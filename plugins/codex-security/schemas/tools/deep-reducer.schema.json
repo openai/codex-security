@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/deep-reducer.schema.json",
+  "title": "Codex Security Deep Scan semantic reducer operations",
+  "$ref": "#/$defs/reductionInput",
+  "$defs": {
+    "reducerInputs": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "Continue the same document from its returned nextCursor."
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Caller-selected byte budget for the serialized MCP response. Choose below the transport and output budgets; reduce it if transport reports an oversized response."
+        },
+        "findingRef": {
+          "type": "string",
+          "description": "Omit to page assigned findings and the previous aggregate without retained provenance bodies. Use source:<sourceFindingId> to fetch a complete original, or previous:<zero-based index> to fetch a complete previous aggregate finding, including its retained history."
+        }
+      },
+      "required": ["maxBytes"],
+      "additionalProperties": false
+    },
+    "reductionInput": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Omit or set true when submitting the finished aggregate."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+        }
+      },
+      "required": ["scanId", "findings"],
+      "additionalProperties": false
+    }
+  }
+}

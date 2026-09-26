@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+# Promptfoo 0.121.15 resolves external $ref paths from the eval package's
+# working directory rather than from this file's directory.
+$ref: ./sastbench/promptfooconfig.sastbench.yaml
+
+description: "Codex Security triage-finding representative SastBench v0.1 sample"
+tags:
+  suite: sastbench-v0.1-representative-sample
+
+tests: file://./scripts/generate-sastbench-tests.js:generateSampleTests

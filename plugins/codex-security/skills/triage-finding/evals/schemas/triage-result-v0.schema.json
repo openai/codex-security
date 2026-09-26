@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Codex Security triage-finding v0 result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "triage-finding/v0"
+    },
+    "repository": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "triage_item_id",
+          "input_id",
+          "source_type",
+          "title",
+          "normalized_input",
+          "verdict",
+          "confidence",
+          "affected_locations",
+          "reachable_path",
+          "boundary_assessment",
+          "exploitability_stack_rank",
+          "evidence",
+          "counterevidence",
+          "proof_gaps",
+          "recommended_next_step",
+          "fix_finding_handoff"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "triage_item_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_type": {
+            "enum": [
+              "sarif",
+              "cve",
+              "advisory",
+              "scanner_ticket",
+              "bug_bounty",
+              "codex_security_finding",
+              "freeform",
+              "unknown"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "normalized_input": {
+            "type": "object",
+            "required": [
+              "vulnerable_component",
+              "claimed_source",
+              "claimed_sink",
+              "claimed_control",
+              "affected_version_or_path",
+              "preconditions",
+              "impact",
+              "references"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "vulnerable_component": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claimed_source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claimed_sink": {
+                "type": "string",
+                "minLength": 1
+              },
+              "claimed_control": {
+                "type": "string",
+                "minLength": 1
+              },
+              "affected_version_or_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "impact": {
+                "type": "string",
+                "minLength": 1
+              },
+              "references": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "verdict": {
+            "enum": [
+              "confirmed",
+              "not_actionable",
+              "needs_review"
+            ]
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "affected_locations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "label",
+                "path",
+                "lines",
+                "detail"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "lines": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "reachable_path": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "boundary_assessment": {
+            "type": "object",
+            "required": [
+              "product_surface",
+              "source_trust",
+              "boundary_crossed",
+              "policy_basis"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "product_surface": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_trust": {
+                "enum": [
+                  "untrusted",
+                  "trusted_operator",
+                  "trusted_developer_config",
+                  "local_only",
+                  "unknown"
+                ]
+              },
+              "boundary_crossed": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "policy_basis": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "exploitability_stack_rank": {
+            "type": "object",
+            "required": [
+              "rank_queue",
+              "rank",
+              "rationale",
+              "drivers"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rank_queue": {
+                "enum": [
+                  "confirmed",
+                  "needs_review",
+                  null
+                ]
+              },
+              "rank": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 1
+              },
+              "drivers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "counterevidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "proof_gaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "recommended_next_step": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fix_finding_handoff": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

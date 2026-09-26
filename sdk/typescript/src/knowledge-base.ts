@@ -13,7 +13,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
 
-const SUPPORTED_EXTENSIONS = new Set([
+const DOCUMENT_EXTENSIONS = new Set([
   ".md",
   ".markdown",
   ".txt",
@@ -30,6 +30,7 @@ export interface PreparedKnowledgeBase {
 export async function prepareKnowledgeBase(
   paths: readonly string[],
   signal?: AbortSignal,
+  directory?: string,
 ): Promise<PreparedKnowledgeBase> {
   const sources = new Set<string>();
   const documents = new Set<string>();
@@ -59,15 +60,14 @@ export async function prepareKnowledgeBase(
       );
     }
     for (const document of selected) {
-      if (!SUPPORTED_EXTENSIONS.has(extname(document).toLowerCase())) {
-        throw new Error(`Unsupported knowledge base document: ${document}`);
-      }
       documents.add(document);
     }
     sources.add(source);
   }
 
-  const path = await mkdtemp(join(tmpdir(), "codex-security-knowledge-"));
+  const path = await mkdtemp(
+    join(directory ?? tmpdir(), "codex-security-knowledge-"),
+  );
   try {
     let index = 0;
     for (const document of documents) {
@@ -92,15 +92,15 @@ export async function prepareKnowledgeBase(
           `Knowledge base document contains no extractable text: ${document}`,
         );
       }
-      await writeFile(
-        join(path, `${index++}-${basename(document)}.txt`),
-        text,
-        {
-          encoding: "utf8",
-          mode: 0o600,
-          signal,
-        },
-      );
+      const name = `${index}-${basename(document)}.txt`;
+      // The prefix and suffix can exceed the filesystem's 255-byte name limit.
+      const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
+      await writeFile(join(path, filename), text, {
+        encoding: "utf8",
+        mode: 0o600,
+        signal,
+      });
+      index++;
     }
   } catch (error) {
     await rm(path, { recursive: true, force: true });
@@ -130,10 +130,18 @@ async function discover(
       for (const document of await discover(path, signal)) {
         documents.push(document);
       }
-    } else if (
-      entry.isFile() &&
-      SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())
-    ) {
+    } else if (entry.isFile()) {
+      if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
+        const bytes = await readFile(path, {
+          flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+          signal,
+        });
+        try {
+          decodeText(path, bytes);
+        } catch {
+          continue;
+        }
+      }
       documents.push(path);
     }
   }
@@ -141,6 +149,9 @@ async function discover(
 }
 
 function decodeText(path: string, bytes: Uint8Array): string {
+  if (bytes.includes(0)) {
+    throw new Error(`Knowledge base document contains binary data: ${path}`);
+  }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
@@ -152,9 +163,8 @@ function decodeText(path: string, bytes: Uint8Array): string {
 
 async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
   try {
-    const { getDocument, VerbosityLevel } = await import(
-      "pdfjs-dist/legacy/build/pdf.mjs"
-    );
+    const { getDocument, VerbosityLevel } =
+      await import("pdfjs-dist/legacy/build/pdf.mjs");
     const loadingTask = getDocument({
       data: new Uint8Array(bytes),
       stopAtErrors: true,
