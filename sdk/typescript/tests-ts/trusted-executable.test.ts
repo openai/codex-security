@@ -192,13 +192,11 @@ describe("trusted executable resolution", () => {
       await symlink(wrapper, launcher);
       await symlink(repositoryBin, aliasedBin, "dir");
 
-      await expect(
-        resolveTrustedExecutable(
-          join(aliasedBin, "python"),
-          { PATH: "" },
-          repository,
-        ),
-      ).resolves.toEqual({ executable: wrapper, environment: { PATH: "" } });
+      for (const candidate of [launcher, join(aliasedBin, "python")]) {
+        await expect(
+          resolveTrustedExecutable(candidate, { PATH: "" }, repository),
+        ).resolves.toEqual({ executable: wrapper, environment: { PATH: "" } });
+      }
     },
   );
 
