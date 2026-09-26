@@ -1601,7 +1601,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("uses the selected Bedrock profile for authentication and cost limits", async () => {
+  test("refreshes Bedrock credentials on reuse while preserving profile and cost settings", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -1612,7 +1612,7 @@ describe("CodexSecurity orchestration", () => {
     let codexOptions: CodexOptions | null = null;
     let authentication: ScanAuthentication | undefined;
     let savedRecipe: Record<string, unknown> | undefined;
-    const environment = {
+    const environment: Record<string, string> = {
       OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
       AWS_REGION: "us-east-2",
@@ -1639,7 +1639,7 @@ describe("CodexSecurity orchestration", () => {
         environment,
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
-          environment,
+          environment: { ...environment },
           credentialsAvailable: false,
         }),
         resolvePluginPython: async () => "/managed/python",
@@ -1726,6 +1726,28 @@ describe("CodexSecurity orchestration", () => {
         },
       },
     });
+    delete environment["AWS_BEARER_TOKEN_BEDROCK"];
+    environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
+    environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
+    environment["AWS_REGION"] = "us-west-2";
+    await client.run(repository, {
+      onAuthentication: (selected) => {
+        authentication = selected;
+      },
+    });
+    expect(authentication).toEqual({
+      method: "aws_credentials",
+      source: "AWS_ACCESS_KEY_ID",
+      verified: false,
+    });
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
+      AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
+      AWS_REGION: "us-west-2",
+    });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "AWS_BEARER_TOKEN_BEDROCK",
+    );
     await client.close();
   });
 
@@ -1782,8 +1804,8 @@ describe("CodexSecurity orchestration", () => {
           {
             environment: {
               CODEX_SECURITY_STATE_DIR: stateDirectory,
-              AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-key",
-              AWS_REGION: "us-east-2",
+              AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
+              AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
             },
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
@@ -1826,7 +1848,10 @@ describe("CodexSecurity orchestration", () => {
                     model_provider: "amazon-bedrock",
                   });
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
-                    "synthetic-bedrock-key",
+                    `synthetic-bedrock-key-${index}`,
+                  );
+                  expect(mcpEnvironment["AWS_REGION"]).toBe(
+                    index % 2 === 0 ? "us-east-2" : "us-west-2",
                   );
                   const shared = parseToml(
                     await readFile(
@@ -6558,6 +6583,14 @@ describe("CodexSecurity orchestration", () => {
     "non-directory tools",
     "blank override",
   ])("preserves default SDK bundled tools for %s", async (scenario) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `preserves default SDK bundled tools for ${scenario}`,
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -6602,14 +6635,25 @@ describe("CodexSecurity orchestration", () => {
       await writeFile(toolsDirectory, "not a directory\n");
     const callerEnvironment = {
       OPENAI_API_KEY: "ambient-key",
+      ...pathEnvironment,
       ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
     };
     const runtimeEnvironment = {
+      ...callerEnvironment,
       CODEX_HOME: codexHome,
-      CODEX_CLI_PATH: executable,
-      ...pathEnvironment,
     };
     const originalEnvironment = { ...runtimeEnvironment };
+    const runtimeModule = await import("../src/runtime.js");
+    const executionEnvironment = runtimeModule.pluginExecutionEnvironment;
+    mock.module("../src/runtime.js", () => ({
+      ...runtimeModule,
+      pluginExecutionEnvironment: (
+        ...args: Parameters<typeof executionEnvironment>
+      ) => ({
+        ...executionEnvironment(...args),
+        CODEX_CLI_PATH: executable,
+      }),
+    }));
     let codexOptions: CodexOptions | null = null;
     const client = new TestClient(
       {},
@@ -6670,10 +6714,15 @@ describe("CodexSecurity orchestration", () => {
       expect(runtimeEnvironment).toEqual(originalEnvironment);
       expect(callerEnvironment).toEqual({
         OPENAI_API_KEY: "ambient-key",
+        ...pathEnvironment,
         ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
       });
     } finally {
       await client.close();
+      mock.module("../src/runtime.js", () => ({
+        ...runtimeModule,
+        pluginExecutionEnvironment: executionEnvironment,
+      }));
     }
   });
 

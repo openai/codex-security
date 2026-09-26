@@ -675,15 +675,11 @@ export class CodexSecurity {
         ...(session.sessionConfig["features"] as JsonObject),
         plugins: false,
       };
-      const { codex } = this.#createSessionCodex(
-        session,
-        {
-          CODEX_SECURITY_REPOSITORY: inputs.repository,
-          CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
-          CODEX_SECURITY_SURFACE: this.#surface,
-        },
-        options.auth,
-      );
+      const { codex } = this.#createSessionCodex(session, {
+        CODEX_SECURITY_REPOSITORY: inputs.repository,
+        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+        CODEX_SECURITY_SURFACE: this.#surface,
+      });
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
@@ -1001,7 +997,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         policyCodexConfig(session.sessionConfig),
         inputs.gitMetadataPaths.length === 0
           ? []
@@ -1881,7 +1876,6 @@ export class CodexSecurity {
       const { codex, environment } = this.#createSessionCodex(
         session,
         runtimePaths,
-        options.auth,
       );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2622,36 +2616,25 @@ export class CodexSecurity {
   #createSessionCodex(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
-    auth: ScanAuthMode = "auto",
     config?: JsonObject,
     configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
       python,
-      modelProvider,
       externalProvider,
       apiKey,
       sessionConfig,
+      scanEnvironment,
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(
-        python,
-        withoutCodexHome(
-          selectedScanEnvironment(
-            commandAuth
-              ? withoutOpenAiApiKeys(runtime.environment)
-              : runtime.environment,
-            auth,
-            modelProvider,
-          ),
-        ),
-      ),
+      ...pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
       ...(externalProvider === null
         ? {}
         : { [externalProvider.env_key]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(scanEnvironment),
       ...runtimePaths,
     };
     for (const name of Object.keys(environment)) {
@@ -2764,13 +2747,15 @@ export class CodexSecurity {
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
       }
-      const scanEnvironment = selectedScanEnvironment(
-        commandAuth
-          ? withoutOpenAiApiKeys(this.#dependencies.environment)
-          : this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
+      const scanEnvironment = {
+        ...selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : this.#dependencies.environment,
+          options.auth,
+          modelProvider,
+        ),
+      };
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
