@@ -1,13 +1,65 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { PluginBootstrapError } from "./errors.js";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { parse } from "smol-toml";
+import type { JsonObject } from "./config.js";
+import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
+  executablePathForSpawn,
+  expandHome,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
+/** @internal */
+export function environmentEntry(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
+}
+
+/** @internal */
+export function configuredCodexHome(environment: ProcessEnvironment): string {
+  return resolve(
+    expandHome(
+      environmentEntry(environment, "CODEX_HOME")?.trim() ||
+        join(homedir(), ".codex"),
+      environment,
+    ),
+  );
+}
+
+/** @internal */
+export async function readCodexHomeConfig(
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  try {
+    return parse(
+      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+        encoding: "utf8",
+        signal,
+      }),
+    ) as JsonObject;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new CodexSecurityError(
+      "Could not read the configured Codex provider.",
+    );
+  }
+}
 
 export interface LoginResult {
   success: boolean;
@@ -47,7 +99,7 @@ export class CodexLoginHandle {
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(command.command, [...args], {
+    this.#child = spawn(executablePathForSpawn(command.command), [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -237,6 +289,19 @@ export async function logout(
   }
 }
 
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/** @internal Shared login recovery guidance for model commands. */
+export const NO_CREDENTIALS_MESSAGE =
+  "No credentials were found. Run 'codex-security login', use " +
+  "'codex-security login --device-auth' on a remote or headless machine, or set " +
+  "OPENAI_API_KEY or CODEX_API_KEY for CI.";
+
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
@@ -265,7 +330,7 @@ function preferredAuthUrl(value: string): string | null {
 }
 
 function userCodeFromOutput(value: string): string | null {
-  const output = plainTerminalText(value);
+  const output = plainTerminalText(value).replace(/https?:\/\/[^\s<>"']+/g, "");
   return (
     output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
     output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??

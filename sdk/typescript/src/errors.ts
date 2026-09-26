@@ -1,4 +1,4 @@
-import { formatUsd, type ScanCost } from "./cost.js";
+import { formatScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
 /** Returns the original error message without altering its contents. */
 export function errorMessage(error: unknown): string {
@@ -31,12 +31,47 @@ export class CodexSecurityError extends Error {
   }
 }
 
+export type DeduplicationReviewStage = "screening" | "pair-review";
+export type DeduplicationReviewFailureCategory =
+  "validation" | "no-submission" | "model" | "transport" | "refusal";
+
+export interface DeduplicationReviewFailureMetadata {
+  stage: DeduplicationReviewStage;
+  model: string;
+  category: DeduplicationReviewFailureCategory;
+  attempts: number;
+  reason: string;
+}
+
+export class DeduplicationReviewError extends CodexSecurityError {
+  public constructor(
+    public readonly metadata: Readonly<DeduplicationReviewFailureMetadata>,
+    displayReason: string = metadata.reason,
+  ) {
+    super(
+      `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${displayReason}`,
+    );
+  }
+}
+
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}
+export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
+  public constructor(
+    public readonly directory: string,
+    operation: "scan" | "policy" = "scan",
+  ) {
+    super(
+      operation === "policy"
+        ? `Policy output directory is not empty: ${directory}. Choose a new or empty directory.`
+        : `Scan output directory is not empty: ${directory}. To keep the existing results and start a new scan, add --archive-existing.`,
+    );
+  }
+}
 export type ProtectedScanPathKind = "output" | "temporary" | "runtime";
 
 export class OutputInsideProtectedRootError extends OutputDirectoryError {
@@ -71,7 +106,7 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     scanDir: string,
   ) {
     super(
-      `Scan stopped: estimated cost ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
       scanDir,
     );
     this.maxCostUsd = maxCostUsd;

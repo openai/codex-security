@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
@@ -79,10 +79,7 @@ export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
   const selectedProfile = selectedScanProfile(config);
-  const model =
-    selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
-      ? selectedProfile["model"]
-      : config["model"];
+  const model = scanModel(config);
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
@@ -104,12 +101,72 @@ export function scanModelConfiguration(
   return { model, reasoningEffort };
 }
 
+export function scanModel(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model")
+    ? selectedProfile["model"]
+    : config["model"];
+}
+
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
   return selectedProfile !== undefined &&
     Object.hasOwn(selectedProfile, "model_provider")
     ? selectedProfile["model_provider"]
     : config["model_provider"];
+}
+
+/** @internal Native Codex validates the auth table, including invalid selections. */
+export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
+  const selected = scanModelProvider(config);
+  const providers = config["model_providers"];
+  const provider =
+    typeof selected === "string" && isObject(providers)
+      ? providers[selected]
+      : undefined;
+  return isObject(provider) && provider["auth"] !== undefined;
+}
+
+/** @internal Keep host-side helpers independent of the source checkout. */
+export function resolveCommandAuthConfig(
+  config: JsonObject,
+  home: string,
+): JsonObject {
+  const resolved = cloneJson(config);
+  const providers = resolved["model_providers"];
+  if (isObject(providers)) {
+    for (const provider of Object.values(providers)) {
+      if (!isObject(provider) || !isObject(provider["auth"])) continue;
+      const auth = provider["auth"];
+      const cwd = auth["cwd"];
+      if (
+        cwd === undefined ||
+        (typeof cwd === "string" && !/^~(?:[/\\]|$)/u.test(cwd))
+      ) {
+        auth["cwd"] = resolve(home, cwd ?? ".");
+      }
+    }
+  }
+  return resolved;
+}
+
+/** @internal CLI dotted keys cannot represent provider IDs containing dots. */
+export function modelProviderConfigOverride(config: JsonObject): string[] {
+  return config["model_providers"] === undefined
+    ? []
+    : [`model_providers=${inlineToml(config["model_providers"])}`];
+}
+
+/** @internal Serialize one Codex CLI override value without flattening its keys. */
+export function inlineToml(value: JsonValue): string {
+  if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
+  if (isObject(value)) {
+    return `{${Object.entries(value)
+      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .join(",")}}`;
+  }
+  return stringify({ value }).slice("value = ".length).trim();
 }
 
 export function scanApprovalPolicy(
@@ -135,6 +192,16 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const resolved = deepMerge(
+    cloneJson(config),
+    selectedScanProfile(config) ?? {},
+  );
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
@@ -154,7 +221,12 @@ export async function mergedCodexConfig(
       }
     }
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
+  }
+  return deepMerge(defaults, overrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
@@ -260,6 +332,11 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
     const profileFeatures = profile["features"];
     if (profileFeatures !== undefined && !isObject(profileFeatures)) {
       throw new ConfigurationError(
@@ -338,7 +415,17 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
   }
 }
 
-function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
+export function mergeCodexOverrides(
+  base: JsonObject,
+  overrides: JsonObject,
+): JsonObject {
+  validateOverrideKeys(base);
+  validateOverrideKeys(overrides);
+  return deepMerge(cloneJson(base), overrides);
+}
+
+/** @internal */
+export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
   for (const [key, value] of Object.entries(overrides)) {
     const existing = Object.hasOwn(base, key) ? base[key] : undefined;
     base[key] =

@@ -2,11 +2,7 @@ import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
-  | "list"
-  | "show"
-  | "findings"
-  | "compare"
-  | "match-all";
+  "list" | "show" | "findings" | "compare" | "match-all";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -110,6 +106,7 @@ export function renderScanHistory(
         ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
+    const related = entry["related"] as JsonObject[] | undefined;
     const knownScanIds = entry["knownScanIds"] as string[] | undefined;
     const knownScans = knownScanIds?.length
       ? ` in ${clean(knownScanIds[0]).slice(0, 8)}${knownScanIds.length > 1 ? ` … ${clean(knownScanIds[knownScanIds.length - 1]).slice(0, 8)}` : ""}`
@@ -132,6 +129,22 @@ export function renderScanHistory(
           `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
         );
         wrap(`↳ ${clean(match["title"])}`, 18);
+      }
+    }
+    if (related?.length) {
+      lines.push(
+        `              ${accent("↔")} ${related.length} related finding${related.length === 1 ? "" : "s"}, kept separate`,
+      );
+      if (showLinkedFindings) {
+        for (const relation of related) {
+          if (relation["scanId"] !== undefined) {
+            lines.push(
+              `                ${strong("RELATED SCAN")} ${accent(clean(relation["scanId"]).slice(0, 8))}`,
+            );
+          }
+          wrap(`↳ ${clean(relation["title"])}`, 18);
+          wrap(clean(relation["reason"]), 20);
+        }
       }
     }
     const reason =
@@ -274,8 +287,7 @@ export function renderScanHistory(
       );
     }
     const coverage = (result["progress"] as JsonObject)["coverage"] as
-      | JsonObject
-      | undefined;
+      JsonObject | undefined;
     if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null
@@ -294,8 +306,7 @@ export function renderScanHistory(
       }
     }
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
-      | string[]
-      | undefined;
+      string[] | undefined;
     if (knowledgeBase?.length) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
@@ -411,12 +422,30 @@ export function renderScanHistory(
         finding(entry, status !== "not_rescanned");
       }
     }
+    const related = result["related"] as JsonObject[] | undefined;
+    if (related?.length) {
+      lines.push("", `  ${strong("Related findings, kept separate")}`);
+      for (const relation of related) {
+        wrap(
+          `${clean(relation["beforeTitle"])} ↔ ${clean(relation["afterTitle"])}`,
+          4,
+        );
+        wrap(clean(relation["reason"]), 6);
+      }
+    }
   } else {
     lines.push(
       `  ${strong(clean(basename(result["repository"] as string)))}`,
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );
+    if (result["relatedPairs"] || result["uncertainPairs"]) {
+      const related = result["relatedPairs"] ?? 0;
+      const uncertain = result["uncertainPairs"] ?? 0;
+      lines.push(
+        `  ${clean(related)} related pair${related === 1 ? "" : "s"} recorded    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
+      );
+    }
     if (result["unavailableScans"]) {
       lines.push(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,

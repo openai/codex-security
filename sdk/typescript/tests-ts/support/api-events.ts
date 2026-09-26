@@ -2,11 +2,19 @@ import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { runScanEvents } from "../../src/api.js";
+import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
 
-export function preparedRuntime(codexHome: string): Record<string, unknown> {
+type PreparedRuntime = Awaited<
+  ReturnType<
+    NonNullable<
+      ConstructorParameters<typeof CodexSecurity>[1]["prepareRuntime"]
+    >
+  >
+>;
+
+export function preparedRuntime(codexHome: string): PreparedRuntime {
   return {
     codexHome,
     plugin: {
@@ -72,8 +80,10 @@ export function createApiTestFixtures() {
   };
 }
 
-export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
+export async function* completedEvents(
+  threadId = "thread-1",
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
   yield { type: "turn.started" };
   yield {
     type: "item.completed",
