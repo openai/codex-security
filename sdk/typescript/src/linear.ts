@@ -83,12 +83,9 @@ export async function importLinearIssues(options: {
         );
       }
 
-      let page = await projects.nodes[0]!.issues({ first: 50, filter });
-      while (true) {
-        issues.push(...page.nodes);
-        if (!page.pageInfo.hasNextPage) break;
-        page = await page.fetchNext();
-      }
+      const page = await projects.nodes[0]!.issues({ first: 50, filter });
+      while (page.pageInfo.hasNextPage) await page.fetchNext();
+      issues.push(...page.nodes);
       if (issues.length === 0) {
         throw new CodexSecurityError(
           `No open Linear issues matched project "${options.project}" and its filter.`,
@@ -117,13 +114,8 @@ export async function importLinearIssues(options: {
 
     const imports: ImportedIssue[] = [];
     for (const issue of issues) {
-      let comments = await issue.comments({ first: 50 });
-      const commentNodes = [];
-      while (true) {
-        commentNodes.push(...comments.nodes);
-        if (!comments.pageInfo.hasNextPage) break;
-        comments = await comments.fetchNext();
-      }
+      const comments = await issue.comments({ first: 50 });
+      while (comments.pageInfo.hasNextPage) await comments.fetchNext();
       imports.push({
         source: "linear",
         id: issue.identifier,
@@ -131,7 +123,7 @@ export async function importLinearIssues(options: {
         text: [
           `Title: ${issue.title}`,
           `<description>\n${issue.description ?? ""}\n</description>`,
-          ...commentNodes.map(
+          ...comments.nodes.map(
             ({ url, body }) => `<comment>\nURL: ${url}\n\n${body}\n</comment>`,
           ),
         ].join("\n\n"),

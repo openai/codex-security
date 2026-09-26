@@ -20,26 +20,20 @@ function linearIssue(identifier: string, comments: string[] = []) {
     body,
     url: `https://linear.app/example/issue/${identifier}#comment-${index}`,
   }));
-  const nextPage = {
-    nodes: nodes.slice(1),
-    pageInfo: { hasNextPage: false },
-    async fetchNext() {
-      throw new Error("unexpected extra Linear comment page");
-    },
-  };
-  const firstPage = {
-    nodes: nodes.slice(0, 1),
-    pageInfo: { hasNextPage: nodes.length > 1 },
-    async fetchNext() {
-      return nextPage;
-    },
-  };
   return {
     identifier,
     title: `Fix ${identifier}`,
     description: `Synthetic evidence for ${identifier}`,
     url: `https://linear.app/example/issue/${identifier}`,
-    comments: async () => firstPage,
+    comments: async () => ({
+      nodes: nodes.slice(0, 1),
+      pageInfo: { hasNextPage: nodes.length > 1 },
+      async fetchNext() {
+        this.nodes.push(...nodes.slice(1));
+        this.pageInfo.hasNextPage = false;
+        return this;
+      },
+    }),
   };
 }
 
@@ -201,7 +195,7 @@ describe("CLI skill commands", () => {
                   description,
                 };
               },
-            } as unknown as ReturnType<LinearClientFactory>;
+            } as ReturnType<LinearClientFactory>;
           },
           onCodex: (_args, output, processEnvironment) => {
             inputs = JSON.parse(output!.appServer!.prompt.split("\n").at(-1)!);
@@ -318,19 +312,16 @@ describe("CLI skill commands", () => {
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
           linearClient: ({ accessToken }) => {
             expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
-            const nextPage = {
-              nodes: [linearIssue("SEC-124", ["Second issue comment"])],
-              pageInfo: { hasNextPage: false },
-              async fetchNext() {
-                throw new Error("unexpected extra Linear issue page");
-              },
-            };
             const page = {
               nodes: [linearIssue("SEC-123", ["First issue comment"])],
               pageInfo: { hasNextPage: true },
               async fetchNext() {
                 nextPages++;
-                return nextPage;
+                this.nodes.push(
+                  linearIssue("SEC-124", ["Second issue comment"]),
+                );
+                this.pageInfo.hasNextPage = false;
+                return this;
               },
             };
             return {
