@@ -12,6 +12,7 @@
 - include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
 - include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
 - propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
+- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
