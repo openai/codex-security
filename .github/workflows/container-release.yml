@@ -419,11 +419,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote the verified, attested, immutable image digest
+      - name: Recheck immutable version and select the latest tag
+        id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.authorize.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          endpoint="orgs/$owner/packages/container/codex-security"
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
+
+      - name: Promote the verified, attested, immutable image digest
+        env:
           IMAGE: ${{ needs.authorize.outputs.image }}
           VERSION: ${{ needs.authorize.outputs.version }}
+          PUBLISH_LATEST: ${{ steps.version.outputs.publish_latest }}
           MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
         shell: bash
         run: |
@@ -433,14 +445,13 @@ jobs:
             exit 1
           fi
 
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          endpoint="orgs/$owner/packages/container/codex-security"
-          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
+          tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$GITHUB_SHA")
+          if [[ "$PUBLISH_LATEST" == true ]]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
 
           docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-$GITHUB_SHA" \
-            --tag "$IMAGE:latest" \
+            "${tags[@]}" \
             "$IMAGE@$MANIFEST_DIGEST"
 
           actual_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:$VERSION")"
