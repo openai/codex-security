@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   mkdtemp,
   mkdir,
@@ -462,24 +462,13 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     const candidateCollisionDeferred = {
       reason: "An unavailable adapter belongs to an existing candidate.",
     };
-    const deferredIdentity = ({ reason, paths, surfaceIds }) => {
-      const digest = createHash("sha256")
-        .update(JSON.stringify([reason, paths ?? [], surfaceIds ?? []]))
-        .digest("hex")
-        .slice(0, 16);
-      return `deferred-${digest}`;
-    };
-    const reasonOnlyDeferredId = deferredIdentity(reasonOnlyDeferred);
-    const explicitCollisionDeferredId = deferredIdentity(
-      explicitCollisionDeferred,
-    );
-    const candidateCollisionDeferredId = deferredIdentity(
-      candidateCollisionDeferred,
-    );
+    const explicitCollisionDeferredId = "explicit-adapter-review";
+    const candidateCollisionDeferredId = "candidate-adapter-review";
     const coverage = {
       completeness: "partial",
       surfaces: [
         {
+          id: "surface_sql-execution",
           label: "SQL execution",
           disposition: "reported",
           notes:
@@ -694,6 +683,12 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
+    const checkpointDeferred = JSON.parse(
+      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+    ).deferred;
+    const generatedIds = checkpointDeferred.slice(5, 9).map(({ id }) => id);
+    assert.ok(generatedIds.every((id) => typeof id === "string"));
+    assert.equal(new Set(generatedIds).size, generatedIds.length);
     const discovery = await progress();
     assert.equal(discovery.status, "running");
     assert.equal(discovery.phase, "discovery");
@@ -816,19 +811,19 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       },
       {
         ...reasonOnlyDeferred,
-        id: reasonOnlyDeferredId,
+        id: generatedIds[0],
       },
       {
         ...reasonOnlyDeferred,
-        id: `${reasonOnlyDeferredId}-2`,
+        id: generatedIds[1],
       },
       {
         ...explicitCollisionDeferred,
-        id: `${explicitCollisionDeferredId}-2`,
+        id: generatedIds[2],
       },
       {
         ...candidateCollisionDeferred,
-        id: `${candidateCollisionDeferredId}-2`,
+        id: generatedIds[3],
       },
       coverage.deferred[9],
       {

@@ -523,7 +523,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
             "deferred": [{"candidateId": "candidate-x", "reason": "Validation is pending."}],
         },
     }
-    write_checkpoint(scan_dir / "checkpoints", pending)
+    checkpoint = write_checkpoint(scan_dir / "checkpoints", pending)
     findings = json.loads((scan_dir / "findings.json").read_text())
     if disposition == "provenance-reported":
         findings["findings"][0]["provenance"]["candidateId"] = "candidate-x"
@@ -538,6 +538,8 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
         candidateId="candidate-x", disposition=disposition, notes="Final source review disposition."
     )
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    for path in (checkpoint, scan_dir / "coverage.json"):
+        os.utime(path, ns=(200, 200))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"

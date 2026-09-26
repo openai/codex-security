@@ -1332,7 +1332,7 @@ def merge_saved_results(
     ordered_candidates.update(
         (owner, candidate_id)
         for relative, owner, candidate_id, _ in outcomes
-        if relative in selected_observations
+        if owner is not None and relative in selected_observations
     )
     for outcome in outcomes:
         record_candidate_outcome(*outcome)
