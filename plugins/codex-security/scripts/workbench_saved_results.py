@@ -12,7 +12,7 @@ import re
 import sqlite3
 import stat
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -1067,9 +1067,11 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
+def _snapshot_published_outputs(
+    scan_dir: Path, outputs: Iterable[str] = _PUBLISHED_OUTPUTS
+) -> dict[str, bytes | None]:
     snapshots: dict[str, bytes | None] = {}
-    for relative in _PUBLISHED_OUTPUTS:
+    for relative in outputs:
         descriptor = -1
         try:
             descriptor = open_scan_local_file_descriptor(
