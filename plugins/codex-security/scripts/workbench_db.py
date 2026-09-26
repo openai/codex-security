@@ -116,6 +116,7 @@ from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
+    diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_bytes,
@@ -514,8 +515,8 @@ def workbench_completion_binding(
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
-            target["snapshotDigest"] = scan["diff_content_digest"]
+        if snapshot_digest := diff_snapshot_digest(scan, manifest):
+            target["snapshotDigest"] = snapshot_digest
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]

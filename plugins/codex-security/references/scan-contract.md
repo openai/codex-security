@@ -65,7 +65,7 @@ A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDig
 
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
 
-For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive it from the exact authoritative diff kind and immutable base/head revisions. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
+For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive `snapshotDigest` from the authoritative diff kind and immutable base/head revisions. The workbench supplies it during finalization, so workbench-backed unsealed drafts may omit it. Previously sealed manifests retain their recorded digest. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
 
 ## Finding Identity
 
