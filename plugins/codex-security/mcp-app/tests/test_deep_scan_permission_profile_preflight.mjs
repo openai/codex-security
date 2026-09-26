@@ -697,26 +697,52 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  await withFakeCodex(
-    {
-      hangAt: "config/read",
-    },
-    async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-      const controller = new AbortController();
-      const running = preflightDeepScanWorkerPermissionProfile({
-        codexPath,
-        cwd,
-        profileId,
-        configOverrides: rawOverrides,
-        expectedProfile,
-        signal: controller.signal,
-      });
-      await waitForFile(readyPath);
-      controller.abort(new DOMException("fixture aborted", "AbortError"));
-      await assert.rejects(running, (error) => error?.name === "AbortError");
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
+  for (const ignoreTermination of [false, true]) {
+    await withFakeCodex(
+      {
+        hangAt: "config/read",
+        ignoreTermination,
+      },
+      async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+        const controller = new AbortController();
+        const running = preflightDeepScanWorkerPermissionProfile({
+          codexPath,
+          cwd,
+          profileId,
+          configOverrides: rawOverrides,
+          expectedProfile,
+          signal: controller.signal,
+        });
+        await waitForFile(readyPath);
+        controller.abort(new DOMException("fixture aborted", "AbortError"));
+        let timeout;
+        try {
+          await assert.rejects(
+            Promise.race([
+              running,
+              new Promise((_, reject) => {
+                timeout = setTimeout(
+                  () => reject(new Error("Preflight did not stop")),
+                  5_000,
+                );
+              }),
+            ]),
+            (error) => error?.name === "AbortError",
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
+        assert.ok(
+          children[0].exitCode !== null || children[0].signalCode !== null,
+        );
+        if (ignoreTermination && process.platform !== "win32") {
+          assert.equal(children[0].signalCode, "SIGKILL");
+        } else {
+          await assertPreflightStopped(children, terminatedPath);
+        }
+      },
+    );
+  }
 }
 
 async function assertPreflightStopped(children, terminatedPath) {
@@ -840,6 +866,13 @@ async function withFakeCodex(
       children,
     });
   } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = new Promise((resolve) => child.once("close", resolve));
+        child.kill("SIGKILL");
+        await closed;
+      }
+    }
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
@@ -860,10 +893,11 @@ writeFileSync(scenario.envPath, JSON.stringify({
 if (scenario.stderr) process.stderr.write(scenario.stderr);
 let buffer = "";
 let catalogIndex = 0;
+if (scenario.ignoreTermination) setInterval(() => {}, 1_000);
 
 process.on("SIGTERM", () => {
   writeFileSync(scenario.terminatedPath, "SIGTERM");
-  process.exit(0);
+  if (!scenario.ignoreTermination) process.exit(0);
 });
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -881,7 +915,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   writeFileSync(scenario.terminatedPath, "stdin-end");
-  process.exit(0);
+  if (!scenario.ignoreTermination) process.exit(0);
 });
 
 function handle(message) {

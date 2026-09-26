@@ -262,7 +262,16 @@ class AppServerPreflightClient {
     this.pending = undefined;
     this.stopChild();
     if (this.childClosed) return;
-    await this.childClose;
+    const forcedTermination = setTimeout(() => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        this.child.kill("SIGKILL");
+      }
+    }, 1_000);
+    try {
+      await this.childClose;
+    } finally {
+      clearTimeout(forcedTermination);
+    }
   }
 
   private write(message: JsonRecord): void {
