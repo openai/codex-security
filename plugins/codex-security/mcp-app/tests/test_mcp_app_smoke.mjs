@@ -1673,7 +1673,18 @@ try {
   assert.equal(elicitationRequest.params.mode, "form");
   assert.equal(
     elicitationRequest.params.message,
-    "Codex Security needs your input before it can continue.",
+    [
+      "Deep scan?",
+      "Another Deep Security Scan is running. Continue this one?",
+      "- Cancel (Recommended): Stop this new scan before preflight or substantive work.",
+      "- Continue: Proceed even though both scans may use more resources.",
+      "",
+      "Preflight?",
+      "How should Codex Security handle the blocked preflight?",
+      "- Apply and retry: Apply the proposed Codex configuration change and rerun preflight.",
+      "- Leave paused: Keep the scan available for a later retry.",
+      "- Cancel scan: Cancel this scan without changing configuration.",
+    ].join("\n"),
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
@@ -1687,11 +1698,9 @@ try {
     ],
   );
   assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan,
-      "description",
-    ),
-    false,
+    elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
+      .description,
+    "Another Deep Security Scan is running. Continue this one?",
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.preflight_action.oneOf,
@@ -1708,11 +1717,9 @@ try {
     ],
   );
   assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.preflight_action,
-      "description",
-    ),
-    false,
+    elicitationRequest.params.requestedSchema.properties.preflight_action
+      .description,
+    "How should Codex Security handle the blocked preflight?",
   );
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
@@ -1782,8 +1789,18 @@ try {
   const declinedElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Decline this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Decline this Codex Security input request?",
+      ),
     "declined Codex Security elicitation request",
+  );
+  assert.equal(
+    declinedElicitation.params.message,
+    [
+      "Decline this Codex Security input request?",
+      "- Continue: Continue the current workflow.",
+      "- Cancel: Leave the current workflow paused.",
+    ].join("\n"),
   );
   testServer.sendResponse(declinedElicitation.id, { action: "decline" });
   const declinedUserInput = await testServer.waitForMessage(
@@ -1820,7 +1837,9 @@ try {
   const cancelledElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Cancel this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Cancel this Codex Security input request?",
+      ),
     "cancelled Codex Security elicitation request",
   );
   testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });
