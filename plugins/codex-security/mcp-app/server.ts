@@ -2351,9 +2351,17 @@ function buildUserInputElicitation(
   const isSingleQuestion = questions.length === 1;
   return {
     mode: "form" as const,
-    message: isSingleQuestion
-      ? questions[0]!.question
-      : "Codex Security needs your input before it can continue.",
+    message: questions
+      .map((question) =>
+        [
+          ...(isSingleQuestion ? [] : [question.header]),
+          question.question,
+          ...question.options.map(
+            (option) => `- ${option.label}: ${option.description}`,
+          ),
+        ].join("\n"),
+      )
+      .join("\n\n"),
     requestedSchema: {
       type: "object" as const,
       properties: Object.fromEntries(
@@ -2362,6 +2370,7 @@ function buildUserInputElicitation(
           {
             type: "string" as const,
             title: question.header,
+            description: question.question,
             oneOf: question.options.map((option) => ({
               const: option.label,
               title: option.label,
