@@ -123,40 +123,51 @@ def _latest_successful_reducer(workers: list[Any]) -> Any | None:
     )
 
 
+def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
+    return [
+        f"{directory}/{name}"
+        for name in _children(scan_dir, directory)
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+    ]
+
+
+def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
+    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    attempts = (output.parent if output.name == "output" else output) / "attempts"
+    archived = [
+        ((attempts / name).as_posix(), int(name.split("-")[1]))
+        for name in _children(scan_dir, attempts.as_posix())
+        if re.fullmatch(r"attempt-\d+", name)
+    ]
+    attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
+    if worker["kind"] == "discovery" and not attempt:
+        attempt = max((attempt for _, attempt in archived), default=0) + 1
+    return [(output.as_posix(), attempt), *archived]
+
+
 def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
     latest_reducer = _latest_successful_reducer(workers)
-
-    def checkpoints(directory: str, kind: str | None = None) -> Iterator[tuple[str, str | None]]:
-        for name in _children(scan_dir, directory):
-            if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-                yield f"{directory}/{name}", kind
-
     yield "checkpoint-head.json", None
-    yield from checkpoints("checkpoint-heads")
-    yield from checkpoints("checkpoints")
+    for directory in ("checkpoint-heads", "checkpoints"):
+        yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
     for worker in workers:
         if worker["kind"] not in {"dedup", "discovery"}:
             continue
         try:
-            output = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
+            outputs = _worker_outputs(scan_dir, worker)
         except (TypeError, ValueError):
             continue
-        attempts = (Path(output).parent if Path(output).name == "output" else Path(output)) / (
-            "attempts"
-        )
-        directories = [output] + [
-            (attempts / name).as_posix()
-            for name in _children(scan_dir, attempts.as_posix())
-            if re.fullmatch(r"attempt-\d+", name)
-        ]
-        for directory in directories:
+        for directory, _ in outputs:
             if worker["kind"] == "discovery":
                 yield f"{directory}/checkpoint-head.json", worker["kind"]
-                yield from checkpoints(f"{directory}/checkpoint-heads", worker["kind"])
-            checkpoint_paths = list(checkpoints(f"{directory}/checkpoints", worker["kind"]))
+                yield from (
+                    (path, worker["kind"])
+                    for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
+                )
+            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
             if worker["kind"] == "discovery" or checkpoint_paths:
                 yield f"{directory}/result.json", worker["kind"]
-                yield from checkpoint_paths
+                yield from ((path, worker["kind"]) for path in checkpoint_paths)
         if worker["result_manifest_path"] and (
             worker["kind"] == "discovery"
             or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
@@ -339,11 +350,11 @@ def _read_saved_parent_result(
     return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
-def _source_digests(value: Any, label: str) -> dict[str, str]:
+def _source_digests(value: Any, error: str) -> dict[str, str]:
     if not isinstance(value, dict) or not all(
         isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
     ):
-        raise ContractError(f"{label} source digests are malformed.")
+        raise ContractError(error)
     return value
 
 
@@ -370,7 +381,12 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
 
         if manifest_path is None:
             if frozen_sources is not None:
-                return bool(_source_digests(json.loads(frozen_sources), "Frozen stopped-scan"))
+                return bool(
+                    _source_digests(
+                        json.loads(frozen_sources),
+                        "Frozen stopped-scan source digests are malformed.",
+                    )
+                )
             return has_saved_source()
         if scan["seal_manifest_digest"] is None:
             try:
@@ -388,7 +404,8 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         if not isinstance(manifest_scan, dict):
             return True
         published_sources = _source_digests(
-            manifest_scan.get("preservedSources", {}), "Published scan"
+            manifest_scan.get("preservedSources", {}),
+            "Published scan source digests are malformed.",
         )
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
@@ -414,7 +431,9 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
-        frozen_sources = _source_digests(json.loads(raw_frozen_sources), "Saved stopped-scan")
+        frozen_sources = _source_digests(
+            json.loads(raw_frozen_sources), "Saved stopped-scan source digests are malformed."
+        )
         include_parent = False
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
@@ -432,7 +451,8 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
         ):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
-                    manifest_scan["preservedSources"], "Published scan"
+                    manifest_scan["preservedSources"],
+                    "Published scan source digests are malformed.",
                 )
                 include_parent = not published_sources
                 if published_sources:
@@ -743,21 +763,20 @@ def _identified_source_deferred(
             exact_ids[index] = exact
             for identity in matches:
                 observations.setdefault(identity, set()).add(value)
+        contested = {identity for identity, values in observations.items() if len(values) > 1}
         saved_rows = []
         assigned = {
             row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
         }
         for identities in matched_ids.values():
-            unambiguous = {identity for identity in identities if len(observations[identity]) == 1}
+            unambiguous = identities - contested
             if len(unambiguous) == 1:
                 assigned.update(unambiguous)
         for index, row in enumerate(rows):
             if not isinstance(row, dict) or isinstance(row.get("id"), str):
                 continue
             # Distinct rows in one checkpoint must not inherit the same saved ID.
-            matches = {
-                identity for identity in matched_ids[index] if len(observations[identity]) == 1
-            }
+            matches = matched_ids[index] - contested
             if len(matches) == 1:
                 identity = next(iter(matches))
                 accepted = [
@@ -782,11 +801,7 @@ def _identified_source_deferred(
                     occupied[owner]
                     if "candidate" in row or "finding" in row
                     else (matched_ids[index] - exact_ids[index])
-                    | {
-                        identity
-                        for identity in matched_ids[index]
-                        if len(observations[identity]) > 1
-                    }
+                    | (matched_ids[index] & contested)
                     | candidate_ids[owner]
                     | assigned
                 )
@@ -973,6 +988,7 @@ def _generic_surface_updates(
                     rows and all(row.get("id") in work_ids for row in rows)
                 ):
                     linked_work = True
+                    break
             if not linked_work:
                 continue
             latest_surface = max(matches, key=lambda match: source_order[match[0]])[2]
@@ -1063,20 +1079,14 @@ def merge_saved_results(
                 if not checkpoint_path.exists():
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
                     # A recovery copy must not appear newer than the review it copies.
-                    os.utime(
-                        checkpoint_path,
-                        ns=(parent_modified, parent_modified),
-                        follow_symlinks=False,
-                    )
+                    os.utime(checkpoint_path, ns=(parent_modified, parent_modified))
                 if head_modified is None or head_modified < parent_modified or tied_observations:
                     write_scan_local_bytes(
                         scan_dir,
                         "checkpoint-head.json",
                         _encoded({"checkpoint": checkpoint_path.name}),
                     )
-                    os.utime(
-                        head_path, ns=(parent_modified, parent_modified), follow_symlinks=False
-                    )
+                    os.utime(head_path, ns=(parent_modified, parent_modified))
                 if frozen_source_digests is not None:
                     captured = _capture_checkpoint_head(scan_dir, "checkpoint-head.json", scan_id)
                     frozen_source_digests = {
@@ -1119,65 +1129,36 @@ def merge_saved_results(
             paths[f"{root}/checkpoint-head.json"] = worker_id
         head_snapshots = (Path(directory).parent / "checkpoint-heads").as_posix()
         for saved_directory in (directory, head_snapshots):
-            for name in _children(scan_dir, saved_directory):
-                if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-                    paths[f"{saved_directory}/{name}"] = worker_id
+            paths.update(dict.fromkeys(_checkpoint_paths(scan_dir, saved_directory), worker_id))
 
     paths["checkpoint-head.json"] = None
     checkpoints("checkpoints", None)
     for worker in workers:
         try:
-            output = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
+            outputs = _worker_outputs(scan_dir, worker)
         except (TypeError, ValueError):
             warnings.append("Skipped a worker checkpoint outside the scan directory.")
             continue
         if worker["kind"] == "dedup":
-
-            def reducer_output(directory: str, attempt: int, reducer_worker: Any) -> None:
-                result_path = f"{directory}/result.json"
-                checkpoint_paths = [
-                    f"{directory}/checkpoints/{name}"
-                    for name in _children(scan_dir, f"{directory}/checkpoints")
-                    if re.fullmatch(r"[0-9a-f]{64}\.json", name)
-                ]
+            for directory, attempt in outputs:
+                checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
                 if not checkpoint_paths:
-                    return
-                paths[result_path] = None
-                for checkpoint_path in checkpoint_paths:
-                    paths[checkpoint_path] = None
-                reducer_paths.update([result_path, *checkpoint_paths])
-                reducer_outputs.append((reducer_worker, result_path, checkpoint_paths, attempt))
-
-            reducer_output(output, int(worker["attempt"] or 0), worker)
-            attempts = (
-                Path(output).parent if Path(output).name == "output" else Path(output)
-            ) / "attempts"
-            for name in _children(scan_dir, attempts.as_posix()):
-                match = re.fullmatch(r"attempt-(\d+)", name)
-                if match:
-                    reducer_output((attempts / name).as_posix(), int(match.group(1)), worker)
+                    continue
+                result_path = f"{directory}/result.json"
+                retained_paths = [result_path, *checkpoint_paths]
+                paths.update(dict.fromkeys(retained_paths))
+                reducer_paths.update(retained_paths)
+                reducer_outputs.append((worker, result_path, checkpoint_paths, attempt))
             continue
         if worker["kind"] != "discovery":
             continue
+        output, attempt = outputs[0]
         paths[f"{output}/result.json"] = worker["id"]
         current_results.add(f"{output}/result.json")
-        attempts = (
-            Path(output).parent if Path(output).name == "output" else Path(output)
-        ) / "attempts"
-        archived_attempts = []
-        for name in _children(scan_dir, attempts.as_posix()):
-            if re.fullmatch(r"attempt-\d+", name):
-                attempt = int(name.split("-")[1])
-                archived_attempts.append(attempt)
-                archived = (attempts / name).as_posix()
-                paths[f"{archived}/result.json"] = worker["id"]
-                checkpoints(f"{archived}/checkpoints", worker["id"], attempt)
-        attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
-        checkpoints(
-            f"{output}/checkpoints",
-            worker["id"],
-            attempt or max(archived_attempts, default=0) + 1,
-        )
+        for archived, archived_attempt in outputs[1:]:
+            paths[f"{archived}/result.json"] = worker["id"]
+            checkpoints(f"{archived}/checkpoints", worker["id"], archived_attempt)
+        checkpoints(f"{output}/checkpoints", worker["id"], attempt)
         if worker["result_manifest_path"]:
             try:
                 current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
@@ -1405,12 +1386,8 @@ def merge_saved_results(
     source_order["parent"] = (0, parent_modified)
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     identified_rows = _identified_source_deferred(all_sources, source_order)
-    selected_checkpoints = {
-        (_checkpoint_head_directory(head) / "checkpoints" / checkpoint).as_posix()
-        for head, checkpoint in saved_heads.items()
-    }
     current_drafts = ([("parent", parent, None)] if parent else []) + [
-        source for source in sources if source[0] in current_results | selected_checkpoints
+        source for source in sources if source[0] in current_results | selected_observations.keys()
     ]
     # Generic closures belong to one logical scan or worker, just like candidates.
     # Keep them when recovering a terminal checkpoint without its canonical write.
@@ -2005,7 +1982,7 @@ def preserve_scan_results_locked(
         frozen_source_digests = recovery_source_digests
     elif raw_frozen_sources is not None:
         frozen_source_digests = _source_digests(
-            json.loads(raw_frozen_sources), "Saved stopped-scan"
+            json.loads(raw_frozen_sources), "Saved stopped-scan source digests are malformed."
         )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
@@ -2029,12 +2006,10 @@ def preserve_scan_results_locked(
     ]
 
     def record_publication(manifest: dict[str, Any], findings: dict[str, Any]) -> None:
-        retained_sources = manifest.get("scan", {}).get("preservedSources")
-        if not isinstance(retained_sources, dict) or not all(
-            isinstance(relative, str) and isinstance(source_digest, str)
-            for relative, source_digest in retained_sources.items()
-        ):
-            raise ContractError("Stopped scan source digests could not be frozen.")
+        retained_sources = _source_digests(
+            manifest.get("scan", {}).get("preservedSources"),
+            "Stopped scan source digests could not be frozen.",
+        )
         digest = db.published_manifest_digest(scan_dir, manifest)
         timestamp = db.now()
         with connection:
@@ -2093,12 +2068,9 @@ def preserve_scan_results_locked(
         if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
             if frozen_source_digests is None:
-                if not isinstance(existing_sources, dict) or not all(
-                    isinstance(relative, str) and isinstance(digest, str)
-                    for relative, digest in existing_sources.items()
-                ):
-                    raise ContractError("Stopped scan source digests could not be frozen.")
-                frozen_source_digests = existing_sources
+                frozen_source_digests = _source_digests(
+                    existing_sources, "Stopped scan source digests could not be frozen."
+                )
             if existing_sources == frozen_source_digests:
                 if (
                     raw_frozen_sources is not None
@@ -2151,12 +2123,10 @@ def preserve_scan_results_locked(
                 )
         return False
     if frozen_source_digests is None:
-        retained_sources = documents[0].get("scan", {}).get("preservedSources")
-        if not isinstance(retained_sources, dict) or not all(
-            isinstance(relative, str) and isinstance(digest, str)
-            for relative, digest in retained_sources.items()
-        ):
-            raise ContractError("Stopped scan source digests could not be frozen.")
+        retained_sources = _source_digests(
+            documents[0].get("scan", {}).get("preservedSources"),
+            "Stopped scan source digests could not be frozen.",
+        )
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "

@@ -87,6 +87,30 @@ def recover(root: Path, module, workers, frozen=None):
     return result
 
 
+def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir, scan_id):
+    """Retry publication from frozen sources after the initial write fails."""
+    prepared_coverage = []
+
+    def fail_publication(prepared):
+        prepared_coverage.append(prepared[4])
+        raise OSError("injected publication failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
+        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
+    assert len(prepared_coverage) == 1
+    run_workbench(
+        state,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
+
+
 @pytest.mark.parametrize("named_history", [False, True])
 def test_distinct_raw_candidate_survives_another_workers_generic_closure(
     tmp_path: Path, saved_results, named_history: bool
@@ -323,27 +347,10 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         )
         os.utime(other_result, ns=(200, 200))
 
-    prepared_coverage = []
-
-    def fail_publication(prepared):
-        prepared_coverage.append(prepared[4])
-        raise OSError("injected publication failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
-        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
-    assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    first_coverage, recovered = cancel_and_preserve(
+        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    recovered = json.loads((scan_dir / "coverage.json").read_text())
-    for coverage in (prepared_coverage[0], recovered):
+    for coverage in (first_coverage, recovered):
         api_surfaces = [row for row in coverage["surfaces"] if row["id"] == "api"]
         assert len(api_surfaces) == 1
         expected_disposition = "no_issue_found" if rejected_here else "needs_follow_up"
@@ -354,8 +361,8 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         )
         if outcome != "unresolved":
             assert rejection in coverage["surfaces"]
-    assert recovered["surfaces"] == prepared_coverage[0]["surfaces"]
-    assert recovered["deferred"] == prepared_coverage[0]["deferred"]
+    assert recovered["surfaces"] == first_coverage["surfaces"]
+    assert recovered["deferred"] == first_coverage["deferred"]
 
 
 @pytest.mark.parametrize(
@@ -414,27 +421,10 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
         head.write_text(json.dumps({"checkpoint": terminal_checkpoint.name}))
         os.utime(head, ns=(300, 300))
         expected_ids.remove(first_id)
-    prepared_coverage = []
-
-    def fail_publication(prepared):
-        prepared_coverage.append(prepared[4])
-        raise OSError("injected publication failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
-        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
-    assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    first_coverage, replay = cancel_and_preserve(
+        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    replay = json.loads((scan_dir / "coverage.json").read_text())
-    for coverage in (prepared_coverage[0], replay):
+    for coverage in (first_coverage, replay):
         retained = [row for row in coverage["deferred"] if row.get("paths") in [["a.py"], ["b.py"]]]
         assert len(retained) == (1 if close_first else 2)
         assert {row["id"] for row in retained} == expected_ids
@@ -445,7 +435,7 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
             )
         if payload_field:
             assert all(row[payload_field] == combined[payload_field] for row in retained)
-    assert replay == prepared_coverage[0]
+    assert replay == first_coverage
 
 
 @pytest.mark.parametrize("payload_field", [None, "candidate", "finding"])
@@ -534,35 +524,18 @@ def test_ambiguous_generic_summary_has_an_independent_recoverable_identity(
     head = result_path.parent / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": selected.name}))
     os.utime(head, ns=(observed, observed))
-    prepared_coverage = []
-
-    def fail_publication(prepared):
-        prepared_coverage.append(prepared[4])
-        raise OSError("injected publication failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
-        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
-    assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    first_coverage, replay = cancel_and_preserve(
+        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    replay = json.loads((scan_dir / "coverage.json").read_text())
     expected = [row for row in detailed if closed != "detailed" or row != detailed[0]]
     expected.extend(candidate_rows)
     if closed != "summary":
         expected.append({**summary, "id": summary_id})
-    for coverage in (prepared_coverage[0], replay):
+    for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert len(pending) == len(expected)
         assert all(row in pending for row in expected)
-    assert replay == prepared_coverage[0]
+    assert replay == first_coverage
 
 
 def test_equivalent_saved_ids_do_not_change_repeated_summary_identity(
@@ -625,32 +598,15 @@ def test_ambiguous_fallback_reserves_later_inferred_ids(
     head = result_path.parent / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[2].name}))
     os.utime(head, ns=(300, 300))
-    prepared_coverage = []
-
-    def fail_publication(prepared):
-        prepared_coverage.append(prepared[4])
-        raise OSError("injected publication failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
-        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
-    assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    first_coverage, replay = cancel_and_preserve(
+        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    replay = json.loads((scan_dir / "coverage.json").read_text())
     expected = [*named[:2], {**summary, "id": f"{named[0]['id']}-4"}]
-    for coverage in (prepared_coverage[0], replay):
+    for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert len(pending) == len(expected)
         assert all(row in pending for row in expected)
-    assert replay == prepared_coverage[0]
+    assert replay == first_coverage
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker"])
@@ -741,27 +697,10 @@ def test_abbreviated_observation_keeps_latest_saved_context(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[accepted_index].name}))
     os.utime(head, ns=(observed, observed))
-    prepared_coverage = []
-
-    def fail_publication(prepared):
-        prepared_coverage.append(prepared[4])
-        raise OSError("injected publication failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(saved_results, "_write_prepared_scan_finalization", fail_publication)
-        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
-    assert len(prepared_coverage) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    first_coverage, replay = cancel_and_preserve(
+        monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    replay = json.loads((scan_dir / "coverage.json").read_text())
-    for coverage in (prepared_coverage[0], replay):
+    for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert pending == [expected]
-    assert replay == prepared_coverage[0]
+    assert replay == first_coverage

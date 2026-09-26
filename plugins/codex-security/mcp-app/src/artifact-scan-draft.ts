@@ -421,7 +421,7 @@ async function preserveScanDraft(
   >();
   const matchingSavedDeferred = (row: JsonObject) => {
     const candidate = "candidate" in row || "finding" in row;
-    const key = JSON.stringify([candidate, row]);
+    const key = JSON.stringify(row);
     let match = deferredMatches.get(key);
     if (!match) {
       const candidates =
@@ -444,7 +444,10 @@ async function preserveScanDraft(
     }
     return match;
   };
-  const acceptedDeferredMatches = new WeakMap<JsonObject, JsonObject[]>();
+  const inferredDeferred = new WeakMap<
+    JsonObject,
+    { id?: string; candidateId?: string }
+  >();
   const reservedObservationIds = new Map<string, Set<string>>();
   const normalizeSavedDeferred = (rows: JsonObject[]) => {
     const claims = new Map<string, JsonObject | undefined>();
@@ -473,13 +476,19 @@ async function preserveScanDraft(
         const accepted = match.rows.filter(
           (saved) => claims.get(saved.id as string) !== undefined,
         );
-        acceptedDeferredMatches.set(row, accepted);
         const identities = new Set(accepted.map((saved) => saved.id as string));
-        if (identities.size === 1) {
+        const candidateIds = new Set(
+          accepted.map((saved) => (saved.candidateId ?? saved.id) as string),
+        );
+        const id =
+          identities.size === 1 ? (accepted[0]!.id as string) : undefined;
+        inferredDeferred.set(row, {
+          id,
+          candidateId:
+            candidateIds.size === 1 ? [...candidateIds][0] : undefined,
+        });
+        if (id !== undefined) {
           const observation = structuredClone(accepted[0]!);
-          const candidateIds = new Set(
-            accepted.map((saved) => saved.candidateId ?? saved.id),
-          );
           if (candidateIds.size > 1) delete observation.candidateId;
           return observation;
         }
@@ -684,29 +693,20 @@ async function preserveScanDraft(
       deferred: (source.coverage.deferred as JsonObject[]).flatMap(
         (item, index) => {
           const identified = deferredBySource.get(source)![index]!;
-          const matches = acceptedDeferredMatches.get(item);
+          const inferred = inferredDeferred.get(item);
           let candidateId = item.candidateId ?? item.id;
-          if (candidateId === undefined) {
-            if ("candidate" in item || "finding" in item) {
-              const identities = new Set(
-                matches!.map((row) => row.candidateId ?? row.id),
-              );
-              if (identities.size === 1) candidateId = [...identities][0];
-            } else {
-              candidateId = identified.id;
-            }
-          }
+          if (candidateId === undefined)
+            candidateId =
+              "candidate" in item || "finding" in item
+                ? inferred?.candidateId
+                : identified.id;
           if (
             (typeof candidateId === "string" && resolvedIds.has(candidateId)) ||
             closedDeferredIds.has(identified.id as string) ||
             coverageEntryPresent(result.coverage.deferred as unknown[], item)
           )
             return [];
-          return [
-            matches?.length && matches.every((row) => row.id === identified.id)
-              ? identified
-              : item,
-          ];
+          return [inferred?.id === identified.id ? identified : item];
         },
       ),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
@@ -801,9 +801,7 @@ function reconcileResolvedDeferred(
   resolvedCandidateIds: Set<string>,
   retainedFinal?: ScanDraftInput,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
-  const activeDeferred = normalizeDeferred(
-    result.coverage.deferred as JsonObject[],
-  );
+  const activeDeferred = result.coverage.deferred as JsonObject[];
   const observedIds = new Set(
     activeDeferred.flatMap((row) =>
       [row.id, row.candidateId].filter(
@@ -840,6 +838,7 @@ function reconcileResolvedDeferred(
       ),
   );
   const closures = new Map<string, JsonObject>();
+  const previouslyClosed = new Set<string>();
   const closureSources = new Map<string, ScanDraftInput>();
   for (const [source, deferred] of deferredBySource) {
     // Keep the first saved state for each ID so reopened work stays pending.
@@ -850,6 +849,7 @@ function reconcileResolvedDeferred(
     if (source.complete === false) continue;
     for (const closure of resolvedDeferred(source.coverage)) {
       const id = closure.id as string;
+      previouslyClosed.add(id);
       if (
         !candidateIds.has(id) &&
         !observedIds.has(id) &&
@@ -861,7 +861,6 @@ function reconcileResolvedDeferred(
       observedIds.add(id);
     }
   }
-  const savedClosureIds = new Set(closures.keys());
   const requested = new Set<string>();
   for (const closure of requestedClosures) {
     const id = closure.id as string;
@@ -871,14 +870,14 @@ function reconcileResolvedDeferred(
     closures.set(id, closure);
   }
   for (const id of closures.keys()) {
-    const rows = historical.filter(
-      (row) => row.id === id || row.candidateId === id,
-    );
     if (candidateIds.has(id))
       throw new Error(
         `scan draft: coverage.resolvedDeferred cannot close candidate ${id}; record its finding or disposition.`,
       );
-    if (rows.length === 0 && !savedClosureIds.has(id))
+    if (
+      !closureSources.has(id) &&
+      !historical.some((row) => row.id === id || row.candidateId === id)
+    )
       throw new Error(
         `scan draft: coverage.resolvedDeferred names no saved generic deferral: ${id}.`,
       );
@@ -895,13 +894,6 @@ function reconcileResolvedDeferred(
     delete result.coverage.resolvedDeferred;
   }
   const closedDeferredIds = new Set(closures.keys());
-  const previouslyClosed = new Set(
-    [...deferredBySource.keys()]
-      .filter((source) => source.complete !== false)
-      .flatMap((source) =>
-        resolvedDeferred(source.coverage).map((row) => row.id as string),
-      ),
-  );
   const reopenedIds = new Set(
     [...activeDeferred, ...historical]
       .map((row) => row.id as string)
@@ -914,9 +906,7 @@ function reconcileResolvedDeferred(
   );
   const inherited = [
     ...new Set([
-      ...[...closureSources]
-        .filter(([id]) => closedDeferredIds.has(id))
-        .map(([, source]) => source),
+      ...closureSources.values(),
       ...[...deferredBySource]
         .filter(([, rows]) =>
           rows.some((row) => reopenedIds.has(row.id as string)),
@@ -1071,6 +1061,32 @@ function reconcileDeferredSurfaces(
   return { resolved, updated };
 }
 
+async function readCheckpointHead(
+  context: ArtifactContext,
+  kind: "current" | "archived",
+): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
+  const metadata = await lstatIfExists(
+    join(context.root, "checkpoint-head.json"),
+  );
+  if (metadata === undefined) return;
+  if (metadata.isSymbolicLink() || !metadata.isFile())
+    throw new Error(
+      `scan checkpoint: ${kind} checkpoint head is not a safe file.`,
+    );
+  const label = `${kind} scan checkpoint head`;
+  const head = parseJsonObject(
+    await readArtifactText(context, ["checkpoint-head.json"], label),
+    label,
+  );
+  if (
+    typeof head.checkpoint !== "string" ||
+    !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
+  )
+    throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
+  // Reselecting an immutable checkpoint updates only the head file.
+  return { checkpoint: head.checkpoint, modifiedMs: Number(metadata.mtimeMs) };
+}
+
 async function readCurrentCheckpoints(
   context: ArtifactContext,
   excludedCheckpoint: string,
@@ -1096,35 +1112,8 @@ async function readCurrentCheckpoints(
     );
   }
 
-  let checkpointHead: string | undefined;
-  let headModifiedMs = 0;
-  const headMetadata = await lstatIfExists(
-    join(context.root, "checkpoint-head.json"),
-  );
-  if (headMetadata !== undefined) {
-    if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
-      throw new Error(
-        "scan checkpoint: current checkpoint head is not a safe file.",
-      );
-    }
-    const head = parseJsonObject(
-      await readArtifactText(
-        context,
-        ["checkpoint-head.json"],
-        "current scan checkpoint head",
-      ),
-      "current scan checkpoint head",
-    );
-    if (
-      typeof head.checkpoint !== "string" ||
-      !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-    ) {
-      throw new Error("scan checkpoint: current checkpoint head is invalid.");
-    }
-    checkpointHead = head.checkpoint;
-    // Reselecting an immutable checkpoint updates only the head file.
-    headModifiedMs = Number(headMetadata.mtimeMs);
-  }
+  const head = await readCheckpointHead(context, "current");
+  const checkpointHead = head?.checkpoint;
 
   const checkpoints: Array<{
     input: ScanDraftInput;
@@ -1167,7 +1156,7 @@ async function readCurrentCheckpoints(
       input,
       modifiedMs:
         entry.name === checkpointHead
-          ? headModifiedMs
+          ? head!.modifiedMs
           : Number(checkpointMetadata.mtimeMs),
       head: entry.name === checkpointHead,
       name: entry.name,
@@ -1247,44 +1236,18 @@ async function readPreviousScanDraft(
     "previous scan draft coverage",
   );
   const scan = requireObject(manifest.scan, "previous scan draft.scan");
-  const semanticScope = isObject(scan.scope) ? { ...scan.scope } : undefined;
-  if (semanticScope) {
-    delete semanticScope.includePaths;
-    delete semanticScope.excludePaths;
-  }
-  const semanticCoverage = { ...coverage };
-  for (const field of [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "mode",
-    "includePaths",
-    "excludePaths",
-    "receiptRefs",
-    "inventoryStrategy",
-  ])
-    delete semanticCoverage[field];
   return {
     digest,
     modifiedMs: Number(
       (await fs.lstat(join(context.root, "coverage.json"))).mtimeMs,
     ),
-    input: parsePersistedScanDraft({
+    input: parsePersistedCheckpoint({
       scanId: context.scanId,
       ...(scan.complete === false ? { complete: false } : {}),
-      ...(semanticScope && Object.keys(semanticScope).length > 0
-        ? { scope: semanticScope }
-        : {}),
-      ...(isObject(scan.threatModel)
-        ? { threatModel: structuredClone(scan.threatModel) }
-        : {}),
-      findings: (findings.findings as JsonObject[]).map((finding) => {
-        const semantic = { ...finding };
-        for (const field of ["findingId", "occurrenceId", "fingerprints"])
-          delete semantic[field];
-        return semantic;
-      }),
-      coverage: semanticCoverage,
+      ...(isObject(scan.scope) ? { scope: scan.scope } : {}),
+      ...(isObject(scan.threatModel) ? { threatModel: scan.threatModel } : {}),
+      findings: findings.findings,
+      coverage,
     }),
   };
 }
@@ -1337,39 +1300,15 @@ async function readArchivedWorkerCheckpoints(
       head?: boolean;
       name: string;
     }> = [];
+    const attemptContext = { ...context, root: attemptRoot };
+    const head = await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
-    let checkpointHeadName: string | undefined;
-    const headMetadata = await lstatIfExists(
-      join(attemptRoot, "checkpoint-head.json"),
-    );
-    if (headMetadata !== undefined) {
-      if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint head is not a safe file.",
-        );
-      }
-      const head = parseJsonObject(
-        await readArtifactText(
-          { ...context, root: attemptRoot },
-          ["checkpoint-head.json"],
-          "archived scan checkpoint head",
-        ),
-        "archived scan checkpoint head",
-      );
-      if (
-        typeof head.checkpoint !== "string" ||
-        !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-      ) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint head is invalid.",
-        );
-      }
-      checkpointHeadName = head.checkpoint;
+    if (head) {
       checkpointHead = parsePersistedScanDraft(
         parseJsonObject(
           await readArtifactText(
-            { ...context, root: attemptRoot },
-            ["checkpoints", checkpointHeadName],
+            attemptContext,
+            ["checkpoints", head.checkpoint],
             "archived scan checkpoint head",
           ),
           "archived scan checkpoint head",
@@ -1385,7 +1324,7 @@ async function readArchivedWorkerCheckpoints(
         throw new Error("scan checkpoint: archived result is not a safe file.");
       }
       const contents = await readArtifactText(
-        { ...context, root: attemptRoot },
+        attemptContext,
         ["result.json"],
         "archived scan result",
       );
@@ -1425,7 +1364,7 @@ async function readArchivedWorkerCheckpoints(
           (entry) =>
             entry.isFile() &&
             entry.name.endsWith(".json") &&
-            entry.name !== checkpointHeadName,
+            entry.name !== head?.checkpoint,
         )
         .sort((left, right) => left.name.localeCompare(right.name));
       for (const checkpoint of checkpoints) {
@@ -1440,7 +1379,7 @@ async function readArchivedWorkerCheckpoints(
           );
         }
         const contents = await readArtifactText(
-          { ...context, root: attemptRoot },
+          attemptContext,
           ["checkpoints", checkpoint.name],
           "archived scan checkpoint",
         );
@@ -1459,10 +1398,10 @@ async function readArchivedWorkerCheckpoints(
     if (checkpointHead !== undefined) {
       drafts.push({
         input: checkpointHead,
-        modifiedMs: Number(headMetadata!.mtimeMs),
+        modifiedMs: head!.modifiedMs,
         head: true,
         result: false,
-        name: checkpointHeadName!,
+        name: head!.checkpoint,
       });
     }
     drafts.sort(
