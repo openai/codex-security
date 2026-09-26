@@ -12,6 +12,7 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "Request blocked by cyberPolicy.",
   "Request blocked by a safety policy violation.",
   "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   "This content was flagged for potentially high-risk cyber activity.",
   "This request has been flagged for possible cybersecurity risk.",
   "This request has been flagged for potentially high-risk cyber activity.",

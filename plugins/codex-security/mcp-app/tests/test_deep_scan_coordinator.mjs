@@ -928,6 +928,7 @@ async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmed
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",
     "This content was flagged for potentially high-risk cyber activity.",
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   ]) {
     const fixture = await fixtureRun({
       workers: 1,
