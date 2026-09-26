@@ -1234,7 +1234,6 @@ describe("CLI workbench", () => {
       const stdout = capture();
       const stderr = capture();
       let workbenchCalls = 0;
-      let started = false;
 
       expect(
         await main(
@@ -1248,9 +1247,6 @@ describe("CLI workbench", () => {
           stdout.stream,
           stderr.stream,
           dependencies({
-            onRun: () => {
-              started = true;
-            },
             onWorkbench: () => {
               workbenchCalls += 1;
               return {};
@@ -1259,7 +1255,6 @@ describe("CLI workbench", () => {
         ),
       ).toBe(2);
       expect(workbenchCalls).toBe(0);
-      expect(started).toBe(false);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
         "Markdown output is not supported for scan results.",

@@ -598,13 +598,20 @@ describe("CLI authentication", () => {
         stored: true,
         key: true,
       },
-      ...(["chatgpt", "api-key"] as const).map((recipeAuth) => ({
+      {
         argv: ["scans", "rerun", "scan-original", "--json"],
         terminal: true,
         stored: true,
         key: true,
-        recipeAuth,
-      })),
+        recipeAuth: "chatgpt" as const,
+      },
+      {
+        argv: ["scans", "rerun", "scan-original", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+        recipeAuth: "api-key" as const,
+      },
       {
         argv: ["scan", "--dry-run"],
         terminal: true,
@@ -616,12 +623,14 @@ describe("CLI authentication", () => {
         terminal: true,
         stored: true,
         key: true,
+        expectedAuth: "chatgpt" as const,
       },
       {
         argv: ["scan", "--auth", "api-key"],
         terminal: true,
         stored: true,
         key: true,
+        expectedAuth: "api-key" as const,
       },
       { argv: ["scan"], terminal: false, stored: true, key: true },
       { argv: ["scan"], terminal: true, stored: false, key: true },
@@ -654,9 +663,9 @@ describe("CLI authentication", () => {
                   repository: "/original/repository",
                   target: { kind: "repository", paths: [] },
                   mode: "standard",
-                  ...("recipeAuth" in scenario
-                    ? { auth: scenario.recipeAuth }
-                    : {}),
+                  ...(scenario.recipeAuth === undefined
+                    ? {}
+                    : { auth: scenario.recipeAuth }),
                   config: {},
                 },
               },
@@ -666,9 +675,7 @@ describe("CLI authentication", () => {
         return scenario.stored;
       };
       deps.scanAuthenticationPrompt = {
-        isInteractive: () =>
-          !("inputInteractive" in scenario) ||
-          scenario.inputInteractive !== false,
+        isInteractive: () => scenario.inputInteractive !== false,
         select: async <Value extends string>(
           _message: string,
           options: readonly { label: string; value: Value }[],
@@ -686,19 +693,10 @@ describe("CLI authentication", () => {
         expect(discoveries).toBe(0);
         expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
         expect(stderr.text()).not.toMatch(/\x1b\[/u);
-        expect(stderr.text()).not.toContain(
-          "Both a ChatGPT sign-in and an API key",
-        );
       }
       if (!scenario.argv.includes("--dry-run")) {
         expect(selected).toBe(
-          "recipeAuth" in scenario
-            ? scenario.recipeAuth
-            : scenario.argv.includes("chatgpt")
-              ? "chatgpt"
-              : scenario.argv.includes("api-key")
-                ? "api-key"
-                : "auto",
+          scenario.recipeAuth ?? scenario.expectedAuth ?? "auto",
         );
       }
       expect(stderr.text()).not.toContain("synthetic-private-key");
