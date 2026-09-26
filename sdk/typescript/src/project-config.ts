@@ -185,9 +185,9 @@ export function projectConfigStarter(
   );
   const schema = isAbsolute(relativeSchema)
     ? pathToFileURL(schemaPath).href
-    : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
-        .split(sep)
-        .join("/")}`;
+    : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
+        relativeSchema.split(sep).join("/"),
+      ).replace(/[#?]/gu, encodeURIComponent)}`;
   if (projectConfigExtension(path) === ".json")
     return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
   return [
