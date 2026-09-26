@@ -5,29 +5,28 @@ Use this reference only when the destination is `jira`.
 ## Contract
 
 - Track one validated finding or an explicitly selected batch of up to 25. Use one Jira Cloud issue per finding.
-- Use only the native [$atlassian](app://connector_692de805e3ec8191834719067174a384) app. Reuse needs read access but not write access. Create and update need both. Stop if the app is unavailable, disconnected, cannot read the destination, or cannot perform the approved mutation.
+- Use only the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Reuse requires read and search access; create and update also require write access. Stop if the app is unavailable, disconnected, or lacks access to the destination.
 - Pin one authenticated Atlassian identity, site and `cloudId`, project key, and issue type from duplicate checks through readback. Use the same destination and issue type for every item in a batch. Start a separate run for work that needs another site, project, or issue type.
 - Require the user to explicitly confirm that the project audience is approved to see the finding details. One confirmation may cover an exact reviewed batch. Jira create permission does not prove who can read the issues.
 
-Do not use the legacy Jira connector, Jira Data Center, Jira Service Management request workflows, CLI tools, direct REST, browser automation, or Computer Use.
+## Tool Discovery
+
+Use the app's live input schemas. For deferred operations, use `discover` and the returned execution tool, such as `executeRead`. Resolve the required operations before previewing a write. If an operation is unavailable, stop and report what is missing. Writes through `executeWrite` require the same preview and approval as direct write tools.
 
 ## Destination And Fields
 
 Call the Rovo tools in this order:
 
 1. Resolve the exact site with `getAccessibleAtlassianResources` and the current identity with `atlassianUserInfo`.
-2. Confirm the project permits the intended operation with `getVisibleJiraProjects`: `action: create` for a create, `edit` for an update, or `browse` for reuse.
-3. Resolve the selected issue type with `getJiraProjectIssueTypesMetadata`.
+2. Resolve the selected project with `listJiraProjects`. Confirm the intended create, edit, or browse access using the operation filter or permission information exposed by its live schema and results. A visible project alone does not prove write access.
+3. Resolve the selected issue type with `listJiraProjectIssueTypesMetadata`.
 4. Fetch its current fields with `getJiraIssueTypeMetaWithFields`.
 
 Select the site, project, and issue type from an explicit choice in the current request or one unambiguous live result. Stop on ambiguity. Fetch every page when results are paginated. For a batch, confirm each operation required by its proposed `create`, `update`, or `reuse` outcome. Keep the destination pinned.
 
-Build each create payload with:
+Build each `createJiraIssue` payload from its live schema using the pinned site, project, issue type, summary, approved description, and any approved optional fields.
 
-- `cloudId`, `projectKey`, `issueTypeName`, `summary`, and a Markdown `description`
-- optional top-level `additional_fields`, `assignee_account_id`, and `parent`
-
-Put priority, components, labels, and custom fields in `additional_fields`, never at the top level. Include every field required by live metadata. Use an optional field only after verifying its key or id and value live and getting user approval.
+Use Markdown when supported and select that format explicitly when the schema offers a choice. Put priority, components, labels, and custom fields in the container specified by the schema, such as `additional_fields`. Include every required field from the issue-type metadata. Verify each optional field's key or id and value against live metadata before asking for approval. Build `editJiraIssue` payloads from its live schema with only the approved changes.
 
 Never:
 
@@ -40,7 +39,7 @@ Include the canonical finding id and primary fingerprint as labeled text in the 
 
 ## Duplicates
 
-For every selected finding, use `searchJiraIssuesUsingJql`. Use project-scoped JQL for the finding id and fingerprint, but search each value separately. Do not combine bindings from several findings in one query. Escape scan-derived values as JQL data, paginate with `nextPageToken`, and search all statuses. Do not print unrelated issue descriptions.
+For every selected finding, use `searchJiraIssuesUsingJql`. Use project-scoped JQL for the finding id and fingerprint, but search each value separately. Do not combine bindings from several findings in one query. Escape scan-derived values as JQL data, exhaust pagination using the live schema and returned continuation tokens, and search all statuses. Do not print unrelated issue descriptions.
 
 JQL tokenization does not prove an exact match. Read every plausible candidate with `getJiraIssue`. Compare its labeled bindings, affected area, root cause, and source context. After the exact-binding searches, use narrow semantic terms only when the confirmed audience is safe for them.
 
