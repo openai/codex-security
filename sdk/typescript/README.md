@@ -159,11 +159,40 @@ Options for `security.run(repository, options)` and
 | `expectedPluginVersion`                     | Required original plugin version when replaying a scan.                             |
 | `signal`                                    | `AbortSignal` to cancel a scan.                                                     |
 
-Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
-saved events with thread IDs and worker numbers. Deep scans can additionally use
-`onDeepProgress` for durable independent-review counts: `completed`, `active`,
-and `maximum`. The maximum is a configured cap, not a percentage denominator.
-`ScanOptions` lists all callbacks.
+Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
+persisted worker sessions discovered by the SDK's existing session tracker,
+independently of model-emitted status markers:
+
+```ts
+await security.run(repository, {
+  onWorkerEvent(event) {
+    console.log(`Worker ${event.worker} observed`);
+  },
+});
+```
+
+The callback contains only `{ kind: "observed", worker: number }`. The scan-local
+worker number matches `onActivity` and `onSessionEvent`; no prompts, raw thread
+IDs, or session contents are exposed. Each session is reported once per run,
+including nested workers and scan-associated validation or Deep Scan sessions.
+On resume, already persisted workers can be reported again. Observation ends
+with scan cost tracking, before `postScanPrompt`.
+
+This works with the bundled Codex version. Persistence and polling can delay
+notification, and missing notifications do not prove that delegation was skipped.
+An observed session does not establish that a worker just started or that file
+review has begun. The callback does not report failed spawn attempts, phase names,
+or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
+`signal` for cancellation. Observer failures go to `onObserverError` without
+stopping the scan.
+
+`onWorkerStatus` remains available for tool-derived preflight status and
+**best-effort** phase dispatch counts from model-emitted text markers. A missing
+dispatch status does not mean delegation was skipped. `onSessionEvent` receives
+saved events with thread IDs and worker numbers and can contain source code or
+credentials. Deep scans additionally expose durable independent-review counts
+through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
+configured cap, not a percentage denominator. `ScanOptions` lists all callbacks.
 
 `preflight` and CLI `--dry-run` check local inputs without starting Codex or
 using the network. They don't authenticate, verify model access, resolve Python,

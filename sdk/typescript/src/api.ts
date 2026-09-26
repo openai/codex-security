@@ -67,6 +67,7 @@ import {
   ScanCostTracker,
   type ScanCost,
   type ScanSessionEvent,
+  type ScanWorkerEvent,
 } from "./cost.js";
 import {
   DeepScanProgressTracker,
@@ -298,7 +299,16 @@ export interface ScanOptions extends ScanSettings {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
+  /** Preflight status and best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  /**
+   * Reports each persisted worker session once when discovered during this run.
+   * Worker numbers match onActivity/onSessionEvent. Includes saved workers on
+   * resume; observation ends before postScanPrompt. Persistence and polling can
+   * delay delivery. Does not report failed spawns, phase, or planned counts and
+   * cannot gate dispatch; use maxCostUsd or signal for cancellation.
+   */
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
@@ -393,6 +403,7 @@ type ScanObserverName =
   | "onProgress"
   | "onDeepProgress"
   | "onWorkerStatus"
+  | "onWorkerEvent"
   | "onStage"
   | "onWarning";
 
@@ -1452,6 +1463,16 @@ export class CodexSecurity {
                   options.onActivity,
                   options.onObserverError,
                   activity,
+                ),
+        onWorkerEvent:
+          options.onWorkerEvent === undefined
+            ? undefined
+            : (event) =>
+                notifyObserver(
+                  "onWorkerEvent",
+                  options.onWorkerEvent,
+                  options.onObserverError,
+                  event,
                 ),
         onSessionEvent:
           options.onSessionEvent === undefined

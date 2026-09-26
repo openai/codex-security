@@ -22,6 +22,13 @@ import {
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
+/** A persisted worker session discovered during this run. Contains no model text. */
+export interface ScanWorkerEvent {
+  kind: "observed";
+  /** Scan-local number shared with activity and session observers. */
+  worker: number;
+}
+
 export interface ScanSessionEvent {
   threadId: string;
   parentThreadId: string | null;
@@ -70,6 +77,7 @@ interface ScanCostTrackerOptions {
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -113,6 +121,7 @@ export class ScanCostTracker {
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
   #threadId: string | null = null;
+  #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
@@ -144,7 +153,8 @@ export class ScanCostTracker {
       this.#options.onCost === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
-      this.#options.onSessionEvent === undefined
+      this.#options.onSessionEvent === undefined &&
+      this.#options.onWorkerEvent === undefined
     ) {
       return;
     }
@@ -188,7 +198,11 @@ export class ScanCostTracker {
       this.#timer = null;
     }
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
-    await this.refresh();
+    try {
+      await this.refresh();
+    } finally {
+      this.#observingWorkers = false;
+    }
     if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
@@ -279,8 +293,13 @@ export class ScanCostTracker {
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
-        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
-        this.#workers.set(threadId, worker);
+        worker = this.#workers.get(threadId);
+        if (worker === undefined) {
+          worker = this.#workers.size + 1;
+          this.#workers.set(threadId, worker);
+          if (this.#observingWorkers)
+            this.#options.onWorkerEvent?.({ kind: "observed", worker });
+        }
       }
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({

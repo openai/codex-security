@@ -46,7 +46,7 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
