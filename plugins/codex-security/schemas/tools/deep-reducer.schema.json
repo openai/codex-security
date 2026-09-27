@@ -6,6 +6,24 @@
   "$defs": {
     "reducerInputs": {
       "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "Continue the same document from its returned nextCursor."
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Caller-selected byte budget for the serialized MCP response. Choose below the transport and output budgets; reduce it if transport reports an oversized response."
+        },
+        "findingRef": {
+          "type": "string",
+          "description": "Omit to page assigned findings and the previous aggregate without retained provenance bodies. Use source:<sourceFindingId> to fetch a complete original, or previous:<zero-based index> to fetch a complete previous aggregate finding, including its retained history."
+        }
+      },
+      "required": ["maxBytes"],
       "additionalProperties": false
     },
     "reductionInput": {
@@ -31,10 +49,7 @@
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
         }
       },
-      "required": [
-        "scanId",
-        "findings"
-      ],
+      "required": ["scanId", "findings"],
       "additionalProperties": false
     }
   }

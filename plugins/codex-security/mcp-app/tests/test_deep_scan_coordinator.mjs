@@ -1812,7 +1812,9 @@ async function testInvalidReducerResultRetriesFromSnapshot(
   }
 }
 
-async function testMissingReducerResultResumesExistingThread() {
+async function testMissingReducerResultResumesExistingThread(
+  diagnosticMessage = "Codex worker artifact tool record_codex_security_deep_reduction failed.",
+) {
   const fixture = await fixtureRun({
     workers: 1,
     subagents: 0,
@@ -1826,8 +1828,7 @@ async function testMissingReducerResultResumesExistingThread() {
     dedupDiagnostics: [
       {
         code: "artifact_tool_failed",
-        message:
-          "Codex worker artifact tool record_codex_security_deep_reduction failed.",
+        message: diagnosticMessage,
       },
     ],
   });
@@ -1852,6 +1853,15 @@ async function testMissingReducerResultResumesExistingThread() {
   assert.equal(store.dedupClaims.length, 1);
   assert.equal(executor.dedupCalls, 2);
   assert.deepEqual(sleeps, [1]);
+  assert.ok(
+    store.workerUpdates.some(
+      (update) =>
+        update.kind === "dedup" &&
+        update.error?.startsWith(diagnosticMessage) &&
+        update.error.includes("result.json"),
+    ),
+    "the persisted missing-result error must retain the tool failure reason",
+  );
   assert.deepEqual(executor.dedupResumeThreadIds, [
     undefined,
     executor.dedupThreadIds[0],
@@ -1869,6 +1879,18 @@ async function testMissingReducerResultResumesExistingThread() {
     executor.dedupContinuationPrompts[1] ?? "",
     /retry the call until it succeeds/,
   );
+  assert.match(
+    executor.dedupContinuationPrompts[1] ?? "",
+    /smaller maxBytes budget.*halve the failed request's budget/,
+  );
+  assert.match(
+    executor.dedupContinuationPrompts[1] ?? "",
+    /preserving its cursor and findingRef to retry the same page/,
+  );
+  assert.match(
+    executor.dedupContinuationPrompts[1] ?? "",
+    /paginate all assigned findings and the previous aggregate/,
+  );
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(
@@ -1885,6 +1907,53 @@ async function testMissingReducerResultResumesExistingThread() {
     { code: "ENOENT" },
     "same-thread completion must preserve reducer artifacts instead of archiving them",
   );
+}
+
+async function testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures() {
+  const sizeMessage =
+    "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
+  for (const earlierDiagnostic of [
+    { code: "file_change_failed", message: "Codex worker file change failed." },
+    {
+      code: "sandbox_namespace_exhausted",
+      message: "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+    },
+  ]) {
+    const fixture = await fixtureRun({
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    });
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor({
+      missingDedupResultsByLabel: { "dedup-0001": 1 },
+      dedupDiagnostics: [
+        earlierDiagnostic,
+        { code: "artifact_tool_failed", message: sizeMessage },
+      ],
+    });
+    const coordinator = new DeepScanCoordinator({
+      run: fixture.run,
+      store,
+      executor,
+      pluginRoot: fixture.pluginRoot,
+      retryDelaysMs: [1],
+      clock: immediateClock,
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    const failure = store.workerUpdates.find(
+      (update) => update.kind === "dedup" && update.error,
+    );
+    assert.ok(failure.error.includes(earlierDiagnostic.message));
+    assert.ok(failure.error.includes(sizeMessage));
+    assert.ok(failure.error.includes("result.json"));
+    const retryPrompt = await readFile(executor.dedupPromptPaths[1], "utf8");
+    assert.ok(retryPrompt.includes(earlierDiagnostic.message));
+    assert.ok(retryPrompt.includes(sizeMessage));
+  }
 }
 
 async function testExhaustedReducerIsReplacedAtDiscoveryLimit() {
@@ -4629,6 +4698,10 @@ try {
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);
   await testMissingReducerResultResumesExistingThread();
+  await testMissingReducerResultResumesExistingThread(
+    "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes",
+  );
+  await testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures();
   await testExhaustedReducerIsReplacedAtDiscoveryLimit();
   await testPolicyRefusedReducerPreservesInputsAndCommittedAggregate();
   await testNonRetryableReducerAbortsScanWithoutRetry();

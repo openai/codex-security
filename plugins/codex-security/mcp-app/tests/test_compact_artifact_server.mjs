@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1438,27 +1445,97 @@ async function testDiscoveryWorkerToolList(bundle) {
 
 async function testReducerWorkerToolList(bundle) {
   const repoRoot = path.join(temporaryRoot, "reducer-repository");
-  const scanRoot = path.join(temporaryRoot, "reducer-scan");
+  const scanRoot = await realpath(
+    await mkdtemp(path.join(temporaryRoot, "reducer-scan-")),
+  );
+  const scanId = randomUUID();
+  const workerId = "worker-paging-fixture";
+  const workerRoot = path.join(
+    scanRoot,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+    "discovery-0001",
+    "output",
+  );
+  const previousRoot = path.join(
+    scanRoot,
+    "artifacts",
+    "deep_discovery",
+    "dedup",
+    "dedup-0001",
+    "output",
+  );
   const artifactRoot = path.join(
     scanRoot,
     "artifacts",
     "deep_discovery",
     "dedup",
+    "dedup-0002",
     "output",
   );
   await Promise.all([
     mkdir(repoRoot, { recursive: true }),
+    mkdir(workerRoot, { recursive: true }),
+    mkdir(previousRoot, { recursive: true }),
     mkdir(artifactRoot, { recursive: true }),
+  ]);
+  const sourceOriginal = reducerPagingFinding("original-source");
+  const workerFinding = {
+    ...reducerPagingFinding("fresh-source"),
+    summary: 'A large finding with quoted "evidence" and Unicode 🧭. '.repeat(
+      120,
+    ),
+    provenance: {
+      source: "local_plugin",
+      sourceFindings: [{ id: "earlier-worker:0", finding: sourceOriginal }],
+      previousFindings: [sourceOriginal],
+      originalCandidates: [{ summary: "retained source candidate" }],
+    },
+  };
+  const previousOriginal = reducerPagingFinding("previous-original");
+  const previousFinding = {
+    ...reducerPagingFinding("previous-aggregate"),
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: ["previous-worker:0"],
+      sourceFindings: [{ id: "previous-worker:0", finding: previousOriginal }],
+      previousFindings: [previousOriginal],
+      originalCandidates: [{ summary: "retained previous candidate" }],
+    },
+  };
+  const workerResultPath = path.join(workerRoot, "result.json");
+  const previousReducerResultPath = path.join(previousRoot, "result.json");
+  await Promise.all([
+    writeFile(
+      workerResultPath,
+      JSON.stringify({
+        scanId,
+        findings: [workerFinding],
+        coverage: {
+          completeness: "complete",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      }),
+    ),
+    writeFile(
+      previousReducerResultPath,
+      JSON.stringify({ scanId, findings: [previousFinding] }),
+    ),
   ]);
 
   const client = await startClient(bundle, {
     CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
+    CODEX_SECURITY_SCAN_ID: scanId,
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
       scanRoot,
-      claimedWorkers: [],
+      claimedWorkers: [{ id: workerId, resultPath: workerResultPath }],
+      previousReducerResultPath,
     }),
   });
   try {
@@ -1501,6 +1578,14 @@ async function testReducerWorkerToolList(bundle) {
           false,
           "The reducer must not be asked to submit coverage.",
         );
+      } else {
+        assert.deepEqual(tool.inputSchema.required, ["maxBytes"]);
+        assert.equal(tool.inputSchema.additionalProperties, false);
+        assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), [
+          "cursor",
+          "findingRef",
+          "maxBytes",
+        ]);
       }
       for (const forbidden of [
         "path",
@@ -1516,9 +1601,121 @@ async function testReducerWorkerToolList(bundle) {
         );
       }
     }
+
+    const maxBytes = 768;
+    async function readPagedInputs(findingRef) {
+      const fragments = [];
+      const cursors = new Set();
+      let cursor;
+      do {
+        const response = await client.callTool({
+          name: "get_codex_security_deep_reducer_inputs",
+          arguments: {
+            maxBytes,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(findingRef === undefined ? {} : { findingRef }),
+          },
+        });
+        assert.notEqual(response.isError, true, JSON.stringify(response));
+        assert.equal(Object.hasOwn(response, "structuredContent"), false);
+        assert.equal(response.content.length, 1);
+        assert.equal(response.content[0].type, "text");
+        assert.ok(
+          Buffer.byteLength(JSON.stringify(response), "utf8") <= maxBytes,
+          "The full encoded MCP result must fit the requested byte budget.",
+        );
+        const page = JSON.parse(response.content[0].text);
+        assert.equal(typeof page.json, "string");
+        assert.ok(page.json.length > 0, "Every page must make progress.");
+        fragments.push(page.json);
+        cursor = page.nextCursor;
+        if (cursor !== undefined) {
+          assert.equal(typeof cursor, "string");
+          assert.equal(
+            cursors.has(cursor),
+            false,
+            "Paging must not repeat a cursor.",
+          );
+          cursors.add(cursor);
+        }
+      } while (cursor !== undefined);
+      return {
+        value: JSON.parse(fragments.join("")),
+        pageCount: fragments.length,
+      };
+    }
+
+    const inputs = await readPagedInputs();
+    assert.ok(inputs.pageCount > 1, "A single large finding must span pages.");
+    assert.equal(inputs.value.discoveries.length, 1);
+    assert.equal(inputs.value.discoveries[0].workerId, workerId);
+    assert.equal(inputs.value.discoveries[0].result.scanId, scanId);
+    assert.equal(inputs.value.previous.scanId, scanId);
+    const fresh = inputs.value.discoveries[0].result.findings[0];
+    const previous = inputs.value.previous.findings[0];
+    assert.equal(fresh.summary, workerFinding.summary);
+    assert.equal(previous.title, previousFinding.title);
+    assert.deepEqual(fresh.provenance.sourceFindingIds, [`${workerId}:0`]);
+    assert.deepEqual(previous.provenance.sourceFindingIds, [
+      "previous-worker:0",
+    ]);
+    for (const finding of [fresh, previous]) {
+      for (const body of [
+        "sourceFindings",
+        "previousFindings",
+        "originalCandidates",
+      ]) {
+        assert.equal(
+          Object.hasOwn(finding.provenance, body),
+          false,
+          `The slim reducer input must omit ${body} bodies.`,
+        );
+      }
+    }
+    const fullSource = await readPagedInputs(
+      `source:${fresh.provenance.sourceFindingIds[0]}`,
+    );
+    assert.ok(fullSource.pageCount > 1);
+    assert.deepEqual(fullSource.value, {
+      ...workerFinding,
+      provenance: {
+        ...workerFinding.provenance,
+        sourceFindingIds: [`${workerId}:0`],
+      },
+    });
+    assert.deepEqual(
+      (await readPagedInputs("previous:0")).value,
+      previousFinding,
+    );
+    assert.deepEqual(
+      (
+        await readPagedInputs(
+          `source:${previous.provenance.sourceFindingIds[0]}`,
+        )
+      ).value,
+      previousOriginal,
+    );
   } finally {
     await client.close();
   }
+}
+
+function reducerPagingFinding(id) {
+  return {
+    ruleId: `cross-site-scripting.${id}`,
+    identity: { anchor: id },
+    title: `Unsafe request output ${id}`,
+    summary: "A request-controlled value reaches an HTML response.",
+    severity: { level: "high" },
+    confidence: {
+      level: "high",
+      rationale: "The source establishes reachability.",
+    },
+    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
+    locations: [{ path: "src/fixture.ts", startLine: 1, endLine: 2 }],
+    remediation: "Encode request-controlled values before emitting HTML.",
+    provenance: { source: "local_plugin" },
+  };
 }
 
 async function bundleEntrypoint(entrypoint, outfile) {

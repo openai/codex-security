@@ -26,7 +26,7 @@ const bundle = await build({
   },
   stdin: {
     // Test the environment snapshot without adding a production export.
-    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment };`,
+    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment, appendSafeItemDiagnostic };`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource),
@@ -35,10 +35,14 @@ const bundle = await build({
   platform: "node",
   write: false,
 });
-const { CodexSdkWorkerExecutor, resolveCodexPath, snapshotWorkerEnvironment } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-  );
+const {
+  CodexSdkWorkerExecutor,
+  resolveCodexPath,
+  snapshotWorkerEnvironment,
+  appendSafeItemDiagnostic,
+} = await import(
+  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+);
 const errorsBundle = await build({
   bundle: true,
   entryPoints: [
@@ -77,6 +81,8 @@ const emptyWorkerPermissionProfile = {
   filesystem: { ":root": "read" },
   network: { enabled: false },
 };
+const ipcFrameError =
+  "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 const deniedWorkerPermissionProfile = {
   extends: ":read-only",
   filesystem: {
@@ -90,8 +96,9 @@ const deniedWorkerPermissionProfile = {
 };
 
 try {
+  testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
-  await testWorkerReasoningSummaries();
+  await testWorkerRuntimeSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -106,6 +113,7 @@ try {
     await testRetryNotificationDoesNotInterruptTurn();
     await testSandboxNamespaceDiagnosticIsSanitized();
     await testOwnedArtifactToolFailureDiagnosticIsSanitized();
+    await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
     await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
     await testAbortPropagation();
@@ -1094,7 +1102,7 @@ async function testOpenAiCredentialsReachWorker() {
   }
 }
 
-async function testWorkerReasoningSummaries() {
+async function testWorkerRuntimeSettings() {
   const cases = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -1110,6 +1118,11 @@ async function testWorkerReasoningSummaries() {
   ];
   const saved = Object.fromEntries(
     [
+      "PYTHON",
+      "PATH",
+      "CODEX_SECURITY_GIT",
+      "GIT_SSH_COMMAND",
+      "GIT_CONFIG_GLOBAL",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1123,6 +1136,21 @@ async function testWorkerReasoningSummaries() {
     delete process.env.CODEX_API_KEY;
     for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(deniedWorkerPermissionProfile);
+      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const helperPython = path.join(
+        fixture.root,
+        "helper venv",
+        "bin",
+        "python",
+      );
+      process.env.PYTHON = python;
+      const gitEnvironment = {
+        PATH: path.join(fixture.root, "selected tools"),
+        CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
+        GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+        GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
+      };
+      Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active scan config.toml");
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(configPath, configuration);
@@ -1147,6 +1175,13 @@ async function testWorkerReasoningSummaries() {
         model: "fixture-model",
         reasoningEffort: "xhigh",
         parentSandbox: trustedParentSandboxWithDenials,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: fixture.root,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan",
+          pythonCommand: helperPython,
+        },
       });
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"]) {
@@ -1157,6 +1192,15 @@ async function testWorkerReasoningSummaries() {
             workingDirectory: fixture.root,
             subagents: 0,
             resumeThreadId,
+            artifactContext: {
+              root: fixture.root,
+              layout: kind === "dedup" ? "reducer" : "worker",
+              ...(kind === "dedup"
+                ? {
+                    deepReducer: { scanRoot: fixture.root, claimedWorkers: [] },
+                  }
+                : {}),
+            },
             signal: new AbortController().signal,
           });
           const invocation = JSON.parse(
@@ -1182,6 +1226,22 @@ async function testWorkerReasoningSummaries() {
             true,
           );
           assert.equal(invocation.configPath, configPath);
+          const preflight = JSON.parse(
+            await readFile(fixture.preflightMarkerPath, "utf8"),
+          );
+          assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
+          assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+          for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.equal(process.env[name], value);
+          }
+          assert.equal(invocation.python, python);
+          assert.equal(
+            invocation.argv.includes(
+              `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(helperPython)}`,
+            ),
+            true,
+          );
+          assert.equal(process.env.PYTHON, python);
           assert.equal(
             invocation.deepConfigPath,
             process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
@@ -1496,6 +1556,107 @@ async function testOwnedArtifactToolFailureDiagnosticIsSanitized() {
     } finally {
       restoreEnv("CODEX_CLI_PATH", previousPath);
     }
+  }
+}
+
+function testCodeModeFrameDiagnosticBoundaries() {
+  const failedArtifactTool = {
+    type: "mcp_tool_call",
+    server: "cs_artifacts",
+    tool: "get_codex_security_deep_reducer_inputs",
+    status: "failed",
+  };
+  const resultWithText = (text) => ({ content: [{ type: "text", text }] });
+  for (const item of [
+    { type: "error", message: ipcFrameError },
+    { ...failedArtifactTool, error: { message: ipcFrameError } },
+    { ...failedArtifactTool, result: resultWithText(ipcFrameError) },
+  ]) {
+    const diagnostics = [];
+    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
+    appendSafeItemDiagnostic(diagnostics, item);
+    appendSafeItemDiagnostic(diagnostics, failedArtifactTool);
+    assert.deepEqual(diagnostics, [
+      { code: "artifact_tool_failed", message: ipcFrameError },
+    ]);
+  }
+  for (const message of [
+    `private source: ${ipcFrameError}`,
+    `${ipcFrameError} private output`,
+    `${ipcFrameError}\n`,
+    JSON.stringify({ error: ipcFrameError }),
+    ipcFrameError.replace("76008279", "unknown"),
+    "private path /customer/repo: IPC frame limit exceeded",
+  ]) {
+    const diagnostics = [];
+    appendSafeItemDiagnostic(diagnostics, { type: "error", message });
+    appendSafeItemDiagnostic(diagnostics, {
+      ...failedArtifactTool,
+      result: resultWithText(message),
+    });
+    assert.deepEqual(diagnostics, [
+      {
+        code: "artifact_tool_failed",
+        message:
+          "Codex worker artifact tool get_codex_security_deep_reducer_inputs returned an error.",
+      },
+    ]);
+  }
+  for (const item of [
+    {
+      ...failedArtifactTool,
+      server: "foreign_server",
+      result: resultWithText(ipcFrameError),
+    },
+    {
+      type: "command_execution",
+      status: "failed",
+      aggregated_output: ipcFrameError,
+    },
+    { type: "agent_message", text: ipcFrameError },
+    { type: "unknown", status: "failed", error: { message: ipcFrameError } },
+  ]) {
+    const diagnostics = [];
+    appendSafeItemDiagnostic(diagnostics, item);
+    assert.deepEqual(diagnostics, []);
+  }
+}
+
+async function testCodeModeFrameDiagnosticSurvivesSuccessfulTurn() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    for (const event of [
+      { type: "error", message: ipcFrameError },
+      {
+        type: "item.completed",
+        item: { id: "error-1", type: "error", message: ipcFrameError },
+      },
+    ]) {
+      await writeFile(
+        promptPath,
+        `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`,
+      );
+      const result = await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+      }).run({
+        kind: "dedup",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal,
+      });
+      assert.equal(result.finalResponse, "fixture final response");
+      assert.deepEqual(result.diagnostics, [
+        { code: "artifact_tool_failed", message: ipcFrameError },
+      ]);
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }
 
@@ -1996,7 +2157,7 @@ async function fakeCodexFixture(
       `const accountResult = ${JSON.stringify(accountResult)};`,
       `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
-      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, requests: [] };",
+      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
       "  let buffer = '';",
       "  process.stdin.setEncoding('utf8');",
@@ -2038,7 +2199,7 @@ async function fakeCodexFixture(
       "for await (const chunk of process.stdin) stdin += chunk;",
       "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
       "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
       "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",
@@ -2059,6 +2220,7 @@ async function fakeCodexFixture(
       "const resumeIndex = process.argv.indexOf('resume');",
       "const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];",
       "console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));",
+      "if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);",
       "if (stdin.includes('MALFORMED_COMMAND_EVENT')) {",
       "  const output = JSON.parse(stdin.split('\\n')[1]);",
       "  const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };",

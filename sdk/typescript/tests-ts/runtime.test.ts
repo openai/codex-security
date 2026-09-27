@@ -23,6 +23,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -74,6 +75,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
+  environmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -85,6 +87,7 @@ import {
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
@@ -4788,6 +4791,83 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
+  test.each([false, true])(
+    "selects workbench Git for the requested target (bound: %s)",
+    async (bound) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const untrustedBin = join(repository, "tools");
+      const launchHome = join(root, "home");
+      const hostBin = join(launchHome, "tools");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      const git = Bun.which("git");
+      const python = await resolvePluginPython();
+      expect(git).not.toBeNull();
+      if (git === null) return;
+      const trustedGit = join(
+        hostBin,
+        process.platform === "win32" ? "git.exe" : "git",
+      );
+      await mkdir(untrustedBin, { recursive: true });
+      await mkdir(join(repository, ".git"));
+      await mkdir(hostBin, { recursive: true });
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await symlink(await realpath(git), trustedGit);
+      await writeFile(
+        join(untrustedBin, basename(trustedGit)),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, sys",
+          "from pathlib import Path",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
+          "from workbench_target import git_command",
+          "assert os.environ.get('GIT_SSH_COMMAND') == 'synthetic-ssh'",
+          "target = Path(sys.argv[1])",
+          "completed = git_command(target, '--version', text=True)",
+          "completed.check_returncode()",
+          "print(json.dumps({'git': completed.args[0], 'path': os.environ.get('PATH'), 'binding': os.environ.get('CODEX_SECURITY_GIT')}))",
+        ].join("\n"),
+      );
+      const currentDirectory = spyOn(process, "cwd").mockReturnValue(
+        launchHome,
+      );
+      try {
+        const environment = {
+          PATH: [untrustedBin, hostBin].join(delimiter),
+          GIT_SSH_COMMAND: "synthetic-ssh",
+        };
+        const result = await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: bound
+              ? environmentWithGit(
+                  environment,
+                  await inspectTrustedExecutable(
+                    "git",
+                    environment,
+                    repository,
+                  ),
+                )
+              : environment,
+          },
+          [repository],
+        );
+        expect(result["git"]).toBe(trustedGit);
+        expect(result["binding"]).toBe(bound ? trustedGit : null);
+        if (bound) expect(result["path"]).toBe(hostBin);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        currentDirectory.mockRestore();
+      }
+    },
+  );
+
   test.each([
     ["legacy", "0.1.22", false, false, undefined],
     ["previous", "0.1.37", true, false, undefined],
@@ -5831,21 +5911,74 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const interpreter =
+    const discovered =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
+    expect(discovered).not.toBeNull();
+    const interpreter = join(
+      await realpath(dirname(discovered!)),
+      basename(discovered!),
+    );
+    const repository = await temporaryDirectory();
 
     expect(
       await resolvePluginPython({
+        protectedRoot: repository,
         environment: {
           PATH: "",
-          Python: interpreter!,
+          Python: interpreter,
           ...(process.env["SystemRoot"] === undefined
             ? {}
             : { SystemRoot: process.env["SystemRoot"] }),
         },
       }),
-    ).toBe(await realpath(interpreter!));
+    ).toBe(interpreter);
+  });
+
+  test("binds the plugin environment to inspected Git", () => {
+    const unbound = { Path: join(tmpdir(), "operator-tools"), KEEP: "1" };
+    expect(environmentWithGit(unbound, undefined)).toEqual(unbound);
+    const environment = environmentWithGit(
+      {
+        Path: join(tmpdir(), "repository-bin"),
+        PATH: join(tmpdir(), "other-repository-bin"),
+        Git_Config_Count: "1",
+        GIT_DIR: join(tmpdir(), "repository", ".git"),
+        Codex_Security_Git: join(tmpdir(), "repository-bin", "git"),
+        PYTHONUTF8: "1",
+        PYTHON: "selected-python",
+        CODEX_CLI_PATH: "selected-codex",
+        TEST: "1",
+      },
+      {
+        executable: join(tmpdir(), "trusted-bin", "git"),
+        environment: {
+          PATH: join(tmpdir(), "trusted-bin"),
+          OPENAI_API_KEY: "unselected-synthetic-key",
+          TEST: "old-snapshot",
+        },
+      },
+    );
+
+    expect(environment).toEqual({
+      CODEX_SECURITY_GIT: join(tmpdir(), "trusted-bin", "git"),
+      CODEX_CLI_PATH: "selected-codex",
+      GIT_DIR: join(tmpdir(), "repository", ".git"),
+      Git_Config_Count: "1",
+      PATH: join(tmpdir(), "trusted-bin"),
+      PYTHON: "selected-python",
+      PYTHONUTF8: "1",
+      TEST: "1",
+    });
+    expect(
+      environmentWithGit(
+        { Path: join(tmpdir(), "repository-bin"), GIT_DIR: ".git" },
+        { executable: null, environment: { PATH: "" } },
+      ),
+    ).toEqual({
+      CODEX_SECURITY_GIT: "",
+      GIT_DIR: ".git",
+      PATH: "",
+    });
   });
 
   test.skipIf(process.platform !== "win32")(
@@ -5947,6 +6080,38 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  testPosix("preserves an explicit virtualenv Python launcher", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(root, "venv", "bin");
+    const systemPython = join(systemBin, "python3");
+    const virtualenvPython = join(virtualenvBin, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      systemPython,
+      '#!/bin/sh\ncase "$0" in */venv/bin/python) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(systemPython, 0o700);
+    await symlink(systemPython, virtualenvPython);
+    const aliasedBin = join(root, "venv-bin-alias");
+    await symlink(virtualenvBin, aliasedBin, "dir");
+
+    for (const candidate of [virtualenvPython, join(aliasedBin, "python")]) {
+      await expect(
+        resolvePluginPython({
+          configuredPath: candidate,
+          environment: { PATH: "" },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(virtualenvPython);
+    }
+  });
+
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
@@ -6024,9 +6189,13 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const marker = join(root, "sitecustomize-executed");
-      const interpreter = Bun.which("python3");
-      expect(interpreter).not.toBeNull();
-      if (interpreter === null) return;
+      const discovered = Bun.which("python3");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const interpreter = join(
+        await realpath(dirname(discovered)),
+        basename(discovered),
+      );
 
       await mkdir(repository);
       await writeFile(
@@ -6047,7 +6216,7 @@ describe("runtime directories and plugin Python boundary", () => {
           environment,
           protectedRoot: repository,
         }),
-      ).toBe(await realpath(interpreter));
+      ).toBe(interpreter);
       expect(existsSync(marker)).toBe(false);
     },
   );

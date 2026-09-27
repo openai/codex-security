@@ -1,7 +1,9 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
+  basename,
   delimiter,
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -15,11 +17,31 @@ export interface TrustedExecutable {
   environment: Record<string, string | undefined>;
 }
 
+export interface InspectedExecutable {
+  executable: string | null;
+  environment: Record<string, string | undefined>;
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
 ): Promise<TrustedExecutable | null> {
+  const inspected = await inspectTrustedExecutable(
+    candidate,
+    environment,
+    protectedRoot,
+  );
+  return inspected.executable === null
+    ? null
+    : { executable: inspected.executable, environment: inspected.environment };
+}
+
+export async function inspectTrustedExecutable(
+  candidate: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  protectedRoot: string,
+): Promise<InspectedExecutable> {
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );
@@ -85,6 +107,9 @@ export async function resolveTrustedExecutable(
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
+    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
+      continue;
+    }
     if (!current.runnable) continue;
     try {
       await access(
@@ -92,12 +117,20 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      // Keep explicit virtualenv launchers, but resolve repository-local aliases
+      // to the trusted target instead of invoking them from the repository.
+      const invocationPath = pathLike
+        ? join(await realpath(dirname(current.path)), basename(current.path))
+        : current.path;
+      executable ??=
+        pathLike &&
+        (isWithin(root, current.path) || isWithin(root, invocationPath))
+          ? canonical
+          : invocationPath;
     } catch {
       continue;
     }
   }
-  if (executable === null) return null;
 
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {

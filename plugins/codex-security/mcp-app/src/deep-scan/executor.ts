@@ -195,6 +195,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             }
             // Codex exec currently emits retry-in-progress notifications as error events.
             lastStreamError = event.message;
+            appendCodeModeFrameDiagnostic(diagnostics, event.message);
           }
         }
         if (!turnCompleted) {
@@ -370,10 +371,16 @@ function appendSafeItemDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   item: unknown,
 ): void {
+  if (!isRecord(item) || typeof item.type !== "string") return;
+  if (item.type === "error") {
+    appendCodeModeFrameDiagnostic(diagnostics, item.message);
+    return;
+  }
+  if (item.status !== "failed") return;
   if (
-    !isRecord(item) ||
-    item.status !== "failed" ||
-    typeof item.type !== "string"
+    item.type === "mcp_tool_call" &&
+    isRecord(item.error) &&
+    appendCodeModeFrameDiagnostic(diagnostics, item.error.message)
   )
     return;
   if (item.type === "command_execution") {
@@ -401,6 +408,16 @@ function appendSafeItemDiagnostic(
       item.server === "codex_security_artifacts") &&
     typeof item.tool === "string"
   ) {
+    if (isRecord(item.result) && Array.isArray(item.result.content)) {
+      for (const content of item.result.content) {
+        if (
+          isRecord(content) &&
+          content.type === "text" &&
+          appendCodeModeFrameDiagnostic(diagnostics, content.text)
+        )
+          return;
+      }
+    }
     const reason = isRecord(item.result)
       ? "returned an error"
       : isRecord(item.error)
@@ -411,6 +428,30 @@ function appendSafeItemDiagnostic(
       message: `Codex worker artifact tool ${item.tool} ${reason}.`,
     });
   }
+}
+
+function appendCodeModeFrameDiagnostic(
+  diagnostics: CodexWorkerDiagnostic[],
+  message: unknown,
+): boolean {
+  // Codex exposes this transport error as text, without a structured code.
+  // Preserve only its complete numeric template, never surrounding tool output.
+  if (typeof message !== "string") return false;
+  const match =
+    /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
+      message,
+    );
+  if (match?.[0] !== message) return false;
+  const diagnostic: CodexWorkerDiagnostic = {
+    code: "artifact_tool_failed",
+    message,
+  };
+  const index = diagnostics.findIndex(
+    (existing) => existing.code === diagnostic.code,
+  );
+  if (index === -1) diagnostics.push(diagnostic);
+  else diagnostics[index] = diagnostic;
+  return true;
 }
 
 function isSandboxNamespaceExhaustion(output: string): boolean {

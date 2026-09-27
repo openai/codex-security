@@ -2333,7 +2333,14 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
@@ -2421,7 +2428,12 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({

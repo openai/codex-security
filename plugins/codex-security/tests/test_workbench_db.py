@@ -3428,7 +3428,6 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     )
     draft_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     draft_target = draft_manifest["scan"]["target"]
-    authored_snapshot_digest = draft_target["snapshotDigest"]
     draft_target["revision"] = "stale-revision"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(draft_manifest))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
@@ -3437,7 +3436,14 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     assert "revision" not in manifest["scan"]["target"]
     assert manifest["scan"]["target"]["baseRevision"] == diff_target["baseRevision"]
     assert manifest["scan"]["target"]["headRevision"] == diff_target["headRevision"]
-    assert manifest["scan"]["target"]["snapshotDigest"] == authored_snapshot_digest
+    expected_digest = hashlib.sha256(
+        f"codex-security-diff/v1\0commit\0{diff_target['baseRevision']}\0"
+        f"{diff_target['headRevision']}".encode()
+    ).hexdigest()
+    assert (
+        manifest["scan"]["target"]["snapshotDigest"]
+        == f"codex-security-snapshot/v1:sha256:{expected_digest}"
+    )
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
 
 

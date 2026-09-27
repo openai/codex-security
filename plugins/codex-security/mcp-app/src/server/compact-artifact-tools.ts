@@ -28,9 +28,12 @@ import {
 import {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
 } from "../artifact-deep-reducer.js";
+import {
+  deepReducerPageResponse,
+  getCodexSecurityDeepReducerInputsPage,
+} from "../artifact-deep-reducer-pages.js";
 import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
@@ -344,14 +347,23 @@ export function registerCompactWorkerArtifactTools(
     );
   }
 
-  registerCompactTool(server, {
-    name: "get_codex_security_deep_reducer_inputs",
-    title: "Get Codex Security Deep Reducer Inputs",
-    description: "Read the assigned findings, context, and previous aggregate.",
-    inputSchema: deepReducerInputsInputSchema,
-    readOnly: true,
-    handler: async () => getCodexSecurityDeepReducerInputs(context),
-  });
+  server.registerTool(
+    "get_codex_security_deep_reducer_inputs",
+    {
+      title: "Get Codex Security Deep Reducer Inputs",
+      description:
+        "Read a byte-budgeted JSON fragment of the assigned findings and previous aggregate. " +
+        "Continue with nextCursor; concatenate json fragments before parsing. " +
+        "Use findingRef source:<sourceFindingId> or previous:N to read full retained provenance.",
+      inputSchema: deepReducerInputsInputSchema,
+      annotations: readingAnnotations,
+      _meta: modelOnlyMeta,
+    },
+    async (input) =>
+      deepReducerPageResponse(
+        await getCodexSecurityDeepReducerInputsPage(context, input),
+      ),
+  );
 
   registerCompactTool(server, {
     name: "record_codex_security_deep_reduction",

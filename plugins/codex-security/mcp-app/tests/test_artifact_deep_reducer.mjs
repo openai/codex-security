@@ -34,7 +34,11 @@ const {
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const validReduction = reduction([]);
 
-assert.equal(deepReducerInputsInputSchema.safeParse({}).success, true);
+assert.equal(
+  deepReducerInputsInputSchema.safeParse({ maxBytes: 4096 }).success,
+  true,
+);
+assert.equal(deepReducerInputsInputSchema.safeParse({}).success, false);
 assert.equal(
   deepReducerInputsInputSchema.safeParse({ path: "/tmp" }).success,
   false,
