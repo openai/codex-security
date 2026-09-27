@@ -34,6 +34,7 @@ def begin_target_scan(
     scan_root: Path,
     *,
     thread_id: str = "thread-deep-scan",
+    user_context: str | None = None,
 ) -> dict[str, object]:
     return run_workbench(
         state_dir,
@@ -48,7 +49,9 @@ def begin_target_scan(
         str(scan_root),
         "--available-parallelism",
         "16",
+        *(("--user-context-stdin",) if user_context is not None else ()),
         environment=deep_environment(codex_home),
+        input_text=user_context,
     )
 
 
@@ -2056,8 +2059,10 @@ def test_invalid_discovery_time_limit_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("user_context", (None, "Review authentication only."))
 def test_target_continuation_reuses_terminal_coordinator_across_threads(
     tmp_path: Path,
+    user_context: str | None,
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -2072,6 +2077,7 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-before-continuation",
+        user_context=user_context,
     )
     scan_id = str(first["deepScan"]["scanId"])
     scan_dir = Path(str(first["deepScan"]["scanDir"]))
@@ -2086,10 +2092,12 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-after-continuation",
+        user_context=user_context,
     )
     assert continued["startDisposition"] == "joined"
     assert continued["deepScan"]["scanId"] == scan_id
     assert continued["deepScan"]["manifestPath"] == str(manifest)
+    assert continued["deepScan"]["userContext"] == user_context
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)

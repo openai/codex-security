@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.mjs";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const bundle = await build({
@@ -100,6 +101,11 @@ try {
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
   if (process.platform !== "win32") {
+    await testDeepScanContextSnapshots({
+      CodexSdkWorkerExecutor,
+      fakeCodexFixture,
+      parentSandbox: trustedReadOnlyParentSandbox,
+    });
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();

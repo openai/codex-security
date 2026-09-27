@@ -675,7 +675,10 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DROP TABLE finding_severity_assessments");
   await query(environment, "DROP TABLE scan_severity_classifications");
-  await query(environment, "DELETE FROM schema_migrations WHERE version >= 41");
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (41, 42)",
+  );
   expect(
     (
       await prepareScanPublication(scanDirectory, {
