@@ -4136,7 +4136,7 @@ export async function main(
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
-          return undefined;
+          throw error;
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
           dependencies.removeSignalListener("SIGTERM", onTerminate);
