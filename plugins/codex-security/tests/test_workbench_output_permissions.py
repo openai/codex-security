@@ -2,12 +2,29 @@ from __future__ import annotations
 
 import os
 import stat
+import uuid
 from pathlib import Path
 
 import pytest
 from workbench_test_support import create_saved_workspace, run_workbench
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")
+
+
+def test_completion_lock_creates_private_directory(
+    tmp_path: Path, monkeypatch, workbench_api
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(mode=0o755)
+    state_dir.chmod(0o755)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    previous_umask = os.umask(0o002)
+    try:
+        with workbench_api["scan_completion_lock"](str(uuid.uuid4())):
+            assert stat.S_IMODE((state_dir / "completion-locks").stat().st_mode) == 0o700
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o755
 
 
 @pytest.fixture(

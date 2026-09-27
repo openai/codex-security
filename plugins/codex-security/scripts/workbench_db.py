@@ -169,7 +169,7 @@ def database_path() -> Path:
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
     lock_dir = state_dir() / "completion-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
     descriptor = os.open(
         lock_path,
