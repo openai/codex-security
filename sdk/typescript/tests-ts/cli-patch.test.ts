@@ -1652,11 +1652,9 @@ describe("scan and patch workflow", () => {
                     occurrenceId: "occ_1",
                     status: status === "outside" ? "verified" : status,
                     files: status === "outside" ? ["../outside.ts"] : [],
-                    ...(status === "outside"
-                      ? { verification: "Focused checks pass." }
-                      : status === "blocked"
-                        ? { reason: "A required service is unavailable." }
-                        : {}),
+                    ...(status === "blocked"
+                      ? { reason: "A required service is unavailable." }
+                      : { verification: "Focused checks pass." }),
                   },
                 ],
               }),
@@ -1708,44 +1706,61 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("keeps blocked findings in the failure policy and rejects unverified results", async () => {
-    for (const failure of ["blocked", "malformed", "unverified"] as const) {
+  test.each([
+    ["blocked", undefined],
+    ["failed", undefined],
+    ["malformed", undefined],
+    ["verified", undefined],
+    ["verified", " \n\t "],
+    ["no_change", undefined],
+    ["no_change", " \n\t "],
+  ] as const)(
+    "keeps %s patch results with verification %j unresolved",
+    async (status, verification) => {
+      const reason = "The requested check did not complete.";
       const outcome = await runWorkflow(
         ["scan", "--patch", "--fail-on-severity", "high", "--json"],
         {
           result: resultWithFindings(["high"]),
-          onCodex: (args, output) => {
-            if (failure === "malformed") {
-              output?.stdout.write("The patch is probably fixed.");
-            } else if (failure === "blocked") {
-              completePatches(args, output, "blocked");
-            } else {
-              output?.stdout.write(
-                JSON.stringify({
-                  patches: [
-                    { occurrenceId: "occ_1", status: "verified", files: [] },
-                  ],
-                }),
-              );
-            }
+          onCodex: (_args, output) => {
+            output?.stdout.write(
+              status === "malformed"
+                ? "The patch is probably fixed."
+                : JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: "occ_1",
+                        status,
+                        files: [],
+                        verification,
+                        ...(status === "blocked" || status === "failed"
+                          ? { reason }
+                          : {}),
+                      },
+                    ],
+                  }),
+            );
             return 0;
           },
         },
       );
-      expect(outcome.exitCode).toBe(failure === "blocked" ? 1 : 2);
+      expect(outcome.exitCode).toBe(status === "blocked" ? 1 : 2);
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         patches: [
           {
             occurrenceId: "occ_1",
-            status: failure === "blocked" ? "blocked" : "failed",
-            ...(failure === "unverified"
-              ? { reason: "Patch verification was not reported." }
-              : {}),
+            status: status === "blocked" ? "blocked" : "failed",
+            reason:
+              status === "verified" || status === "no_change"
+                ? "Patch verification was not reported."
+                : status === "malformed"
+                  ? "Patch results were not valid JSON."
+                  : reason,
           },
         ],
       });
-    }
-  });
+    },
+  );
 
   test("does not patch incomplete scans or allow patching during a dry run", async () => {
     let invoked = false;
