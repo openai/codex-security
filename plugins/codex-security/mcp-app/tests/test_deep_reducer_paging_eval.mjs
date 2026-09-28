@@ -16,6 +16,12 @@ test("a reducer recovers from the real IPC frame limit and records all sources",
   const root = await mkdtemp(path.join(tmpdir(), "deep-reducer-ipc-eval-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const report = await runReducerPagingEval({ root });
+  const prompt = await readFile(path.join(root, "prompt.md"), "utf8");
+  const context = JSON.parse(prompt.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.deepEqual(context, {
+    reducerLabel: "paging-eval",
+    claimedWorkerIds: ["current-worker"],
+  });
   assert.equal(report.realIpcErrorObserved, true);
   assert.ok(report.actualOversizedResponseBytes > report.ipcFrameLimitBytes);
   assert.ok(report.recoveryBudget < report.firstBudget);

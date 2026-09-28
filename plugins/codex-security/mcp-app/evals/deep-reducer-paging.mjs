@@ -50,10 +50,16 @@ export async function runReducerPagingEval({
   const { renderDedupPrompt } = await import(
     pathToFileURL(promptModulePath).href
   );
-  const prompt = renderDedupPrompt({
+  /** @type {import("../src/deep-scan/templates").DedupPromptInput} */
+  const promptInput = {
     reducerLabel: "paging-eval",
-    discoveries: fixture.context.deepReducer.claimedWorkers,
-  });
+    discoveries: fixture.context.deepReducer.claimedWorkers.map((worker) => ({
+      workerId: worker.id,
+      resultPath: worker.resultPath,
+    })),
+  };
+  const prompt = renderDedupPrompt(promptInput);
+  await writeFile(path.join(root, "prompt.md"), prompt);
   const mcpServers = {
     cs_artifacts: {
       command: process.execPath,
