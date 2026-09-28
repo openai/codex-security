@@ -1238,9 +1238,8 @@ a project. Destination flags override `CODEX_SECURITY_LINEAR_TEAM` and
 contacting Linear; `--json` returns structured results.
 
 Sign in to Codex and connect Linear to publish with your existing Codex
-configuration; publication doesn't use the isolated scan home. The connected
-publication helper uses `gpt-6-sol` with `xhigh` reasoning. To use the Linear API
-directly, set a personal API key:
+configuration; publication doesn't use the isolated scan home. To use the
+Linear API directly, set a personal API key:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY

@@ -1316,9 +1316,9 @@ describe("connected Linear publication", () => {
     expect(args).toEqual([
       "exec",
       "--model",
-      "gpt-6-sol",
+      "gpt-5.6-luna",
       "-c",
-      'model_reasoning_effort="xhigh"',
+      'model_reasoning_effort="low"',
       "--ephemeral",
       "--json",
       "--sandbox",
