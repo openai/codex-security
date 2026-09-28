@@ -308,6 +308,52 @@ def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) 
             assert "requiredSnapshotDigest" not in target_contract
 
 
+@pytest.mark.parametrize("target_kind", ["directory_snapshot", "git_revision", "git_worktree"])
+@pytest.mark.parametrize("omit_target", [True, False])
+def test_cli_scan_completes_when_draft_omits_registered_target(
+    tmp_path: Path, target_kind: str, omit_target: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    if target_kind == "directory_snapshot":
+        repository.mkdir()
+    else:
+        initialize_git_repository(repository)
+        if target_kind == "git_worktree":
+            (repository / "README.md").write_text("Changed source\n")
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(state_dir, repository, scan_dir)
+    scan_id = registered["scanId"]
+    registered_target = registered["contract"]["target"]
+    write_completed_contract(scan_dir, scan_id, repository)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["target"]
+    if not omit_target:
+        draft["scan"]["target"] = {}
+    manifest_path.write_text(json.dumps(draft))
+    (scan_dir / "report.md").unlink()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert completed["scan"]["reportAvailable"] is True
+    manifest = json.loads(manifest_path.read_text())
+    target = manifest["scan"]["target"]
+    assert target["kind"] == target_kind
+    assert target["targetId"] == registered_target["targetId"]
+    assert target["displayName"] == registered_target["displayName"]
+    if target_kind == "git_revision":
+        assert "snapshotDigest" not in target
+    else:
+        assert target["snapshotDigest"] == registered_target["requiredSnapshotDigest"]
+    if target_kind != "directory_snapshot":
+        assert target["revision"] == registered["targetRevision"]
+    assert manifest["scan"]["sealedAt"]
+    assert (scan_dir / "report.md").is_file()
+
+
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
