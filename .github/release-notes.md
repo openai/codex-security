@@ -19,6 +19,7 @@
 - preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
 - create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
 - require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
+- bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
