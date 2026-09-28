@@ -132,7 +132,7 @@ For Standard and diff scans, record:
 | `working_tree`    | Staged or unstaged local changes                              |
 | `deep_repository` | Exhaustive repeated repository-wide scan                      |
 
-`inventoryStrategy` optionally records how the producer enumerated the reviewed content, independently of the requested scan workflow. Omit it when the strategy was not recorded; omission does not change coverage completeness or prevent finalization.
+`inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
 
 For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
 

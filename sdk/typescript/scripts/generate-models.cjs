@@ -71,7 +71,7 @@ async function generate() {
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
       'export type CoverageCompleteness = CoverageDocument["completeness"];',
-      'export type InventoryStrategy = NonNullable<CoverageDocument["inventoryStrategy"]>;',
+      'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
       'export type ExplicitExclusion = CoverageDocument["explicitExclusions"][number];',

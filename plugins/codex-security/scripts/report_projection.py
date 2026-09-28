@@ -819,7 +819,7 @@ def build_report_markdown(
         "",
         f"- Scan mode: {coverage['mode']}",
         *_target_scope_lines(target),
-        f"- Inventory strategy: {coverage.get('inventoryStrategy', 'not recorded')}",
+        f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
     ]

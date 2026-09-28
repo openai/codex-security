@@ -282,7 +282,7 @@ export interface CoverageDocument {
     | "working_tree"
     | "deep_repository";
   completeness: "complete" | "partial" | "unknown";
-  inventoryStrategy?:
+  inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
@@ -382,9 +382,7 @@ export type CoverageMode = CoverageDocument["mode"];
 
 export type CoverageCompleteness = CoverageDocument["completeness"];
 
-export type InventoryStrategy = NonNullable<
-  CoverageDocument["inventoryStrategy"]
->;
+export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 
 export type CoverageSurface = CoverageDocument["surfaces"][number];
 

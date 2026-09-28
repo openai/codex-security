@@ -9,6 +9,7 @@
     "scanId",
     "mode",
     "completeness",
+    "inventoryStrategy",
     "includePaths",
     "excludePaths",
     "surfaces",
