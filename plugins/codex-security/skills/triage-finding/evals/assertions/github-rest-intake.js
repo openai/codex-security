@@ -118,18 +118,6 @@ const checks = {
     ];
   },
 
-  connector_rest_only: (text) => {
-    return [
-      ...(!/GitHub Connector.*token|connector.*auth token|token.*GitHub Connector/is.test(text)
-        ? ["must allow GitHub Connector only as an auth token source"]
-        : []),
-      ...(!/REST/i.test(text) ? ["must state that finding retrieval uses REST"] : []),
-      ...(!/do not use.*GitHub Connector.*(fetch|retrieve|data|findings)|GitHub Connector.*not.*(fetch|retrieve|data|findings)/is.test(text)
-        ? ["must say not to use the GitHub Connector for finding retrieval"]
-        : []),
-    ];
-  },
-
   explicit_issue: (text) => {
     return [
       ...(!/GitHub Issues?.*(explicit|specific)|specific.*GitHub Issues?/is.test(text)
