@@ -1,3 +1,5 @@
+const extractJson = require("./extract-json.js");
+
 function textFor(output) {
   return typeof output === "string" ? output : JSON.stringify(output);
 }
@@ -118,16 +120,25 @@ const checks = {
     ];
   },
 
-  connector_rest_only: (text) => {
-    return [
-      ...(!/GitHub Connector.*token|connector.*auth token|token.*GitHub Connector/is.test(text)
-        ? ["must allow GitHub Connector only as an auth token source"]
-        : []),
-      ...(!/REST/i.test(text) ? ["must state that finding retrieval uses REST"] : []),
-      ...(!/do not use.*GitHub Connector.*(fetch|retrieve|data|findings)|GitHub Connector.*not.*(fetch|retrieve|data|findings)/is.test(text)
-        ? ["must say not to use the GitHub Connector for finding retrieval"]
-        : []),
-    ];
+  explicit_connector: (text, context) => {
+    let decision;
+    try {
+      decision = extractJson(text, "github-transport-decision/v0", { requireSingle: true });
+    } catch (error) {
+      return [error.message];
+    }
+    const expected = {
+      transport: "github_connector",
+      access: "read_only",
+      unavailable_endpoint: "explain_limitation",
+      rest_fallback: "only_if_endpoint_unavailable",
+      rest_approval: "before_use",
+      rest_account: "specified_account",
+      rest_repository: new URL(context.vars.target_repo).pathname.slice(1),
+    };
+    return Object.entries(expected)
+      .filter(([field, value]) => decision[field] !== value)
+      .map(([field, value]) => `expected ${field}: ${value}`);
   },
 
   explicit_issue: (text) => {

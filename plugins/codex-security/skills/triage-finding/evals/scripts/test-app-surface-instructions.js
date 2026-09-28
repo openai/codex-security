@@ -50,3 +50,55 @@ assert(
   plugin.interface.defaultPrompt.every((prompt) => [...prompt].length <= 128),
 );
 assert(plugin.interface.defaultPrompt.includes("Triage existing security findings against this repository."));
+
+const githubIntake = require("../assertions/github-rest-intake.js");
+const connectorContext = {
+  vars: {
+    expected_github_rest_behavior: "explicit_connector",
+    target_repo: "https://github.com/promptfoo/promptfoo",
+  },
+};
+const connectorDecision = {
+  schema_version: "github-transport-decision/v0",
+  transport: "github_connector",
+  access: "read_only",
+  unavailable_endpoint: "explain_limitation",
+  rest_fallback: "only_if_endpoint_unavailable",
+  rest_approval: "before_use",
+  rest_account: "specified_account",
+  rest_repository: "promptfoo/promptfoo",
+};
+for (const answer of [
+  JSON.stringify(connectorDecision),
+  `Decision for /repos/{owner}/{repo}/code-scanning/alerts:\n\`\`\`json\n${JSON.stringify(connectorDecision, null, 2)}\n\`\`\``,
+]) {
+  const result = githubIntake(answer, connectorContext);
+  assert.equal(result.pass, true, result.reason);
+}
+for (const wrongDecision of [
+  { transport: "rest" },
+  { access: "read_write" },
+  { unavailable_endpoint: "ignore" },
+  { rest_fallback: "always_after_approval" },
+  { rest_fallback: undefined },
+  { rest_approval: "not_required" },
+  { rest_approval: "after_use" },
+  { rest_account: "any_available_account" },
+  { rest_repository: "example/other-repo" },
+]) {
+  const answer = JSON.stringify({ ...connectorDecision, ...wrongDecision });
+  assert.equal(githubIntake(answer, connectorContext).pass, false, answer);
+}
+assert.equal(githubIntake("{invalid JSON}", connectorContext).pass, false);
+for (const fenced of [[true, true], [true, false], [false, true]]) {
+  const conflictingDecisions = [connectorDecision, { ...connectorDecision, transport: "rest" }]
+    .map((decision, index) => fenced[index]
+      ? `\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``
+      : JSON.stringify(decision))
+    .join("\n");
+  assert.equal(githubIntake(`Endpoint: /repos/{owner}/{repo}/code-scanning/alerts\n${conflictingDecisions}`, connectorContext).pass, false);
+}
+
+const intakeCases = fs.readFileSync(path.join(__dirname, "../tests/github-rest-intake.yaml"), "utf8");
+const connectorCase = intakeCases.match(/case_id: github-explicit-connector[\s\S]*?(?=\n- description:|$)/)[0];
+assert.match(connectorCase, /finding_input:.*code scanning/i);
