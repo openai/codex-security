@@ -12,17 +12,17 @@ await build({
   outExtension: { ".js": ".mjs" },
   format: "esm",
   platform: "node",
-  target: "node20"
+  target: "node20",
 });
 
 execFileSync("cargo", ["fetch", "--locked"], {
   cwd: root,
-  stdio: "inherit"
+  stdio: "inherit",
 });
 
 for (const script of ["build.mjs", "notices.mjs"]) {
   execFileSync(process.execPath, [join(root, script)], {
     cwd: root,
-    stdio: "inherit"
+    stdio: "inherit",
   });
 }

@@ -37,6 +37,9 @@ for headless generation, saved artifacts, and SDK usage.
 
 ## TypeScript SDK
 
+To suggest owners for existing findings from source and Git history, see
+[Suggest finding owners](sdk/typescript/README.md#suggest-finding-owners).
+
 Codex Security is a Javascript package:
 
 ```ts

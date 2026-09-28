@@ -17,6 +17,23 @@ fn main() -> std::io::Result<()> {
         OsString::from_wide(&prefix.encode_utf16().chain([unit]).collect::<Vec<_>>())
     }
 
+    fn symlink_fixture(create: impl FnOnce() -> io::Result<()>) -> io::Result<bool> {
+        match env::var_os("CODEX_SECURITY_TEST_WINDOWS_SYMLINKS") {
+            Some(mode) if mode == "disabled" => Ok(false),
+            Some(mode) if mode == "required" => create().map(|()| true),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "CODEX_SECURITY_TEST_WINDOWS_SYMLINKS must be disabled or required",
+            )),
+            None => match create() {
+                Ok(()) => Ok(true),
+                // Windows requires Developer Mode or the symbolic-link privilege.
+                Err(error) if error.raw_os_error() == Some(1314) => Ok(false),
+                Err(error) => Err(error),
+            },
+        }
+    }
+
     fn run(node: OsString, script: OsString, root: &Path) -> io::Result<()> {
         let cwd = root.join(raw("cwd-", 0xd800));
         fs::create_dir(&cwd)?;
@@ -37,12 +54,16 @@ fn main() -> std::io::Result<()> {
         }
         fs::create_dir(cwd.join("empty"))?;
         fs::create_dir(cwd.join(raw("directory-", 0xdc80)))?;
-        std::os::windows::fs::symlink_file(&names[0], cwd.join("file-link"))?;
-        std::os::windows::fs::symlink_dir("empty", cwd.join("directory-link"))?;
-        std::os::windows::fs::symlink_dir(
-            raw("missing-", 0xdfff),
-            cwd.join("dangling-directory-link"),
-        )?;
+        let symlinks = symlink_fixture(|| {
+            std::os::windows::fs::symlink_file(&names[0], cwd.join("file-link"))
+        })?;
+        if symlinks {
+            std::os::windows::fs::symlink_dir("empty", cwd.join("directory-link"))?;
+            std::os::windows::fs::symlink_dir(
+                raw("missing-", 0xdfff),
+                cwd.join("dangling-directory-link"),
+            )?;
+        }
         let locked = cwd.join(raw("locked-", 0xdfff));
         fs::write(&locked, "directory enumeration does not open this file")?;
         fs::write(root.join(raw("parent-", 0xd800)), "parent sentinel")?;
@@ -81,6 +102,10 @@ fn main() -> std::io::Result<()> {
             .env_remove("CODEX_SECURITY_WIDE_ABSENT")
             .env(raw("CODEX_SECURITY_WIDE_NAME_", 0xdfff), "wide name value")
             .env("CODEX_SECURITY_WIDE_LONG", "x".repeat(1024))
+            .env(
+                "CODEX_SECURITY_TEST_WINDOWS_HAS_SYMLINKS",
+                if symlinks { "1" } else { "0" },
+            )
             .env("USERPROFILE", &cwd)
             .status()?;
         if !status.success() {
@@ -199,18 +224,12 @@ fn main() -> std::io::Result<()> {
         fs::create_dir(&sibling)?;
         let sibling_policy = sibling.join("SECURITY.md");
         fs::write(&sibling_policy, "sibling policy\n")?;
-        for scope in [&sibling, &identity_root] {
-            if scope == &identity_root {
-                std::os::windows::fs::symlink_file(
-                    &sibling_policy,
-                    identity_root.join("SECURITY.md"),
-                )?;
-            }
+        let verify_outside_root = |scope: &Path| -> io::Result<()> {
             let result = invoke(&[
                 "--repo".into(),
                 identity_root.clone(),
                 "--scope".into(),
-                scope.clone(),
+                scope.to_path_buf(),
                 "--out".into(),
                 "-".into(),
             ])?;
@@ -222,8 +241,18 @@ fn main() -> std::io::Result<()> {
                     "Windows policy helper did not preserve directory identity",
                 ));
             }
+            Ok(())
+        };
+        verify_outside_root(&sibling)?;
+        let symlinks = symlink_fixture(|| {
+            std::os::windows::fs::symlink_file(&sibling_policy, identity_root.join("SECURITY.md"))
+        })?;
+        if symlinks {
+            verify_outside_root(&identity_root)?;
         }
-        println!("{{\"policyHelperRawPaths\":true,\"directoryIdentity\":true}}");
+        println!(
+            "{{\"policyHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+        );
         Ok(())
     }
 

@@ -3,11 +3,13 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [new URL("../src/deep-scan/templates.ts", import.meta.url).pathname],
+  entryPoints: [
+    new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
+  ],
   format: "esm",
   loader: { ".md": "text" },
   platform: "node",
-  write: false
+  write: false,
 });
 const { renderDedupPrompt, renderDiscoveryPrompt } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
@@ -18,9 +20,10 @@ const rendered = renderDiscoveryPrompt({
   pluginRoot: "/fixture/plugins/codex-security",
   targetPath: "/fixture/repository",
   scope: ".",
-  userContext: "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
+  userContext:
+    "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
   workerLabel: "discovery-0001",
-  subagents: 3
+  subagents: 3,
 });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
@@ -32,9 +35,10 @@ assert.deepEqual(discoveryContext, {
   pluginRoot: "/fixture/plugins/codex-security",
   targetPath: "/fixture/repository",
   scope: ".",
-  userContext: "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
+  userContext:
+    "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
   workerLabel: "discovery-0001",
-  subagents: 3
+  subagents: 3,
 });
 for (const field of [
   "artifactDir",
@@ -43,37 +47,47 @@ for (const field of [
   "candidateLedgerPath",
   "artifactSchemas",
   "rankInputPath",
-  "deepReviewInputPath"
+  "deepReviewInputPath",
 ]) {
   assert.equal(Object.hasOwn(discoveryContext, field), false);
 }
 
-const feedbackPath = "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";
-const withFeedback = renderDiscoveryPrompt({
-  scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
-  pluginRoot: "/fixture/plugins/codex-security",
-  targetPath: "/fixture/repository",
-  scope: ".",
-  userContext: "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
-  workerLabel: "discovery-0001",
-  subagents: 3
-}, feedbackPath);
+const feedbackPath =
+  "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";
+const withFeedback = renderDiscoveryPrompt(
+  {
+    scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
+    pluginRoot: "/fixture/plugins/codex-security",
+    targetPath: "/fixture/repository",
+    scope: ".",
+    userContext:
+      "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
+    workerLabel: "discovery-0001",
+    subagents: 3,
+  },
+  feedbackPath,
+);
 assert.deepEqual(firstJsonBlock(withFeedback), discoveryContext);
 assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 
 const dedup = renderDedupPrompt({
   reducerLabel: "dedup-0001",
-  discoveries: [{
-    workerId: "worker-001",
-    resultPath: "/fixture/worker/result.json"
-  }]
+  discoveries: [
+    {
+      workerId: "worker-001",
+      resultPath: "/fixture/worker/result.json",
+    },
+  ],
 });
 const dedupContext = firstJsonBlock(dedup);
 assert.doesNotMatch(dedup, /\bcoverage\b/i);
-assert.match(dedup, /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/);
+assert.match(
+  dedup,
+  /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+);
 assert.deepEqual(dedupContext, {
   reducerLabel: "dedup-0001",
-  claimedWorkerIds: ["worker-001"]
+  claimedWorkerIds: ["worker-001"],
 });
 for (const field of [
   "artifactDir",
@@ -84,18 +98,20 @@ for (const field of [
   "resultPath",
   "rawCandidatesPath",
   "previousInventoryPath",
-  "artifactSchemas"
+  "artifactSchemas",
 ]) {
   assert.equal(Object.hasOwn(dedupContext, field), false);
 }
 
-const previousReduction = firstJsonBlock(renderDedupPrompt({
-  reducerLabel: "dedup-0002",
-  discoveries: []
-}));
+const previousReduction = firstJsonBlock(
+  renderDedupPrompt({
+    reducerLabel: "dedup-0002",
+    discoveries: [],
+  }),
+);
 assert.deepEqual(previousReduction, {
   reducerLabel: "dedup-0002",
-  claimedWorkerIds: []
+  claimedWorkerIds: [],
 });
 
 function firstJsonBlock(prompt) {

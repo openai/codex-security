@@ -304,6 +304,7 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
   const [directory, commonDirectory] = await Promise.all([
     gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
@@ -313,7 +314,7 @@ export async function gitMetadataDirectories(
     abortable(() => realpath(resolve(repository, directory)), signal),
     abortable(() => realpath(resolve(repository, commonDirectory)), signal),
   ]);
-  return [...roots, ...(await gitObjectDirectories(roots, signal))];
+  return [...roots, ...(await gitObjectDirectories(roots, signal, options))];
 }
 
 function gitAlternatePaths(contents: Buffer): string[] {
@@ -373,6 +374,7 @@ function gitAlternatePaths(contents: Buffer): string[] {
 export async function gitObjectDirectories(
   metadataDirectories: readonly string[],
   signal?: AbortSignal,
+  options: { includeLocalObjects?: boolean } = {},
 ): Promise<string[]> {
   const pending = metadataDirectories.map((path) => join(path, "objects"));
   const visited = new Set<string>();
@@ -407,10 +409,12 @@ export async function gitObjectDirectories(
       pending.push(resolve(directory, path));
     }
   }
-  return [...visited].filter((path) =>
-    metadataDirectories.every((root) =>
-      relativePathIsOutside(relative(root, path)),
-    ),
+  return [...visited].filter(
+    (path) =>
+      options.includeLocalObjects ||
+      metadataDirectories.every((root) =>
+        relativePathIsOutside(relative(root, path)),
+      ),
   );
 }
 
@@ -749,12 +753,15 @@ async function gitOutput(
   return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
-async function gitMarkerRoot(
+export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let current = repository;
+  const canonical = await abortable(() => realpath(repository), signal);
+  let current = (await lstat(canonical)).isDirectory()
+    ? canonical
+    : dirname(canonical);
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);

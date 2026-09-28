@@ -1,13 +1,10 @@
 import type * as z from "zod/v4";
 import workerThreatModelSchema from "../../schemas/tools/worker-threat-model.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
-import {
-  artifactDestination,
-  replaceArtifactText
-} from "./artifact-io.js";
+import { artifactDestination, replaceArtifactText } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
-  type SchemaDocument
+  type SchemaDocument,
 } from "./artifact-schema-loader.js";
 
 export interface WorkerThreatModelInput {
@@ -22,17 +19,17 @@ export interface RecordWorkerThreatModelResult {
 export const workerThreatModelInputSchema = loadArtifactZodSchema(
   [workerThreatModelSchema] as SchemaDocument[],
   workerThreatModelSchema.$id,
-  "recordWorkerThreatModelInput"
+  "recordWorkerThreatModelInput",
 ) as z.ZodType<WorkerThreatModelInput>;
 
 /** Preserve the full threat model at the discovery worker's fixed destination. */
 export async function recordCodexSecurityWorkerThreatModel(
   input: WorkerThreatModelInput,
-  context: ArtifactContext
+  context: ArtifactContext,
 ): Promise<RecordWorkerThreatModelResult> {
   if (context.layout !== "worker") {
     throw new Error(
-      "Worker threat model: only a bound discovery worker can record its threat model."
+      "Worker threat model: only a bound discovery worker can record its threat model.",
     );
   }
 
@@ -40,7 +37,7 @@ export async function recordCodexSecurityWorkerThreatModel(
   const destination = await artifactDestination(
     context,
     ["artifacts", "01_context", "threat_model.md"],
-    "Worker threat model"
+    "Worker threat model",
   );
   await replaceArtifactText(destination, content);
   return { operation: "replace" };

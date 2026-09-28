@@ -1228,6 +1228,40 @@ describe("CLI workbench", () => {
     }
   });
 
+  test.each(["scan-original", undefined])(
+    "rejects Markdown rerun output before loading scan %p",
+    async (scanId) => {
+      const stdout = capture();
+      const stderr = capture();
+      let workbenchCalls = 0;
+
+      expect(
+        await main(
+          [
+            "scans",
+            "rerun",
+            ...(scanId === undefined ? [] : [scanId]),
+            "--format",
+            "md",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: () => {
+              workbenchCalls += 1;
+              return {};
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(workbenchCalls).toBe(0);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Markdown output is not supported for scan results.",
+      );
+    },
+  );
+
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
 

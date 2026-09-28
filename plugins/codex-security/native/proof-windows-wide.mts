@@ -23,6 +23,13 @@ export function wideProcessProof(root: string): Record<string, boolean> {
 function worker(root: string): Record<string, boolean> {
   const native = loadWindowsBinding();
   const files = windowsFileSystem(native);
+  const symlinkFlag = process.env["CODEX_SECURITY_TEST_WINDOWS_HAS_SYMLINKS"];
+  assert(symlinkFlag === "0" || symlinkFlag === "1");
+  const symlinks = symlinkFlag === "1";
+  const directoryLinks = symlinks
+    ? ["dangling-directory-link", "directory-link"]
+    : [];
+  const links = symlinks ? [...directoryLinks, "file-link"] : [];
   const cwd = win32.join(root, "cwd-\ud800");
   const expectedArguments = [
     "arg-high-\ud800",
@@ -106,10 +113,8 @@ function worker(root: string): Record<string, boolean> {
       "space",
       "space ",
       "directory-\udc80",
-      "file-link",
-      "directory-link",
-      "dangling-directory-link",
       "locked-\udfff",
+      ...links,
     ].sort(),
   );
   for (const spelling of [".", `${drive}.`, cwd, win32.toNamespacedPath(cwd)]) {
@@ -125,8 +130,7 @@ function worker(root: string): Record<string, boolean> {
     .map((entry) => pathText(entry.name))
     .sort();
   assert.deepEqual(directories, [
-    "dangling-directory-link",
-    "directory-link",
+    ...directoryLinks,
     "directory-\udc80",
     "empty",
   ]);
@@ -135,7 +139,7 @@ function worker(root: string): Record<string, boolean> {
       .filter((entry) => entry.isSymbolicLink())
       .map((entry) => pathText(entry.name))
       .sort(),
-    ["dangling-directory-link", "directory-link", "file-link"],
+    links,
   );
   assert.throws(
     () => files.readInto(widePath("locked-\udfff"), Buffer.alloc(1)),
@@ -278,7 +282,7 @@ function worker(root: string): Record<string, boolean> {
     rawCwdAndDriveRelativePaths: true,
     completeWideDirectoryIteration: true,
     cachedDirectoryAttributesWithoutFileAccess: true,
-    cachedSymlinkTagsIncludingDanglingDirectories: true,
+    cachedSymlinkTagsIncludingDanglingDirectories: symlinks,
     existingFilesWithTrailingSeparators: true,
     distinctRawAndReplacementFiles: true,
     canonicalPathsBoundedReadsAndTruncation: true,

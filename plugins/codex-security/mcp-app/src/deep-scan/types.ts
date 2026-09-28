@@ -3,20 +3,12 @@ import type { DeepReducerContext } from "../artifact-io.js";
 export type DeepScanTerminalReason = "saturated" | "capped";
 
 export type DeepScanRunStatus =
-  | "running"
-  | "succeeded"
-  | "canceled"
-  | "failed"
-  | "interrupted";
+  "running" | "succeeded" | "canceled" | "failed" | "interrupted";
 
 export type DeepScanWorkerKind = "setup" | "discovery" | "dedup";
 
 export type DeepScanWorkerStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "canceled";
+  "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export type DeepScanMergeState = "none" | "buffered" | "merging" | "merged";
 
@@ -98,9 +90,7 @@ export interface DeepScanWorkerMutation {
 }
 
 export type DeepScanReplaceableFailureKind =
-  | "policy_refusal"
-  | "transient_error"
-  | "invalid_discovery_artifacts";
+  "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
 /** The authoritative worker record returned after SQLite commits the change. */
 export interface PersistedDeepScanWorker {
@@ -141,10 +131,16 @@ export interface DeepScanStore {
     scanRoot: string;
   }): Promise<BeginDeepScanResult>;
   get(scanId: string, threadId: string): Promise<DeepScanRunState>;
-  claimCoordinator(input: DeepScanCoordinatorLeaseInput): Promise<DeepScanCoordinatorClaim>;
-  heartbeatCoordinator(input: DeepScanCoordinatorLeaseInput): Promise<DeepScanRunState>;
+  claimCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanCoordinatorClaim>;
+  heartbeatCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanRunState>;
   cancel(scanId: string, threadId: string): Promise<Record<string, unknown>>;
-  updateWorker(update: DeepScanWorkerMutation): Promise<PersistedDeepScanWorker>;
+  updateWorker(
+    update: DeepScanWorkerMutation,
+  ): Promise<PersistedDeepScanWorker>;
   claimDedup(input: {
     id: string;
     scanId: string;
@@ -165,12 +161,12 @@ export interface DeepScanStore {
     message: string,
     status?: "failed" | "interrupted",
     manifestPath?: string,
-    stagedManifestPath?: string
+    stagedManifestPath?: string,
   ): Promise<DeepScanRunState>;
   recordStoppedPublicationFailure(
     scanId: string,
     message: string,
-    coordinatorGeneration?: number
+    coordinatorGeneration?: number,
   ): Promise<DeepScanRunState>;
   updateProgress(input: {
     scanId: string;
@@ -216,7 +212,10 @@ export interface CodexWorkerResult {
  * worker could not satisfy its artifact contract.
  */
 export interface CodexWorkerDiagnostic {
-  code: "sandbox_namespace_exhausted" | "file_change_failed" | "artifact_tool_failed";
+  code:
+    | "sandbox_namespace_exhausted"
+    | "file_change_failed"
+    | "artifact_tool_failed";
   message: string;
 }
 

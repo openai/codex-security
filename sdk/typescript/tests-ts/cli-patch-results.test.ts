@@ -1,45 +1,49 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { promisify } from "node:util";
+import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
 type FixtureOptions = NonNullable<Parameters<typeof dependencies>[0]>;
-const directories: string[] = [];
-afterEach(async () => {
-  for (const directory of directories.splice(0))
-    await rm(directory, { recursive: true, force: true });
-});
+const execFileAsync = promisify(execFile);
 
 async function repositoryFixture({ initializeGit = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "patch-results-"));
-  directories.push(directory);
   const runRepositoryCommand: NonNullable<
     FixtureOptions["onRepositoryCommand"]
-  > = (command, args, cwd, options) => {
-    const result = execFileSync(command, [...args], {
+  > = async (command, args, cwd, options) => {
+    const { stdout } = await execFileAsync(command, [...args], {
       cwd,
       encoding: "utf8",
       env: { ...process.env, ...options?.environment },
-      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
-    return options?.trim === false ? result : result.trim();
+    return options?.trim === false ? stdout : stdout.trim();
   };
   const git = (...args: string[]) =>
     runRepositoryCommand("git", args, directory);
-  await writeFile(join(directory, "app.ts"), "original\n");
-  if (initializeGit) {
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
-    git("add", ".");
-    git("commit", "-m", "Synthetic fixture");
+  try {
+    await writeFile(join(directory, "app.ts"), "original\n");
+    if (initializeGit) {
+      await git("init", "--initial-branch=main");
+      await git("config", "user.name", "Synthetic User");
+      await git("config", "user.email", "synthetic@example.test");
+      await git("add", ".");
+      await git("commit", "-m", "Synthetic fixture");
+    }
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
   }
   return {
     directory,
     git,
+    async [Symbol.asyncDispose]() {
+      await rm(directory, { recursive: true, force: true });
+    },
     async patch(args: string[], options: FixtureOptions = {}) {
       const stdout = capture();
       const stderr = capture();
@@ -69,7 +73,7 @@ async function repositoryFixture({ initializeGit = true } = {}) {
 
 describe("patch outcomes", () => {
   test("uses the external sandbox only after explicit opt-in and prints a warning", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -121,12 +125,12 @@ lines.on("line", (line) => {
   test.each([false, true])(
     "fails a no-op with full output %j and preserves local changes",
     async (fullOutput) => {
-      const fixture = await repositoryFixture();
+      await using fixture = await repositoryFixture();
       await writeFile(join(fixture.directory, "app.ts"), "staged change\n");
-      fixture.git("add", "app.ts");
+      await fixture.git("add", "app.ts");
       await writeFile(join(fixture.directory, "app.ts"), "unstaged change\n");
       await writeFile(join(fixture.directory, "local.txt"), "untracked\n");
-      const index = fixture.git("write-tree");
+      const index = await fixture.git("write-tree");
       const outcome = await fixture.patch(
         ["Synthetic issue", ...(fullOutput ? ["--full-output"] : [])],
         {
@@ -141,7 +145,7 @@ lines.on("line", (line) => {
         ok: false,
         error: { code: "NO_PATCH_APPLIED" },
       });
-      expect(fixture.git("write-tree")).toBe(index);
+      expect(await fixture.git("write-tree")).toBe(index);
       expect(await readFile(join(fixture.directory, "app.ts"), "utf8")).toBe(
         "unstaged change\n",
       );
@@ -152,10 +156,10 @@ lines.on("line", (line) => {
   );
 
   test("reports actual changed files and preserves the index", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     await writeFile(join(fixture.directory, "local.txt"), "unrelated\n");
-    fixture.git("add", "local.txt");
-    const index = fixture.git("write-tree");
+    await fixture.git("add", "local.txt");
+    const index = await fixture.git("write-tree");
     const outcome = await fixture.patch(["Synthetic issue", "--full-output"], {
       onCodex: async (_args, output) => {
         await writeFile(join(fixture.directory, "app.ts"), "fixed\n");
@@ -176,13 +180,13 @@ lines.on("line", (line) => {
         files: ["app.ts", "regression.test.ts"],
       },
     });
-    expect(fixture.git("write-tree")).toBe(index);
+    expect(await fixture.git("write-tree")).toBe(index);
   });
 
   test.each([false, true])(
     "checks patch changes outside a Git repository: %j",
     async (apply) => {
-      const fixture = await repositoryFixture({ initializeGit: false });
+      await using fixture = await repositoryFixture({ initializeGit: false });
       const outcome = await fixture.patch(["Synthetic issue"], {
         onCodex: async () => {
           if (apply)
@@ -203,7 +207,7 @@ lines.on("line", (line) => {
   );
 
   test("rejects a verified saved-finding result when no files change", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     const outcome = await fixture.patch(["--scan", "scan-1"], {
       onWorkbench: () => ({
         scan: {
@@ -246,7 +250,7 @@ lines.on("line", (line) => {
   test.each(["exit", "rpc"])(
     "fails before starting a model turn when sandbox preflight returns %s failure",
     async (failure) => {
-      const fixture = await repositoryFixture();
+      await using fixture = await repositoryFixture();
       const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -285,7 +289,7 @@ lines.on("line", (line) => {
       expect(outcome.stdout + outcome.stderr).not.toContain(
         "/private/repository",
       );
-      expect(fixture.git("status", "--porcelain")).toBe("");
+      expect(await fixture.git("status", "--porcelain")).toBe("");
     },
   );
 });

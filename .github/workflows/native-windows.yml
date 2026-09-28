@@ -11,6 +11,8 @@ jobs:
     name: primitives / win32-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      CODEX_SECURITY_TEST_WINDOWS_SYMLINKS: required
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +69,24 @@ jobs:
           & $nativeNode --expose-gc proof-windows.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $nativeNode proof-policy-windows.mjs
+      - name: Verify Windows proofs without symbolic links
+        env:
+          CODEX_SECURITY_TEST_WINDOWS_SYMLINKS: disabled
+        run: |
+          $nativeNode = (Get-Command node).Source
+          $env:PATH = ""
+          $primitivesJson = & $nativeNode --expose-gc proof-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $primitives = $primitivesJson | ConvertFrom-Json
+          if ($primitives.wideProcessAndPaths.cachedSymlinkTagsIncludingDanglingDirectories -ne $false -or $primitives.wideProcessAndPaths.completeWideDirectoryIteration -ne $true -or $primitives.handles.junctionMetadataAndFinalNames -ne $true) {
+            throw "The restricted proof did not report skipped symbolic links and verified directory and junction coverage."
+          }
+          $policyJson = & $nativeNode proof-policy-windows.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $policy = $policyJson | ConvertFrom-Json
+          if ($policy.proof.policySymlinkBoundary -ne $false -or $policy.proof.directoryIdentity -ne $true -or $policy.proof.policyHelperRawPaths -ne $true) {
+            throw "The restricted policy proof did not report skipped symbolic links and verified directory identity."
+          }
       - name: Compare the existing Python completion lock
         run: |
           $python = (Get-Command python -ErrorAction Stop).Source

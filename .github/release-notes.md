@@ -1,31 +1,20 @@
-<!-- release-version: 0.1.29 -->
+<!-- release-version: 0.1.31 -->
 
 <!-- release-section: highlights:start -->
 ## Highlights
 
-- stream large saved scan JSON output ([#932](https://github.com/openai/codex-security/pull/932))
-- prefer complete saved rollout copies ([#933](https://github.com/openai/codex-security/pull/933))
-- support custom patch validation prompts ([#940](https://github.com/openai/codex-security/pull/940))
-- bump @opencode-ai/sdk from 1.18.29 to 1.18.30 in /plugins/codex-security/skills/triage-finding/evals in the third-party group across 1 directory ([#936](https://github.com/openai/codex-security/pull/936))
-- bump @linear/sdk from 93.0.1 to 94.0.0 in /sdk/typescript ([#937](https://github.com/openai/codex-security/pull/937))
-- seal drafts with empty artifact lists ([#941](https://github.com/openai/codex-security/pull/941))
-- include Terraform files in scan inventories ([#944](https://github.com/openai/codex-security/pull/944))
-- run README CLI commands with npx ([#945](https://github.com/openai/codex-security/pull/945))
-- resolve Git metadata outside its config ([#935](https://github.com/openai/codex-security/pull/935))
-- redirect findings service root to dashboard ([#948](https://github.com/openai/codex-security/pull/948))
-- bound source preview reads ([#947](https://github.com/openai/codex-security/pull/947))
-- align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
-- match filter control borders ([#957](https://github.com/openai/codex-security/pull/957))
-- make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
-- bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
-- tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
-- reject line breaks in inventory paths. ([#961](https://github.com/openai/codex-security/pull/961))
-- bump the third-party group across 3 directories with 7 updates ([#954](https://github.com/openai/codex-security/pull/954))
-- keep model-authored runtime status out of finalized reports ([#703](https://github.com/openai/codex-security/pull/703))
-- show progress while patching findings ([#931](https://github.com/openai/codex-security/pull/931))
-- deduplicate string-form openQuestions in merge\_saved\_results ([#951](https://github.com/openai/codex-security/pull/951))
-- emit structured JSON errors for failed scans ([#709](https://github.com/openai/codex-security/pull/709))
-- preserve undecided findings after model refusals ([#960](https://github.com/openai/codex-security/pull/960))
+- require explicit scan-fatal worker errors ([#996](https://github.com/openai/codex-security/pull/996))
+- explain that the local Git hook is advisory ([#1000](https://github.com/openai/codex-security/pull/1000))
+- bump docker/build-push-action from 7.3.0 to 7.4.0 ([#992](https://github.com/openai/codex-security/pull/992))
+- bump the third-party group across 2 directories with 6 updates ([#1003](https://github.com/openai/codex-security/pull/1003))
+- bump docker/setup-buildx-action from 4.3.0 to 4.4.1 ([#1002](https://github.com/openai/codex-security/pull/1002))
+- support Codex 0.156.1 with Bubblewrap ([#997](https://github.com/openai/codex-security/pull/997))
+- suggest finding owners ([#1010](https://github.com/openai/codex-security/pull/1010))
+- \[codex\] align security policy with Codex bug bounty scope ([#1001](https://github.com/openai/codex-security/pull/1001))
+- support long filenames when staging documents ([#1016](https://github.com/openai/codex-security/pull/1016))
+- include Objective-C sources in scan inventories ([#989](https://github.com/openai/codex-security/pull/989))
+- ignore URL parameters when reading device codes ([#979](https://github.com/openai/codex-security/pull/979))
+- page reducer inputs by serialized size ([#1025](https://github.com/openai/codex-security/pull/1025))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

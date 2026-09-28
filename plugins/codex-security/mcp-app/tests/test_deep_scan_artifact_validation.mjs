@@ -6,7 +6,7 @@ import {
   realpath,
   rm,
   symlink,
-  writeFile
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,22 +14,24 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname],
+  entryPoints: [
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
+      .pathname,
+  ],
   format: "esm",
   platform: "node",
-  write: false
+  write: false,
 });
-const {
-  validateDiscoveryArtifacts,
-  validateReducerArtifacts
-} = await import(
-  "data:text/javascript;base64,"
-  + Buffer.from(bundle.outputFiles[0].contents).toString("base64")
+const { validateDiscoveryArtifacts, validateReducerArtifacts } = await import(
+  "data:text/javascript;base64," +
+    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
 );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
-const root = await realpath(await mkdtemp(path.join(tmpdir(), "deep-scan-artifact-validation-")));
+const root = await realpath(
+  await mkdtemp(path.join(tmpdir(), "deep-scan-artifact-validation-")),
+);
 try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
@@ -43,9 +45,14 @@ console.log("deep scan artifact validation tests passed");
 async function testDiscoveryValidation(root) {
   const artifacts = await createLayout(path.join(root, "discovery"));
   const result = draft([finding("shared", "src/a.js")], {
-    threatModel: { summary: "Requests reach shared code." }
+    threatModel: { summary: "Requests reach shared code." },
   });
-  const worker = await createWorker(artifacts, "discovery-0001", "worker-001", result);
+  const worker = await createWorker(
+    artifacts,
+    "discovery-0001",
+    "worker-001",
+    result,
+  );
 
   await writeResult(worker.resultPath, { ...result, complete: false });
   await assert.rejects(
@@ -56,7 +63,7 @@ async function testDiscoveryValidation(root) {
 
   assert.deepEqual(
     await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    result
+    result,
   );
 
   const legacyFinding = {
@@ -64,93 +71,105 @@ async function testDiscoveryValidation(root) {
     attackPath: { steps: { first: "upload" } },
     code_evidence: null,
     root_cause: null,
-    validation: { evidence: { kind: "trace" } }
+    validation: { evidence: { kind: "trace" } },
   };
-  await writeResult(worker.resultPath, { ...result, findings: [legacyFinding] });
+  await writeResult(worker.resultPath, {
+    ...result,
+    findings: [legacyFinding],
+  });
   const recoveredLegacy = await validateDiscoveryArtifacts(
     artifacts,
     worker.resultPath,
-    scanId
+    scanId,
   );
   assert.deepEqual(recoveredLegacy.findings[0], {
     ...result.findings[0],
     attackPath: {},
-    validation: {}
+    validation: {},
   });
   await writeResult(worker.resultPath, {
     ...result,
-    findings: [{ ...result.findings[0], root_cause: "" }]
+    findings: [{ ...result.findings[0], root_cause: "" }],
   });
   assert.deepEqual(
     await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    result
+    result,
   );
 
   await writeResult(worker.resultPath, {
     ...result,
-    findings: [{
-      ...result.findings[0],
-      root_cause: " ",
-      validation: {
-        method: " ",
-        status: " ",
-        summary: " ",
-        disposition: " ",
-        result: " "
-      },
-      attackPath: {
-        summary: " ",
-        dataFlow: " ",
-        data_flow: { summary: " ", source: " ", sink: " ", outcome: " " },
-        reachability: {
+    findings: [
+      {
+        ...result.findings[0],
+        root_cause: " ",
+        validation: {
+          method: " ",
+          status: " ",
           summary: " ",
-          attacker: " ",
-          entrypoint: " ",
-          source: " ",
-          sink: " ",
-          outcome: " "
+          disposition: " ",
+          result: " ",
         },
-        impact: " ",
-        likelihood: { level: " ", rationale: " ", why: " " }
-      }
-    }]
+        attackPath: {
+          summary: " ",
+          dataFlow: " ",
+          data_flow: { summary: " ", source: " ", sink: " ", outcome: " " },
+          reachability: {
+            summary: " ",
+            attacker: " ",
+            entrypoint: " ",
+            source: " ",
+            sink: " ",
+            outcome: " ",
+          },
+          impact: " ",
+          likelihood: { level: " ", rationale: " ", why: " " },
+        },
+      },
+    ],
   });
   assert.deepEqual(
     await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
     {
       ...result,
-      findings: [{
-        ...result.findings[0],
-        validation: {},
-        attackPath: {
-          data_flow: {},
-          reachability: {},
-          likelihood: {}
-        }
-      }]
-    }
+      findings: [
+        {
+          ...result.findings[0],
+          validation: {},
+          attackPath: {
+            data_flow: {},
+            reachability: {},
+            likelihood: {},
+          },
+        },
+      ],
+    },
   );
 
   await writeResult(worker.resultPath, { ...result, scanId: otherScanId });
   await assert.rejects(
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /different scan/
-  );
-
-  await writeResult(worker.resultPath, {
-    ...result,
-    coverage: { ...result.coverage, deferred: [{ reason: "Needs follow-up." }] }
-  });
-  await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /complete coverage cannot contain deferred/
+    /different scan/,
   );
 
   await writeResult(worker.resultPath, {
     ...result,
     coverage: {
       ...result.coverage,
-      surfaces: [{ label: "Unfinished Standard review", disposition: "needs_follow_up" }],
+      deferred: [{ reason: "Needs follow-up." }],
+    },
+  });
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    /complete coverage cannot contain deferred/,
+  );
+
+  await writeResult(worker.resultPath, {
+    ...result,
+    coverage: {
+      ...result.coverage,
+      surfaces: [
+        { label: "Unfinished Standard review", disposition: "needs_follow_up" },
+      ],
     },
   });
   await assert.rejects(
@@ -161,20 +180,22 @@ async function testDiscoveryValidation(root) {
 
   await writeResult(worker.resultPath, {
     ...result,
-    findings: [{
-      ...result.findings[0],
-      locations: [{ path: "src/a.js", startLine: 3, endLine: 2 }]
-    }]
+    findings: [
+      {
+        ...result.findings[0],
+        locations: [{ path: "src/a.js", startLine: 3, endLine: 2 }],
+      },
+    ],
   });
   await assert.rejects(
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /endLine/
+    /endLine/,
   );
 
   await writeFile(worker.resultPath, "{invalid JSON");
   await assert.rejects(
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /Invalid Deep Scan JSON artifact/
+    /Invalid Deep Scan JSON artifact/,
   );
 
   await writeResult(worker.resultPath, draft([]));
@@ -187,7 +208,7 @@ async function testDiscoveryValidation(root) {
     await symlink(outside, worker.resultPath, "file");
     await assert.rejects(
       validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-      /escaped its scan directory|canonical non-symlink path/
+      /escaped its scan directory|canonical non-symlink path/,
     );
   }
 }
@@ -200,13 +221,13 @@ async function testReducerValidation(root) {
     artifacts,
     "discovery-0001",
     "worker-001",
-    draft([firstFinding])
+    draft([firstFinding]),
   );
   await createWorker(
     artifacts,
     "discovery-0002",
     "worker-002",
-    draft([firstFinding, secondFinding])
+    draft([firstFinding, secondFinding]),
   );
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
   const resultPath = path.join(artifactDir, "result.json");
@@ -214,12 +235,22 @@ async function testReducerValidation(root) {
   await writeResult(resultPath, draft([firstFinding]));
 
   const sources = {
-    discoveries: [{ workerId: first.id, result: draft([firstFinding, secondFinding]) }],
+    discoveries: [
+      { workerId: first.id, result: draft([firstFinding, secondFinding]) },
+    ],
     previous: null,
   };
-  const validateSnapshot = () => validateReducerArtifacts({
-    artifacts, artifactDir, resultPath, reducerId: "dedup-0001", sources,
-  }, scanId);
+  const validateSnapshot = () =>
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "dedup-0001",
+        sources,
+      },
+      scanId,
+    );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
   await writeFile(first.resultPath, "{source changed after dispatch");
@@ -232,32 +263,43 @@ async function testReducerValidation(root) {
     "validation returns the same reconciled result that was accepted on disk",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
-  assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, ["worker-001:1"]);
+  assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
+    "worker-001:1",
+  ]);
   sources.previous = structuredClone(admitted);
-  sources.previous.findings[0].summary = "Additional proof established by the previous reducer.";
+  sources.previous.findings[0].summary =
+    "Additional proof established by the previous reducer.";
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
   assert.equal((await validateSnapshot()).newFindings, 0);
   assert.equal(
-    JSON.parse(await readFile(resultPath, "utf8")).findings[0].provenance.previousFindings[0].summary,
+    JSON.parse(await readFile(resultPath, "utf8")).findings[0].provenance
+      .previousFindings[0].summary,
     sources.previous.findings[0].summary,
   );
 
-  const inheritedThreatModel = { summary: "Internet requests reach the shared handler." };
+  const inheritedThreatModel = {
+    summary: "Internet requests reach the shared handler.",
+  };
   const threatModelSources = {
-    discoveries: [{
-      workerId: first.id,
-      result: draft([firstFinding], { threatModel: inheritedThreatModel }),
-    }],
+    discoveries: [
+      {
+        workerId: first.id,
+        result: draft([firstFinding], { threatModel: inheritedThreatModel }),
+      },
+    ],
     previous: null,
   };
   await writeResult(resultPath, draft([firstFinding]));
-  await validateReducerArtifacts({
-    artifacts,
-    artifactDir,
-    resultPath,
-    reducerId: "dedup-threat-model",
-    sources: threatModelSources,
-  }, scanId);
+  await validateReducerArtifacts(
+    {
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-threat-model",
+      sources: threatModelSources,
+    },
+    scanId,
+  );
   assert.deepEqual(
     JSON.parse(await readFile(resultPath, "utf8")).threatModel,
     inheritedThreatModel,
@@ -266,34 +308,56 @@ async function testReducerValidation(root) {
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
-    validateReducerArtifacts({
-      artifacts,
-      artifactDir,
-      resultPath,
-      reducerId: "dedup-ambiguous-threat-model",
-      sources: {
-        discoveries: [
-          { workerId: "worker-a", result: draft([], { threatModel: { summary: "Public API." } }) },
-          { workerId: "worker-b", result: draft([], { threatModel: { summary: "Local operator." } }) },
-        ],
-        previous: null,
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "dedup-ambiguous-threat-model",
+        sources: {
+          discoveries: [
+            {
+              workerId: "worker-a",
+              result: draft([], { threatModel: { summary: "Public API." } }),
+            },
+            {
+              workerId: "worker-b",
+              result: draft([], {
+                threatModel: { summary: "Local operator." },
+              }),
+            },
+          ],
+          previous: null,
+        },
       },
-    }, scanId),
+      scanId,
+    ),
     /ambiguous threat models/i,
   );
 
-  const inheritedScope = { summary: "Shared request handlers", includePaths: ["src"] };
+  const inheritedScope = {
+    summary: "Shared request handlers",
+    includePaths: ["src"],
+  };
   await writeResult(resultPath, draft([firstFinding]));
-  await validateReducerArtifacts({
-    artifacts,
-    artifactDir,
-    resultPath,
-    reducerId: "dedup-scope",
-    sources: {
-      discoveries: [{ workerId: first.id, result: draft([firstFinding], { scope: inheritedScope }) }],
-      previous: null,
+  await validateReducerArtifacts(
+    {
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-scope",
+      sources: {
+        discoveries: [
+          {
+            workerId: first.id,
+            result: draft([firstFinding], { scope: inheritedScope }),
+          },
+        ],
+        previous: null,
+      },
     },
-  }, scanId);
+    scanId,
+  );
   assert.deepEqual(
     JSON.parse(await readFile(resultPath, "utf8")).scope,
     inheritedScope,
@@ -309,19 +373,28 @@ async function testReducerValidation(root) {
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
-    validateReducerArtifacts({
-      artifacts,
-      artifactDir,
-      resultPath,
-      reducerId: "dedup-ambiguous-scope",
-      sources: {
-        discoveries: [
-          { workerId: "worker-a", result: draft([], { scope: { summary: "Public API" } }) },
-          { workerId: "worker-b", result: draft([], { scope: { summary: "Admin API" } }) },
-        ],
-        previous: null,
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "dedup-ambiguous-scope",
+        sources: {
+          discoveries: [
+            {
+              workerId: "worker-a",
+              result: draft([], { scope: { summary: "Public API" } }),
+            },
+            {
+              workerId: "worker-b",
+              result: draft([], { scope: { summary: "Admin API" } }),
+            },
+          ],
+          previous: null,
+        },
       },
-    }, scanId),
+      scanId,
+    ),
     /ambiguous scopes/i,
   );
 
@@ -354,42 +427,56 @@ async function testReducerValidation(root) {
     discoveries: [],
     previous: draft([previousCollisionA, previousCollisionB]),
   };
-  await writeResult(resultPath, draft([
-    {
-      ...collidingOriginalA,
-      provenance: { source: "local_plugin", sourceFindingIds: ["origin:a"] },
-    },
-    {
-      ...collidingOriginalB,
-      provenance: { source: "local_plugin", sourceFindingIds: ["origin:b"] },
-    },
-  ]));
-  await validateReducerArtifacts({
-    artifacts,
-    artifactDir,
+  await writeResult(
     resultPath,
-    reducerId: "dedup-colliding-previous",
-    sources: collidingSources,
-  }, scanId);
-  const reconciledCollisions = JSON.parse(await readFile(resultPath, "utf8")).findings;
+    draft([
+      {
+        ...collidingOriginalA,
+        provenance: { source: "local_plugin", sourceFindingIds: ["origin:a"] },
+      },
+      {
+        ...collidingOriginalB,
+        provenance: { source: "local_plugin", sourceFindingIds: ["origin:b"] },
+      },
+    ]),
+  );
+  await validateReducerArtifacts(
+    {
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-colliding-previous",
+      sources: collidingSources,
+    },
+    scanId,
+  );
+  const reconciledCollisions = JSON.parse(
+    await readFile(resultPath, "utf8"),
+  ).findings;
   assert.deepEqual(
     reconciledCollisions.map((item) => item.provenance.sourceFindingIds),
     [["origin:a"], ["origin:b"]],
   );
   assert.deepEqual(
-    reconciledCollisions.map((item) => item.provenance.previousFindings[0].summary),
+    reconciledCollisions.map(
+      (item) => item.provenance.previousFindings[0].summary,
+    ),
     [previousCollisionA.summary, previousCollisionB.summary],
   );
   await writeResult(first.resultPath, draft([firstFinding]));
   await writeResult(resultPath, draft([firstFinding]));
 
-  const validate = (previousReducerResultPath) => validateReducerArtifacts({
-    artifacts,
-    artifactDir,
-    resultPath,
-    reducerId: "dedup-0001",
-    ...(previousReducerResultPath ? { previousReducerResultPath } : {})
-  }, scanId);
+  const validate = (previousReducerResultPath) =>
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "dedup-0001",
+        ...(previousReducerResultPath ? { previousReducerResultPath } : {}),
+      },
+      scanId,
+    );
 
   assert.equal((await validate()).newFindings, 1);
 
@@ -397,17 +484,27 @@ async function testReducerValidation(root) {
     coverage: {
       completeness: "partial",
       surfaces: [
-        { ...resolvedCoverageSurface, receiptRefs: ["artifacts/missing-worker-receipt.md"] },
+        {
+          ...resolvedCoverageSurface,
+          receiptRefs: ["artifacts/missing-worker-receipt.md"],
+        },
         { label: "Legacy follow-up", disposition: "needs_follow_up" },
       ],
-      explicitExclusions: [{ pattern: "vendor", reason: "Outside the requested source scope." }],
-      deferred: [{ reason: "A previous reducer retained worker follow-up work." }],
+      explicitExclusions: [
+        { pattern: "vendor", reason: "Outside the requested source scope." },
+      ],
+      deferred: [
+        { reason: "A previous reducer retained worker follow-up work." },
+      ],
       openQuestions: ["Should a future review include generated handlers?"],
     },
   });
   for (const [label, legacyCoverage] of [
     ["partial", legacyPartial.coverage],
-    ["complete with pending work", { ...legacyPartial.coverage, completeness: "complete" }],
+    [
+      "complete with pending work",
+      { ...legacyPartial.coverage, completeness: "complete" },
+    ],
     ["malformed", null],
   ]) {
     const legacyReducer = {
@@ -431,7 +528,10 @@ async function testReducerValidation(root) {
   await writeResult(resultPath, draft([]));
   assert.equal((await validate()).newFindings, 0);
 
-  await writeResult(resultPath, { ...draft([firstFinding]), resultPath: "/tmp/result.json" });
+  await writeResult(resultPath, {
+    ...draft([firstFinding]),
+    resultPath: "/tmp/result.json",
+  });
   await assert.rejects(validate(), /resultPath/);
 
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
@@ -441,7 +541,7 @@ async function testReducerValidation(root) {
     artifacts.dedupRoot,
     "dedup-0000",
     "output",
-    "result.json"
+    "result.json",
   );
   await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
   await writeResult(previousReducerResultPath, {
@@ -460,89 +560,98 @@ async function testReducerValidation(root) {
     "reading a previous reducer must not rewrite its original coverage",
   );
 
-  const renamedTitle = { ...firstFinding, title: "Stronger explanation of the same finding." };
+  const renamedTitle = {
+    ...firstFinding,
+    title: "Stronger explanation of the same finding.",
+  };
   await writeResult(resultPath, draft([renamedTitle, secondFinding]));
-  assert.equal(
-    (await validate(previousReducerResultPath)).newFindings,
-    1
-  );
+  assert.equal((await validate(previousReducerResultPath)).newFindings, 1);
 
-  await writeResult(previousReducerResultPath, draft([firstFinding, secondFinding]));
+  await writeResult(
+    previousReducerResultPath,
+    draft([firstFinding, secondFinding]),
+  );
   await writeResult(resultPath, draft([secondFinding]));
   await assert.rejects(
     validate(previousReducerResultPath),
-    (error) => error.code === "merge_traceability_unstable_candidate_id"
+    (error) => error.code === "merge_traceability_unstable_candidate_id",
   );
 
   const replacement = finding("replacement", "src/c.js");
-  await writeResult(resultPath, draft([firstFinding, secondFinding, replacement]));
-  assert.equal(
-    (await validate(previousReducerResultPath)).newFindings,
-    1
+  await writeResult(
+    resultPath,
+    draft([firstFinding, secondFinding, replacement]),
   );
+  assert.equal((await validate(previousReducerResultPath)).newFindings, 1);
 
   const implicitFirst = { ...firstFinding };
   delete implicitFirst.identity;
-  const implicitRenamed = { ...implicitFirst, summary: "More complete evidence." };
+  const implicitRenamed = {
+    ...implicitFirst,
+    summary: "More complete evidence.",
+  };
   await writeResult(previousReducerResultPath, draft([implicitFirst]));
   await writeResult(resultPath, draft([implicitRenamed]));
-  assert.equal(
-    (await validate(previousReducerResultPath)).newFindings,
-    0
+  assert.equal((await validate(previousReducerResultPath)).newFindings, 0);
+  await writeResult(
+    resultPath,
+    draft([
+      {
+        ...implicitRenamed,
+        locations: [
+          ...implicitRenamed.locations,
+          { path: "src/another-affected-location.js", startLine: 4 },
+        ],
+      },
+    ]),
   );
-  await writeResult(resultPath, draft([{
-    ...implicitRenamed,
-    locations: [
-      ...implicitRenamed.locations,
-      { path: "src/another-affected-location.js", startLine: 4 }
-    ]
-  }]));
   assert.equal(
     (await validate(previousReducerResultPath)).newFindings,
     0,
-    "An existing finding without an explicit identity may gain affected locations."
+    "An existing finding without an explicit identity may gain affected locations.",
   );
 
-  await writeResult(resultPath, { ...draft([firstFinding]), scanId: otherScanId });
+  await writeResult(resultPath, {
+    ...draft([firstFinding]),
+    scanId: otherScanId,
+  });
   await assert.rejects(
     validate(),
-    (error) => error.name !== "DeepScanNonRetryableError"
-      && /different scan/.test(error.message)
+    (error) =>
+      error.name !== "DeepScanNonRetryableError" &&
+      /different scan/.test(error.message),
   );
 
   await writeResult(resultPath, draft([firstFinding]));
-  await writeResult(first.resultPath, { ...draft([firstFinding]), scanId: otherScanId });
+  await writeResult(first.resultPath, {
+    ...draft([firstFinding]),
+    scanId: otherScanId,
+  });
   assert.equal(
     (await validate()).newFindings,
     1,
-    "A completed aggregate must not reread already-consumed Standard results."
+    "A completed aggregate must not reread already-consumed Standard results.",
   );
   await writeFile(first.resultPath, "{invalid Standard scan\n");
   assert.equal(
     (await validate()).newFindings,
     1,
-    "Accepted Standard inputs were already validated by the reducer writer."
+    "Accepted Standard inputs were already validated by the reducer writer.",
   );
   await writeResult(first.resultPath, draft([firstFinding]));
 
   await writeResult(previousReducerResultPath, {
     ...draft([firstFinding]),
-    scanId: otherScanId
+    scanId: otherScanId,
   });
-  await assert.rejects(
-    validate(previousReducerResultPath),
-    /different scan/
-  );
+  await assert.rejects(validate(previousReducerResultPath), /different scan/);
 
   if (process.platform !== "win32") {
     const actualResult = path.join(artifactDir, "actual-result.json");
     await writeResult(actualResult, draft([firstFinding]));
     await rm(resultPath);
     await symlink(actualResult, resultPath, "file");
-    await assert.rejects(
-      validate(),
-      /canonical non-symlink path/
-    );
+    await assert.rejects(validate(), /canonical non-symlink path/);
   }
 }
 
@@ -552,7 +661,7 @@ async function testEmptyDiscoveryAndReduction(root) {
     artifacts,
     "discovery-0001",
     "worker-empty",
-    draft([])
+    draft([]),
   );
   await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId);
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-empty", "output");
@@ -563,7 +672,7 @@ async function testEmptyDiscoveryAndReduction(root) {
     artifacts,
     artifactDir,
     resultPath,
-    reducerId: "dedup-empty"
+    reducerId: "dedup-empty",
   });
   assert.equal(result.newFindings, 0);
   assert.deepEqual(
@@ -574,16 +683,21 @@ async function testEmptyDiscoveryAndReduction(root) {
 }
 
 async function createLayout(scanDir) {
-  const workersRoot = path.join(scanDir, "artifacts", "deep_discovery", "workers");
+  const workersRoot = path.join(
+    scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
   const dedupRoot = path.join(scanDir, "artifacts", "deep_discovery", "dedup");
   await Promise.all([
     mkdir(workersRoot, { recursive: true }),
-    mkdir(dedupRoot, { recursive: true })
+    mkdir(dedupRoot, { recursive: true }),
   ]);
   return {
     scanDir,
     workersRoot,
-    dedupRoot
+    dedupRoot,
   };
 }
 
@@ -603,9 +717,9 @@ function draft(findings, extra = {}) {
       completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: []
+      deferred: [],
     },
-    ...extra
+    ...extra,
   };
 }
 
@@ -616,11 +730,14 @@ function finding(id, candidatePath) {
     title: "Unsafe request output " + id,
     summary: "A request-controlled value reaches an HTML response.",
     severity: { level: "high" },
-    confidence: { level: "high", rationale: "The source establishes reachability." },
+    confidence: {
+      level: "high",
+      rationale: "The source establishes reachability.",
+    },
     taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
     locations: [{ path: candidatePath, startLine: 1, endLine: 2 }],
     remediation: "Encode request-controlled values before emitting HTML.",
-    provenance: { source: "local_plugin" }
+    provenance: { source: "local_plugin" },
   };
 }
 

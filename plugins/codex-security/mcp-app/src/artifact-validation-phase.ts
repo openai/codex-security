@@ -5,12 +5,12 @@ import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 import {
   artifactDestination,
   readArtifactJsonl,
-  replaceArtifactJsonl
+  replaceArtifactJsonl,
 } from "./artifact-io.js";
 import type { ArtifactContext } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
-  type SchemaDocument
+  type SchemaDocument,
 } from "./artifact-schema-loader.js";
 
 const documents = [commonSchema, validationSchema] as SchemaDocument[];
@@ -20,7 +20,8 @@ export interface CandidateValidationRecord {
   method: string;
   confidence: "high" | "medium" | "low";
   confidence_rationale: string;
-  rubric: string | Record<string, unknown> | Array<string | Record<string, unknown>>;
+  rubric:
+    string | Record<string, unknown> | Array<string | Record<string, unknown>>;
   evidence: string | string[];
   counterevidence_or_proof_gap: string;
   remaining_uncertainty: string;
@@ -45,40 +46,42 @@ interface CandidateValidationUpdates {
 export const candidateValidationRecordSchema = loadArtifactZodSchema(
   documents,
   validationSchema.$id,
-  "validationRecord"
+  "validationRecord",
 ) as z.ZodType<CandidateValidationRecord>;
 
 const candidateValidationUpdatesSchema = loadArtifactZodSchema(
   documents,
   validationSchema.$id,
-  "updatesPayload"
+  "updatesPayload",
 ) as z.ZodType<CandidateValidationUpdates>;
 
 /** Public workbench input; the bound context, never the caller, selects the artifact. */
 export const candidateValidationsInputSchema = loadArtifactZodSchema(
   documents,
   validationSchema.$id,
-  "input"
+  "input",
 ) as z.ZodType<CandidateValidationUpdates & { scanId: string }>;
 
 const compactCandidateLedgerRowSchema = candidateSchemaV1.passthrough();
 const candidateLedgerComponents = [
   "artifacts",
   "02_discovery",
-  "candidate_ledger.jsonl"
+  "candidate_ledger.jsonl",
 ] as const;
 
 /** Complete one existing validation phase without changing discovery or attack-path data. */
 export async function recordCodexSecurityCandidateValidations(
   context: ArtifactContext,
-  input: CandidateValidationUpdates
+  input: CandidateValidationUpdates,
 ): Promise<{
   kind: "candidate_validations";
   operation: "replace";
   rowsWritten: number;
 }> {
   if (context.layout !== "scan") {
-    throw new Error("Candidate validation requires a scan-bound artifact context.");
+    throw new Error(
+      "Candidate validation requires a scan-bound artifact context.",
+    );
   }
 
   const { validations } = candidateValidationUpdatesSchema.parse(input);
@@ -86,12 +89,14 @@ export async function recordCodexSecurityCandidateValidations(
     context,
     candidateLedgerComponents,
     "Compact candidate ledger",
-    compactCandidateLedgerRowSchema
+    compactCandidateLedgerRowSchema,
   );
   const candidateIds = new Set<string>();
   for (const row of rows) {
     if (candidateIds.has(row.candidate_id)) {
-      throw new Error(`Compact candidate ledger repeats candidate ${row.candidate_id}.`);
+      throw new Error(
+        `Compact candidate ledger repeats candidate ${row.candidate_id}.`,
+      );
     }
     candidateIds.add(row.candidate_id);
   }
@@ -99,7 +104,9 @@ export async function recordCodexSecurityCandidateValidations(
   const validationByCandidateId = new Map<string, CandidateValidationRecord>();
   for (const update of validations) {
     if (!candidateIds.has(update.candidateId)) {
-      throw new Error(`Validation names unknown candidate ${update.candidateId}.`);
+      throw new Error(
+        `Validation names unknown candidate ${update.candidateId}.`,
+      );
     }
     if (validationByCandidateId.has(update.candidateId)) {
       throw new Error(`Validation repeats candidate ${update.candidateId}.`);
@@ -107,28 +114,28 @@ export async function recordCodexSecurityCandidateValidations(
     validationByCandidateId.set(update.candidateId, update.validation);
   }
 
-  const missing = [...candidateIds].filter((candidateId) => (
-    !validationByCandidateId.has(candidateId)
-  ));
+  const missing = [...candidateIds].filter(
+    (candidateId) => !validationByCandidateId.has(candidateId),
+  );
   if (missing.length > 0) {
     throw new Error(
-      `Validation must include every existing candidate; missing ${missing.join(", ")}.`
+      `Validation must include every existing candidate; missing ${missing.join(", ")}.`,
     );
   }
 
   const updatedRows = rows.map((row) => ({
     ...row,
-    validation: validationByCandidateId.get(row.candidate_id)!
+    validation: validationByCandidateId.get(row.candidate_id)!,
   }));
   const destination = await artifactDestination(
     context,
     candidateLedgerComponents,
-    "Compact candidate ledger"
+    "Compact candidate ledger",
   );
   await replaceArtifactJsonl(destination, updatedRows);
   return {
     kind: "candidate_validations",
     operation: "replace",
-    rowsWritten: updatedRows.length
+    rowsWritten: updatedRows.length,
   };
 }

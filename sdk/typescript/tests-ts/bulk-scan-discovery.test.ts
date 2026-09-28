@@ -37,6 +37,8 @@ async function temporaryDirectory(): Promise<string> {
 class FakePrompt implements BulkScanPrompt {
   public readonly messages: string[] = [];
   public readonly questions: string[] = [];
+  public readonly signals: (AbortSignal | undefined)[] = [];
+  public beforeAnswer?: (signal?: AbortSignal) => Promise<void>;
   public interactive = true;
   public confirms: boolean[] = [];
   public inputs: string[] = [];
@@ -51,21 +53,37 @@ class FakePrompt implements BulkScanPrompt {
     this.messages.push(value);
   }
 
-  public async confirm(question: string, fallback = false): Promise<boolean> {
+  public async confirm(
+    question: string,
+    fallback = false,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     this.questions.push(question);
+    this.signals.push(signal);
+    await this.beforeAnswer?.(signal);
     return this.confirms.shift() ?? fallback;
   }
 
-  public async input(question: string, fallback = ""): Promise<string> {
+  public async input(
+    question: string,
+    fallback = "",
+    signal?: AbortSignal,
+  ): Promise<string> {
     this.questions.push(question);
+    this.signals.push(signal);
+    await this.beforeAnswer?.(signal);
     return this.inputs.shift() ?? fallback;
   }
 
   public async select<Value extends string>(
     question: string,
     options: readonly { label: string; value: Value }[],
+    _presentation?: unknown,
+    signal?: AbortSignal,
   ): Promise<Value> {
     this.questions.push(question);
+    this.signals.push(signal);
+    await this.beforeAnswer?.(signal);
     this.searchOptions.push(options.map(({ label }) => label));
     const value = this.choices.shift();
     return (options.find((option) => option.value === value) ?? options[0]!)
@@ -460,5 +478,53 @@ describe("bulk scan repository discovery", () => {
     ).rejects.toThrow();
     expect(prompt.questions).toEqual([]);
     expect(requests).toEqual([]);
+  });
+
+  test("passes cancellation to every setup prompt", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt } = discoveryDependencies(root, {
+      organizations: ["acme"],
+    });
+    const signal = new AbortController().signal;
+
+    await runBulkScanWizard(dependencies, signal);
+
+    expect(prompt.signals).toEqual([signal, signal, signal, signal]);
+  });
+
+  test.each([
+    [1, "account selection"],
+    [2, "repository selection"],
+    [3, "repeated repository selection"],
+    [4, "output directory"],
+    [5, "start confirmation"],
+  ] as const)("stops at prompt %i (%s) when canceled", async (stage) => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt } = discoveryDependencies(root, {
+      organizations: ["acme"],
+    });
+    prompt.choices.push("acme", "acme/payments-api", "");
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const canceled = new Error("Setup canceled");
+    prompt.beforeAnswer = async (signal) => {
+      if (prompt.signals.length !== stage) return;
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+        started.resolve();
+      });
+    };
+
+    const wizard = runBulkScanWizard(dependencies, controller.signal);
+    await started.promise;
+    controller.abort(canceled);
+
+    await expect(wizard).rejects.toBe(canceled);
+    expect(prompt.questions).toHaveLength(stage);
+    await expect(lstat(join(root, "security-scans"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

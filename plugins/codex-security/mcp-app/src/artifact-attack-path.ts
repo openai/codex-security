@@ -5,12 +5,12 @@ import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 import {
   artifactDestination,
   readArtifactJsonl,
-  replaceArtifactJsonl
+  replaceArtifactJsonl,
 } from "./artifact-io.js";
 import type { ArtifactContext } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
-  type SchemaDocument
+  type SchemaDocument,
 } from "./artifact-schema-loader.js";
 
 const documents = [commonSchema, attackPathSchema] as SchemaDocument[];
@@ -29,11 +29,16 @@ interface CandidateAttackPathFields {
   [field: string]: unknown;
 }
 
-export type CandidateAttackPathRecord = CandidateAttackPathFields & (
-  | { decision: "reportable"; severity: ReportableSeverity }
-  | { decision: "ignore"; severity: "ignore" }
-  | { decision: "deferred"; severity: ReportableSeverity | "unknown"; proof_gap: string }
-);
+export type CandidateAttackPathRecord = CandidateAttackPathFields &
+  (
+    | { decision: "reportable"; severity: ReportableSeverity }
+    | { decision: "ignore"; severity: "ignore" }
+    | {
+        decision: "deferred";
+        severity: ReportableSeverity | "unknown";
+        proof_gap: string;
+      }
+  );
 
 interface CandidateAttackPathUpdate {
   candidateId: string;
@@ -48,20 +53,20 @@ interface CandidateAttackPathsPayload {
 export const candidateAttackPathSchema = loadArtifactZodSchema(
   documents,
   attackPathSchema.$id,
-  "attackPath"
+  "attackPath",
 ) as z.ZodType<CandidateAttackPathRecord>;
 
 const candidateAttackPathsPayloadSchema = loadArtifactZodSchema(
   documents,
   attackPathSchema.$id,
-  "updatesPayload"
+  "updatesPayload",
 ) as z.ZodType<CandidateAttackPathsPayload>;
 
 /** The checked-in public schema controls both tools/list and call validation. */
 export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
   documents,
   attackPathSchema.$id,
-  "input"
+  "input",
 ) as z.ZodType<CandidateAttackPathsPayload & { scanId: string }>;
 
 const candidateLedgerRowSchema = candidateSchemaV1.passthrough();
@@ -69,20 +74,22 @@ const candidateLedgerRowSchema = candidateSchemaV1.passthrough();
 const candidateLedgerComponents = [
   "artifacts",
   "02_discovery",
-  "candidate_ledger.jsonl"
+  "candidate_ledger.jsonl",
 ] as const;
 
 /** Add attack-path judgments to eligible canonical Deep candidate rows. */
 export async function recordCodexSecurityCandidateAttackPaths(
   context: ArtifactContext,
-  input: CandidateAttackPathsPayload
+  input: CandidateAttackPathsPayload,
 ): Promise<{
   kind: "candidate_attack_paths";
   operation: "replace";
   rowsWritten: number;
 }> {
   if (context.layout !== "scan") {
-    throw new Error("Candidate attack-path analysis requires a scan-bound artifact context.");
+    throw new Error(
+      "Candidate attack-path analysis requires a scan-bound artifact context.",
+    );
   }
 
   const { attackPaths } = candidateAttackPathsPayloadSchema.parse(input);
@@ -90,7 +97,7 @@ export async function recordCodexSecurityCandidateAttackPaths(
   for (const update of attackPaths) {
     if (updates.has(update.candidateId)) {
       throw new Error(
-        `Candidate attack-path update repeats candidate ${update.candidateId}.`
+        `Candidate attack-path update repeats candidate ${update.candidateId}.`,
       );
     }
     updates.set(update.candidateId, update.attackPath);
@@ -100,13 +107,13 @@ export async function recordCodexSecurityCandidateAttackPaths(
     context,
     candidateLedgerComponents,
     "Compact candidate ledger",
-    candidateLedgerRowSchema
+    candidateLedgerRowSchema,
   );
   const candidates = new Map<string, (typeof rows)[number]>();
   for (const row of rows) {
     if (candidates.has(row.candidate_id)) {
       throw new Error(
-        `Candidate ledger repeats candidate ${row.candidate_id}.`
+        `Candidate ledger repeats candidate ${row.candidate_id}.`,
       );
     }
     candidates.set(row.candidate_id, row);
@@ -116,12 +123,12 @@ export async function recordCodexSecurityCandidateAttackPaths(
     const candidate = candidates.get(candidateId);
     if (!candidate) {
       throw new Error(
-        `Candidate attack-path update refers to unknown candidate ${candidateId}.`
+        `Candidate attack-path update refers to unknown candidate ${candidateId}.`,
       );
     }
     if (!isAttackPathEligible(candidate)) {
       throw new Error(
-        `Candidate ${candidateId} must have a reportable or deferred validation before attack-path analysis.`
+        `Candidate ${candidateId} must have a reportable or deferred validation before attack-path analysis.`,
       );
     }
   }
@@ -132,7 +139,7 @@ export async function recordCodexSecurityCandidateAttackPaths(
     .filter((candidateId) => !updates.has(candidateId));
   if (missing.length > 0) {
     throw new Error(
-      `Attack-path analysis must include every reportable or deferred candidate; missing ${missing.join(", ")}.`
+      `Attack-path analysis must include every reportable or deferred candidate; missing ${missing.join(", ")}.`,
     );
   }
 
@@ -143,22 +150,24 @@ export async function recordCodexSecurityCandidateAttackPaths(
   const destination = await artifactDestination(
     context,
     candidateLedgerComponents,
-    "Compact candidate ledger"
+    "Compact candidate ledger",
   );
   await replaceArtifactJsonl(destination, updatedRows);
 
   return {
     kind: "candidate_attack_paths",
     operation: "replace",
-    rowsWritten: updates.size
+    rowsWritten: updates.size,
   };
 }
 
-function isAttackPathEligible(
-  candidate: Record<string, unknown>
-): boolean {
+function isAttackPathEligible(candidate: Record<string, unknown>): boolean {
   const validation = candidate.validation;
-  if (!validation || typeof validation !== "object" || Array.isArray(validation)) {
+  if (
+    !validation ||
+    typeof validation !== "object" ||
+    Array.isArray(validation)
+  ) {
     return false;
   }
   const disposition = (validation as Record<string, unknown>).disposition;

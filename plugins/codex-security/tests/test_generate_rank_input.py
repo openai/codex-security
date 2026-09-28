@@ -259,6 +259,115 @@ def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
     ]
 
 
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_objective_c(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    ios = repo / "ios"
+    ios.mkdir(parents=True)
+    initialize_repo(repo)
+    source = ios / "ViewController.m"
+    source.write_text('NSString *greeting = @"hello";\n', encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = 'NSString *greeting = @"goodbye";'
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "ios"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "ios/ViewController.m",
+            "area": "ios" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    contracts = repo / "contracts"
+    contracts.mkdir(parents=True)
+    initialize_repo(repo)
+    source = contracts / "Vault.sol"
+    source.write_text("uint256 public limit = 1;\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = "uint256 public limit = 2;"
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "contracts/Vault.sol",
+            "area": "contracts" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_svelte(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    components = repo / "src"
+    components.mkdir(parents=True)
+    initialize_repo(repo)
+    source = components / "Counter.svelte"
+    content = '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>'
+    source.write_text(content + "\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = content.replace("count = 0", "count = 1")
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "src"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "src/Counter.svelte",
+            "area": "src" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
 def test_make_repo_rank_input_rejects_scope_outside_repo(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

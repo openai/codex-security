@@ -25,7 +25,6 @@ import { VERSION } from "../version.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
-  type DeduplicationReviewStage,
   safeErrorMessage,
 } from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
@@ -40,18 +39,17 @@ import {
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
 import { retryDelay, waitForRetry } from "./retry.js";
+import type { DeduplicationReviewRequest } from "./review.js";
 import { isReviewRefusal } from "./refusal.js";
 
 const reviewErrorSchema = z
   .object({ reason: z.string().trim().min(1) })
   .strict();
 
-export interface CodexReview<T> {
-  stage: DeduplicationReviewStage;
-  model: string;
-  effort: string;
-  prompt: string;
-  schema: unknown;
+export interface CodexReview<T> extends Pick<
+  DeduplicationReviewRequest,
+  "stage" | "model" | "effort" | "prompt" | "schema"
+> {
   validate(value: unknown): T;
 }
 
