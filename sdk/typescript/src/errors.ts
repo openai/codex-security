@@ -58,6 +58,7 @@ export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
+export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {

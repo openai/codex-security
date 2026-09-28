@@ -93,6 +93,7 @@ export {
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  SandboxUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";

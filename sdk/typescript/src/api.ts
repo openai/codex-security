@@ -187,6 +187,7 @@ import {
   prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
+  probeCodexSandbox,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
@@ -3494,8 +3495,14 @@ export class CodexSecurity {
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
+      const codexCommand = this.#codexCommand();
+      await probeCodexSandbox(
+        codexCommand,
+        { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
+        signal,
+      );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        codexCommand: this.#codexCommand(),
+        codexCommand,
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
