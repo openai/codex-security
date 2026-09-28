@@ -831,9 +831,6 @@ independent of later changes to the legacy TOML file.
 
 ### Runtime configuration and worker limits
 
-Scans default to `gpt-6-sol` with `xhigh` reasoning. Explicit model and effort
-overrides still take precedence; pin `gpt-5.6-sol` to retain the previous model.
-
 Scans use these isolated Codex defaults instead of your user or repository
 configuration:
 
