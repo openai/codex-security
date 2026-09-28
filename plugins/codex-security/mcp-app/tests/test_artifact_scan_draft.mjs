@@ -136,6 +136,34 @@ try {
   };
   const workerResultPath = path.join(workerRoot, "result.json");
 
+  const inventoryRoot = path.join(root, "inventory-worker");
+  await mkdir(inventoryRoot);
+  const inventoryContext = { ...workerContext, root: inventoryRoot };
+  for (const [complete, reviewedFiles] of [
+    [false, ["./src/a.py", "src/a.py", "outside.py"]],
+    [true, ["src/b.py"]],
+  ]) {
+    await recordCodexSecurityWorkerScanDraft(inventoryContext, {
+      ...workerInput,
+      complete,
+      findings: [],
+      coverage: {
+        ...coverage,
+        fileInventory: {
+          inScopeFiles: ["src/b.py", "src/a.py"],
+          reviewedFiles,
+        },
+      },
+    });
+  }
+  assert.deepEqual(
+    (await readJson(inventoryRoot, "result.json")).coverage.fileInventory,
+    {
+      inScopeFiles: ["src/a.py", "src/b.py"],
+      reviewedFiles: ["src/a.py", "src/b.py"],
+    },
+  );
+
   const checkpointRoot = path.join(root, "checkpoint-worker");
   await mkdir(checkpointRoot);
   const checkpointContext = { ...workerContext, root: checkpointRoot };

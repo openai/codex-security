@@ -31,6 +31,10 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
         "complete": False,
         "findings": [finding],
         "coverage": {
+            "fileInventory": {
+                "inScopeFiles": ["app.py", "pending.py"],
+                "reviewedFiles": ["app.py", "app.py", "outside.py"],
+            },
             "completeness": "partial",
             "surfaces": [],
             "explicitExclusions": [],
@@ -79,6 +83,9 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
+    assert coverage["fileInventory"]["reviewedFiles"] == ["app.py"]
+    assert (scan_dir / "artifacts/coverage/reviewed_files.txt").read_text() == "app.py\n"
+    assert (scan_dir / "artifacts/coverage/remaining_files.txt").read_text() == "pending.py\n"
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (
@@ -86,6 +93,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     )
     first_seal = (scan_dir / "scan-manifest.json").read_bytes()
     late = copy.deepcopy(checkpoint)
+    late["coverage"]["fileInventory"]["reviewedFiles"].append("pending.py")
     late["findings"][0]["locations"][0]["startLine"] = 91
     late["findings"][0]["locations"][0]["endLine"] = 92
     archived = result_path.parent / "attempts" / "attempt-01" / "checkpoints"

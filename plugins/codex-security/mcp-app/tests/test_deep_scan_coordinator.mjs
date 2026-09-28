@@ -102,6 +102,10 @@ async function testCappedQueueAndSerialDedup() {
   assert.equal(completedDrafts.length, 1);
   assert.equal(completedDrafts[0].scanId, fixture.run.scanId);
   assert.deepEqual(completedDrafts[0].findings, manifest.findings);
+  assert.deepEqual(completedDrafts[0].coverage.fileInventory, {
+    inScopeFiles: ["fixture.py", "unreviewed.py"],
+    reviewedFiles: ["fixture.py"],
+  });
   const reducerWorkers = [...store.workers.values()].filter(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",
   );
@@ -4536,6 +4540,10 @@ function standardScanDraft(scanId, candidateId, workerLabel) {
       : [],
     coverage: {
       completeness: "complete",
+      fileInventory: {
+        inScopeFiles: ["unreviewed.py", "fixture.py"],
+        reviewedFiles: ["fixture.py", "./fixture.py", "outside.py"],
+      },
       surfaces: [
         {
           label: "Fixture query",

@@ -312,6 +312,14 @@ export interface CoverageDocument {
     surfaceIds?: string[];
     [k: string]: unknown;
   }[];
+  /**
+   * Reported source inventory. reviewedFiles contains only fully security-reviewed in-scope files, not search hits or excerpts. Omit when unavailable.
+   */
+  fileInventory?: {
+    inScopeFiles: string[];
+    reviewedFiles: string[];
+    [k: string]: unknown;
+  };
   openQuestions?: {
     question: string;
     followUpPrompt?: string;

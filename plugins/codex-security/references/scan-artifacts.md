@@ -28,6 +28,18 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 - Per-scan threat model copy: `<context_dir>/threat_model.md`
 - Later scan phases should treat `<context_dir>/threat_model.md` as the source of truth.
 
+## File Coverage Artifacts
+
+Supply `coverage.fileInventory` with `inScopeFiles` (the complete selected source inventory) and `reviewedFiles` (fully security-reviewed paths). Workbench parent checkpoints write the following UTF-8 files, one repository-relative POSIX path per line, sorted and deduplicated:
+
+- `<scan_dir>/artifacts/coverage/in_scope_files.txt`
+- `<scan_dir>/artifacts/coverage/reviewed_files.txt`
+- `<scan_dir>/artifacts/coverage/remaining_files.txt`
+
+Finalization writes and seals the same files for SDK and terminal scans. Deep parents union accepted workers' inventories; stopped scans retain inventories from their admitted checkpoints. The host derives these files from `coverage.json`; do not write them separately. A file seen only in a search or excerpt is not reviewed. Reviewed paths outside the inventory do not count. Remaining paths are in-scope paths minus reviewed paths.
+
+These lists measure reported file-review coverage, not the absence of vulnerabilities. Missing `fileInventory` means unknown inventory, not zero reviewed files or complete coverage; older bundles remain valid.
+
 ## Finding Discovery (Phase 2) Paths
 
 ### Compact Deep And Workbench-Backed Diff Discovery
@@ -46,7 +58,7 @@ Deep reducer inputs, results, and checkpoints contain findings and optional scop
 - Optional compact validation evidence: `<discovery_dir>/validation_artifacts/<candidate_id>/`
   - Create this directory only for actual PoCs, crafted inputs, or logs and reference those paths from the row's `validation` object. Do not create placeholder per-candidate directories or narrative reports.
 
-The worklist, per-finding receipt, and phase-report paths below apply only to standalone or legacy Diff workflows. Compact Workbench Diff scans use one shared `<discovery_dir>/candidate_ledger.jsonl`, written by `record_codex_security_discovery_candidates` and updated by the bound batch tools `record_codex_security_candidate_validations` and `record_candidate_attack_paths`; they do not create per-finding ledgers, reports, or receipts. Standard and Deep scans assemble validated findings directly without persisted source inventories or candidate ledgers.
+The worklist, per-finding receipt, and phase-report paths below apply only to standalone or legacy Diff workflows. Compact Workbench Diff scans use one shared `<discovery_dir>/candidate_ledger.jsonl`, written by `record_codex_security_discovery_candidates` and updated by the bound batch tools `record_codex_security_candidate_validations` and `record_candidate_attack_paths`; they do not create per-finding ledgers, reports, or receipts. Standard and Deep scans assemble validated findings directly without candidate ledgers. Their file inventories use the shared [file coverage artifacts](#file-coverage-artifacts).
 
 ### Diff Discovery And Coverage
 

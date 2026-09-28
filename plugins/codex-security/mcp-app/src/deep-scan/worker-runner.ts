@@ -41,6 +41,7 @@ export interface AcceptedDiscovery {
   label: string;
   artifactDir: string;
   resultPath: string;
+  fileInventory?: { inScopeFiles: string[]; reviewedFiles: string[] };
   completionSequence: number;
   attempt: number;
   threadId?: string;
@@ -185,6 +186,7 @@ export class DeepScanWorkerRunner {
       attempt: 1,
     });
     let discoveryValidated = false;
+    let fileInventory: AcceptedDiscovery["fileInventory"];
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -194,11 +196,13 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        await validateDiscoveryArtifacts(
+        const draft = await validateDiscoveryArtifacts(
           artifacts,
           files.resultPath,
           run.scanId,
         );
+        fileInventory = draft.coverage
+          .fileInventory as AcceptedDiscovery["fileInventory"];
         discoveryValidated = true;
       },
       beforeRetry: async (attempt) => {
@@ -315,6 +319,7 @@ export class DeepScanWorkerRunner {
         label: workerLabel,
         artifactDir,
         resultPath: files.resultPath,
+        ...(fileInventory ? { fileInventory } : {}),
         completionSequence: persisted.completionSequence,
         attempt: outcome.attempt,
         threadId: outcome.threadId,

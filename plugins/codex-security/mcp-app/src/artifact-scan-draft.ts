@@ -1099,6 +1099,8 @@ export function preserveScanCoverage(
   preserveCompleteness = true,
 ): JsonObject {
   const result = structuredClone(coverage);
+  const fileInventory = mergeScanFileInventories([coverage, ...sources]);
+  if (fileInventory) result.fileInventory = fileInventory;
   for (const field of [
     "surfaces",
     "explicitExclusions",
@@ -1137,6 +1139,36 @@ export function preserveScanCoverage(
     result.completeness = "unknown";
   }
   return result;
+}
+
+/** Count each reported in-scope file once across checkpoints and workers. */
+export function mergeScanFileInventories(
+  coverages: JsonObject[],
+): { inScopeFiles: string[]; reviewedFiles: string[] } | undefined {
+  const inventories = coverages.flatMap((coverage) =>
+    coverage.fileInventory
+      ? [
+          coverage.fileInventory as {
+            inScopeFiles: string[];
+            reviewedFiles: string[];
+          },
+        ]
+      : [],
+  );
+  if (inventories.length === 0) return undefined;
+  const paths = (field: "inScopeFiles" | "reviewedFiles") =>
+    new Set(
+      inventories.flatMap((inventory) =>
+        inventory[field].map((path) => path.replace(/^\.\//u, "")),
+      ),
+    );
+  const inScopeFiles = paths("inScopeFiles");
+  return {
+    inScopeFiles: [...inScopeFiles].sort(),
+    reviewedFiles: [...paths("reviewedFiles")]
+      .filter((path) => inScopeFiles.has(path))
+      .sort(),
+  };
 }
 
 function coverageHasOutstandingWork(coverage: JsonObject): boolean {
