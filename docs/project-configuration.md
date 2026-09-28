@@ -43,7 +43,7 @@ scan:
     paths: [src]
   knowledge_base: [SECURITY.md, docs/architecture.md]
 codex:
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high

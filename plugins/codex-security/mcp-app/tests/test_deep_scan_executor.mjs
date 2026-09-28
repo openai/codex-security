@@ -770,7 +770,7 @@ async function testWorkerReasoningSummaries() {
       );
       syncBuiltinESMExports();
       const executor = new CodexSdkWorkerExecutor({
-        model: "fixture-model",
+        model: "gpt-6-sol",
         reasoningEffort: "xhigh",
         parentSandbox: trustedParentSandboxWithDenials
       });
@@ -788,6 +788,7 @@ async function testWorkerReasoningSummaries() {
             assert.equal(invocation.argv.includes(`model_reasoning_summary=${JSON.stringify(expected)}`), true);
           }
           assert.equal(invocation.argv.includes('model_reasoning_effort="xhigh"'), true);
+          assertFlagPair(invocation.argv, "--model", "gpt-6-sol");
           assert.equal(invocation.configPath, configPath);
           assert.equal(invocation.deepConfigPath, process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH);
           assertReadOnlyWorkerPolicy(invocation.argv);

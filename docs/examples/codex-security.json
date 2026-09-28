@@ -5,7 +5,7 @@
     "scope": { "paths": ["sdk/typescript/src"] }
   },
   "codex": {
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6-sol",
     "model_reasoning_effort": "xhigh"
   },
   "policy": { "fail_on_severity": "high" }

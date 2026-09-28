@@ -528,7 +528,7 @@ scan:
   scope:
     paths: [src]
 codex:
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
@@ -831,6 +831,9 @@ independent of later changes to the legacy TOML file.
 
 ### Runtime configuration and worker limits
 
+Scans default to `gpt-6-sol` with `xhigh` reasoning. Explicit model and effort
+overrides still take precedence; pin `gpt-5.6-sol` to retain the previous model.
+
 Scans use these isolated Codex defaults instead of your user or repository
 configuration:
 
@@ -838,7 +841,7 @@ configuration:
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
@@ -1235,8 +1238,9 @@ a project. Destination flags override `CODEX_SECURITY_LINEAR_TEAM` and
 contacting Linear; `--json` returns structured results.
 
 Sign in to Codex and connect Linear to publish with your existing Codex
-configuration; publication doesn't use the isolated scan home. To use the
-Linear API directly, set a personal API key:
+configuration; publication doesn't use the isolated scan home. The connected
+publication helper uses `gpt-6-sol` with `xhigh` reasoning. To use the Linear API
+directly, set a personal API key:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY

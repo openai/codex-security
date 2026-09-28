@@ -22,6 +22,7 @@ import {
   type Team,
   type User,
 } from "@linear/sdk";
+import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "./config.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -366,14 +367,16 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
+    const { model, reasoningEffort } =
+      scanModelConfiguration(DEFAULT_CODEX_CONFIG);
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
       command!,
       [
         "exec",
         "--model",
-        "gpt-5.6-luna",
+        model,
         "-c",
-        'model_reasoning_effort="low"',
+        `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
         "--ephemeral",
         "--json",
         "--sandbox",
