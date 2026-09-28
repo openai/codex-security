@@ -2,8 +2,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { stageSkillRuntime } = require("./run-sastbench-promptfoo.js");
 
 const sastbenchRoot = path.resolve(__dirname, "..");
 const evalRoot = path.resolve(sastbenchRoot, "..");
@@ -99,5 +101,34 @@ assert.equal(
   fs.existsSync(path.join(sastbenchRoot, "docs", "2026-06-22-sastbench-triage-finding-eval.md")),
   false,
 );
+
+const runtimeRoot = stageSkillRuntime();
+try {
+  const pluginRoot = path.join(runtimeRoot, "plugins", "codex-security");
+  const repoRoot = path.join(runtimeRoot, "policy-fixture");
+  const affectedFile = path.join(repoRoot, "src", "handler.js");
+  fs.mkdirSync(path.dirname(affectedFile), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, "SECURITY.md"), "Root policy for the synthetic fixture.\n");
+  fs.writeFileSync(path.join(repoRoot, "src", "SECURITY.md"), "Nested policy for request handlers.\n");
+  fs.writeFileSync(affectedFile, "export const handler = () => null;\n");
+  const launcher = path.join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const command = process.platform === "win32" ? process.execPath : launcher;
+  const helperArgs = process.platform === "win32"
+    ? [path.join(pluginRoot, "mcp", "helpers.mjs"), "resolve-security-md"]
+    : ["--helper", "resolve-security-md"];
+  const policy = childProcess.execFileSync(
+    command,
+    [...helperArgs, "--repo", repoRoot, "--scope", affectedFile, "--out", "-"],
+    { encoding: "utf8", cwd: runtimeRoot, env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath } },
+  );
+  assert.match(policy, /Root policy for the synthetic fixture/);
+  assert.match(policy, /Nested policy for request handlers/);
+  assert.ok(policy.indexOf("Root policy") < policy.indexOf("Nested policy"));
+  assert.equal(fs.existsSync(launcher + ".cmd"), true);
+  assert.equal(fs.existsSync(path.join(pluginRoot, "skills", "triage-finding", "evals")), false);
+  assert.equal(fs.existsSync(path.join(pluginRoot, "mcp", "server.mjs")), false);
+} finally {
+  fs.rmSync(runtimeRoot, { recursive: true, force: true });
+}
 
 console.log("sastbench native Promptfoo harness tests passed");

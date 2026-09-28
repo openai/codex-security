@@ -8,11 +8,16 @@ Run commands from the repository root. The parent `evals/` directory owns the pi
 
 ## Prepare the benchmark
 
-Install dependencies once:
+Install dependencies and build the current checkout's host plugin runtime:
 
 ```bash
 pnpm --dir plugins/codex-security/skills/triage-finding/evals run setup
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
+
+Rebuild the plugin runtime after changing its helper source. The host build requires the Rust toolchain described in [`native/README.md`](../../../../native/README.md).
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 

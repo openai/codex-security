@@ -38,6 +38,13 @@ function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
  * it needs. The label-bearing dataset and Promptfoo harness stay in EVAL_ROOT.
  */
 function stageSkillRuntime() {
+  const helperRoot = path.join(PLUGIN_ROOT, "mcp");
+  if (!fs.existsSync(path.join(helperRoot, "helpers.mjs"))) {
+    throw new Error("Build the plugin helper runtime first; see sastbench/README.md.");
+  }
+  const helperFiles = fs.readdirSync(helperRoot).filter(
+    (name) => name === "helpers.mjs" || name.startsWith("helpers.mjs.br.part-"),
+  );
   const runtimeRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-security-triage-finding-sastbench-"),
   );
@@ -53,6 +60,17 @@ function stageSkillRuntime() {
       copyDirectory(sourcePath, path.join(stagedPluginRoot, sharedDirectory));
     }
   }
+  const stagedScripts = path.join(stagedPluginRoot, "scripts");
+  fs.mkdirSync(stagedScripts, { recursive: true });
+  for (const name of ["launch_codex_security_mcp", "launch_codex_security_mcp.cmd"]) {
+    fs.copyFileSync(path.join(PLUGIN_ROOT, "scripts", name), path.join(stagedScripts, name));
+  }
+  const stagedHelpers = path.join(stagedPluginRoot, "mcp");
+  fs.mkdirSync(stagedHelpers, { recursive: true });
+  for (const name of helperFiles) {
+    fs.copyFileSync(path.join(helperRoot, name), path.join(stagedHelpers, name));
+  }
+  copyDirectory(path.join(helperRoot, "native"), path.join(stagedHelpers, "native"));
   return runtimeRoot;
 }
 

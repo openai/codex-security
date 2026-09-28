@@ -511,6 +511,11 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
+      - name: Build policy helper for deterministic eval tests
+        run: |
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+          node plugins/codex-security/mcp-app/scripts/build_native.mjs
+          node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
       - name: Test deterministic triage eval contracts
         working-directory: plugins/codex-security/skills/triage-finding/evals
         run: node --run test:deterministic
