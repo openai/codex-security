@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { configuredCodexHome } from "./auth.js";
 import {
   CodexSecurity,
   scanAuthentication,
@@ -130,7 +131,10 @@ export async function runComponentScans(
   if (auth !== undefined && auth !== "auto") {
     const source = environment ?? process.env;
     const provider = scanModelProvider(
-      await mergedCodexConfig(options.config ?? {}),
+      await mergedCodexConfig(
+        options.config ?? {},
+        configuredCodexHome(source),
+      ),
     );
     scanAuthentication(source, auth, provider);
     environment = selectedScanEnvironment(source, auth, provider);

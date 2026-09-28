@@ -157,7 +157,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["home", "profile", "overrides", "override-away"])(
+  test.each(["home", "profile", "native", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
       const home = await mkdtemp(
@@ -177,13 +177,21 @@ describe("semantic scan comparison", () => {
       };
       const config = {
         model_provider:
-          selection === "overrides" || selection === "profile"
+          selection === "overrides" ||
+          selection === "profile" ||
+          selection === "native"
             ? "openai"
             : "synthetic.provider",
         model_providers: { "synthetic.provider": provider },
       };
       const contents = stringify(config);
       await writeFile(join(home, "config.toml"), contents);
+      if (selection === "native") {
+        await writeFile(
+          join(home, "review.config.toml"),
+          'model_provider = "synthetic.provider"\n',
+        );
+      }
       const environment = {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
@@ -234,12 +242,18 @@ describe("semantic scan comparison", () => {
                         },
                       },
                     }
-                  : {}),
+                  : selection === "native"
+                    ? { config: { codexOverrides: { profile: "review" } } }
+                    : {}),
           },
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
-        if (selection === "profile")
-          expect(captured?.config?.["profile"]).toBe("review");
+        if (selection === "profile" || selection === "native") {
+          expect(captured?.config).not.toHaveProperty("profile");
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+        }
         if (commandAuth) {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");

@@ -21,6 +21,7 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   modelProviderConfigOverride,
+  resolveCodexProfile,
   resolveCommandAuthConfig,
   scanModelConfiguration,
   scanModelProvider,
@@ -528,10 +529,11 @@ async function startReadOnlyCodexThread(
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
+  const source = options.environment ?? process.env;
   const config =
     options.config === undefined
       ? undefined
-      : await mergedCodexConfig(options.config);
+      : await mergedCodexConfig(options.config, configuredCodexHome(source));
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
@@ -539,7 +541,6 @@ async function startReadOnlyCodexThread(
     options.reasoningEffort ??
     (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
     "medium";
-  const source = options.environment ?? process.env;
   const providerConfig =
     options.codex === undefined
       ? resolveCommandAuthConfig(
@@ -563,7 +564,7 @@ async function startReadOnlyCodexThread(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const sdkConfig = { ...config };
+  const sdkConfig = resolveCodexProfile(config ?? {});
   if (commandAuth) delete sdkConfig["model_providers"];
   const environment =
     options.codex === undefined

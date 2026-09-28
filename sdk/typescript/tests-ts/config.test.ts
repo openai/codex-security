@@ -186,6 +186,44 @@ describe("Codex configuration", () => {
     }
   });
 
+  test("loads a native profile below explicit scan overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model = "profile-model"\nmodel_reasoning_effort = "high"\nmodel_provider = "synthetic"\n',
+    );
+    const config = await mergedCodexConfig(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "explicit-model",
+        },
+      },
+      home,
+    );
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "explicit-model",
+      reasoningEffort: "high",
+    });
+    expect(scanModelProvider(config)).toBe("synthetic");
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  });
+
+  test("rejects invalid native profile names and owned settings", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features]\nplugins = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "../review" } }, home),
+    ).rejects.toThrow("plain name");
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("owns plugin loading configuration");
+  });
+
   test("ignores model overrides from unselected Codex profiles", async () => {
     const config = await mergedCodexConfig({
       codexOverrides: {

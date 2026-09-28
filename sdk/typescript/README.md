@@ -874,6 +874,21 @@ Quote string values as TOML, for example
 `--codex 'model_reasoning_effort="..."'`: conflicting or repeated keys are
 rejected.
 
+To select a Codex file profile, put its settings in
+`$CODEX_HOME/review.config.toml` (or `~/.codex/review.config.toml` when
+`CODEX_HOME` is unset), then run:
+
+```bash
+npx @openai/codex-security scan . --codex 'profile="review"'
+```
+
+SDK callers can set `codexOverrides: { profile: "review" }`, and project config
+files can set `codex.profile: review`. The file uses top-level Codex TOML keys.
+Its settings override scanner defaults; explicit scan settings override the
+file. The scan runs from an isolated Codex home, so include any custom provider
+definition in the profile file. An absent profile file contributes no settings.
+Inline `profiles` tables remain supported for existing scanner configurations.
+
 Choose plugins with `--plugin-path`. Overrides of `plugins`, `marketplaces`,
 or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
