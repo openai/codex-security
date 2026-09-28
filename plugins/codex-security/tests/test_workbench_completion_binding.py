@@ -747,6 +747,36 @@ def test_completion_keeps_invalid_prewrite_drafts_resumable(
     assert completed["findingCount"] == 1
 
 
+def test_completion_without_optional_inventory_strategy(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    del coverage["inventoryStrategy"]
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    sealed_coverage = json.loads(coverage_path.read_text())
+    assert "inventoryStrategy" not in sealed_coverage
+    assert sealed_coverage["completeness"] == coverage["completeness"]
+    report_path = scan_dir / "report.md"
+    report = report_path.read_bytes()
+    assert report
+    sealed_documents = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    report_path.unlink()
+
+    _seal_draft(scan_dir, tmp_path / "target")
+
+    assert report_path.read_bytes() == report
+    for name, content in sealed_documents.items():
+        assert (scan_dir / name).read_bytes() == content
+
+
 def test_completion_keeps_recoverable_prewrite_failures_resumable(
     tmp_path: Path,
 ) -> None:

@@ -1404,7 +1404,8 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         raise ContractError("coverage.scanId: must match manifest scan id")
     _require_str(coverage, "mode", "coverage")
     completeness = _require_str(coverage, "completeness", "coverage")
-    _require_str(coverage, "inventoryStrategy", "coverage")
+    if "inventoryStrategy" in coverage:
+        _require_str(coverage, "inventoryStrategy", "coverage")
     scope = _require_dict(scan, "scope", "manifest.scan")
     if coverage.get("includePaths") != scope.get("includePaths"):
         raise ContractError("coverage.includePaths: must match manifest scope")

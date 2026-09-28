@@ -11,6 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import {
+  loadContract,
+  type CoverageDocument as CanonicalCoverageDocument,
+} from "../src/index.js";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -1309,6 +1313,30 @@ describe("malformed scan artifact recovery", () => {
     expect(strict.status).not.toBe(0);
     expect(strict.stderr).toContain("stable lowercase semantic slug");
     expect((await completeScan(fixture)).findingCount).toBe(1);
+  });
+
+  test("completes and loads a scan without an inventory strategy", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "coverage.json");
+    const document = await readJson<CanonicalCoverageDocument>(path);
+    delete document.inventoryStrategy;
+    await writeJson(path, document);
+    await rm(join(fixture.scanDir, "report.md"));
+
+    const completed = await completeScan(fixture);
+    const contract = await loadContract(fixture.scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(1);
+    expect(completed.warnings).toEqual([]);
+    expect(contract.coverage).not.toHaveProperty("inventoryStrategy");
+    expect(contract.coverage.completeness).toBe(document.completeness);
+    expect(contract.findings.findings).toHaveLength(1);
+    expect(await readFile(join(fixture.scanDir, "report.md"), "utf8")).not.toBe(
+      "",
+    );
   });
 
   test("refuses to repair scan-wide coverage contract violations", async () => {
