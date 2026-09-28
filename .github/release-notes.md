@@ -20,6 +20,7 @@
 - create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
 - require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
 - bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
+- bump the codex group across 3 directories with 2 updates ([#1076](https://github.com/openai/codex-security/pull/1076))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
