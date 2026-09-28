@@ -259,7 +259,7 @@ describe("CodexSecurity policy API", () => {
     expect(preflight.targetPath).toBe(
       join(f.repository, "component", "SECURITY.md"),
     );
-    expect(preflight.model).toBe("gpt-5.6-sol");
+    expect(preflight.model).toBe("gpt-6-sol");
     expect(prepared).toBe(false);
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
@@ -1187,7 +1187,10 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("uses the shared runtime for three fresh, scoped, structured turns", async () => {
-    const f = await setup({ surface: "cli" });
+    const f = await setup({
+      surface: "cli",
+      config: { codexOverrides: { model: "gpt-5.6-sol" } },
+    });
     await writeFile(
       join(f.repository, "SECURITY.md"),
       "# Existing policy\nKeep the reporting channel.\n",
@@ -1539,7 +1542,9 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
-    const f = await setup();
+    const f = await setup({
+      config: { codexOverrides: { model: "gpt-5.6-sol" } },
+    });
     await expect(
       f.security.generatePolicy(f.repository, {
         outputDir: f.outputDir,

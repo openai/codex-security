@@ -528,7 +528,7 @@ scan:
   scope:
     paths: [src]
 codex:
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
@@ -838,7 +838,7 @@ configuration:
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
