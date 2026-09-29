@@ -1350,6 +1350,171 @@ test("sealed legacy results retain their saved accounting", async () => {
 });
 
 test.each([
+  "managed",
+  "native",
+  "wrong-claim",
+  "wrong-target",
+  "wrong-output",
+  "changed-artifact",
+] as const)(
+  "sealed publication reads without authentication or execution (%s)",
+  async (scenario) => {
+    const childCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 375,
+      output_tokens: 3,
+    })!;
+    const expectedCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1375,
+      output_tokens: 13,
+    })!;
+    const f = await interruptedScan("deep", false, {}, true, true, {
+      cost: childCost,
+    });
+    await appendFile(
+      f.sessionPath,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 1000, output_tokens: 10 },
+          },
+        },
+      }) + "\n",
+    );
+    await finishDiscovery(f);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const native = scenario !== "managed";
+    const owner = "synthetic-native-owner";
+    const claim = randomUUID();
+    if (native) {
+      const nativeHome = join(f.root, "native-home");
+      await rename(f.codexHome, nativeHome);
+      f.environment.CODEX_HOME = nativeHome;
+      execFileSync(f.python, [
+        "-c",
+        `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE scans SET deep_scan_owner_thread_id = ?, handoff_claim_token = ? WHERE id = ?", sys.argv[2:])
+`,
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        owner,
+        claim,
+        f.scanId,
+      ]);
+    }
+    let repository = f.repository;
+    let outputDir = f.scanDir;
+    if (scenario === "wrong-target") {
+      repository = join(f.root, "other-repository");
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "source.py"),
+        "# another synthetic source\n",
+      );
+    }
+    if (scenario === "wrong-output") {
+      outputDir = join(f.root, "other-output");
+      await mkdir(outputDir, { mode: 0o700 });
+      await cp(f.scanDir, outputDir, { recursive: true });
+    }
+    if (scenario === "changed-artifact")
+      await appendFile(join(f.scanDir, "findings.json"), "\n");
+    const artifactNames = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+      DEEP_SCAN_CHECKPOINT,
+    ];
+    const artifacts = await Promise.all(
+      artifactNames.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const commands: string[] = [];
+    let authentications = 0;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: f.environment,
+        ...(native
+          ? {
+              ambientExecution: {
+                command: { command: "synthetic-unused-codex" },
+                configuration: {},
+                environment: f.environment,
+                preserveProviderEnvironment: false,
+                pluginRoot: PLUGIN_ROOT,
+              },
+            }
+          : {}),
+        prepareRuntime: async () => {
+          throw new Error(
+            "Saved publication must not prepare a Codex runtime.",
+          );
+        },
+        createCodex: () => {
+          throw new Error("Saved publication must not create a model client.");
+        },
+        resolvePluginPython: async () => f.python,
+        runWorkbench: async (options, args, input) => {
+          commands.push(args[0]!);
+          return runWorkbench(options, args, input);
+        },
+      },
+    );
+    try {
+      const pending = client.run(repository, {
+        mode: "deep",
+        outputDir,
+        maxCostUsd: 1,
+        ...(native
+          ? {
+              registeredScan: {
+                scanId: f.scanId,
+                scanDir: outputDir,
+                threadId: owner,
+                handoffClaimToken:
+                  scenario === "wrong-claim" ? randomUUID() : claim,
+              },
+            }
+          : { resumeScanId: f.scanId }),
+        onAuthentication() {
+          authentications++;
+        },
+      });
+      if (scenario === "managed" || scenario === "native") {
+        const result = await pending;
+        expect(result.cost).toEqual(expectedCost);
+        expect(result.threadId).toBe(f.threadId);
+        expect(result.repositoryFindings).toEqual([]);
+        expect(commands).toContain("list-global-findings");
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(1);
+      } else {
+        await expect(pending).rejects.toThrow(
+          scenario === "wrong-claim"
+            ? "another continuation"
+            : scenario === "changed-artifact"
+              ? "Cannot resume sealed scan"
+              : "match its target, directory and mode",
+        );
+        expect(commands).not.toContain("complete-scan");
+      }
+      expect(authentications).toBe(0);
+      expect(commands).not.toContain("get-scan-feedback");
+      expect(
+        await Promise.all(
+          artifactNames.map((name) => readFile(join(f.scanDir, name))),
+        ),
+      ).toEqual(artifacts);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
   [null, false, false],
   [undefined, false, false],
   [null, true, false],

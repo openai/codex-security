@@ -435,11 +435,9 @@ export async function prepareAmbientExecution(
         );
     }
   }
-  const selectedEnvironment = {
-    ...(configuredProvider
-      ? environment
-      : selectedScanEnvironment(environment, auth, modelProvider)),
-  };
+  const selectedEnvironment = configuredProvider
+    ? environment
+    : selectedScanEnvironment(environment, auth, modelProvider);
   if (!configuredProvider && selectedEnvironment["CODEX_API_KEY"]?.trim())
     delete selectedEnvironment["OPENAI_API_KEY"];
 

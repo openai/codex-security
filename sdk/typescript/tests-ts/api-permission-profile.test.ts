@@ -80,7 +80,7 @@ async function fixture(
       'if (args.includes("app-server")) {',
       "  const selected = config.default_permissions;",
       "  const profile = config.permissions[selected];",
-      '  profile.description = "Synthetic description"; profile.network.fixtureNull = null;',
+      '  profile.description = "Synthetic description"; if (profile.network) profile.network.fixtureNull = null;',
       ...(scenario === "substituted-default"
         ? ['  config.default_permissions = ":read-only";']
         : []),
