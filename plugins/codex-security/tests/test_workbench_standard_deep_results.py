@@ -676,7 +676,7 @@ def test_unreadable_only_checkpoint_records_recovery_warning(tmp_path: Path) -> 
     assert any("Preserved unreadable checkpoint" in warning for warning in failed["warnings"])
 
 
-def test_malformed_current_finding_does_not_override_parent_rejection(tmp_path: Path) -> None:
+def test_malformed_current_finding_retains_parent_rejection_history(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
     contract_dir = tmp_path / "contract"
     contract_dir.mkdir()
@@ -688,18 +688,19 @@ def test_malformed_current_finding_does_not_override_parent_rejection(tmp_path: 
     checkpoint["findings"] = [copy.deepcopy(finding)]
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
     finding["summary"] = ""
-    current = checkpoint_draft(scan_id)
-    current["findings"] = [finding]
-    current["coverage"]["surfaces"] = [
+    coverage = json.loads((contract_dir / "coverage.json").read_text())
+    coverage["surfaces"] = [
         {
+            "id": "rejected-candidate",
             "label": "Rejected candidate",
             "candidateId": "rejected-candidate",
             "disposition": "rejected",
+            "receiptRefs": [],
             "notes": "The parent rejected this checkpointed candidate.",
         }
     ]
-    (scan_dir / "findings.json").write_text(json.dumps({"findings": current["findings"]}))
-    (scan_dir / "coverage.json").write_text(json.dumps(current["coverage"]))
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": [finding]}))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     (scan_dir / "scan-manifest.json").write_bytes(
         (contract_dir / "scan-manifest.json").read_bytes()
     )
@@ -709,10 +710,14 @@ def test_malformed_current_finding_does_not_override_parent_rejection(tmp_path: 
     )
     failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
 
+    assert failed["reportAvailable"] is True
+    assert failed["resultsRecoveryNeeded"] is False
     assert failed["findingCount"] == 0
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["surfaces"][0]["disposition"] == "rejected"
-    assert len(coverage["surfaces"][0]["previousFindings"]) == 1
+    # Ordinary publication preserves rejection history but flags malformed current evidence.
+    assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
+    assert coverage["surfaces"][0]["previousFindings"] == checkpoint["findings"]
+    assert any(item["id"] == "discarded-finding-1" for item in coverage["deferred"])
 
 
 def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:
