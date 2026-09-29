@@ -475,47 +475,63 @@ describe("one-shot scan events", () => {
     expect(result.turnResult.status).toBe("completed");
   });
 
-  test("lets the workbench seal artifacts before validating completed scans", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    const events = completedEvents();
-    let finalized = false;
+  test.each(["unchanged", "unknown"] as const)(
+    "lets the workbench seal artifacts with %s final usage",
+    async (finalUsage) => {
+      const root = await temporaryDirectory();
+      const scanDir = join(root, "scan");
+      let streamFinished = false;
+      const events = (async function* () {
+        yield* completedEvents();
+        streamFinished = true;
+      })();
+      let finalized = false;
 
-    const result = await runScanEvents({
-      thread: {
-        id: null,
-        async runStreamed() {
-          return { events };
+      const result = await runScanEvents({
+        thread: {
+          id: null,
+          async runStreamed() {
+            return { events };
+          },
         },
-      },
-      events,
-      signal: new AbortController().signal,
-      scanDir,
-      pluginRoot: PLUGIN_ROOT,
-      expectation: {
-        repository: "/repository",
-        repositoryRevision: "deadbeef",
-        target: { kind: "repository", paths: [] },
-        mode: "standard",
-        pluginVersion: "0.1.0",
-      },
-      onFinalize: async (usage) => {
-        expect(usage).toMatchObject({
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-        });
-        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
-        await copyCompletedScan(root);
-        finalized = true;
-      },
-    });
+        events,
+        signal: new AbortController().signal,
+        scanDir,
+        pluginRoot: PLUGIN_ROOT,
+        model: "gpt-5.6-sol",
+        expectation: {
+          repository: "/repository",
+          repositoryRevision: "deadbeef",
+          target: { kind: "repository", paths: [] },
+          mode: "standard",
+          pluginVersion: "0.1.0",
+        },
+        onFinalize: async (usage) => {
+          expect(streamFinished).toBe(true);
+          expect(usage).toMatchObject({
+            input_tokens: 10,
+            cached_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            output_tokens: 3,
+          });
+          expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
+          await copyCompletedScan(root);
+          finalized = true;
+          return finalUsage === "unknown" ? null : undefined;
+        },
+      });
 
-    expect(finalized).toBe(true);
-    expect(result.threadId).toBe("thread-1");
-    expect(result.turnResult.status).toBe("completed");
-  });
+      expect(finalized).toBe(true);
+      expect(result.threadId).toBe("thread-1");
+      expect(result.turnResult.status).toBe("completed");
+      if (finalUsage === "unknown") {
+        expect(result.turnResult.usage).toBeNull();
+        expect(result.cost).toBeNull();
+      } else {
+        expect(result.cost?.inputTokens).toBe(10);
+      }
+    },
+  );
 
   test("reports a scan as started only after the thread starts", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());

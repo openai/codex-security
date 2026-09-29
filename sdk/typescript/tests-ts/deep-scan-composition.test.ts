@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import * as timers from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { Codex } from "@openai/codex-sdk";
 import type { ScanOptions } from "../src/api.js";
 import {
   ScanCostLimitExceededError,
@@ -26,6 +27,7 @@ import {
   type ScanCost,
 } from "../src/cost.js";
 import { createScanCostReporter } from "../src/scan-monitoring.js";
+import { readCodexTurn } from "../src/scan-events.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
   runDeepScans,
@@ -102,6 +104,41 @@ function result(
     threadId: `thread-${scanId}`,
     turnResult: {},
   });
+}
+
+async function codexStreamError(item: string): Promise<Error> {
+  const thread = new Codex({
+    codexPathOverride: process.execPath,
+  }).startThread();
+  const executable = thread as unknown as {
+    _exec: { run(): AsyncGenerator<string> };
+  };
+  executable._exec.run = async function* () {
+    yield item;
+  };
+  try {
+    await readCodexTurn({
+      thread,
+      events: (await thread.runStreamed("Synthetic stream failure.")).events,
+    });
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw error;
+  }
+  throw new Error("The synthetic stream did not fail.");
+}
+
+async function diagnosticError(kind: string): Promise<Error> {
+  if (kind === "SDK parser") {
+    const error = await codexStreamError(
+      '{"type":"item.completed","item":{"type":"command_execution","command":"cat cyber_policy.py","output":"truncated',
+    );
+    expect(error.cause).toBeInstanceOf(SyntaxError);
+    return error;
+  }
+  return new Error(
+    "Could not save the Codex Security scan: findings.findings[0].severity.level: unsupported severity: cyber_policy",
+  );
 }
 
 interface SavedRecord {
@@ -644,6 +681,27 @@ describe("ordinary scan composition", () => {
     expect(h.published).toEqual([]);
   });
 
+  test.each(["SDK parser", "schema"])(
+    "retries a merge after a %s diagnostic containing policy-like data",
+    async (kind) => {
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      const failure = await diagnosticError(kind);
+      const merge = h.input.merge;
+      let attempts = 0;
+      h.input.merge = async (...args) => {
+        if (++attempts === 1) throw failure;
+        return merge(...args);
+      };
+
+      await runDeepScans(h.input);
+
+      expect(attempts).toBe(2);
+      expect(h.calls).toHaveLength(1);
+      expect((await h.checkpoint()).mergedScanIds).toHaveLength(1);
+      expect((await h.checkpoint()).mergeFailures).toBe(0);
+    },
+  );
+
   test("continues the already reserved final pass before applying the run cap", async () => {
     const h = await harness({ maxDiscoveryRuns: 1 });
     const id = randomUUID();
@@ -1102,6 +1160,8 @@ describe("ordinary scan composition", () => {
     "Transient scan interruption",
     "429: request flagged for possible cybersecurity risk.",
     "Rate-limited: request refused under safety policy.",
+    "Source fixture: Request blocked by cyberPolicy.",
+    'Codex Exec exited with code 1: "Request blocked by cyberPolicy."',
   ])(
     "retries the same ordinary scan after %s without counting another logical input",
     async (message) => {
@@ -1123,6 +1183,46 @@ describe("ordinary scan composition", () => {
       expect(state.noNewStreak).toBe(1);
       expect(state.mergedScanIds).toHaveLength(1);
       expect(h.mergeInputs).toEqual([1]);
+    },
+  );
+
+  test.each(["SDK parser", "schema"])(
+    "retries a child after a %s diagnostic without canceling its sibling",
+    async (kind) => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ workers: 2, maxDiscoveryRuns: 2 });
+      const failure = await diagnosticError(kind);
+      const siblingStarted = Promise.withResolvers<void>();
+      const retryObserved = Promise.withResolvers<void>();
+      h.input.onRetry = () => retryObserved.resolve();
+      let attempts = 0;
+      h.setRun(async (options) => {
+        if (options.outputDir!.endsWith("pass-1")) {
+          await siblingStarted.promise;
+          if (++attempts === 1) throw failure;
+        } else {
+          siblingStarted.resolve();
+          await abortable(() => retryObserved.promise, options.signal);
+          options.signal!.throwIfAborted();
+        }
+        return result(options.resumeScanId!, options.outputDir!);
+      });
+
+      await runDeepScans(h.input);
+
+      expect(attempts).toBe(2);
+      expect(h.calls).toHaveLength(3);
+      expect(
+        [...h.records.values()].map((record) => record.progress.status),
+      ).toEqual(["complete", "complete"]);
+      const state = await h.checkpoint();
+      expect(h.calls[2]!.resumeScanId).toBe(state.passes[0]!.scanId);
+      expect(state.passes).toHaveLength(2);
+      expect(state.mergedScanIds).toHaveLength(2);
+      expect(state.terminalReason).not.toBe("failed");
+      expect(state.terminalReason).not.toBe("canceled");
     },
   );
 
@@ -1678,6 +1778,8 @@ describe("ordinary scan composition", () => {
     "permission after registration",
     "This content was flagged for possible cybersecurity risk.",
     "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
     "Request blocked by cyberPolicy.",
     "Request blocked by a cybersecurity_policy_violation.",
     "Request blocked by a safety policy violation.",
@@ -1697,7 +1799,12 @@ describe("ordinary scan composition", () => {
             )
           : kind.startsWith("permission")
             ? new ScanPermissionError("Read-only permissions rejected.")
-            : new Error(kind);
+            : await codexStreamError(
+                JSON.stringify({
+                  type: "turn.failed",
+                  error: { message: kind },
+                }),
+              );
       let secondStarted!: () => void;
       const started = new Promise<void>((resolve) => {
         secondStarted = resolve;

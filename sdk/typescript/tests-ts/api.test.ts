@@ -7415,7 +7415,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     expect(scanSignal?.aborted).toBe(false);
   });
 
-  test.each(["failure", "completion"])(
+  test.each(["failure", "completion", "late-exit-failure"])(
     "closes a real Codex subprocess cleanly after a streamed terminal %s",
     async (terminal) => {
       const root = await temporaryDirectory();
@@ -7423,11 +7423,12 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       const codexHome = join(root, "codex-home");
       const scanDir = join(root, "scan");
       const preload = join(root, "fake-codex.mjs");
+      const exitMarker = join(root, "codex-exited");
       await mkdir(repository);
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
       const events: ThreadEvent[] = [];
-      if (terminal === "completion") {
+      if (terminal !== "failure") {
         await copyCompletedScan(root);
         for await (const event of completedEvents()) events.push(event);
       } else {
@@ -7439,17 +7440,25 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       await writeFile(
         preload,
         [
+          'import { writeFileSync } from "node:fs";',
+          "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
           ...events.map(
             (event) =>
               `process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)});`,
           ),
-          "setInterval(() => {}, 1_000);",
-          "await new Promise(() => {});",
+          ...(terminal === "failure"
+            ? ["setInterval(() => {}, 1_000);", "await new Promise(() => {});"]
+            : [
+                `process.on("exit", () => writeFileSync(${JSON.stringify(exitMarker)}, "finished"));`,
+                "await new Promise((resolve) => process.stdout.write('', resolve));",
+                `process.exit(${terminal === "completion" ? 0 : 1});`,
+              ]),
         ].join("\n"),
       );
       const nodeExecutable = execFileSync("node", ["-p", "process.execPath"], {
         encoding: "utf8",
       }).trim();
+      let publicationStarted = false;
       const client = new TestClient(
         {},
         {
@@ -7461,6 +7470,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options, args, input) => {
+            if (args[0] === "prepare-scan-completion") {
+              expect(await readFile(exitMarker, "utf8")).toBe("finished");
+              publicationStarted = true;
+            }
+            return mockWorkbench(args, input);
+          },
           createCodex: (options: CodexOptions) =>
             new Codex({
               ...options,
@@ -7482,7 +7498,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             threadId: "thread-1",
             turnResult: { status: "completed", finalResponse: "scan complete" },
           });
-        else await expect(scan).rejects.toThrow("401 invalid API key");
+        else
+          await expect(scan).rejects.toThrow(
+            terminal === "failure"
+              ? "401 invalid API key"
+              : "Codex Exec exited with code 1",
+          );
+        expect(publicationStarted).toBe(terminal === "completion");
       } finally {
         clearTimeout(timeout);
         await expect(client.close()).resolves.toBeUndefined();

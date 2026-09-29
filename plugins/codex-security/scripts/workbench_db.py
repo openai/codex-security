@@ -2571,9 +2571,13 @@ def scan_context(
     scan = require_scan(connection, scan_id)
     composition = load_composition(connection, scan)
     result = scan_result(connection, scan, occurrence_id=occurrence_id, composition=composition)
-    workspace_result = (
-        result if occurrence_id is None else scan_result(connection, scan, composition=composition)
-    )
+    workspace_result = result
+    if len(result["findings"]) > FINDINGS_RESULT_LIMIT:
+        workspace_result = {
+            **result,
+            "findings": result["findings"][:FINDINGS_RESULT_LIMIT],
+            "findingsTruncated": result["findingCount"] > FINDINGS_RESULT_LIMIT,
+        }
     workspace = workspace_state(
         connection,
         scan["workspace_id"],

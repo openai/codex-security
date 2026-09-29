@@ -577,17 +577,16 @@ export async function runDeepScans(
 
 function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  if (
-    /\b(?:429|rate[ _-]*limit(?:ed|ing)?|too many requests)\b/iu.test(message)
-  )
-    return false;
+  // SDK diagnostics can include repository text; match complete runtime refusals.
   return [
-    /\bflagged for possible cybersecurity risk\b/iu,
-    /\bflagged for potentially high-risk cyber activity\b/iu,
-    /\bcyber[_\s-]?policy\b/iu,
-    /\b(?:cybersecurity|cyber)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-    /\b(?:content|safety)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-    /\b(?:refusal|refused)\b[^\n]*\b(?:cybersecurity|cyber|safety policy)\b/iu,
-    /\b(?:cybersecurity|cyber|safety policy)\b[^\n]*\b(?:refusal|refused)\b/iu,
-  ].some((pattern) => pattern.test(message));
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
+    "Request blocked by a cybersecurity_policy_violation.",
+    "Request refused under cybersecurity policy.",
+    "Cybersecurity policy has refused the request.",
+  ].includes(message);
 }

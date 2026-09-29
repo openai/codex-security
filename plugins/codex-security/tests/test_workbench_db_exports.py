@@ -844,7 +844,10 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     assert row["remediation"] == "' \t＋1+1"
 
 
-def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finding_count", [20, 21, 75])
+def test_completed_findings_are_returned_in_bounded_pages(
+    tmp_path: Path, finding_count: int
+) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
@@ -868,12 +871,12 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
             "identity": {"anchor": f"archive-entry-write-without-containment-{index:03d}"},
             "title": f"Unsafe archive extraction finding {index:03d}",
         }
-        for index in range(75)
+        for index in range(finding_count)
     ]
     findings_path.write_text(json.dumps(document))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
-    assert completed["findingCount"] == 75
-    assert completed["findingsTruncated"] is True
+    assert completed["findingCount"] == finding_count
+    assert completed["findingsTruncated"] is (finding_count > 20)
     assert len(completed["findings"]) == 20
     embedded_occurrence_ids = {finding["occurrenceId"] for finding in completed["findings"]}
     second_page = run_workbench(
@@ -887,19 +890,45 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
         "50",
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
-    assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert second_page["nextOffset"] == (40 if finding_count > 40 else None)
+    assert second_page["total"] == finding_count
+    assert len(second_page["findings"]) == min(finding_count - 20, 20)
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
-    off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
-    selected = run_workbench(
-        state_dir, "get-scan", "--scan-id", scan_id, "--occurrence-id", off_prefix_occurrence_id
-    )["scan"]
-    assert any(
-        finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
+    context = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    assert context["workspace"]["results"] == context["scan"] == completed
+    on_page_occurrence_id = completed["findings"][0]["occurrenceId"]
+    assert (
+        run_workbench(
+            state_dir, "get-scan", "--scan-id", scan_id, "--occurrence-id", on_page_occurrence_id
+        )
+        == context
     )
+    if second_page["findings"]:
+        off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
+        selected = run_workbench(
+            state_dir, "get-scan", "--scan-id", scan_id, "--occurrence-id", off_prefix_occurrence_id
+        )
+        assert selected["workspace"] == context["workspace"]
+        assert selected["scan"]["findings"][:-1] == completed["findings"]
+        assert selected["scan"]["findings"][-1]["occurrenceId"] == off_prefix_occurrence_id
+        assert selected["scan"]["findingsTruncated"] is (finding_count > 21)
+
+    other = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    rejected = run_workbench(
+        state_dir,
+        "get-scan",
+        "--scan-id",
+        other["scanId"],
+        "--occurrence-id",
+        on_page_occurrence_id,
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "does not belong to the selected scan" in rejected["stderr"]
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
