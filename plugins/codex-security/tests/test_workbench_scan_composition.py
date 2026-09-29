@@ -566,6 +566,16 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
     scan = started["scan"]
     directory = Path(scan["scanDir"])
     token = scan["handoffClaimToken"]
+    run_workbench(
+        state,
+        "set-scan-thread",
+        "--scan-id",
+        scan["scanId"],
+        "--thread-id",
+        "saved-execution",
+        "--claim-token",
+        token,
+    )
     if artifact_state != "unsealed":
         run_workbench(
             state, "prepare-scan-completion", "--scan-id", scan["scanId"], "--claim-token", token
@@ -619,9 +629,16 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
     )
     if artifact_state == "sealed":
         assert rebound["scanId"] == scan["scanId"]
+        assert rebound["threadId"] == "saved-execution"
         resumed = run_workbench(
             state, "get-cli-scan-resume", "--scan-id", scan["scanId"], "--claim-token", token
         )
+        assert resumed["threadId"] == "saved-execution"
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()[1:]
+                == original_identity[1:]
+            )
         assert (
             resumed["sealedProducerVersion"]
             == json.loads(originals["scan-manifest.json"])["scan"]["producer"]["version"]

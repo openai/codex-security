@@ -1509,16 +1509,14 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Cannot resume: the original checkout revision or contents changed."
                 )
-            if (
-                scan_history.sealed_scan_producer_version(
-                    scan,
-                    scan_dir,
-                    artifact_path=artifact_path,
-                    read_json_object=read_json_object,
-                    workbench_completion_binding=workbench_completion_binding,
-                )
-                is None
-            ):
+            sealed_version = scan_history.sealed_scan_producer_version(
+                scan,
+                scan_dir,
+                artifact_path=artifact_path,
+                read_json_object=read_json_object,
+                workbench_completion_binding=workbench_completion_binding,
+            )
+            if sealed_version is None:
                 scan_history.require_current_deep_runtime(connection, scan)
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
@@ -1528,9 +1526,14 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
                 connection.execute(
-                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = NULL, "
+                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = ?, "
                     "updated_at = ? WHERE id = ?",
-                    (json.dumps(recipe, allow_nan=False), now(), scan_id),
+                    (
+                        json.dumps(recipe, allow_nan=False),
+                        scan["continuation_thread_id"] if sealed_version is not None else None,
+                        now(),
+                        scan_id,
+                    ),
                 )
             scan = require_scan(connection, scan_id)
         return scan_history.scan_registration(connection, scan, scan_contract)

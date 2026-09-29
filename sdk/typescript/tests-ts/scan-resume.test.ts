@@ -1516,6 +1516,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
 
 test.each([
   [null, false, false],
+  ["native-unbound", false, false],
   [undefined, false, false],
   [null, true, false],
   [null, true, true],
@@ -1570,6 +1571,21 @@ with sqlite3.connect(sys.argv[1]) as connection:
         JSON.stringify(cost),
       ]);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    if (checkpoint === "native-unbound") {
+      execFileSync(f.python, [
+        "-c",
+        `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        "UPDATE scans SET recipe_json = NULL, deep_scan_owner_thread_id = ? WHERE id = ?",
+        (sys.argv[3], sys.argv[2]),
+    )
+`,
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        f.scanId,
+        f.threadId,
+      ]);
+    }
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
@@ -1670,7 +1686,15 @@ with sqlite3.connect(sys.argv[1]) as connection:
       const pending = client.run(f.repository, {
         mode: "deep",
         outputDir: f.scanDir,
-        resumeScanId: f.scanId,
+        ...(checkpoint === "native-unbound"
+          ? {
+              registeredScan: {
+                scanId: f.scanId,
+                scanDir: f.scanDir,
+                threadId: f.threadId,
+              },
+            }
+          : { resumeScanId: f.scanId }),
         ...f.recipe.deepScan,
         ...(requiredCost ? { maxCostUsd: 1 } : {}),
         onWarning: (warning) => warnings.push(warning),
