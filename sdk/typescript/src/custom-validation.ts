@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
-import { requireScanFile } from "./contract.js";
+import { normalizePersistedFindings, requireScanFile } from "./contract.js";
 import { IncompleteScanError, safeErrorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
@@ -226,7 +226,9 @@ export async function runCustomValidation(options: {
       "The scan did not return an unsealed custom-validation draft.",
     );
   }
-  const findings = findingsDocument.findings;
+  const { findings } = normalizePersistedFindings(
+    findingsDocument,
+  ) as typeof findingsDocument;
   const [common, candidatesSchema, draft, coverageSchema] = await Promise.all([
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),
@@ -239,25 +241,27 @@ export async function runCustomValidation(options: {
   const validFinding = ajv.compile({ $ref: `${draft.$id}#/$defs/finding` });
   if (!ajv.validate(coverageSchema, coverage))
     throw new IncompleteScanError(
-      "Custom validation requires valid provisional coverage.",
+      `Custom validation requires valid provisional coverage: ${ajv.errorsText(ajv.errors, { dataVar: "coverage" })}`,
     );
   const surfaceIds = new Set(coverage.surfaces.map((surface) => surface.id));
   if (surfaceIds.size !== coverage.surfaces.length)
     throw new IncompleteScanError(
       "Provisional coverage contains duplicate surface IDs.",
     );
-  if (
-    !Array.isArray(findings) ||
-    findings.some((finding) => {
-      const semantic = { ...finding };
-      for (const key of ["findingId", "occurrenceId", "fingerprints"])
-        delete semantic[key];
-      return !validFinding(semantic);
-    })
-  ) {
+  if (!Array.isArray(findings)) {
     throw new IncompleteScanError(
-      "Custom validation requires a valid provisional finding set.",
+      "Custom validation requires a valid provisional finding set: findings must be an array.",
     );
+  }
+  for (const [index, finding] of findings.entries()) {
+    const semantic = { ...finding };
+    for (const key of ["findingId", "occurrenceId", "fingerprints"])
+      delete semantic[key];
+    if (!validFinding(semantic)) {
+      throw new IncompleteScanError(
+        `Custom validation requires a valid provisional finding set: ${ajv.errorsText(validFinding.errors, { dataVar: `findings[${index}]` })}`,
+      );
+    }
   }
   const candidates = findings.map((finding, index) => {
     const ids = finding.extensions?.["customValidationSurfaceIds"];
