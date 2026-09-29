@@ -753,12 +753,15 @@ async function gitOutput(
   return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
-async function gitMarkerRoot(
+export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let current = repository;
+  const canonical = await abortable(() => realpath(repository), signal);
+  let current = (await lstat(canonical)).isDirectory()
+    ? canonical
+    : dirname(canonical);
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);

@@ -1119,6 +1119,10 @@ async function testWorkerRuntimeSettings() {
   const saved = Object.fromEntries(
     [
       "PYTHON",
+      "PATH",
+      "CODEX_SECURITY_GIT",
+      "GIT_SSH_COMMAND",
+      "GIT_CONFIG_GLOBAL",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1140,6 +1144,13 @@ async function testWorkerRuntimeSettings() {
         "python",
       );
       process.env.PYTHON = python;
+      const gitEnvironment = {
+        PATH: path.join(fixture.root, "selected tools"),
+        CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
+        GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+        GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
+      };
+      Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active scan config.toml");
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(configPath, configuration);
@@ -1161,7 +1172,7 @@ async function testWorkerRuntimeSettings() {
         );
       syncBuiltinESMExports();
       const executor = new CodexSdkWorkerExecutor({
-        model: "fixture-model",
+        model: "gpt-6-sol",
         reasoningEffort: "xhigh",
         parentSandbox: trustedParentSandboxWithDenials,
         artifactContext: {
@@ -1214,7 +1225,16 @@ async function testWorkerRuntimeSettings() {
             invocation.argv.includes('model_reasoning_effort="xhigh"'),
             true,
           );
+          assertFlagPair(invocation.argv, "--model", "gpt-6-sol");
           assert.equal(invocation.configPath, configPath);
+          const preflight = JSON.parse(
+            await readFile(fixture.preflightMarkerPath, "utf8"),
+          );
+          assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
+          assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+          for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.equal(process.env[name], value);
+          }
           assert.equal(invocation.python, python);
           assert.equal(
             invocation.argv.includes(
@@ -2138,7 +2158,7 @@ async function fakeCodexFixture(
       `const accountResult = ${JSON.stringify(accountResult)};`,
       `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
-      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, requests: [] };",
+      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
       "  let buffer = '';",
       "  process.stdin.setEncoding('utf8');",
@@ -2180,7 +2200,7 @@ async function fakeCodexFixture(
       "for await (const chunk of process.stdin) stdin += chunk;",
       "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
       "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
       "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

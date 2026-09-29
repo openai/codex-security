@@ -1162,11 +1162,14 @@ def _populate_unsealed_manifest_envelope(
     scan["completedAt"] = completion_binding["completedAt"]
     scan["producer"] = copy.deepcopy(completion_binding["producer"])
 
-    target = scan.get("target")
+    target = scan.setdefault("target", {})
     if isinstance(target, dict):
+        allowed_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_kinds) == 1:
+            target.setdefault("kind", allowed_kinds[0])
         _populate_unsealed_target_binding(target, completion_binding["target"])
 
-    scope = scan.get("scope")
+    scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 

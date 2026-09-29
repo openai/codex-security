@@ -408,6 +408,11 @@ function resumeClient(
       environment: f.environment,
       prepareRuntime: async () => {
         const runtime = preparedRuntime(f.codexHome);
+        runtime.environment = Object.fromEntries(
+          Object.entries(f.environment).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        );
         runtime.plugin.version = JSON.parse(
           await readFile(
             join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),

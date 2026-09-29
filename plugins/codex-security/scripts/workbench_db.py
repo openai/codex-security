@@ -60,7 +60,7 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.storage import resolve_scan_root, state_dir
+from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -170,7 +170,7 @@ def database_path() -> Path:
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
     lock_dir = state_dir() / "completion-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
     descriptor = os.open(
         lock_path,
@@ -233,7 +233,7 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect() -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    create_private_directory(path.parent)
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         connection = sqlite3.connect(path, timeout=5)
         try:
@@ -856,7 +856,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             metadata=target_metadata,
         )
         target_root = scan_target_root(args.scan_root, target)
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
@@ -1024,7 +1024,7 @@ def _start_prompt_driven_scan(
                 **scan_context(connection, existing["id"]),
                 "startDisposition": "joined",
             }
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()

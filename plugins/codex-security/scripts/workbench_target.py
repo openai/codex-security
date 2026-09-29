@@ -145,6 +145,74 @@ def _read_sized_nul_field(
     return output[offset:end], end + 1
 
 
+def _protected_repository_root(target: Path) -> Path:
+    root = target.resolve()
+    if root.is_file():
+        root = root.parent
+    protected = root
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        protected = ancestor
+    return protected
+
+
+def trusted_git_executable(protected_root: Path) -> str | None:
+    """Validate host-selected Git, or discover Git for a direct plugin invocation."""
+    configured = os.environ.get("CODEX_SECURITY_GIT")
+    windows = sys.platform == "win32"
+    if configured is None:
+        names = ("git.exe", "git.com") if windows else ("git",)
+        candidates = (
+            Path(entry.strip('"') if windows else entry) / name
+            for entry in os.get_exec_path()
+            for name in names
+        )
+    elif not configured:
+        return None
+    else:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+        candidates = iter((candidate,))
+
+    try:
+        repository = _protected_repository_root(protected_root)
+    except (OSError, RuntimeError):
+        return None
+
+    for candidate in candidates:
+        try:
+            lexical = Path(os.path.abspath(candidate))
+            invocation = candidate.parent.resolve(strict=True) / candidate.name
+            canonical = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if (
+            not canonical.is_file()
+            or not os.access(canonical, os.F_OK if windows else os.X_OK)
+            or (
+                windows
+                and (
+                    candidate.suffix.lower() not in {".exe", ".com"}
+                    or canonical.suffix.lower() in {".bat", ".cmd"}
+                )
+            )
+        ):
+            continue
+        if any(
+            path == repository or repository in path.parents
+            for path in (lexical, invocation, canonical)
+        ):
+            if configured is not None:
+                raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
+            continue
+        return str(invocation)
+    return None
+
+
 def git_command(
     target: Path,
     *args: str,
@@ -160,9 +228,10 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
-        "git",
+        executable or "git",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -173,6 +242,9 @@ def git_command(
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
+    if executable is None:
+        empty_output = "" if text else b""
+        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
     try:
         output_options = (
             {"capture_output": True}

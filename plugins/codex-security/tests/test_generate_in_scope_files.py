@@ -175,7 +175,10 @@ def test_inventory_rejects_line_breaks_before_serializing_paths(
     assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
 
 
-def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
+def test_diff_inventory_includes_power_shell_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     repository = tmp_path / "repository"
     repository.mkdir()
     subprocess.run(

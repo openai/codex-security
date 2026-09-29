@@ -308,6 +308,94 @@ def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) 
             assert "requiredSnapshotDigest" not in target_contract
 
 
+@pytest.mark.parametrize("target_kind", ["directory_snapshot", "git_revision", "git_worktree"])
+@pytest.mark.parametrize("omit_target", [True, False])
+def test_cli_scan_completes_when_draft_omits_registered_target(
+    tmp_path: Path, target_kind: str, omit_target: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    if target_kind == "directory_snapshot":
+        repository.mkdir()
+    else:
+        initialize_git_repository(repository)
+        if target_kind == "git_worktree":
+            (repository / "README.md").write_text("Changed source\n")
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(state_dir, repository, scan_dir)
+    scan_id = registered["scanId"]
+    registered_target = registered["contract"]["target"]
+    write_completed_contract(scan_dir, scan_id, repository)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["target"]
+    if not omit_target:
+        draft["scan"]["target"] = {}
+    manifest_path.write_text(json.dumps(draft))
+    (scan_dir / "report.md").unlink()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert completed["scan"]["reportAvailable"] is True
+    manifest = json.loads(manifest_path.read_text())
+    target = manifest["scan"]["target"]
+    assert target["kind"] == target_kind
+    assert target["targetId"] == registered_target["targetId"]
+    assert target["displayName"] == registered_target["displayName"]
+    if target_kind == "git_revision":
+        assert "snapshotDigest" not in target
+    else:
+        assert target["snapshotDigest"] == registered_target["requiredSnapshotDigest"]
+    if target_kind != "directory_snapshot":
+        assert target["revision"] == registered["targetRevision"]
+    assert manifest["scan"]["sealedAt"]
+    assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("omit_scope", [True, False])
+def test_cli_scan_completes_when_draft_omits_registered_scope(
+    tmp_path: Path, omit_scope: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for path in ("src", "tests"):
+        (repository / path).mkdir()
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(
+        state_dir,
+        repository,
+        scan_dir,
+        scan_target={"kind": "paths", "paths": ["src", "tests"]},
+    )
+    scan_id = registered["scanId"]
+    write_completed_contract(scan_dir, scan_id, repository)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["scope"]
+    if not omit_scope:
+        draft["scan"]["scope"] = {}
+    manifest_path.write_text(json.dumps(draft))
+    (scan_dir / "report.md").unlink()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert completed["scan"]["reportAvailable"] is True
+    manifest = json.loads(manifest_path.read_text())
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    expected_scope = {"includePaths": ["src", "tests"], "excludePaths": []}
+    assert manifest["scan"]["scope"] == expected_scope
+    assert coverage["includePaths"] == expected_scope["includePaths"]
+    assert coverage["excludePaths"] == expected_scope["excludePaths"]
+    assert coverage["mode"] == "scoped_path"
+    assert manifest["scan"]["sealedAt"]
+    assert (scan_dir / "report.md").is_file()
+
+
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -510,7 +598,10 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         assert coverage["mode"] == expected
 
 
-def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) -> None:
+@pytest.mark.parametrize("omit_metadata", [True, False])
+def test_completion_populates_workbench_owned_unsealed_envelope(
+    tmp_path: Path, omit_metadata: bool
+) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
@@ -562,6 +653,26 @@ def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) 
     coverage["mode"] = "scoped_path"
     coverage["includePaths"] = ["wrong/"]
     coverage["excludePaths"] = ["wrong/"]
+    if omit_metadata:
+        for document in (manifest, findings, coverage):
+            for field in ("documentType", "schemaVersion", "scanId"):
+                document.pop(field, None)
+        for field in (
+            "id",
+            "producer",
+            "status",
+            "startedAt",
+            "completedAt",
+            "target",
+            "scope",
+            "coverageRef",
+            "findingsRef",
+        ):
+            del manifest["scan"][field]
+        for field in ("findingId", "occurrenceId", "fingerprints"):
+            del findings["findings"][0][field]
+        for field in ("mode", "includePaths", "excludePaths"):
+            del coverage[field]
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
