@@ -52,10 +52,10 @@ version-update cooldown.
 Updates still require review and passing CI; nothing is merged automatically.
 
 Keep `@openai/codex` and `@openai/codex-sdk` on the same exact version across the
-TypeScript SDK, MCP app, and triage evals. Dependabot groups their updates across
-all three projects, and the SDK tests reject mismatched pins or multiple locked
-SDK versions. The evals override Promptfoo's transitive Codex SDK to the direct
-SDK dependency so it follows the same update.
+TypeScript SDK, MCP app, and triage evals in `evals/triage-finding`. Dependabot
+groups their updates across all three projects, and the SDK tests reject
+mismatched pins or multiple locked SDK versions. The evals override Promptfoo's
+transitive Codex SDK to the direct SDK dependency so it follows the same update.
 
 Each pnpm project applies the same seven-day age policy to newly resolved
 dependencies, including transitive packages, with `openai` and `@openai/*` exempt.

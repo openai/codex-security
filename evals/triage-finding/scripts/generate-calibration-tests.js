@@ -7,7 +7,7 @@ const path = require("node:path");
 const DEFAULT_DATASET = path.join(__dirname, "..", "datasets", "triage-calibration-seed.json");
 const DEFAULT_OUTPUT = path.join(__dirname, "..", "tests", "calibration-oss.yaml");
 const DEFAULT_REPO_ROOT =
-  "plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos";
+  "evals/triage-finding/artifacts/calibration-repos";
 
 function parseArgs(argv) {
   const args = {

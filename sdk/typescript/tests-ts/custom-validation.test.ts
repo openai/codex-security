@@ -89,6 +89,55 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   return findings;
 }
 
+async function publishDraft(
+  scanDir: string,
+  scanId: string,
+  workbench: (args: readonly string[]) => Promise<Record<string, unknown>>,
+) {
+  const manifest = await json<ScanManifest>(
+    join(scanDir, "scan-manifest.json"),
+  );
+  const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
+  const coverage = await json<CoverageDocument>(join(scanDir, "coverage.json"));
+  const staged = {
+    manifest: {
+      scan: {
+        target: manifest.scan.target,
+        scope: manifest.scan.scope,
+      },
+    },
+    findings: {
+      findings: findings.findings.map(
+        ({
+          findingId: _id,
+          occurrenceId: _occurrence,
+          fingerprints: _fingerprints,
+          ...finding
+        }) => finding,
+      ),
+    },
+    coverage: {
+      completeness: coverage.completeness,
+      inventoryStrategy: coverage.inventoryStrategy,
+      surfaces: coverage.surfaces,
+      explicitExclusions: coverage.explicitExclusions,
+      deferred: coverage.deferred,
+    },
+  };
+  await mkdir(join(scanDir, "drafts"), { recursive: true });
+  const draftPath = join(scanDir, "drafts", `${scanId}.json`);
+  await save(draftPath, staged);
+  expect(
+    await workbench([
+      "write-scan-draft",
+      "--scan-id",
+      scanId,
+      "--draft-path",
+      draftPath,
+    ]),
+  ).toMatchObject({ scanId, status: "draft_written" });
+}
+
 function result(
   ...dispositions: CustomValidationResult["validations"][number]["validation"]["disposition"][]
 ): CustomValidationResult {
@@ -246,12 +295,26 @@ describe("custom validation", () => {
     });
   });
 
-  test("rejects a prematurely sealed discovery draft", async () => {
+  test.each([
+    "sealedAt",
+    "artifacts",
+    "manifest ID",
+    "findings ID",
+    "coverage ID",
+  ])("rejects an invalid discovery handoff: %s", async (kind) => {
     const f = await fixture();
     const manifest = await json<ScanManifest>(
       join(f.scanDir, "scan-manifest.json"),
     );
-    manifest.scan.sealedAt = "2026-01-01T00:00:00Z";
+    if (kind === "sealedAt") manifest.scan.sealedAt = "2026-01-01T00:00:00Z";
+    if (kind === "artifacts") manifest.scan.artifacts = [];
+    if (kind === "manifest ID") manifest.scan.id = randomUUID();
+    if (kind === "findings ID" || kind === "coverage ID") {
+      const name = kind === "findings ID" ? "findings.json" : "coverage.json";
+      const document = await json<{ scanId: string }>(join(f.scanDir, name));
+      document.scanId = randomUUID();
+      await save(join(f.scanDir, name), document);
+    }
     await save(join(f.scanDir, "scan-manifest.json"), manifest);
     await expect(
       runCustomValidation({
@@ -261,6 +324,101 @@ describe("custom validation", () => {
         },
       }),
     ).rejects.toThrow("unsealed custom-validation draft");
+  });
+
+  test("validates persisted findings with empty optional dataflow details", async () => {
+    const f = await fixture(3);
+    for (const [index, finding] of f.findings.findings.entries()) {
+      finding.attackPath = {
+        dataflow: {
+          source: "Synthetic request input",
+          sink: index < 2 ? "" : "Synthetic output operation",
+        },
+      };
+    }
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    let called = false;
+    await runCustomValidation({
+      ...f,
+      run: async () => {
+        called = true;
+        const candidates = await json<{
+          candidates: Array<{ finding: unknown }>;
+        }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
+        expect(candidates.candidates).toHaveLength(3);
+        expect(candidates.candidates[0]!.finding).toHaveProperty(
+          "attackPath.dataflow",
+          { source: "Synthetic request input" },
+        );
+        return JSON.stringify(result("reportable", "reportable", "reportable"));
+      },
+    });
+    expect(called).toBe(true);
+    const saved = await json<FindingsDocument>(
+      join(f.scanDir, "findings.json"),
+    );
+    expect(saved.findings).toHaveLength(3);
+    for (const [index, finding] of saved.findings.entries()) {
+      expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
+      expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
+      expect(finding.attackPath).toEqual({
+        dataflow: {
+          source: "Synthetic request input",
+          ...(index < 2 ? {} : { sink: "Synthetic output operation" }),
+        },
+      });
+    }
+  });
+
+  test("retains original optional details when custom validation fails", async () => {
+    const f = await fixture();
+    f.findings.findings[0]!.attackPath = { dataflow: { sink: "" } };
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    await expect(
+      runCustomValidation({
+        ...f,
+        run: async () => {
+          throw new Error("Synthetic validation failure");
+        },
+      }),
+    ).rejects.toThrow("Synthetic validation failure");
+    expect(
+      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+    ).toEqual(f.findings);
+  });
+
+  test("identifies an invalid provisional finding and field before validation", async () => {
+    const f = await fixture(2);
+    f.findings.findings[1]!.title = "";
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    await expect(
+      runCustomValidation({
+        ...f,
+        run: async () => {
+          throw new Error("unexpected validation");
+        },
+      }),
+    ).rejects.toThrow(/findings\[1\].*title/);
+    expect(
+      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+    ).toEqual(f.findings);
+  });
+
+  test("identifies invalid provisional coverage before validation", async () => {
+    const f = await fixture();
+    const path = join(f.scanDir, "coverage.json");
+    const coverage = await json<CoverageDocument>(path);
+    coverage.surfaces[0]!.label = "";
+    await save(path, coverage);
+    await expect(
+      runCustomValidation({
+        ...f,
+        run: async () => {
+          throw new Error("unexpected validation");
+        },
+      }),
+    ).rejects.toThrow("coverage/surfaces/0/label");
+    expect(await json<CoverageDocument>(path)).toEqual(coverage);
   });
 
   test.each([
@@ -419,11 +577,23 @@ describe("custom validation", () => {
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
                       await draft(scanDir, scanId, count, diff);
+                      await publishDraft(scanDir, scanId, workbench);
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
                       return { events: completedEvents() };
                     }
                     expect(prompt).toContain(workflow);
+                    const pendingManifest = await json<ScanManifest>(
+                      join(scanDir, "scan-manifest.json"),
+                    );
+                    expect(pendingManifest.scan.id).toBe(scanId);
+                    expect(pendingManifest.scan.scope.validationMode).toBe(
+                      "custom_pending",
+                    );
+                    expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
+                    expect(pendingManifest.scan).not.toHaveProperty(
+                      "artifacts",
+                    );
                     expect(turnOptions.outputSchema).toBeDefined();
                     if (scenario === "dismissed") {
                       expect(prompt).toContain("untrusted reviewer feedback");

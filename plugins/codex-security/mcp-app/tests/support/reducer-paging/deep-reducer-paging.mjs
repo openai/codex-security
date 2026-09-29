@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex } from "@openai/codex-sdk";
@@ -10,7 +10,7 @@ import {
   gradeReducerPagingResult,
 } from "./deep-reducer-paging-fixture.mjs";
 
-const evalDirectory = path.dirname(fileURLToPath(import.meta.url));
+const supportDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 /** Run one reducer through real code-mode IPC and the production artifact tools. */
 export async function runReducerPagingEval({
@@ -31,7 +31,9 @@ export async function runReducerPagingEval({
   );
   await Promise.all([
     build({
-      entryPoints: [path.join(evalDirectory, "deep-reducer-paging-server.mjs")],
+      entryPoints: [
+        path.join(supportDirectory, "deep-reducer-paging-server.mjs"),
+      ],
       outfile: serverPath,
       bundle: true,
       platform: "node",
@@ -39,7 +41,9 @@ export async function runReducerPagingEval({
       loader: { ".md": "text" },
     }),
     build({
-      entryPoints: [path.join(evalDirectory, "../src/deep-scan/templates.ts")],
+      entryPoints: [
+        path.join(supportDirectory, "../../../src/deep-scan/templates.ts"),
+      ],
       outfile: promptModulePath,
       bundle: true,
       platform: "node",
@@ -253,16 +257,3 @@ const result = await tools.mcp__cs_artifacts__record_codex_security_deep_reducti
 if (result.isError) throw new Error(result.content[0].text);
 text({reductionRecorded: true});
 `;
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const reports = path.join(evalDirectory, "../reports");
-  await mkdir(reports, { recursive: true });
-  const root = await mkdtemp(path.join(reports, "deep-reducer-paging-"));
-  console.log(`Eval artifacts: ${root}`);
-  const report = await runReducerPagingEval({
-    root,
-    mode: process.argv[2] ?? "deterministic",
-    model: process.argv[3],
-  });
-  console.log(JSON.stringify(report, null, 2));
-}

@@ -7,8 +7,8 @@ const os = require("node:os");
 const path = require("node:path");
 
 const EVAL_ROOT = path.resolve(__dirname, "..", "..");
-const TRIAGE_SKILL_ROOT = path.resolve(EVAL_ROOT, "..");
-const PLUGIN_ROOT = path.resolve(TRIAGE_SKILL_ROOT, "..", "..");
+const PLUGIN_ROOT = path.resolve(EVAL_ROOT, "..", "..", "plugins", "codex-security");
+const TRIAGE_SKILL_ROOT = path.join(PLUGIN_ROOT, "skills", "triage-finding");
 const DEFAULT_TARGET_ROOT = path.join(EVAL_ROOT, "artifacts", "sastbench-targets");
 const DEFAULT_GIT_CACHE_ROOT = path.join(EVAL_ROOT, "artifacts", "sastbench-git-cache");
 const PROMPTFOO_BIN = path.join(EVAL_ROOT, "node_modules", ".bin", "promptfoo");

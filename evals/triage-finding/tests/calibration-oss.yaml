@@ -8,7 +8,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-73vx-49mv-v8w5-000-vulnerable
     expected_source_types: cve
@@ -43,7 +43,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-mantisbt-ghsa-73vx-49mv-v8w5/fixed
     source_type_under_test: cve
     expected_ids: GHSA-73vx-49mv-v8w5-000-fixed
     expected_source_types: cve
@@ -78,7 +78,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-qpgx-jfcq-r59f-000-vulnerable
     expected_source_types: cve
@@ -113,7 +113,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-imagemagick-ghsa-qpgx-jfcq-r59f-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-imagemagick-ghsa-qpgx-jfcq-r59f/fixed
     source_type_under_test: cve
     expected_ids: GHSA-qpgx-jfcq-r59f-000-fixed
     expected_source_types: cve
@@ -148,7 +148,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-scitokens-ghsa-rh5m-2482-966c-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-rh5m-2482-966c-000-vulnerable
     expected_source_types: cve
@@ -183,7 +183,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-scitokens-ghsa-rh5m-2482-966c-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-scitokens-ghsa-rh5m-2482-966c/fixed
     source_type_under_test: cve
     expected_ids: GHSA-rh5m-2482-966c-000-fixed
     expected_source_types: cve
@@ -218,7 +218,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-emissary-ghsa-3p24-9x7v-7789-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-3p24-9x7v-7789-000-vulnerable
     expected_source_types: cve
@@ -253,7 +253,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-emissary-ghsa-3p24-9x7v-7789-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-emissary-ghsa-3p24-9x7v-7789/fixed
     source_type_under_test: cve
     expected_ids: GHSA-3p24-9x7v-7789-000-fixed
     expected_source_types: cve
@@ -288,7 +288,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-6RGM-GR97-X3J5-vulnerable
     expected_source_types: cve
@@ -323,7 +323,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5/fixed
     source_type_under_test: cve
     expected_ids: GHSA-6RGM-GR97-X3J5-fixed
     expected_source_types: cve
@@ -358,7 +358,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-27vg-33gh-4hwg-000-vulnerable
     expected_source_types: cve
@@ -393,7 +393,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-actualbudget-ghsa-27vg-33gh-4hwg-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-actualbudget-ghsa-27vg-33gh-4hwg/fixed
     source_type_under_test: cve
     expected_ids: GHSA-27vg-33gh-4hwg-000-fixed
     expected_source_types: cve
@@ -428,7 +428,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-v8jm-5vwx-cfxm-gap-fill-000-vulnerable
     expected_source_types: cve
@@ -463,7 +463,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-dompurify-ghsa-v8jm-5vwx-cfxm-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-dompurify-ghsa-v8jm-5vwx-cfxm/fixed
     source_type_under_test: cve
     expected_ids: GHSA-v8jm-5vwx-cfxm-gap-fill-000-fixed
     expected_source_types: cve
@@ -498,7 +498,7 @@
     expected_binary_label: positive
   vars:
     case_id: oss-monetr-ghsa-29v9-frvh-c426-vulnerable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/vulnerable
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/vulnerable
     source_type_under_test: cve
     expected_ids: GHSA-29v9-frvh-c426-000-vulnerable
     expected_source_types: cve
@@ -533,7 +533,7 @@
     expected_binary_label: negative
   vars:
     case_id: oss-monetr-ghsa-29v9-frvh-c426-fixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/fixed
+    target_repo: evals/triage-finding/artifacts/calibration-repos/oss-monetr-ghsa-29v9-frvh-c426/fixed
     source_type_under_test: cve
     expected_ids: GHSA-29v9-frvh-c426-000-fixed
     expected_source_types: cve

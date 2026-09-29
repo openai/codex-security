@@ -2,13 +2,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const skillPath = path.join(__dirname, "..", "..", "SKILL.md");
+const pluginRoot = path.resolve(__dirname, "..", "..", "..", "plugins", "codex-security");
+const skillRoot = path.join(pluginRoot, "skills", "triage-finding");
+const skillPath = path.join(skillRoot, "SKILL.md");
 const skill = fs.readFileSync(skillPath, "utf8");
-const ticketIntakePath = path.join(__dirname, "..", "..", "references", "ticket-intake.md");
+const ticketIntakePath = path.join(skillRoot, "references", "ticket-intake.md");
 const ticketIntake = fs.readFileSync(ticketIntakePath, "utf8");
-const agentPath = path.join(__dirname, "..", "..", "agents", "openai.yaml");
+const agentPath = path.join(skillRoot, "agents", "openai.yaml");
 const agent = fs.readFileSync(agentPath, "utf8");
-const pluginPath = path.join(__dirname, "..", "..", "..", "..", ".codex-plugin", "plugin.json");
+const pluginPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
 const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
 
 assert.match(skill, /## Jira and Linear Intake/);

@@ -4,7 +4,7 @@
     source_type: sarif
   vars:
     case_id: sarif-redirects
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: sarif
     expected_ids: SARIF-OPEN-REDIRECT,SARIF-SAFE-REDIRECT
     expected_source_types: sarif,sarif
@@ -27,7 +27,7 @@
     source_type: cve
   vars:
     case_id: cve-dependencies
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: cve
     expected_ids: CVE-2026-0001,CVE-2026-0002
     expected_source_types: cve,cve
@@ -50,7 +50,7 @@
     source_type: advisory
   vars:
     case_id: advisory-downloads
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: advisory
     expected_ids: ADV-DOWNLOAD-TRAVERSAL,ADV-SAFE-DOWNLOAD
     expected_source_types: advisory,advisory
@@ -70,7 +70,7 @@
     source_type: scanner_ticket
   vars:
     case_id: scanner-query
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     expected_ids: SCAN-SQL-001,SCAN-SQL-TEST-ONLY
     expected_source_types: scanner_ticket,scanner_ticket
@@ -92,7 +92,7 @@
     source_type: bug_bounty
   vars:
     case_id: bug-bounty-access
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: bug_bounty
     expected_ids: BB-ORDER-IDOR,BB-PARTNER-EXPORT
     expected_source_types: bug_bounty,bug_bounty
@@ -112,7 +112,7 @@
     source_type: codex_security_finding
   vars:
     case_id: codex-security-findings
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: codex_security_finding
     expected_ids: csf_111111111111111111111111,csf_222222222222222222222222
     expected_source_types: codex_security_finding,codex_security_finding
@@ -160,7 +160,7 @@
     source_type: freeform
   vars:
     case_id: freeform-mixed
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: freeform
     expected_ids: FREEFORM-REDIRECT,FREEFORM-UNSPECIFIED-AUTH
     expected_source_types: freeform,freeform
@@ -178,7 +178,7 @@
     source_type: unknown
   vars:
     case_id: unknown-fallback
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: unknown
     expected_ids: UNKNOWN-001,UNKNOWN-002
     expected_source_types: unknown,unknown

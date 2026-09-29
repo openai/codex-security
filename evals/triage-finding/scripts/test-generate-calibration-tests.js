@@ -29,7 +29,7 @@ assert.match(generatedYaml, /case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-vulnerabl
 assert.match(generatedYaml, /case_id: oss-mantisbt-ghsa-73vx-49mv-v8w5-fixed/);
 assert.match(generatedYaml, /expected_verdicts: confirmed/);
 assert.match(generatedYaml, /expected_verdicts: not_actionable/);
-assert.match(generatedYaml, /target_repo: plugins\/codex-security\/skills\/triage-finding\/evals\/artifacts\/calibration-repos\//);
+assert.match(generatedYaml, /target_repo: evals\/triage-finding\/artifacts\/calibration-repos\//);
 assert.doesNotMatch(
   generatedYaml,
   /expected_evidence_terms:\n\s+- /,

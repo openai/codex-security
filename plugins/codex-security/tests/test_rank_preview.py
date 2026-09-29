@@ -398,6 +398,33 @@ def test_enterprise_language_previews_list_declarations(
     assert "function widget" not in preview
 
 
+@pytest.mark.parametrize("suffix", [".h", ".hpp", ".hh", ".hxx", ".HH", ".HXX"])
+def test_cpp_headers_use_structural_previews(tmp_path: Path, suffix: str) -> None:
+    source = """typedef void Callback();
+Widget widget(options);
+template <typename T>
+class Box {
+public:
+  Box() {}
+  T get() const { return value; }
+};
+inline int answer() { return 42; }
+"""
+    path = tmp_path / f"box{suffix}"
+    preview = generate_preview(tmp_path, path.name, source)
+
+    assert "class Box" in preview
+    assert "method Box.Box" in preview
+    assert "method Box.get" in preview
+    assert "function answer" in preview
+    assert "function Callback" not in preview
+    assert "function widget" not in preview
+    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
+        preview,
+        False,
+    )
+
+
 def test_expression_bodied_function_does_not_consume_next_type_body(tmp_path: Path) -> None:
     source = """fun answer(): Int = 42
 class Service {

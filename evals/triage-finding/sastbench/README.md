@@ -4,20 +4,20 @@ This Promptfoo lane measures how accurately the source version of `plugins/codex
 
 SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. The eval runner stages the skill in a throwaway working directory and uses a deny-by-default Codex permission profile so only that directory, hydrated target repos, and their label-free Git cache plus minimal Codex runtime paths are readable to the model.
 
-Run commands from the repository root. The parent `evals/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
+Run commands from the repository root. The parent `evals/triage-finding/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
 
 ## Prepare the benchmark
 
 Install dependencies once:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run setup
+pnpm --dir evals/triage-finding run setup
 ```
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run sastbench:prepare
+pnpm --dir evals/triage-finding run sastbench:prepare
 ```
 
 Preparation verifies the SastBench origin, pinned commit, dataset SHA-256, record counts, target origins, target commits, and clean target worktrees. It must finish before any paid model evaluation begins.
@@ -27,14 +27,14 @@ Preparation verifies the SastBench origin, pinned commit, dataset SHA-256, recor
 Run deterministic tests and ask Promptfoo to load the dynamic test generator:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run test:sastbench
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate:sastbench
+pnpm --dir evals/triage-finding run test:sastbench
+pnpm --dir evals/triage-finding run validate:sastbench
 ```
 
 ## Run an evaluation
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:sastbench \
+pnpm --dir evals/triage-finding run eval:sastbench \
   --output ./artifacts/sastbench-results/canary.promptfoo.jsonl
 ```
 
@@ -51,8 +51,8 @@ The sample reuses the full eval's pinned dataset, hydrated repositories, prompt,
 Validate and run it from the repository root:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run validate:sastbench:sample
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run eval:sastbench:sample \
+pnpm --dir evals/triage-finding run validate:sastbench:sample
+pnpm --dir evals/triage-finding run eval:sastbench:sample \
   --output ./artifacts/sastbench-results/representative-sample.promptfoo.jsonl
 ```
 
@@ -130,7 +130,7 @@ Every denominator uses `max(denominator, 1)`. An empty denominator therefore pro
 Open the Promptfoo viewer to inspect the completed evaluation:
 
 ```bash
-pnpm --dir plugins/codex-security/skills/triage-finding/evals run pf:view
+pnpm --dir evals/triage-finding run pf:view
 ```
 
 Promptfoo also records cost, latency, and token use without SastBench-specific code.

@@ -1,14 +1,14 @@
 # yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
-description: "Codex Security triage-finding OSS calibration smoke eval"
+description: "Codex Security triage-finding OSS calibration eval"
 
 prompts:
   - file://./prompts/triage-request.txt
 
 providers:
   - id: openai:codex-sdk:gpt-5.5
-    label: "Codex SDK triage-finding calibration smoke"
+    label: "Codex SDK triage-finding calibration"
     config:
-      working_dir: ../../../../..
+      working_dir: ../..
       sandbox_mode: read-only
       approval_policy: never
       network_access_enabled: false
@@ -32,4 +32,4 @@ defaultTest:
     - type: javascript
       value: file://./assertions/calibration-evidence.js
 
-tests: file://./artifacts/calibration-smoke.yaml
+tests: file://./tests/calibration-oss.yaml

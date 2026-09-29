@@ -4,7 +4,7 @@
     source_type: scanner_ticket
   vars:
     case_id: ticket-connector-unavailable
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear issue SEC-293. Connector observation: the Linear connector is unavailable because it is not connected."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
@@ -25,7 +25,7 @@
     source_type: scanner_ticket
   vars:
     case_id: ticket-connector-permission
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear issue SEC-293. Connector observation: access was denied because the authenticated user lacks permission."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
@@ -46,7 +46,7 @@
     source_type: scanner_ticket
   vars:
     case_id: ticket-not-found
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear issue SEC-999999. Connector observation: the issue was not found or is inaccessible."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-999999."
@@ -67,7 +67,7 @@
     source_type: scanner_ticket
   vars:
     case_id: ticket-transient-retry-exhausted
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear issue SEC-293. Connector observation: the first read returned a transient timeout; the identical retry also timed out."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
@@ -89,7 +89,7 @@
     source_type: scanner_ticket
   vars:
     case_id: linear-direct-subissue-confirmation
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear parent SEC-293 was fetched. Child listing returned SEC-294 'Auth bypass' and SEC-295 'Unsafe redirect'. Their full bodies have not been fetched."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
@@ -110,7 +110,7 @@
     source_type: scanner_ticket
   vars:
     case_id: linear-nested-subissue-confirmation
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "The user approved direct child SEC-294. Its full body was fetched. The next child listing found SEC-296 'Nested token leak'; its full body has not been fetched."
     invocation_preamble: "Continue $codex-security:triage-finding for the approved Linear issue tree."
@@ -131,7 +131,7 @@
     source_type: scanner_ticket
   vars:
     case_id: linear-ambiguous-parent
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "Linear parent SEC-293 contains collection notes plus a possible standalone authorization claim. The user approved importing its child findings."
     invocation_preamble: "Continue $codex-security:triage-finding for Linear parent SEC-293."
@@ -152,7 +152,7 @@
     source_type: scanner_ticket
   vars:
     case_id: linear-subissue-limit
-    target_repo: plugins/codex-security/skills/triage-finding/evals/fixtures/repo
+    target_repo: evals/triage-finding/fixtures/repo
     source_type_under_test: scanner_ticket
     finding_input: "The approved Linear parent and selected sub-issue levels contain 251 triage items. No issue bodies beyond the limit have been imported."
     invocation_preamble: "Continue $codex-security:triage-finding for this Linear issue tree."

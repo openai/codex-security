@@ -1,8 +1,8 @@
 import { appendFile, readFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { getCodexSecurityDeepReducerInputs } from "../src/artifact-deep-reducer.ts";
-import { registerCompactWorkerArtifactTools } from "../src/server/compact-artifact-tools.ts";
+import { getCodexSecurityDeepReducerInputs } from "../../../src/artifact-deep-reducer.ts";
+import { registerCompactWorkerArtifactTools } from "../../../src/server/compact-artifact-tools.ts";
 
 async function main() {
   const { context, tracePath } = JSON.parse(

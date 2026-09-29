@@ -4791,9 +4791,12 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
-  test.each([false, true])(
-    "selects workbench Git for the requested target (bound: %s)",
-    async (bound) => {
+  test.each([
+    ["unbound", false],
+    ["bound", true],
+  ] as const)(
+    "selects workbench Git for the requested target (%s)",
+    async (_label, bound) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const untrustedBin = join(repository, "tools");

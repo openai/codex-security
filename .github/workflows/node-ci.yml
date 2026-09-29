@@ -512,7 +512,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Test deterministic triage eval contracts
-        working-directory: plugins/codex-security/skills/triage-finding/evals
+        working-directory: evals/triage-finding
         run: node --run test:deterministic
 
   required-test:

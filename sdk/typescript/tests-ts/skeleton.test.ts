@@ -62,7 +62,7 @@ describe("TypeScript package skeleton", () => {
     const directories = [
       "sdk/typescript",
       "plugins/codex-security/mcp-app",
-      "plugins/codex-security/skills/triage-finding/evals",
+      "evals/triage-finding",
     ];
     const manifests = await Promise.all(
       directories.map(async (directory) =>
