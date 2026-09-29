@@ -13,7 +13,15 @@ from threading import Barrier, Event
 from unittest import mock
 
 import pytest
-from workbench_test_support import SCRIPT, run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    SCRIPT,
+    checkpoint,
+    recipe,
+    register,
+    run_workbench,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
@@ -99,65 +107,6 @@ def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path
     )
     assert report.read_text() == "# Original report\n"
     assert evidence.read_text() == "Synthetic supporting evidence\n"
-
-
-def recipe(target: Path, mode: str = "standard") -> dict:
-    return {
-        "repository": str(target),
-        "target": {"kind": "repository", "paths": []},
-        "mode": mode,
-        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
-        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
-    }
-
-
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700)
-    saved_recipe = recipe(target, mode)
-    if paths:
-        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
-    return run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        *(("--parent-scan-id", parent) if parent else ()),
-        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
-    )
-
-
-def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
-    value = {
-        "version": 2,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "passes": list(passes),
-        "mergedScanIds": list(merged),
-        "aggregate": None,
-        "noNewStreak": 0,
-        "consecutiveErrors": 0,
-        **({"terminalReason": terminal} if terminal else {}),
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=json.dumps(value),
-    )
-    return value
 
 
 @pytest.mark.parametrize("accepted", [False, True])
@@ -293,7 +242,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
 
 
 @pytest.mark.parametrize("name", ["current", "legacy"])
-def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
+def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("print('fixture')\n")
@@ -314,18 +263,6 @@ def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monk
     stored = {"id": scan["scanId"], "scan_dir": scan["scanDir"]}
     loaded = workbench_api["read_composition_checkpoint"](stored)
     assert loaded == original
-    encoded = workbench_api["saved_results"].encode_composition_checkpoint(loaded)
-    assert json.loads(encoded) == original
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=encoded.decode(),
-    )
-    assert workbench_api["read_composition_checkpoint"](stored) == original
 
 
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
@@ -1377,56 +1314,6 @@ def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
         run_workbench(state, "get-scan", "--scan-id", rerun["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-
-
-@pytest.mark.parametrize("missing_outputs", [False, True])
-def test_membership_migration_backfills_stored_paths_once(
-    tmp_path: Path, missing_outputs: bool
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    parent_dir = tmp_path / "parent.previous-synthetic"
-    parent = register(state, target, parent_dir, mode="deep")
-    child = register(
-        state, target, parent_dir / "artifacts/deep-scan/passes/pass-1", parent=parent["scanId"]
-    )
-    rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
-    database = state / "workbench.sqlite3"
-    marker = parent_dir / "saved-output.txt"
-    marker.write_bytes(b"Saved outputs must not change during migration.")
-    with sqlite3.connect(database) as connection:
-        connection.execute("DROP INDEX scans_by_composition_parent")
-        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
-        before = connection.execute(
-            "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-        ).fetchall()
-    if missing_outputs:
-        parent_dir.rename(tmp_path / "removed-output")
-    run_workbench(state, "database-info")
-    run_workbench(state, "database-info")
-    with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute(
-                "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-            ).fetchall()
-            == before
-        )
-        assert dict(connection.execute("SELECT id, parent_scan_role FROM scans")) == {
-            parent["scanId"]: None,
-            child["scanId"]: "deep_pass",
-            rerun["scanId"]: None,
-        }
-        assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
-        ).fetchone() == (1,)
-    saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
-    assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
-    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
-        parent["scanId"],
-        rerun["scanId"],
-    }
 
 
 def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(

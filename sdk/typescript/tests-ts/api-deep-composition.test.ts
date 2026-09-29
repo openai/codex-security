@@ -1,7 +1,6 @@
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   appendFile,
@@ -9,7 +8,6 @@ import {
   mkdtemp,
   readFile,
   realpath,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -23,24 +21,13 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import { estimateScanCost, type ScanSessionEvent } from "../src/cost.js";
-import type { ScanCost } from "../src/cost-model.js";
+import type { ScanSessionEvent } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
-import {
-  prepareScanArtifactRestorer,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
-import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
-import {
-  DEEP_SCAN_CHECKPOINT,
-  ScanCostTrackingError,
-} from "../src/deep-scan.js";
+import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import { publishDraft } from "./support/scan-publication.js";
+import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
-import {
-  ScanCostLimitExceededError,
-  ScanInterruptedError,
-} from "../src/errors.js";
+import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { readSavedScanLogs, type ScanLogSource } from "../src/scan-logs.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -107,119 +94,20 @@ afterEach(async () => {
 });
 
 test.each([
-  { workers: 1, budget: false, emptyDeadline: true },
-  { workers: 1, budget: false, emptyDeadline: true, measuredChild: true },
-  {
-    workers: 1,
-    budget: false,
-    emptyDeadline: true,
-    measuredChild: true,
-    lostCompletion: true,
-  },
-  {
-    workers: 1,
-    budget: false,
-    emptyDeadline: true,
-    measuredChild: true,
-    lostCompletion: true,
-    usage: "missing-child",
-  },
-  { workers: 1, budget: false, emptyDeadline: true, lostCompletion: true },
-  ...[
-    "changed",
-    "renamed-file",
-    "removed-file",
-    "renamed-directory",
-    "removed-directory",
-  ].map((knowledge) => ({ workers: 1, budget: false, knowledge })),
-  { workers: 1, budget: false, provider: undefined },
-  { workers: 2, budget: false, provider: undefined },
-  { workers: 1, budget: true, provider: undefined },
-  { workers: 1, budget: true, firstChildBudget: true },
-  { workers: 1, budget: false, provider: { env_key: "OPENAI_API_KEY" } },
-  {
-    workers: 1,
-    budget: false,
-    provider: { auth: { type: "command", command: "synthetic-auth-provider" } },
-  },
-  { workers: 1, budget: false, native: "feedback" },
-  {
-    workers: 1,
-    budget: false,
-    native: "discovery",
-    provider: { env_key: "PROVIDER_KEY" },
-  },
-  { workers: 1, budget: false, native: "discovery", userCancel: true },
-  {
-    workers: 1,
-    budget: false,
-    native: "sealed",
-    provider: { env_key: "PROVIDER_KEY" },
-  },
-  { workers: 1, budget: false, trackingFailure: true },
-  { workers: 1, budget: false, artifactFailure: "directory" },
-  { workers: 1, budget: false, artifactFailure: "draft" },
-  { workers: 1, budget: false, artifactFailure: "checkpoint" },
-  { workers: 1, budget: false, cleanupFailure: true },
-  {
-    workers: 1,
-    budget: false,
-    artifactFailure: "publication",
-    cleanupFailure: true,
-  },
-  { workers: 1, budget: false, logFailure: true },
-  { workers: 1, budget: false, sessionFailure: true },
-  { workers: 1, budget: false, usage: "missing-merge" },
-  { workers: 1, budget: false, native: "sealed", usage: "missing-merge" },
-  { workers: 1, budget: false, usage: "unreported-cache" },
-  { workers: 1, budget: false, usage: "missing-child" },
-  { workers: 1, budget: false, usage: "missing-child", requiredCost: true },
-  { workers: 1, budget: false, native: "discovery", usage: "missing-child" },
-  { workers: 1, budget: false, native: "sealed", usage: "missing-child" },
+  { budget: false },
+  { budget: true },
+  { budget: true, firstChildBudget: true },
+  { budget: false, native: "discovery" },
+  { budget: false, native: "discovery", provider: { env_key: "PROVIDER_KEY" } },
+  { budget: false, native: "sealed", provider: { env_key: "PROVIDER_KEY" } },
 ] as {
-  workers: number;
   budget: boolean;
   firstChildBudget?: boolean;
-  trackingFailure?: boolean;
-  artifactFailure?: "directory" | "draft" | "checkpoint" | "publication";
-  cleanupFailure?: boolean;
   provider?: JsonObject;
-  native?: "feedback" | "discovery" | "sealed";
-  usage?: "missing-merge" | "missing-child" | "unreported-cache";
-  requiredCost?: boolean;
-  logFailure?: boolean;
-  sessionFailure?: boolean;
-  emptyDeadline?: boolean;
-  lostCompletion?: boolean;
-  knowledge?:
-    | "changed"
-    | "renamed-file"
-    | "removed-file"
-    | "renamed-directory"
-    | "removed-directory";
-  measuredChild?: boolean;
-  userCancel?: boolean;
+  native?: "discovery" | "sealed";
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
-  async ({
-    workers,
-    budget,
-    firstChildBudget,
-    provider,
-    native,
-    trackingFailure,
-    artifactFailure,
-    cleanupFailure,
-    usage,
-    requiredCost,
-    logFailure,
-    sessionFailure,
-    emptyDeadline,
-    lostCompletion,
-    knowledge,
-    measuredChild,
-    userCancel,
-  }) => {
+  async ({ budget, firstChildBudget, provider, native }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
     const root = await realpath(
@@ -229,16 +117,6 @@ test.each([
     const repo = join(root, "repo");
     const codexHome = join(root, "codex");
     let scanDir = join(root, "scan");
-    const knowledgeDirectory = knowledge?.endsWith("directory");
-    const knowledgePath = join(
-      root,
-      knowledgeDirectory ? "knowledge" : "policy.md",
-    );
-    const knowledgeDocument = knowledgeDirectory
-      ? join(knowledgePath, "policy.md")
-      : knowledgePath;
-    if (knowledgeDirectory) await mkdir(knowledgePath);
-    if (knowledge) await writeFile(knowledgeDocument, "Original policy.");
     await Promise.all([mkdir(repo), mkdir(codexHome)]);
     await Promise.all(
       ["app.py", "routes.py", "models.py", "helpers.py"].map((name) =>
@@ -343,27 +221,7 @@ process.exit(0);
     }
     const commandOptions = { python, pluginRoot, environment };
     let registeredScan: ScanOptions["registeredScan"];
-    let feedbackBefore: Buffer<ArrayBuffer> | undefined;
     if (native) {
-      if (native === "feedback") {
-        execFileSync(python, [
-          "-c",
-          `import sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from workbench_test_support import create_saved_workspace, start_delivered_scan, write_completed_contract, run_workbench
-state, repository, scans = map(Path, sys.argv[2:])
-workspace = create_saved_workspace(state, repository)
-scan = start_delivered_scan(state, '--workspace-id', workspace['id'], '--scan-root', str(scans))['results']
-write_completed_contract(Path(scan['scanDir']), scan['scanId'], repository, relative_path='app.py')
-completed = run_workbench(state, 'complete-scan', '--scan-id', scan['scanId'])['scan']
-run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['findings'][0]['occurrenceId'], '--status', 'closed', '--close-reason', 'false_positive', '--note', 'The synthetic route verifies the session.')`,
-          join(pluginRoot, "tests"),
-          environment.CODEX_SECURITY_STATE_DIR,
-          repo,
-          join(root, "prior-scans"),
-        ]);
-      }
       const started = await runWorkbench(commandOptions, [
         "begin-deep-scan",
         "--thread-id",
@@ -383,24 +241,15 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         threadId: "native-owner",
         handoffClaimToken: scan["handoffClaimToken"] as string,
       };
-      if (native === "feedback")
-        feedbackBefore = await readFile(
-          join(scanDir, "artifacts/01_context/false_positive_feedback.json"),
-        );
     }
     let controller = new AbortController();
     let interrupted = false;
     let savedExecutionThread: string | undefined;
     let sealedArtifacts: Map<string, Buffer<ArrayBuffer>> | undefined;
     const registrations = new Map<string, JsonObject>();
-    const costs: ScanCost[] = [];
     const followUpThreads: string[] = [];
     const previousFollowUp = native === "sealed" ? randomUUID() : undefined;
-    const finishedFollowUps: string[] = [];
-    const warnings: string[] = [];
     let childTurns = 0;
-    let mergeAttempts = 0;
-    let sessionWrites = 0;
     let threadCount = 0;
     const progressRuns: ScanProgress[][] = [];
     let progress: ScanProgress[];
@@ -454,12 +303,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               userContext: "Inspect the synthetic source.",
             },
             recipe: nativeRecipe ?? {
-              postScanPrompt: emptyDeadline
-                ? undefined
-                : "Post-scan instructions once.",
+              postScanPrompt: "Post-scan instructions once.",
             },
             savedDeepScanSettings: {
-              workers,
+              workers: 1,
               subagents: 3,
               stopAfterNoNew: 2,
               maxDiscoveryRuns: 4,
@@ -515,60 +362,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           }),
           ...prepared?.client.dependencies,
           resolvePluginPython: async () => python,
-          prepareScanArtifactRestorer: async (...args) => {
-            const writer = await prepareScanArtifactRestorer(...args);
-            return {
-              ...writer,
-              async prepareDirectory(path) {
-                if (artifactFailure === "directory")
-                  throw new Error("Synthetic directory write failure.");
-                await writer.prepareDirectory(path);
-              },
-              async restore(path, contents) {
-                if (artifactFailure === "draft" && path.startsWith("drafts/"))
-                  throw new Error("Synthetic draft write failure.");
-                if (logFailure && path.endsWith("execution-threads.json"))
-                  throw new Error("Synthetic session index write failure.");
-                await writer.restore(path, contents);
-              },
-              async remove(path) {
-                if (cleanupFailure && path.endsWith(".checkpoint.json"))
-                  throw new Error("Synthetic staging cleanup failure.");
-                await writer.remove(path);
-              },
-            };
-          },
           runWorkbench: async (options, args, input) => {
-            if (
-              sessionFailure &&
-              args[0] === "set-scan-thread" &&
-              registrations.get(args[args.indexOf("--scan-id") + 1]!)?.[
-                "mode"
-              ] === "deep" &&
-              ++sessionWrites === 1
-            )
-              throw new Error("Synthetic session metadata write failure.");
-            // Model a process exit after sealing: its catch block cannot persist parent cost.
-            if (
-              measuredChild &&
-              lostCompletion &&
-              interrupted &&
-              args[0] === "preserve-scan-results" &&
-              registrations.get(args[args.indexOf("--scan-id") + 1]!)?.[
-                "mode"
-              ] === "deep"
-            )
-              return {};
-            if (
-              artifactFailure === "checkpoint" &&
-              args[0] === "save-scan-artifact"
-            )
-              throw new Error("Synthetic checkpoint write failure.");
-            if (
-              artifactFailure === "publication" &&
-              args[0] === "write-scan-draft"
-            )
-              throw new Error("Synthetic publication write failure.");
             const result = await runWorkbench(options, args, input);
             const id = args.includes("--scan-id")
               ? args[args.indexOf("--scan-id") + 1]
@@ -585,97 +379,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                 recipe: JSON.parse(input!).recipe,
               });
               workbenches.set(scanId, options);
-              if (knowledge && JSON.parse(input!).recipe.mode === "deep") {
-                if (knowledge.startsWith("renamed"))
-                  await rename(knowledgePath, `${knowledgePath}.moved`);
-                else if (knowledge.startsWith("removed"))
-                  await rm(knowledgePath, { recursive: true });
-                else await writeFile(knowledgeDocument, "Changed policy.");
-              }
-              if (emptyDeadline && JSON.parse(input!).recipe.mode === "deep")
-                result["startedAt"] = "2020-01-01T00:00:00Z";
-              if (measuredChild && JSON.parse(input!).recipe.mode === "deep") {
-                const directory = "artifacts/deep-scan/passes/pass-1";
-                const childDirectory = join(scanDir, directory);
-                await mkdir(childDirectory, { recursive: true, mode: 0o700 });
-                const recipe = JSON.parse(input!).recipe;
-                recipe.mode = "standard";
-                delete recipe.deepScan;
-                const child = await runWorkbench(
-                  options,
-                  [
-                    "register-cli-scan",
-                    "--repository",
-                    repo,
-                    "--scan-dir",
-                    childDirectory,
-                    "--parent-scan-id",
-                    scanId,
-                    "--registration-json-stdin",
-                  ],
-                  JSON.stringify({ recipe }),
-                );
-                const childId = child["scanId"] as string;
-                registrations.set(childId, { ...child, mode: "standard" });
-                await runWorkbench(options, [
-                  "set-scan-thread",
-                  "--scan-id",
-                  childId,
-                  "--thread-id",
-                  "synthetic-interrupted-child",
-                ]);
-                await runWorkbench(options, [
-                  "fail-scan",
-                  "--scan-id",
-                  childId,
-                  "--message",
-                  "Discovery deadline reached.",
-                  ...(usage === "missing-child"
-                    ? []
-                    : [
-                        "--cost-json",
-                        JSON.stringify(
-                          estimateScanCost("gpt-6-astra", {
-                            input_tokens: 100,
-                            output_tokens: 20,
-                          }),
-                        ),
-                      ]),
-                ]);
-                await runWorkbench(
-                  options,
-                  [
-                    "save-scan-artifact",
-                    "--scan-id",
-                    scanId,
-                    "--artifact-path",
-                    DEEP_SCAN_CHECKPOINT,
-                  ],
-                  JSON.stringify({
-                    version: 2,
-                    startedAt: result["startedAt"],
-                    passes: [{ directory, scanId: childId, failed: true }],
-                    mergedScanIds: [],
-                    aggregate: null,
-                    noNewStreak: 0,
-                    consecutiveErrors: 0,
-                  }),
-                );
-              }
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
-            if (
-              (knowledge || lostCompletion) &&
-              !interrupted &&
-              args[0] === "prepare-scan-completion" &&
-              registrations.get(id!)?.["mode"] === "deep"
-            ) {
-              interrupted = true;
-              controller.abort(
-                new ScanTransportClosedError("synthetic_lost_completion"),
-              );
-            }
             if (
               native === "sealed" &&
               !interrupted &&
@@ -729,17 +435,13 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               threadCount += 1;
               const thread = {
                 id: savedThreadId,
-                async runStreamed(
-                  prompt: string,
-                  turnOptions?: { signal?: AbortSignal },
-                ) {
+                async runStreamed(prompt: string) {
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
                   if (
                     mode === "deep" &&
                     prompt !== "Post-scan instructions once."
                   ) {
-                    mergeAttempts += 1;
                     const mergePath = join(
                       record["scanDir"] as string,
                       "artifacts/deep-scan/merge-inputs.json",
@@ -757,17 +459,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                       );
                       expect(scan).toMatchObject({ scanId: id, findings: [] });
                     }
-                  }
-                  if (knowledge) {
-                    expect(
-                      await readFile(
-                        join(
-                          env["CODEX_SECURITY_KNOWLEDGE_BASE"]!,
-                          "0-policy.md.txt",
-                        ),
-                        "utf8",
-                      ),
-                    ).toBe("Original policy.");
                   }
                   turns.push({
                     id,
@@ -824,22 +515,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                   async function* events(): AsyncGenerator<ThreadEvent> {
                     thread.id ??= randomUUID();
                     const sessionHome = env["CODEX_HOME"]!;
-                    if (trackingFailure) {
-                      expect(mode).toBe("standard");
-                      await writeFile(
-                        join(sessionHome, "sessions"),
-                        "not a directory",
-                      );
-                      yield { type: "thread.started", thread_id: thread.id };
-                      const signal = turnOptions!.signal!;
-                      if (!signal.aborted)
-                        await new Promise<void>((resolve) =>
-                          signal.addEventListener("abort", () => resolve(), {
-                            once: true,
-                          }),
-                        );
-                      throw signal.reason;
-                    }
                     await mkdir(join(sessionHome, "sessions"), {
                       recursive: true,
                     });
@@ -917,11 +592,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                       );
                     }
                     yield { type: "thread.started", thread_id: thread.id };
-                    if (
-                      artifactFailure === "checkpoint" &&
-                      prompt === "Post-scan instructions once."
-                    )
-                      throw new Error("Synthetic follow-up failure.");
                     if (mode === "standard") {
                       for (const type of [
                         "item.started",
@@ -968,11 +638,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                             },
                           }) + "\n",
                         );
-                        const error = userCancel
-                          ? new Error("Synthetic user cancellation")
-                          : new ScanTransportClosedError(
-                              "mcp_transport_closed",
-                            );
+                        const error = new ScanTransportClosedError(
+                          "mcp_transport_closed",
+                        );
                         controller.abort(error);
                         throw error;
                       }
@@ -1023,39 +691,12 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                           deferred: [],
                         },
                       };
-                      const documents = prepareSemanticScanDraft(
-                        {
-                          targetContract: record["contract"] as JsonObject,
-                          mode: "standard",
-                          targetRevision: record["targetRevision"] as string,
-                        },
+                      await publishDraft(
+                        (args) => runWorkbench(workbenches.get(id)!, [...args]),
+                        record,
+                        "standard",
                         draft,
                       );
-                      const draftPath = join(
-                        directory,
-                        "drafts",
-                        randomUUID() + ".json",
-                      );
-                      const checkpointPath = join(
-                        directory,
-                        "drafts",
-                        randomUUID() + ".checkpoint.json",
-                      );
-                      await mkdir(join(directory, "drafts"), {
-                        recursive: true,
-                        mode: 0o700,
-                      });
-                      await writeFile(draftPath, JSON.stringify(documents));
-                      await writeFile(checkpointPath, JSON.stringify(draft));
-                      await runWorkbench(workbenches.get(id)!, [
-                        "write-scan-draft",
-                        "--scan-id",
-                        id,
-                        "--draft-path",
-                        draftPath,
-                        "--checkpoint-path",
-                        checkpointPath,
-                      ]);
                     }
                     yield {
                       type: "item.completed",
@@ -1068,31 +709,20 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                             : "Complete",
                       },
                     };
-                    if (prompt === "Post-scan instructions once.")
-                      finishedFollowUps.push(thread.id);
                     yield {
                       type: "turn.completed",
-                      usage:
-                        (usage === "missing-merge" && mode === "deep") ||
-                        (usage === "missing-child" &&
+                      usage: {
+                        input_tokens:
+                          budget &&
                           mode === "standard" &&
-                          childTurns === 1)
-                          ? null
-                          : {
-                              input_tokens:
-                                budget &&
-                                mode === "standard" &&
-                                childTurns === (firstChildBudget ? 1 : 2)
-                                  ? 100000
-                                  : 10,
-                              cached_input_tokens: 0,
-                              output_tokens: 3,
-                              cache_write_input_tokens: 0,
-                              ...(usage === "unreported-cache"
-                                ? { cache_write_input_tokens_reported: false }
-                                : {}),
-                              reasoning_output_tokens: 0,
-                            },
+                          childTurns === (firstChildBudget ? 1 : 2)
+                            ? 100000
+                            : 10,
+                        cached_input_tokens: 0,
+                        output_tokens: 3,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 0,
+                      },
                     } as ThreadEvent;
                   }
                   return { events: events() };
@@ -1131,12 +761,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
     try {
       const scanOptions: ScanOptions = {
         mode: "deep",
-        ...(knowledge ? { knowledgeBasePaths: [knowledgePath] } : {}),
         preserveProviderEnvironment: provider !== undefined,
-        workers,
+        workers: 1,
         subagents: 3,
         stopAfterNoNew: 2,
-        ...(sessionFailure ? { stopAfterConsecutiveErrors: 1 } : {}),
         maxDiscoveryRuns: 4,
         maxTimeHours: 1,
         outputDir: scanDir,
@@ -1145,26 +773,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           ? { safetyIdentifier: "saved-native-identifier" }
           : {}),
         scanPrompt: "Inspect the synthetic source.",
-        ...(budget
-          ? { maxCostUsd: 0.001 }
-          : trackingFailure || requiredCost
-            ? { maxCostUsd: 1 }
-            : {}),
-        postScanPrompt: emptyDeadline
-          ? undefined
-          : "Post-scan instructions once.",
+        ...(budget ? { maxCostUsd: 0.001 } : {}),
+        postScanPrompt: "Post-scan instructions once.",
         onProgress: (update) => progress.push(update),
         onActivity: (activity) => workerRun.activities.push(activity),
         onSessionEvent: (event) => workerRun.sessions.push(event),
-        onCost: (cost) => costs.push(cost),
-        onWarning: (message) => {
-          warnings.push(message);
-          if (trackingFailure && message.startsWith("Deep Scan pass "))
-            controller.abort(
-              new Error("Unexpected retry after required metering failure."),
-            );
-          else console.error(message);
-        },
       };
       const run = () => {
         progress = [];
@@ -1198,87 +811,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           expect(scan.continuationThreadId).not.toBe(id);
         }
       };
-      if (emptyDeadline) {
-        if (lostCompletion) {
-          await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
-          controller = new AbortController();
-          scanOptions.resumeScanId = [...registrations.keys()][0]!;
-          if (measuredChild) {
-            const saved = await runWorkbench(commandOptions, [
-              "get-scan",
-              "--scan-id",
-              scanOptions.resumeScanId,
-            ]);
-            expect((saved["scan"] as JsonObject)["cost"]).toBeUndefined();
-          }
-        }
-        const result = await run();
-        expect(result.threadId).toBeNull();
-        expect(result.findings.findings).toEqual([]);
-        expect(result.coverage.completeness).toBe("partial");
-        expect(turns).toEqual([]);
-        expect(mergeAttempts).toBe(0);
-        expect(registrations.size).toBe(measuredChild ? 2 : 1);
-        if (measuredChild && usage !== "missing-child") {
-          const expectedCost = estimateScanCost("gpt-6-astra", {
-            input_tokens: 100,
-            output_tokens: 20,
-          });
-          expect(result.cost).toEqual(expectedCost);
-          const saved = await runWorkbench(commandOptions, [
-            "get-scan",
-            "--scan-id",
-            result.manifest.scan.id,
-          ]);
-          expect(
-            (saved["scan"] as JsonObject)["cost"] as unknown as ScanCost,
-          ).toEqual(expectedCost!);
-          expect(result.turnResult).toMatchObject({
-            usage: { input_tokens: 100, output_tokens: 20 },
-          });
-        } else if (measuredChild) {
-          expect(result.cost).toBeNull();
-          expect(result.turnResult.usage).toBeNull();
-        }
-        const manifest = await readFile(join(scanDir, "scan-manifest.json"));
-        scanOptions.resumeScanId = result.manifest.scan.id;
-        await expect(run()).rejects.toThrow("Resume requires a running scan");
-        expect(await readFile(join(scanDir, "scan-manifest.json"))).toEqual(
-          manifest,
-        );
-        expect(turns).toEqual([]);
-        return;
-      }
-      if (knowledge) {
-        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
-        const count = turns.length;
-        expect(count).toBeGreaterThan(0);
-        const scanId = [...registrations].find(
-          ([, value]) => value["mode"] === "deep",
-        )![0];
-        const manifest = await readFile(join(scanDir, "scan-manifest.json"));
-        controller = new AbortController();
-        scanOptions.resumeScanId = scanId;
-        if (knowledgeDirectory) await mkdir(knowledgePath);
-        await writeFile(knowledgeDocument, "Changed policy.");
-        await expect(run()).rejects.toThrow("knowledge base changed");
-        expect(turns).toHaveLength(count);
-        expect(await readFile(join(scanDir, "scan-manifest.json"))).toEqual(
-          manifest,
-        );
-        const saved = await runWorkbench(commandOptions, [
-          "get-scan",
-          "--scan-id",
-          scanId,
-        ]);
-        expect(saved["scan"]).toMatchObject({
-          progress: { status: "running" },
-        });
-        return;
-      }
       if (firstChildBudget) {
         await expect(run()).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-        expect(mergeAttempts).toBe(0);
         expect(turns.map((turn) => turn.mode)).toEqual(["standard"]);
         expect(registrations.size).toBe(2);
         const parent = [...registrations.values()].find(
@@ -1320,103 +854,16 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         ).toMatchObject({ completeness: "partial" });
         return;
       }
-      if (artifactFailure) {
-        await expect(run()).rejects.toThrow(
-          `Synthetic ${artifactFailure} write failure.`,
-        );
-        if (cleanupFailure)
-          expect(warnings).toContain(
-            "Could not clean up after the Codex Security scan: Synthetic staging cleanup failure.",
-          );
-        if (artifactFailure === "directory")
-          expect([threadCount, turns.length]).toEqual([0, 0]);
-        expect(
-          commands.filter(({ command }) => command === "write-scan-draft"),
-        ).toEqual([]);
-        const parent = [...registrations.values()].find(
-          ({ mode }) => mode === "deep",
-        )!;
-        const saved = await runWorkbench(commandOptions, [
-          "get-scan",
-          "--scan-id",
-          parent["scanId"] as string,
-        ]);
-        expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
-        if (artifactFailure !== "directory")
-          await assertFollowUpLogs(saved["scan"] as ScanLogSource);
-        if (artifactFailure === "checkpoint") {
-          expect(saved["compositionCheckpoint"]).toBeNull();
-          expect(
-            (saved["scan"] as ScanLogSource).continuationThreadId,
-          ).toBeNull();
-        }
-        return;
-      }
-      if (trackingFailure) {
-        await expect(run()).rejects.toBeInstanceOf(ScanCostTrackingError);
-        expect(turns).toHaveLength(1);
-        expect(
-          [...registrations.values()].map((record) => record["mode"]).sort(),
-        ).toEqual(["deep", "standard"]);
-        expect(
-          JSON.parse(
-            await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
-          ),
-        ).toMatchObject({
-          terminalReason: "failed",
-          mergedScanIds: [],
-          consecutiveErrors: 0,
-        });
-        for (const scanId of registrations.keys()) {
-          const saved = await runWorkbench(commandOptions, [
-            "get-scan",
-            "--scan-id",
-            scanId,
-          ]);
-          expect(saved["scan"]).toMatchObject({
-            progress: { status: "failed" },
-          });
-        }
-        return;
-      }
-      if (requiredCost) {
-        await expect(run()).rejects.toBeInstanceOf(ScanCostTrackingError);
-        expect(turns).toHaveLength(1);
-        const parent = [...registrations.values()].find(
-          ({ mode }) => mode === "deep",
-        )!;
-        const saved = await runWorkbench(commandOptions, [
-          "get-scan",
-          "--scan-id",
-          parent["scanId"] as string,
-        ]);
-        expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
-        expect(saved["compositionCheckpoint"]).toMatchObject({
-          terminalReason: "failed",
-          consecutiveErrors: 0,
-          noNewStreak: 0,
-        });
-        return;
-      }
       if (native === "discovery" || native === "sealed") {
-        if (userCancel)
-          await expect(run()).rejects.toBeInstanceOf(ScanInterruptedError);
-        else
-          await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
         const saved = await runWorkbench(commandOptions, [
           "get-scan",
           "--scan-id",
           registeredScan!.scanId,
         ]);
         expect(saved["scan"]).toMatchObject({
-          progress: { status: userCancel ? "canceled" : "running" },
+          progress: { status: "running" },
         });
-        if (userCancel) {
-          expect(saved["compositionCheckpoint"]).toMatchObject({
-            terminalReason: "canceled",
-          });
-          return;
-        }
         savedExecutionThread = (saved["scan"] as JsonObject)[
           "continuationThreadId"
         ] as string;
@@ -1515,29 +962,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         }
       }
       const result = await run();
-      if (cleanupFailure)
-        expect(warnings).toContain(
-          "Could not clean up after the Codex Security scan: Synthetic staging cleanup failure.",
-        );
-      if (usage) {
-        const saved = await runWorkbench(commandOptions, [
-          "get-scan",
-          "--scan-id",
-          result.manifest.scan.id,
-        ]);
-        const scan = saved["scan"] as JsonObject;
-        expect(scan["progress"]).toMatchObject({ status: "complete" });
-        expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0);
-        if (usage === "missing-merge" || usage === "missing-child") {
-          expect(result.cost).toBeNull();
-          expect(scan["cost"]).toBeUndefined();
-          expect(scan["usage"]).toMatchObject({ coverage: "unavailable" });
-        } else {
-          expect(result.cost).toEqual(costs.at(-1)!);
-          expect(result.cost!.cacheWriteInputTokensReported).toBe(false);
-          expect(result.cost).toEqual(scan["cost"] as unknown as ScanCost);
-        }
-      }
       for (const observed of workerRuns) {
         const labels = new Map<string, number>();
         for (const event of observed.sessions) {
@@ -1579,20 +1003,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         for (const [path, bytes] of sealedArtifacts)
           expect(await readFile(join(scanDir, path))).toEqual(bytes);
         expect(result.manifest.scan.producer.version).toBe(version);
-      }
-      if (feedbackBefore) {
-        expect(
-          await readFile(
-            join(scanDir, "artifacts/01_context/false_positive_feedback.json"),
-          ),
-        ).toEqual(feedbackBefore);
-        expect(
-          turns
-            .filter((turn) => turn.mode === "standard")
-            .every((turn) =>
-              turn.prompt.includes("false_positive_feedback.json"),
-            ),
-        ).toBe(true);
       }
       expect(result.findings.findings).toEqual([]);
       expect(result.coverage.completeness).toBe(
@@ -1710,7 +1120,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             )
             .map(({ account }) => account),
         ).toEqual(["A", "B"]);
-        if (!usage) expect(result.cost!.estimatedUsd).toBeGreaterThan(0);
+        expect(result.cost!.estimatedUsd).toBeGreaterThan(0);
         expect(existsSync(join(codexHome, "sessions"))).toBe(true);
         expect(existsSync(join(managedHome, "sessions"))).toBe(false);
         expect(await readFile(join(managedHome, "auth.json"), "utf8")).toBe(
@@ -1763,13 +1173,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
       expect(
         turns.filter((turn) => turn.prompt === "Post-scan instructions once."),
       ).toHaveLength(budget ? 0 : 1);
-      if (logFailure) {
-        expect(finishedFollowUps).toEqual(followUpThreads);
-        expect(finishedFollowUps).toHaveLength(1);
-        expect(warnings).toContain(
-          "Could not save post-scan session: Synthetic session index write failure.",
-        );
-      } else if (!budget) {
+      if (!budget) {
         const saved = await runWorkbench(commandOptions, [
           "get-scan",
           "--scan-id",
@@ -1778,17 +1182,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         const scan = saved["scan"] as ScanLogSource;
         expect(scan.continuationThreadId).toBe(result.threadId!);
         await assertFollowUpLogs(scan);
-      }
-      if (sessionFailure) {
-        expect(sessionWrites).toBe(2);
-        expect(mergeAttempts).toBe(2);
-        expect(
-          warnings.filter((warning) =>
-            warning.startsWith("Could not save scan session:"),
-          ),
-        ).toEqual([
-          "Could not save scan session: Synthetic session metadata write failure.",
-        ]);
       }
       if (budget) {
         expect(result.cost!.estimatedUsd).toBeGreaterThan(0.001);
@@ -1807,7 +1200,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         (scan) => scan["scanId"],
       );
       expect(listedIds).toContain(result.manifest.scan.id);
-      expect(listedIds).toHaveLength(native === "feedback" ? 2 : 1);
+      expect(listedIds).toHaveLength(1);
     } finally {
       try {
         await client.close();

@@ -8,8 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_workbench_scan_composition import register
-from workbench_test_support import run_workbench, write_completed_contract
+from workbench_test_support import register, run_workbench, write_completed_contract
 
 
 def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:

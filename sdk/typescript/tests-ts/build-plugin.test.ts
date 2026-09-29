@@ -1,3 +1,7 @@
+import {
+  mcpSmokeInput,
+  mcpSmokeResponses,
+} from "../scripts/fixtures/mcp-smoke.mjs";
 import { execFile } from "node:child_process";
 import {
   chmod,
@@ -133,33 +137,9 @@ describe("bundled plugin build", () => {
         timeout: 10_000,
       },
     );
-    execution.child.stdin?.end(
-      [
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "standalone-package-test", version: "1" },
-          },
-        }),
-        JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/list",
-          params: {},
-        }),
-        "",
-      ].join("\n"),
-    );
+    execution.child.stdin?.end(mcpSmokeInput);
     const standalone = await execution;
-    const responses = standalone.stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
+    const responses = mcpSmokeResponses(standalone.stdout);
     expect(
       responses.find((response) => response.id === 2)?.result.tools,
     ).toEqual(

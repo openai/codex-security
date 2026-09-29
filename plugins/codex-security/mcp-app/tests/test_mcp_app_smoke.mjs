@@ -112,7 +112,7 @@ const scanHandoffSource = await readFile(
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
 assert.match(
   serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
+  /timeout: workbenchCommandTimeout\(args\[0\]\)/,
   "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
 );
 const authenticatedArtifactClaimSource = serverSource.match(

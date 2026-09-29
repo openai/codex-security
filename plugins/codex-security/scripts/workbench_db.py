@@ -1339,10 +1339,6 @@ def complete_scan_locked(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
                     warnings,
                     stopped=False,
                     reason="",
@@ -2764,7 +2760,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan, composition
+            _WORKBENCH_DB_CONTEXT, connection, scan
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],

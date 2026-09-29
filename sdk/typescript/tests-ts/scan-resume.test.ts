@@ -1,3 +1,4 @@
+import { publishDraft } from "./support/scan-publication.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -25,10 +26,7 @@ import {
   TerminalDeepScanError,
   type DeepScanCheckpoint,
 } from "../src/deep-scan.js";
-import {
-  prepareSemanticScanDraft,
-  type SemanticScan,
-} from "../src/scan-semantics.js";
+import type { SemanticScan } from "../src/scan-semantics.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { capture, dependencies } from "./cli-fixtures.js";
@@ -255,7 +253,7 @@ async function interruptedScan(
         deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
       },
     };
-    await writeDraft(command, child, "standard", {
+    await publishDraft(command, child, "standard", {
       ...aggregate,
       scanId: childId,
     });
@@ -310,41 +308,6 @@ async function interruptedScan(
     childId,
     childDir,
   };
-}
-
-async function writeDraft(
-  command: (args: readonly string[], input?: string) => Promise<JsonObject>,
-  registration: JsonObject,
-  mode: "deep" | "standard",
-  draft: SemanticScan,
-) {
-  const directory = registration["scanDir"] as string;
-  const documents = prepareSemanticScanDraft(
-    {
-      targetContract: registration["contract"] as JsonObject,
-      mode,
-      targetRevision: registration["targetRevision"] as string,
-    },
-    draft,
-  );
-  const draftPath = join(directory, "drafts", randomUUID() + ".json");
-  const checkpointPath = join(
-    directory,
-    "drafts",
-    randomUUID() + ".checkpoint.json",
-  );
-  await mkdir(join(directory, "drafts"), { recursive: true, mode: 0o700 });
-  await writeFile(draftPath, JSON.stringify(documents));
-  await writeFile(checkpointPath, JSON.stringify(draft));
-  await command([
-    "write-scan-draft",
-    "--scan-id",
-    registration["scanId"] as string,
-    "--draft-path",
-    draftPath,
-    "--checkpoint-path",
-    checkpointPath,
-  ]);
 }
 
 test("resume preserves its identity, launch recipe, accepted child and checkpoint", async () => {
@@ -528,7 +491,7 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     ],
     JSON.stringify(checkpoint),
   );
-  await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+  await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
 test.each(["failed", "canceled"] as const)(
@@ -880,7 +843,12 @@ test.each([true, false])(
       ],
       JSON.stringify(checkpoint),
     );
-    await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+    await publishDraft(
+      f.command,
+      f.registration,
+      "deep",
+      checkpoint.aggregate!,
+    );
     let turns = 0;
     const client = resumeClient(
       f,
@@ -1073,7 +1041,12 @@ test.each([
         coverage: semanticCoverage({ completeness: "partial" }),
       };
       checkpoint.terminalReason = "saturated";
-      await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+      await publishDraft(
+        f.command,
+        f.registration,
+        "deep",
+        checkpoint.aggregate,
+      );
     }
     await f.command(
       [
@@ -1325,7 +1298,7 @@ test("sealed legacy results retain their saved accounting", async () => {
     "report.md",
     DEEP_SCAN_CHECKPOINT,
   ];
-  await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+  await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
   await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
   const artifacts = await Promise.all(
     artifactNames.map((name) => readFile(join(f.scanDir, name))),

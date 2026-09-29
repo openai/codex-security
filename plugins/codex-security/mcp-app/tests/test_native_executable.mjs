@@ -7,7 +7,6 @@ import {
   realpath,
   rm,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,10 +29,8 @@ const { resolveCodexPath, resolveTrustedCodex, snapshotNativeEnvironment } =
   );
 const temporaryRoots = [];
 try {
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
-  await testWindowsNpmPackageResolution();
-  await testWindowsNpmPackageResolution("managed");
   await testCodexHomePathsStayBoundToOriginalDirectory();
+  await testExplicitAndPathExecutables();
   if (process.platform === "win32") {
     await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
     await testWindowsLauncherSkipsExtensionlessNpmShim();
@@ -48,17 +45,43 @@ try {
   );
   const originalCwd = path.join(process.cwd(), "fixture-root");
   assert.equal(
-    resolveCodexPath(
-      { CODEX_CLI_PATH: "fixture/codex" },
-      "linux",
-      process.arch,
-      originalCwd,
-    ),
+    resolveCodexPath({ CODEX_CLI_PATH: "fixture/codex" }, "linux", originalCwd),
     path.join(originalCwd, "fixture/codex"),
   );
 } finally {
   await Promise.all(
     temporaryRoots.map((root) => rm(root, { recursive: true, force: true })),
+  );
+}
+
+async function testExplicitAndPathExecutables() {
+  const root = await mkdtemp(path.join(tmpdir(), "codex-security-executable-"));
+  temporaryRoots.push(root);
+  const repository = path.join(root, "repository");
+  const bin = path.join(repository, "bin");
+  const external = path.join(root, "external");
+  await Promise.all([mkdir(bin, { recursive: true }), mkdir(external)]);
+  const name = process.platform === "win32" ? "codex.exe" : "codex";
+  const selected = path.join(external, name);
+  await Promise.all([
+    copyFile(process.execPath, path.join(bin, name)),
+    copyFile(process.execPath, selected),
+  ]);
+  for (const configured of [undefined, "codex", selected]) {
+    const environment = {
+      PATH: [bin, external].join(path.delimiter),
+      ...(configured === undefined ? {} : { CODEX_CLI_PATH: configured }),
+    };
+    const trusted = await resolveTrustedCodex(environment, repository);
+    assert.equal(await realpath(trusted.executable), await realpath(selected));
+    assert.equal(trusted.environment.PATH, await realpath(external));
+  }
+  assert.equal(
+    await resolveTrustedCodex(
+      { CODEX_CLI_PATH: path.join(bin, name) },
+      repository,
+    ),
+    null,
   );
 }
 
@@ -68,7 +91,6 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
       resolveCodexPath(
         { CODEX_CLI_PATH: "\\Tools\\codex.exe" },
         "win32",
-        process.arch,
         "C:\\original\\cwd",
       ),
       "C:\\Tools\\codex.exe",
@@ -77,7 +99,6 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
       resolveCodexPath(
         { CODEX_CLI_PATH: "/Tools/codex.exe" },
         "win32",
-        process.arch,
         "D:\\original\\cwd",
       ),
       "D:\\Tools\\codex.exe",
@@ -183,161 +204,6 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
   }
 }
 
-async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-cache-"),
-  );
-  temporaryRoots.push(root);
-  const localAppData = path.join(root, "LocalAppData");
-  const olderBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "11111111",
-    "codex.exe",
-  );
-  const currentBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "22222222",
-    "codex.exe",
-  );
-  const emptyBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "33333333",
-    "codex.exe",
-  );
-  const protectedDirectory = path.join(
-    root,
-    "WindowsApps",
-    "OpenAI.Codex_fixture",
-    "resources",
-  );
-  const architecture = process.arch === "arm64" ? "arm64" : "x64";
-  const targetTriple =
-    architecture === "arm64"
-      ? "aarch64-pc-windows-msvc"
-      : "x86_64-pc-windows-msvc";
-  const managedPackage = path.join(
-    protectedDirectory,
-    "node_modules",
-    "@openai",
-    "codex",
-  );
-  const platformPackage = path.join(
-    managedPackage,
-    "node_modules",
-    "@openai",
-    `codex-win32-${architecture}`,
-  );
-  const protectedPackageBinary = path.join(
-    platformPackage,
-    "vendor",
-    targetTriple,
-    "bin",
-    "codex.exe",
-  );
-  await Promise.all([
-    mkdir(path.dirname(olderBinary), { recursive: true }),
-    mkdir(path.dirname(currentBinary), { recursive: true }),
-    mkdir(path.dirname(emptyBinary), { recursive: true }),
-    mkdir(path.dirname(protectedPackageBinary), { recursive: true }),
-  ]);
-  await Promise.all([
-    copyFile(process.execPath, olderBinary),
-    copyFile(process.execPath, currentBinary),
-    writeFile(emptyBinary, ""),
-    writeFile(
-      path.join(protectedDirectory, "codex.exe"),
-      "protected direct binary",
-    ),
-    writeFile(
-      path.join(managedPackage, "package.json"),
-      JSON.stringify({ name: "@openai/codex" }),
-    ),
-    writeFile(
-      path.join(platformPackage, "package.json"),
-      JSON.stringify({ name: `@openai/codex-win32-${architecture}` }),
-    ),
-    writeFile(protectedPackageBinary, "protected package binary"),
-  ]);
-  await Promise.all([
-    utimes(olderBinary, new Date(1_000), new Date(1_000)),
-    utimes(currentBinary, new Date(2_000), new Date(2_000)),
-    utimes(emptyBinary, new Date(3_000), new Date(3_000)),
-  ]);
-
-  const resolved = resolveCodexPath(
-    {
-      CODEX_CLI_PATH:
-        "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\resources\\codex.exe",
-      LOCALAPPDATA: localAppData,
-    },
-    "win32",
-  );
-  assert.equal(resolved, currentBinary);
-  assert.equal(
-    resolveCodexPath(
-      {
-        CODEX_MANAGED_PACKAGE_ROOT: managedPackage,
-        Path: protectedDirectory,
-        LOCALAPPDATA: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    currentBinary,
-  );
-  assert.equal(
-    resolveCodexPath(
-      {
-        LOCALAPPDATA: path.relative(root, localAppData),
-      },
-      "win32",
-      architecture,
-      root,
-    ),
-    currentBinary,
-  );
-  assert.equal(
-    resolveCodexPath(
-      {
-        localappdata: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    currentBinary,
-  );
-  const explicitOverride = path.join(root, "custom-codex.exe");
-  assert.equal(
-    resolveCodexPath(
-      {
-        CODEX_CLI_PATH: explicitOverride,
-        CODEX_MANAGED_PACKAGE_ROOT: managedPackage,
-        Path: protectedDirectory,
-        LOCALAPPDATA: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    explicitOverride,
-  );
-
-  if (process.platform === "win32") {
-    const launched = spawnSync(resolved, ["--version"], { encoding: "utf8" });
-    assert.equal(launched.error, undefined);
-    assert.equal(launched.status, 0);
-    assert.equal(launched.stdout.trim(), process.version);
-  }
-}
-
 async function testWindowsLauncherSkipsExtensionlessNpmShim() {
   const root = await mkdtemp(
     path.join(tmpdir(), "codex-security-windows-launcher-"),
@@ -371,152 +237,6 @@ async function testWindowsLauncherSkipsExtensionlessNpmShim() {
   assert.equal(fixed.error, undefined);
   assert.equal(fixed.status, 0);
   assert.equal(fixed.stdout.trim(), process.version);
-}
-
-async function testWindowsNpmPackageResolution(installation = "global") {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security windows-npm-"),
-  );
-  temporaryRoots.push(root);
-  const architecture = process.arch === "arm64" ? "arm64" : "x64";
-  const targetTriple =
-    architecture === "arm64"
-      ? "aarch64-pc-windows-msvc"
-      : "x86_64-pc-windows-msvc";
-  const packageDirectory =
-    installation === "managed"
-      ? path.join(root, "node_modules")
-      : path.join(root, "npm", "node_modules");
-  const shimDirectory =
-    installation === "managed"
-      ? path.join(packageDirectory, ".bin")
-      : path.join(root, "npm");
-  const codexPackage = path.join(packageDirectory, "@openai", "codex");
-  const platformPackage = path.join(
-    codexPackage,
-    "node_modules",
-    "@openai",
-    `codex-win32-${architecture}`,
-  );
-  const nativeBinary = path.join(
-    platformPackage,
-    "vendor",
-    targetTriple,
-    "bin",
-    "codex.exe",
-  );
-  await Promise.all([
-    mkdir(path.dirname(nativeBinary), { recursive: true }),
-    mkdir(shimDirectory, { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(path.join(shimDirectory, "codex"), "#!/bin/sh\nexit 1\n"),
-    writeFile(
-      path.join(codexPackage, "package.json"),
-      JSON.stringify({ name: "@openai/codex" }),
-    ),
-    writeFile(
-      path.join(platformPackage, "package.json"),
-      JSON.stringify({ name: `@openai/codex-win32-${architecture}` }),
-    ),
-    copyFile(process.execPath, nativeBinary),
-  ]);
-
-  const environment = windowsLauncherEnvironment(shimDirectory);
-  if (installation === "managed") {
-    environment.CODEX_MANAGED_PACKAGE_ROOT = codexPackage;
-  }
-  assert.equal(
-    await realpath(resolveCodexPath(environment, "win32", architecture)),
-    await realpath(nativeBinary),
-  );
-  const repository = path.join(root, "repository");
-  await mkdir(repository);
-  const selected = await resolveTrustedCodex(
-    environment,
-    repository,
-    "win32",
-    architecture,
-  );
-  assert.ok(selected);
-  assert.equal(
-    await realpath(selected.executable),
-    await realpath(nativeBinary),
-  );
-  if (installation === "global") {
-    const repositoryBin = path.join(repository, "bin");
-    const alias = path.join(root, "repository-bin-alias");
-    await mkdir(repositoryBin, { recursive: true });
-    await copyFile(process.execPath, path.join(repositoryBin, "codex.exe"));
-    await symlink(repositoryBin, alias, "junction");
-    for (const configured of [undefined, "codex", "codex.exe"]) {
-      for (const quoted of [false, true]) {
-        const directories = [repositoryBin, alias, shimDirectory].map(
-          (directory) => (quoted ? `"${directory}"` : directory),
-        );
-        const search = windowsLauncherEnvironment(...directories);
-        if (configured !== undefined) search.CODEX_CLI_PATH = configured;
-        const trusted = await resolveTrustedCodex(
-          search,
-          repository,
-          "win32",
-          architecture,
-        );
-        assert.ok(
-          trusted,
-          "a later trusted npm installation must remain discoverable",
-        );
-        assert.equal(
-          await realpath(trusted.executable),
-          await realpath(nativeBinary),
-        );
-        if (!quoted || process.platform === "win32") {
-          assert.equal(trusted.environment.PATH, await realpath(shimDirectory));
-        }
-        assert.equal(search.Path, directories.join(path.delimiter));
-      }
-    }
-    const explicit = windowsLauncherEnvironment(repositoryBin, shimDirectory);
-    explicit.CODEX_CLI_PATH = path.join(repositoryBin, "codex.exe");
-    assert.equal(
-      await resolveTrustedCodex(explicit, repository, "win32", architecture),
-      null,
-    );
-  }
-  if (installation === "managed") {
-    const mixedCaseEnvironment = {
-      ...environment,
-      codex_managed_package_root: codexPackage,
-    };
-    delete mixedCaseEnvironment.CODEX_MANAGED_PACKAGE_ROOT;
-    assert.equal(
-      await realpath(
-        resolveCodexPath(mixedCaseEnvironment, "win32", architecture),
-      ),
-      await realpath(nativeBinary),
-    );
-  }
-  if (process.platform === "win32") {
-    assert.equal(
-      spawnSync("codex.exe", ["--version"], {
-        encoding: "utf8",
-        env: environment,
-      }).error?.code,
-      "ENOENT",
-    );
-
-    const fixed = spawnSync(
-      resolveCodexPath(environment, "win32", architecture),
-      ["--version"],
-      {
-        encoding: "utf8",
-        env: environment,
-      },
-    );
-    assert.equal(fixed.error, undefined);
-    assert.equal(fixed.status, 0);
-    assert.equal(fixed.stdout.trim(), process.version);
-  }
 }
 
 function windowsLauncherEnvironment(...directories) {

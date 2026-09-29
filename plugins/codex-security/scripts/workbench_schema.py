@@ -4,7 +4,6 @@ import argparse
 import json
 import sqlite3
 from collections.abc import Callable
-from pathlib import Path
 
 MIGRATIONS = (
     (
@@ -919,25 +918,6 @@ MIGRATIONS = (
 )
 
 
-def backfill_composition_children(connection: sqlite3.Connection) -> None:
-    # Preserve the previous membership rule using stored paths, including archived
-    # scans and scans whose outputs no longer exist. Do not consult checkpoints.
-    rows = connection.execute(
-        "SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir "
-        "FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id "
-        "WHERE parents.mode = 'deep' AND children.mode = 'standard'"
-    ).fetchall()
-    connection.executemany(
-        "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?",
-        (
-            (child["id"],)
-            for child in rows
-            if Path(child["scan_dir"]).parent
-            == Path(child["parent_scan_dir"]) / "artifacts/deep-scan/passes"
-        ),
-    )
-
-
 def migrate_finding_workflow_review_columns(connection: sqlite3.Connection) -> None:
     for row in connection.execute(
         "SELECT workflow_id, review_key, prompt_digest FROM finding_workflow_reviews"
@@ -1091,8 +1071,6 @@ def apply_migrations(
                     migrate_finding_workflow_columns(connection)
                 elif version == 39:
                     migrate_finding_workflow_review_columns(connection)
-                elif version == 43:
-                    backfill_composition_children(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, now()),

@@ -84,12 +84,6 @@ def read_composition_checkpoint(scan: sqlite3.Row) -> CompositionCheckpoint | No
     return cast(CompositionCheckpoint, checkpoint)
 
 
-def encode_composition_checkpoint(checkpoint: CompositionCheckpoint) -> bytes:
-    return json.dumps(
-        checkpoint, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-
-
 def composition_children(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[sqlite3.Row]:
     return connection.execute(
         "SELECT * FROM scans WHERE parent_scan_id = ? AND parent_scan_role = 'deep_pass' "

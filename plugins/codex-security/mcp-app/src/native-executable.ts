@@ -1,20 +1,10 @@
 import {
   accessSync,
   constants as fsConstants,
-  existsSync,
   promises as fs,
-  readdirSync,
   statSync,
 } from "node:fs";
-import { createRequire } from "node:module";
-import {
-  delimiter,
-  dirname,
-  isAbsolute,
-  join,
-  resolve,
-  win32,
-} from "node:path";
+import { delimiter, isAbsolute, join, resolve, win32 } from "node:path";
 import {
   resolveTrustedExecutable,
   type TrustedExecutable,
@@ -24,15 +14,14 @@ export async function resolveTrustedCodex(
   environment: NodeJS.ProcessEnv,
   protectedRoot: string,
   platform: NodeJS.Platform = process.platform,
-  architecture: NodeJS.Architecture = process.arch,
   originalCwd: string = process.cwd(),
 ): Promise<TrustedExecutable | null> {
   for (const candidate of codexPathCandidates(
     environment,
     platform,
-    architecture,
     originalCwd,
   )) {
+    if (platform === "win32" && isWindowsAppsPath(candidate)) continue;
     const codex = await resolveTrustedExecutable(
       candidate,
       environment,
@@ -67,88 +56,41 @@ export async function snapshotNativeEnvironment(): Promise<
 export function resolveCodexPath(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  architecture: NodeJS.Architecture = process.arch,
   originalCwd: string = process.cwd(),
 ): string {
-  return codexPathCandidates(env, platform, architecture, originalCwd).next()
-    .value!;
+  return codexPathCandidates(env, platform, originalCwd).next().value!;
 }
 
 function* codexPathCandidates(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
-  architecture: NodeJS.Architecture,
   originalCwd: string,
 ): Generator<string> {
-  const searchPath = searchPathForPlatform(env, platform);
   const configured = environmentVariable(
     env,
     "CODEX_CLI_PATH",
     platform,
   )?.trim();
-  if (configured && (platform !== "win32" || !isWindowsAppsPath(configured))) {
-    if (isBareCommandName(configured)) {
-      const executableName =
-        platform === "win32" && !configured.toLowerCase().endsWith(".exe")
-          ? `${configured}.exe`
-          : configured;
-      const fromSearchPath =
-        platform === "win32"
-          ? configured === "codex" || configured === "codex.exe"
-            ? resolveWindowsCodexFromSearchPath(
-                searchPath,
-                architecture,
-                originalCwd,
-              )
-            : resolveWindowsDirectFromSearchPath(
-                searchPath,
-                executableName,
-                originalCwd,
-              )
-          : resolveFromSearchPath(searchPath, executableName, originalCwd);
-      yield* fromSearchPath;
-    }
-    yield absoluteCodexPath(configured, platform, originalCwd);
-    return;
+  const command = configured || "codex";
+  if (isBareCommandName(command)) {
+    const executableName =
+      platform === "win32" && !command.toLowerCase().endsWith(".exe")
+        ? `${command}.exe`
+        : command;
+    const searchPath = searchPathForPlatform(env, platform);
+    yield* platform === "win32"
+      ? resolveWindowsDirectFromSearchPath(
+          searchPath,
+          executableName,
+          originalCwd,
+        )
+      : resolveFromSearchPath(searchPath, executableName, originalCwd);
   }
-
-  if (platform !== "win32") {
-    yield* resolveFromSearchPath(searchPath, "codex", originalCwd);
-    yield resolve(originalCwd, "codex");
-    return;
-  }
-
-  const managedPackageRoot = environmentVariable(
-    env,
-    "CODEX_MANAGED_PACKAGE_ROOT",
+  yield absoluteCodexPath(
+    configured || (platform === "win32" ? "codex.exe" : "codex"),
     platform,
-  )?.trim();
-  if (managedPackageRoot) {
-    const managedBinary = resolveWindowsPackageBinary(
-      absoluteCodexPath(managedPackageRoot, platform, originalCwd),
-      architecture,
-    );
-    if (managedBinary && !isWindowsAppsPath(managedBinary)) yield managedBinary;
-  }
-
-  yield* resolveWindowsCodexFromSearchPath(
-    searchPath,
-    architecture,
     originalCwd,
   );
-
-  const localAppData = environmentVariable(
-    env,
-    "LOCALAPPDATA",
-    platform,
-  )?.trim();
-  const cachedBinary = resolveWindowsCachedBinary(
-    localAppData
-      ? absoluteCodexPath(localAppData, platform, originalCwd)
-      : undefined,
-  );
-  if (cachedBinary) yield cachedBinary;
-  yield resolve(originalCwd, "codex.exe");
 }
 
 function searchPathForPlatform(
@@ -201,76 +143,13 @@ function* resolveWindowsDirectFromSearchPath(
       absoluteWindowsSearchDirectory(directory, originalCwd),
       executableName,
     );
-    if (!isWindowsAppsPath(candidate) && existsSync(candidate)) yield candidate;
-  }
-}
-
-function* resolveWindowsCodexFromSearchPath(
-  searchPath: string | undefined,
-  architecture: NodeJS.Architecture,
-  originalCwd: string,
-): Generator<string> {
-  for (const directory of searchPath?.split(delimiter) ?? []) {
-    const absoluteDirectory = absoluteWindowsSearchDirectory(
-      directory,
-      originalCwd,
-    );
-    const directBinary = join(absoluteDirectory, "codex.exe");
-    if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
-      yield directBinary;
-
-    const packageRoot = join(
-      absoluteDirectory,
-      "node_modules",
-      "@openai",
-      "codex",
-    );
-    const nativeBinary = resolveWindowsPackageBinary(packageRoot, architecture);
-    if (nativeBinary && !isWindowsAppsPath(nativeBinary)) yield nativeBinary;
+    if (!isWindowsAppsPath(candidate) && isExecutableFile(candidate))
+      yield candidate;
   }
 }
 
 function isWindowsAppsPath(candidate: string): boolean {
   return /(?:^|[\\/])windowsapps(?:[\\/]|$)/iu.test(candidate);
-}
-
-function resolveWindowsCachedBinary(
-  localAppData: string | undefined,
-): string | undefined {
-  const root = localAppData?.trim();
-  if (!root) return undefined;
-
-  const cacheRoot = join(root, "OpenAI", "Codex", "bin");
-  let selected: { path: string; modifiedAt: number } | undefined;
-  try {
-    for (const entry of readdirSync(cacheRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^[a-f0-9]{8,128}$/iu.test(entry.name))
-        continue;
-      const candidate = join(cacheRoot, entry.name, "codex.exe");
-      let metadata: ReturnType<typeof statSync>;
-      try {
-        metadata = statSync(candidate);
-      } catch {
-        continue;
-      }
-      if (
-        !metadata.isFile() ||
-        metadata.size === 0 ||
-        isWindowsAppsPath(candidate)
-      )
-        continue;
-      if (
-        !selected ||
-        metadata.mtimeMs > selected.modifiedAt ||
-        (metadata.mtimeMs === selected.modifiedAt && candidate > selected.path)
-      ) {
-        selected = { path: candidate, modifiedAt: metadata.mtimeMs };
-      }
-    }
-  } catch {
-    return undefined;
-  }
-  return selected?.path;
 }
 
 function isExecutableFile(value: string): boolean {
@@ -319,36 +198,4 @@ function isNativeWindowsRootRelativePath(value: string): boolean {
   if (process.platform !== "win32") return false;
   const root = win32.parse(value).root;
   return root === "\\" || root === "/";
-}
-
-function resolveWindowsPackageBinary(
-  packageRoot: string,
-  architecture: NodeJS.Architecture,
-): string | undefined {
-  const packageJson = join(packageRoot, "package.json");
-  if (!existsSync(packageJson)) return undefined;
-
-  const targetTriple =
-    architecture === "arm64"
-      ? "aarch64-pc-windows-msvc"
-      : architecture === "x64"
-        ? "x86_64-pc-windows-msvc"
-        : undefined;
-  if (!targetTriple) return undefined;
-
-  try {
-    const platformPackageJson = createRequire(packageJson).resolve(
-      `@openai/codex-win32-${architecture}/package.json`,
-    );
-    const nativeBinary = join(
-      dirname(platformPackageJson),
-      "vendor",
-      targetTriple,
-      "bin",
-      "codex.exe",
-    );
-    return existsSync(nativeBinary) ? nativeBinary : undefined;
-  } catch {
-    return undefined;
-  }
 }

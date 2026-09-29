@@ -1940,7 +1940,6 @@ describe("ordinary scan composition", () => {
         passes: [{ directory, scanId }],
         mergedScanIds: [],
         aggregate: { scanId: h.input.scanId, findings: [], coverage },
-        legacy: { discoveryRuns: 2, coverage },
         noNewStreak: 2,
         consecutiveErrors: 1,
         mergeFailures: 1,

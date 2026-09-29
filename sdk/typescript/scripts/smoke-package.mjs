@@ -1,3 +1,4 @@
+import { mcpSmokeInput, mcpSmokeResponses } from "./fixtures/mcp-smoke.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -234,19 +235,7 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
       cwd: pluginRoot,
       encoding: "utf8",
       env: { ...scanEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
-      input: `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: {
-            name: "codex-security-package-smoke",
-            version: "0.1.0",
-          },
-        },
-      })}\n${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`,
+      input: mcpSmokeInput,
       timeout: PACKAGE_SMOKE_TIMEOUT_MS,
       windowsHide: true,
     },
@@ -257,10 +246,7 @@ async function smokeSharedScanRuntime(installedRoot, consumer) {
     });
   }
   assert.equal(initialized.status, 0, initialized.stderr);
-  const mcpResponses = initialized.stdout
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const mcpResponses = mcpSmokeResponses(initialized.stdout);
   assert.equal(
     mcpResponses.find((response) => response.id === 1)?.result.serverInfo.name,
     "codex-security",

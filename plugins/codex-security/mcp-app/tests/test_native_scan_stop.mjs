@@ -33,7 +33,8 @@ const bundle = await build({
           }`,
           "./src/python_command.js": `
           export async function resolvePythonCommand() { return "fixture-python"; }
-          export function missingPythonHelperMessage() {}`,
+          export function missingPythonHelperMessage() {}
+          export function workbenchCommandTimeout() { return 30000; }`,
           "../../../sdk/typescript/src/scan-execution.js": `
           export const ScanPermissionError = fixture.ScanPermissionError;`,
           "node:child_process": `
@@ -69,7 +70,7 @@ function serverFor(fixture) {
 
 for (const entry of [
   "completed",
-  "run-success",
+  "read-error",
   "run-error",
   "permission-error",
 ]) {
@@ -91,6 +92,8 @@ for (const entry of [
         if (command === "begin-deep-scan") return { scan };
         assert.equal(args[args.indexOf("--scan-id") + 1], scan.scanId);
         if (command === "get-scan") {
+          if (entry === "read-error")
+            throw new Error("synthetic saved metadata unavailable");
           return { scan: { ...scan, progress: { status: "complete" } } };
         }
         assert.equal(command, "complete-scan");
@@ -135,11 +138,16 @@ for (const entry of [
       result.content[0].text,
       entry === "permission-error"
         ? /synthetic permission rejection/
-        : /synthetic sealed artifact mismatch/,
+        : entry === "read-error"
+          ? /synthetic saved metadata unavailable/
+          : /synthetic sealed artifact mismatch/,
     );
     assert.equal(result.structuredContent, undefined);
     assert.equal(runs, entry === "completed" ? 0 : 1);
-    assert.equal(validations, entry === "permission-error" ? 0 : 1);
+    assert.equal(
+      validations,
+      ["permission-error", "read-error"].includes(entry) ? 0 : 1,
+    );
     if (entry === "permission-error")
       assert.equal(scan.progress.status, "complete");
   });
@@ -343,21 +351,27 @@ for (const completed of [false, true]) {
       handoffClaimToken: "synthetic-claim",
       progress: { status: completed ? "complete" : "running" },
     };
-    const server = serverFor({
-      async workbench([command]) {
+    const commands = [];
+    const fixture = {
+      async workbench([command, ...args]) {
         if (command === "list-scans") return {};
         if (command === "resolve-scan-root")
           return { scanRoot: "/synthetic/scans" };
+        commands.push(command);
         if (command === "begin-deep-scan") return { scan };
-        assert.equal(command, "complete-scan");
+        assert.ok(["complete-scan", "get-scan"].includes(command));
+        assert.equal(args[args.indexOf("--scan-id") + 1], scan.scanId);
         return {
           scan: { ...scan, ...metadata, recipe: { private: "not public" } },
         };
       },
       async run() {
-        return {};
+        // A successful SDK run has already completed the scan; saved metadata is authoritative.
+        await this.workbench(["complete-scan", "--scan-id", scan.scanId]);
+        return { cost: { estimatedUsd: 99 }, turnResult: { usage: null } };
       },
-    });
+    };
+    const server = serverFor(fixture);
     const result = await server.tools.get("start_codex_security_deep_scan")(
       { scanId: scan.scanId, handoffClaimToken: scan.handoffClaimToken },
       nativeMeta,
@@ -366,5 +380,11 @@ for (const completed of [false, true]) {
     for (const key of Object.keys(metadata))
       assert.deepEqual(result.structuredContent[key], metadata[key]);
     assert.equal(result.structuredContent.recipe, undefined);
+    assert.deepEqual(
+      commands,
+      completed
+        ? ["begin-deep-scan", "complete-scan"]
+        : ["begin-deep-scan", "complete-scan", "get-scan"],
+    );
   });
 }
