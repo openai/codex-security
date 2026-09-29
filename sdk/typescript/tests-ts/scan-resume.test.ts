@@ -1515,6 +1515,169 @@ with sqlite3.connect(sys.argv[1]) as connection:
 );
 
 test.each([
+  ["sealed", "other-directory", false],
+  ["sealed", "predates-scan", false],
+  ["sealed", "undated", false],
+  ["sealed", "other-directory", true],
+  ["sealed", "dedicated", true],
+  ["sealed-v1", "predates-scan", false],
+  ["sealed-v1", "predates-scan", true],
+  ["sealed-v1", "dedicated", true],
+] as const)(
+  "sealed legacy accounting includes only scan-owned sessions (%s, %s, required: %p)",
+  async (state, origin, required) => {
+    const f = await interruptedScan("deep", false, {}, true, false, null);
+    const usage = { input_tokens: 1_000_000, output_tokens: 100 };
+    const startedAt = (
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+    )["startedAt"] as string;
+    await writeFile(
+      f.sessionPath,
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: f.threadId,
+            cwd: origin === "other-directory" ? f.repository : f.scanDir,
+            ...(origin === "undated"
+              ? {}
+              : {
+                  timestamp: new Date(
+                    Date.parse(startedAt) +
+                      (origin === "predates-scan" ? -60_000 : 1),
+                  ).toISOString(),
+                }),
+          },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "token_count", info: { total_token_usage: usage } },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+    const aggregate: SemanticScan = {
+      scanId: f.scanId,
+      findings: [semanticFinding({ identity: { anchor: "retained-legacy" } })],
+      coverage: semanticCoverage({ completeness: "partial" }),
+    };
+    const checkpoint: DeepScanCheckpoint = {
+      version: 2,
+      startedAt: "2000-01-01T00:00:00Z",
+      passes: [],
+      mergedScanIds: [],
+      aggregate,
+      noNewStreak: 0,
+      consecutiveErrors: 0,
+      terminalReason: "capped",
+      legacy: {
+        originThreadId: f.threadId,
+        discoveryRuns: 1,
+        coverage: aggregate.coverage,
+      },
+    };
+    if (state === "sealed-v1") {
+      await f.command([
+        "set-scan-thread",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+      ]);
+      execFileSync(f.python, [
+        "-c",
+        `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
+        "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
+        "manifest_path, terminal_reason, created_at, updated_at, completed_at) "
+        "VALUES (?, 1, 'recovery-test', 'succeeded', 'terminal', 1, 0, 1, 1, "
+        "?, 'saturated', ?, ?, ?)",
+        (sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], sys.argv[4]),
+    )
+`,
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        f.scanId,
+        join(f.scanDir, "scan-manifest.json"),
+        startedAt,
+      ]);
+    } else {
+      await f.command(
+        [
+          "save-scan-artifact",
+          "--scan-id",
+          f.scanId,
+          "--artifact-path",
+          DEEP_SCAN_CHECKPOINT,
+        ],
+        JSON.stringify(checkpoint),
+      );
+    }
+    const names = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+      ...(state === "sealed" ? [DEEP_SCAN_CHECKPOINT] : []),
+    ];
+    await publishDraft(f.command, f.registration, "deep", aggregate);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const artifacts = await Promise.all(
+      names.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    let turns = 0;
+    const unusedThread = (id: string | null) => ({
+      id,
+      async runStreamed() {
+        turns++;
+        throw new Error("Retained legacy results need no model turn.");
+      },
+    });
+    const client = resumeClient(f, () => ({
+      startThread: () => unusedThread(null),
+      resumeThread: (id) => unusedThread(id),
+    }))({ codexOverrides: f.recipe.config });
+    try {
+      const pending = client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+        ...(required ? { maxCostUsd: 10 } : {}),
+      });
+      if (required && origin !== "dedicated") {
+        await expect(pending).rejects.toThrow(/cost limit/);
+        expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
+          before,
+        );
+      } else {
+        const result = await pending;
+        expect(result.cost).toEqual(
+          origin === "dedicated"
+            ? estimateScanCost("gpt-5.6-sol", usage)
+            : null,
+        );
+        expect(result.findings.findings).toHaveLength(1);
+        expect(result.coverage.completeness).toBe("partial");
+      }
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      if (origin !== "dedicated") expect(saved["cost"]).toBeUndefined();
+      expect(
+        await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+      ).toEqual(artifacts);
+      expect(turns).toBe(0);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
   [null, false, false],
   ["native-unbound", false, false],
   [undefined, false, false],
@@ -1540,6 +1703,9 @@ test.each([
       outputTokens: 13,
       estimatedUsd: cost.estimatedUsd,
     };
+    const sessionStartedAt = (
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+    )["startedAt"] as string;
     await finishDiscovery(f);
     if (checkpoint !== "v2") {
       await rm(join(f.scanDir, DEEP_SCAN_CHECKPOINT));
@@ -1596,28 +1762,21 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
-    const savedCheckpoint = (
-      await f.command(["get-scan", "--scan-id", f.scanId])
-    )["compositionCheckpoint"];
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const savedCheckpoint = saved["compositionCheckpoint"];
     if (checkpoint === "v2")
       expect(savedCheckpoint).toMatchObject({ version: 2 });
     else expect(savedCheckpoint).toBeNull();
     for (const [threadId, cwd, inputTokens, outputTokens, timestamp] of [
-      [f.threadId, f.scanDir, 1000, 10, "2026-07-26T12:00:00.900Z"],
+      [f.threadId, f.scanDir, 1000, 10, sessionStartedAt],
       [
         randomUUID(),
         join(f.scanDir, "artifacts/deep_discovery/workers/worker/output"),
         250,
         2,
-        "2026-07-26T12:00:00.900Z",
+        sessionStartedAt,
       ],
-      [
-        randomUUID(),
-        join(f.scanDir, "artifacts"),
-        125,
-        1,
-        "2026-07-26T12:02:00Z",
-      ],
+      [randomUUID(), join(f.scanDir, "artifacts"), 125, 1, sessionStartedAt],
     ] as const) {
       await writeFile(
         join(f.codexHome, "sessions", `rollout-${threadId}.jsonl`),
@@ -1650,9 +1809,13 @@ with sqlite3.connect(sys.argv[1]) as connection:
       f,
       () => ({
         startThread() {
-          throw new Error(
-            "The sealed legacy scan already has a saved session.",
-          );
+          return {
+            id: null,
+            async runStreamed() {
+              turns++;
+              throw new Error("Sealed legacy discovery needs no model turn.");
+            },
+          };
         },
         resumeThread(threadId) {
           expect(threadId).toBe(f.threadId);

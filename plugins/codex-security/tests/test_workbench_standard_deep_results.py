@@ -11,7 +11,12 @@ import uuid
 from pathlib import Path
 
 import pytest
-from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    finding_fixture,
+    run_workbench,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.mark.parametrize("termination", ["failed", "canceled"])
@@ -21,10 +26,7 @@ def test_stopped_scan_ignores_late_checkpoints_until_explicit_recovery(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
     result_path = write_checkpoint(scan_dir / "checkpoints", checkpoint_draft(scan_id))
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = finding_fixture(relative_path="app.py")
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -122,10 +124,7 @@ def test_stopped_scan_ignores_late_checkpoints_until_explicit_recovery(
 
 def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = finding_fixture(relative_path="app.py")
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -184,10 +183,7 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
 
 def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = finding_fixture(relative_path="app.py")
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -628,10 +624,7 @@ def test_aggregate_queries_ignore_late_stopped_scan_checkpoints(
     count_field: str | None,
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = finding_fixture(relative_path="app.py")
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -752,10 +745,7 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     tmp_path: Path,
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = finding_fixture(relative_path="app.py")
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -1132,11 +1122,8 @@ def test_stopped_findings_cannot_enter_remediation(
     tmp_path: Path, command: tuple[str, ...]
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
     result = checkpoint_draft(scan_id)
-    result["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
+    result["findings"] = [finding_fixture(relative_path="app.py")]
     write_checkpoint(scan_dir / "checkpoints", result)
     stop_scan(state_dir, scan_id, "Stopped with a provisional finding.", status="failed")
     failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
@@ -1234,10 +1221,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
 
 def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    weak = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    weak = finding_fixture(relative_path="app.py")
     weak["severity"]["level"] = "low"
     weak["confidence"]["level"] = "low"
     weak["summary"] = "Earlier weak checkpoint evidence."

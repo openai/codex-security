@@ -1481,6 +1481,7 @@ export class CodexSecurity {
               );
             validateScanCostLimit(options.maxCostUsd, model);
             const turn = await readSealedScanTurn({
+              startedAt: registered.registration["startedAt"],
               scanId: registered.scanId,
               scanDir,
               expectation,
@@ -1793,6 +1794,7 @@ export class CodexSecurity {
       progress.preflight(registered.scopeFileCount, tracker);
       const sealedTurn = sealed
         ? await readSealedScanTurn({
+            startedAt: registration["startedAt"],
             scanId,
             scanDir,
             expectation,

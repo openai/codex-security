@@ -35,6 +35,7 @@ import {
 import type { SavedScanRecord } from "./workbench-types.js";
 import { throwIfAborted } from "./scan-events.js";
 import type { JsonObject } from "./config.js";
+import { findScanSession } from "./scan-logs.js";
 
 export interface CompletedScanTurn {
   threadId: string | null;
@@ -92,6 +93,7 @@ export function restorePriorScanCosts(
   scanDir: string,
   maxCostUsd?: number,
 ): void {
+  if (checkpoint?.legacy) costs.set("legacy", checkpoint.legacy.cost ?? null);
   if (
     checkpoint?.costUnavailable ||
     (typeof resumeThreadId !== "string" &&
@@ -113,6 +115,7 @@ export async function readSealedScanTurn(
   context: Omit<ScanPublicationContext, "pluginRoot"> & {
     codexHome: string;
     model: string;
+    startedAt: unknown;
     maxCostUsd?: number;
     onTrackingError(error: unknown): void;
     onCost(cost: Readonly<ScanCost>): void;
@@ -149,7 +152,28 @@ export async function readSealedScanTurn(
   const saved = await workbench(["get-scan", "--scan-id", scanId]);
   const savedScan = saved["scan"] as SavedScanRecord;
   const checkpoint = compositionCheckpointFromWorkbench(saved);
-  const resumeThreadId = savedScan.continuationThreadId;
+  let resumeThreadId = savedScan.continuationThreadId;
+  const historicalCost = async (threadId: string) => {
+    const session = await findScanSession(codexHome, threadId).catch(
+      (error: unknown) => {
+        context.onTrackingError(error);
+        return null;
+      },
+    );
+    const startedAt =
+      typeof context.startedAt === "string"
+        ? Date.parse(context.startedAt)
+        : NaN;
+    // Native owners can include earlier conversation work, even from this directory.
+    if (
+      session?.workingDirectory !== scanDir ||
+      session.startedAt === null ||
+      !Number.isFinite(startedAt) ||
+      session.startedAt < startedAt
+    )
+      return null;
+    return (await measure(threadId, scanDir)).cost;
+  };
   restorePriorScanCosts(
     costs,
     checkpoint,
@@ -172,7 +196,14 @@ export async function readSealedScanTurn(
     throw new CodexSecurityError(
       "The sealed scan has no saved execution session.",
     );
-  if (checkpoint?.legacy?.cost) costs.set("legacy", checkpoint.legacy.cost);
+  if (checkpoint?.legacy)
+    costs.set(
+      "legacy",
+      checkpoint.legacy.cost ??
+        (checkpoint.legacy.originThreadId
+          ? await historicalCost(checkpoint.legacy.originThreadId)
+          : null),
+    );
   if (checkpoint !== null) {
     const children = await workbench([
       "list-scans",
@@ -184,10 +215,13 @@ export async function readSealedScanTurn(
         costs.set(child.scanId, child.cost ?? null);
     }
   }
-  let cost =
-    mode === "deep" && checkpoint === null
-      ? (await measure(threadId, scanDir)).cost
-      : null;
+  let cost: ScanCost | null = null;
+  if (mode === "deep" && checkpoint === null) {
+    cost = (await historicalCost(threadId!)) ?? savedScan.cost ?? null;
+    costs.set("legacy", cost);
+    // This retired origin was measured above; it is not a composed merge session.
+    resumeThreadId = null;
+  }
   if (
     !costs.has("previous-work") &&
     (savedScan.progress.status === "complete" ||
@@ -196,7 +230,7 @@ export async function readSealedScanTurn(
     cost ??= savedScan.cost ?? null;
   if (
     typeof resumeThreadId !== "string" &&
-    (emptyComposition || checkpoint?.legacy?.cost)
+    (emptyComposition || checkpoint?.legacy)
   )
     cost ??= completeCost(null);
   if (

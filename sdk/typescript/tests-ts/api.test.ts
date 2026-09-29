@@ -1988,113 +1988,87 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const stateDirectory = join(root, "state");
-    await mkdir(repository);
-    const scenarios: [JsonObject, string][] = [
-      [{}, "none"],
-      [{ model_reasoning_summary: "auto" }, "auto"],
-      [
-        {
-          profile: "cloud",
-          profiles: { cloud: { model_reasoning_summary: "concise" } },
-        },
-        "concise",
-      ],
-      [
-        {
-          profile: "cloud.production",
-          profiles: {
-            "cloud.production": { model_reasoning_summary: "concise" },
-          },
-        },
-        "concise",
-      ],
-    ];
-    let started = 0;
-    let release!: () => void;
-    const allStarted = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const configPaths = new Set<string>();
-    const manifest = JSON.parse(
-      await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
-    ) as {
-      mcpServers: Record<string, { env_vars: string[] }>;
-    };
-    const clients = await Promise.all(
-      scenarios.map(async ([overrides, expected], index) => {
-        const scanDir = join(root, `scan-${index}`);
-        await mkdir(scanDir, { mode: 0o700 });
-        let codexOptions: CodexOptions;
-        let recipe: JsonObject;
-        return new TestClient(
+  test.each([false, true])(
+    "isolates resolved Deep settings across concurrent Bedrock scans (discovery: %j)",
+    async (deepScanPass) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      await mkdir(repository);
+      const scenarios: [JsonObject, string][] = [
+        [{}, "none"],
+        [{ model_reasoning_summary: "auto" }, "auto"],
+        [
           {
-            pluginPath: PLUGIN_ROOT,
-            codexOverrides: {
-              model: "openai.gpt-5.6-luna",
-              model_provider: "amazon-bedrock",
-              ...overrides,
+            profile: "cloud",
+            profiles: { cloud: { model_reasoning_summary: "concise" } },
+          },
+          "concise",
+        ],
+        [
+          {
+            profile: "cloud.production",
+            profiles: {
+              "cloud.production": { model_reasoning_summary: "concise" },
             },
           },
-          {
-            environment: {
-              CODEX_SECURITY_STATE_DIR: stateDirectory,
-              AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
-              AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
-            },
-            resolvePluginPython: async () => "/managed/python",
-            prepareOutputDir: async () => scanDir,
-            repositoryRevision: async () => "deadbeef",
-            createCodex: (options: CodexOptions) => {
-              codexOptions = options;
-              return {
-                startThread: () => ({
-                  id: null,
-                  runStreamed: async () => {
-                    throw new Error("Unexpected discovery");
-                  },
-                }),
-              };
-            },
-            runWorkbench: async (_options, args, input) => {
-              if (args[0] === "register-cli-scan")
-                recipe = JSON.parse(input!).recipe;
-              if (args[0] !== "list-scans") return mockWorkbench(args, input);
-              const options = codexOptions;
-              if (++started === scenarios.length) release();
-              await allStarted;
-              const mcpEnvironment = Object.fromEntries(
-                Object.entries(options.env ?? {}).filter(([name]) =>
-                  manifest.mcpServers["codex-security"]!.env_vars.includes(
-                    name,
-                  ),
-                ),
-              );
-              const configPath = mcpEnvironment["CODEX_SECURITY_CONFIG_PATH"];
-              expect(typeof configPath).toBe("string");
-              configPaths.add(configPath!);
+          "concise",
+        ],
+      ];
+      let started = 0;
+      let release!: () => void;
+      const allStarted = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const configPaths = new Set<string>();
+      const manifest = JSON.parse(
+        await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as {
+        mcpServers: Record<string, { env_vars: string[] }>;
+      };
+      const clients = await Promise.all(
+        scenarios.map(async ([overrides, expected], index) => {
+          const scanDir = join(root, `scan-${index}`);
+          await mkdir(scanDir, { mode: 0o700 });
+          let codexOptions: CodexOptions;
+          let recipe: JsonObject;
+          const capture = async () => {
+            const options = codexOptions;
+            if (++started === scenarios.length) release();
+            await allStarted;
+            expect(options.config?.["mcp_servers"]).toEqual({
+              "codex-security": { command: "node", enabled: false },
+              synthetic: { command: `synthetic-mcp-${index}` },
+            });
+            const mcpEnvironment = Object.fromEntries(
+              Object.entries(options.env ?? {}).filter(([name]) =>
+                manifest.mcpServers["codex-security"]!.env_vars.includes(name),
+              ),
+            );
+            const configPath = mcpEnvironment["CODEX_SECURITY_CONFIG_PATH"];
+            expect(typeof configPath).toBe("string");
+            configPaths.add(configPath!);
+            if (!deepScanPass)
               expect(recipe!["deepScan"]).toMatchObject({
                 workers: index + 1,
                 subagents: index,
                 stopAfterConsecutiveErrors: index + 2,
               });
-              const config = parseToml(
-                await readFile(configPath!, "utf8"),
-              ) as JsonObject;
-              expect(resolveCodexProfile(config)).toMatchObject({
-                model_reasoning_summary: expected,
-                model_reasoning_effort: "xhigh",
-                model_provider: "amazon-bedrock",
-              });
-              expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
-                `synthetic-bedrock-key-${index}`,
-              );
-              expect(mcpEnvironment["AWS_REGION"]).toBe(
-                index % 2 === 0 ? "us-east-2" : "us-west-2",
-              );
+            const config = parseToml(
+              await readFile(configPath!, "utf8"),
+            ) as JsonObject;
+            expect(resolveCodexProfile(config)).toMatchObject({
+              model_reasoning_summary: expected,
+              model_reasoning_effort: "xhigh",
+              model_provider: "amazon-bedrock",
+            });
+            expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
+              `synthetic-bedrock-key-${index}`,
+            );
+            expect(mcpEnvironment["AWS_REGION"]).toBe(
+              index % 2 === 0 ? "us-east-2" : "us-west-2",
+            );
+            if (!deepScanPass) {
               const shared = parseToml(
                 await readFile(
                   join(options.env!["CODEX_HOME"]!, "config.toml"),
@@ -2102,39 +2076,97 @@ describe("CodexSecurity orchestration", () => {
                 ),
               );
               expect(shared["model_reasoning_summary"]).toBeUndefined();
-              throw new Error("composition context captured");
+            }
+            throw new Error("composition context captured");
+          };
+          return new TestClient(
+            {
+              pluginPath: PLUGIN_ROOT,
+              codexOverrides: {
+                model: "openai.gpt-5.6-luna",
+                model_provider: "amazon-bedrock",
+                mcp_servers: {
+                  "codex-security": {
+                    command: "synthetic-workbench",
+                    enabled: true,
+                  },
+                  synthetic: { command: `synthetic-mcp-${index}` },
+                },
+                ...overrides,
+              },
             },
-          },
-        );
-      }),
-    );
-    try {
-      const results = await Promise.allSettled(
-        clients.map((client, index) =>
-          client
-            .run(repository, {
-              mode: "deep",
-              workers: index + 1,
-              subagents: index,
-              stopAfterConsecutiveErrors: index + 2,
-            })
-            .finally(release),
-        ),
+            {
+              environment: {
+                CODEX_SECURITY_STATE_DIR: stateDirectory,
+                AWS_BEARER_TOKEN_BEDROCK: `synthetic-bedrock-key-${index}`,
+                AWS_REGION: index % 2 === 0 ? "us-east-2" : "us-west-2",
+              },
+              resolvePluginPython: async () => "/managed/python",
+              prepareOutputDir: async () => scanDir,
+              repositoryRevision: async () => "deadbeef",
+              createCodex: (options: CodexOptions) => {
+                codexOptions = options;
+                return {
+                  startThread: () => ({
+                    id: null,
+                    runStreamed: async () => {
+                      if (!deepScanPass)
+                        throw new Error("Unexpected discovery");
+                      return {
+                        events: (async function* () {
+                          yield {
+                            type: "thread.started" as const,
+                            thread_id: `synthetic-thread-${index}`,
+                          };
+                          await capture();
+                        })(),
+                      };
+                    },
+                  }),
+                };
+              },
+              runWorkbench: async (_options, args, input) => {
+                if (args[0] === "register-cli-scan")
+                  recipe = JSON.parse(input!).recipe;
+                if (args[0] !== "list-scans") return mockWorkbench(args, input);
+                return capture();
+              },
+            },
+          );
+        }),
       );
-      for (const result of results)
-        expect(result).toMatchObject({
-          status: "rejected",
-          reason: expect.objectContaining({
-            message: "composition context captured",
-          }),
-        });
-      expect(started).toBe(scenarios.length);
-      expect(configPaths.size).toBe(scenarios.length);
-    } finally {
-      release();
-      await Promise.all(clients.map((client) => client.close()));
-    }
-  });
+      try {
+        const results = await Promise.allSettled(
+          clients.map((client, index) =>
+            client
+              .run(repository, {
+                mode: deepScanPass ? "standard" : "deep",
+                ...(deepScanPass
+                  ? { deepScanPass: true }
+                  : {
+                      workers: index + 1,
+                      subagents: index,
+                      stopAfterConsecutiveErrors: index + 2,
+                    }),
+              })
+              .finally(release),
+          ),
+        );
+        for (const result of results)
+          expect(result).toMatchObject({
+            status: "rejected",
+            reason: expect.objectContaining({
+              message: "composition context captured",
+            }),
+          });
+        expect(started).toBe(scenarios.length);
+        expect(configPaths.size).toBe(scenarios.length);
+      } finally {
+        release();
+        await Promise.all(clients.map((client) => client.close()));
+      }
+    },
+  );
 
   test("does not accept Bedrock credentials for an OpenAI scan", async () => {
     const root = await temporaryDirectory();

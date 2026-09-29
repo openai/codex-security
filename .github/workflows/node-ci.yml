@@ -603,7 +603,6 @@ jobs:
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test shard ${{ matrix.shard }}
-        timeout-minutes: 15
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}

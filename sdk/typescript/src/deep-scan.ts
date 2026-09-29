@@ -250,9 +250,12 @@ export async function runDeepScans(
     }
     for (const [directory, cost] of costs) reportPassCost(directory, cost);
     let recoveredSuccess = false;
+    let recoveredFailure = false;
     for (const { record, pass } of passes) {
-      if (recoverOutcomes && record.progress.status === "failed")
+      if (recoverOutcomes && record.progress.status === "failed") {
+        recoveredFailure ||= !pass.failed;
         observePassFailure(state, pass, recoveredSuccess);
+      }
       if (
         record.progress.status === "complete" &&
         !completed.has(record.scanId)
@@ -265,7 +268,7 @@ export async function runDeepScans(
           recoveredSuccess = observePassCompletion(
             state,
             pass,
-            recoveredSuccess,
+            recoveredSuccess || recoveredFailure,
           );
         else pass.completed = true;
       }
@@ -579,6 +582,10 @@ function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   // SDK diagnostics can include repository text; match complete runtime refusals.
   return [
+    "cyber_policy",
+    "Request rejected: cyber_policy.",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",

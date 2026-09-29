@@ -653,33 +653,44 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test("keeps a runtime refusal fatal after a merge validation error", async () => {
-    const h = await harness({ maxDiscoveryRuns: 1 });
-    h.setRun(async (options) =>
-      result(options.resumeScanId!, options.outputDir!, "supported-issue"),
-    );
-    const merge = h.input.merge;
-    const refusal = new Error("Request blocked by cyberPolicy.");
-    let attempts = 0;
-    h.input.merge = async (prompt, signal) => {
-      if (++attempts > 1) throw refusal;
-      return {
-        ...((await merge(prompt, signal)) as JsonObject),
-        cyber_policy: false,
+  test.each([
+    "Request blocked by cyberPolicy.",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
+    "Request rejected: cyber_policy.",
+    "cyber_policy",
+  ])(
+    "keeps runtime refusal %s fatal after a merge validation error",
+    async (message) => {
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      h.setRun(async (options) =>
+        result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+      );
+      const merge = h.input.merge;
+      const refusal = await codexStreamError(
+        JSON.stringify({ type: "turn.failed", error: { message } }),
+      );
+      let attempts = 0;
+      h.input.merge = async (prompt, signal) => {
+        if (++attempts > 1) throw refusal;
+        return {
+          ...((await merge(prompt, signal)) as JsonObject),
+          cyber_policy: false,
+        };
       };
-    };
 
-    await expect(runDeepScans(h.input)).rejects.toBe(refusal);
+      await expect(runDeepScans(h.input)).rejects.toBe(refusal);
 
-    expect(attempts).toBe(2);
-    expect(h.calls).toHaveLength(1);
-    expect(await h.checkpoint()).toMatchObject({
-      terminalReason: "failed",
-      mergeFailures: 1,
-      mergedScanIds: [],
-    });
-    expect(h.published).toEqual([]);
-  });
+      expect(attempts).toBe(2);
+      expect(h.calls).toHaveLength(1);
+      expect(await h.checkpoint()).toMatchObject({
+        terminalReason: "failed",
+        mergeFailures: 1,
+        mergedScanIds: [],
+      });
+      expect(h.published).toEqual([]);
+    },
+  );
 
   test.each(["SDK parser", "schema"])(
     "retries a merge after a %s diagnostic containing policy-like data",
@@ -1379,19 +1390,21 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test.each(
-    [2, 3].flatMap((limit) =>
+  test.each([
+    ...[2, 3].flatMap((limit) =>
       [false, true].flatMap((successLast) =>
         [false, true].map((failureSaved) => ({
           limit,
           successLast,
           failureSaved,
+          successSaved: false,
         })),
       ),
     ),
-  )(
+    { limit: 1, successLast: true, failureSaved: false, successSaved: true },
+  ])(
     "recovers terminal outcomes in completion order across repeated resumes (%j)",
-    async ({ limit, successLast, failureSaved }) => {
+    async ({ limit, successLast, failureSaved, successSaved }) => {
       const h = await harness({
         maxDiscoveryRuns: 3,
         stopAfterConsecutiveErrors: limit,
@@ -1435,7 +1448,11 @@ describe("ordinary scan composition", () => {
         startedAt: h.input.startedAt,
         passes: [
           { directory: "artifacts/deep-scan/passes/pass-1", failed: true },
-          { directory, scanId },
+          {
+            directory,
+            scanId,
+            ...(successSaved ? { completed: true as const } : {}),
+          },
           {
             directory: "artifacts/deep-scan/passes/pass-3",
             scanId: failedId,
@@ -1445,14 +1462,15 @@ describe("ordinary scan composition", () => {
         mergedScanIds: [],
         aggregate: null,
         noNewStreak: 0,
-        consecutiveErrors: failureSaved ? 2 : 1,
+        consecutiveErrors: successSaved ? 0 : failureSaved ? 2 : 1,
       });
       const workbench = h.input.workbench;
       h.input.workbench = async (args, contents) => {
         const result = await workbench(args, contents);
         if (
           args[0] === "save-scan-artifact" &&
-          JSON.parse(contents!).passes[1].completed
+          JSON.parse(contents!).passes[1].completed &&
+          JSON.parse(contents!).passes[2].failed
         )
           throw new ScanTransportClosedError(
             "Synthetic interruption after recovery",
@@ -1468,8 +1486,54 @@ describe("ordinary scan composition", () => {
         consecutiveErrors: successLast ? 0 : 1,
       });
       expect(h.calls).toEqual([]);
+      expect(h.mergeInputs).toEqual([1]);
+      expect(h.published[0]!.findings).toHaveLength(
+        exampleFindings.findings.length,
+      );
     },
   );
+
+  test("does not recount a saved failure after recovering an earlier failure", async () => {
+    const h = await harness({
+      maxDiscoveryRuns: 2,
+      stopAfterConsecutiveErrors: 3,
+    });
+    const passes = [1, 2].map((number) => ({
+      directory: `artifacts/deep-scan/passes/pass-${number}`,
+      scanId: randomUUID(),
+      ...(number === 2 ? { failed: true as const } : {}),
+    }));
+    for (const [index, pass] of passes.entries())
+      h.records.set(pass.scanId, {
+        scanId: pass.scanId,
+        scanDir: join(h.input.scanDir, pass.directory),
+        parentScanId: h.input.scanId,
+        targetPath: h.input.repository,
+        progress: { status: "failed" },
+        completedAt: `2026-01-01T00:00:0${index + 1}Z`,
+      });
+    await h.seed({
+      version: 2,
+      startedAt: h.input.startedAt,
+      passes,
+      mergedScanIds: [],
+      aggregate: null,
+      noNewStreak: 0,
+      consecutiveErrors: 1,
+    });
+
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      "every discovery run failed",
+    );
+    expect(await h.checkpoint()).toMatchObject({
+      terminalReason: "failed",
+      consecutiveErrors: 2,
+      passes: passes.map((pass) => ({ ...pass, failed: true })),
+    });
+    expect(h.calls).toEqual([]);
+    expect(h.mergeInputs).toEqual([]);
+    expect(h.published).toEqual([]);
+  });
 
   test.each(["none", "cancel", "cost"] as const)(
     "keeps the consecutive error limit when a sibling finishes after it (late stop: %s)",
@@ -1776,6 +1840,10 @@ describe("ordinary scan composition", () => {
     "metering",
     "permission before registration",
     "permission after registration",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
+    "Request rejected: cyber_policy.",
+    "cyber_policy",
     "This content was flagged for possible cybersecurity risk.",
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",

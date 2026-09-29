@@ -1035,6 +1035,17 @@ process.exit(0);
         );
       }
       for (const turn of turns) {
+        const servers = (turn.config as JsonObject | undefined)?.[
+          "mcp_servers"
+        ] as JsonObject | undefined;
+        expect(servers?.["codex-security"]).toEqual({
+          command: "node",
+          enabled: false,
+        });
+        if (prepareNative)
+          expect(servers?.["synthetic"]).toEqual(
+            nativeSettings.mcp_servers.synthetic,
+          );
         const permission = turn.overrides?.find((value) =>
           value.startsWith("permissions.codex_security_scan="),
         );

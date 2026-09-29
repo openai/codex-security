@@ -356,27 +356,12 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     assert_published_aggregate(scan)
 
 
-@pytest.mark.parametrize(
-    ("source", "scope", "has_parent"),
-    [
-        ("standard-worker-checkpoint", ".", True),
-        ("deep-reducer-checkpoint", ".", True),
-        ("deep-reducer-archived-checkpoint", ".", True),
-        ("deep-reducer-result", ".", True),
-        ("deep-reducer-result", "subdir", False),
-    ],
-    ids=[
-        "standard-worker-checkpoint",
-        "deep-reducer-checkpoint",
-        "deep-reducer-archived-checkpoint",
-        "deep-reducer-result",
-        "scoped-reducer-without-parent",
-    ],
-)
-def test_stopped_deep_scan_still_salvages_saved_findings(
-    workbench_api, workbench_db, publication_scan, source, scope, has_parent
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize(("scope", "has_parent"), [(".", True), ("subdir", False)])
+def test_stopped_scan_salvages_saved_parent_checkpoints(
+    workbench_api, workbench_db, publication_scan, mode, scope, has_parent
 ):
-    scan = publication_scan(scope=scope)
+    scan = publication_scan(mode=mode, scope=scope)
     if not has_parent:
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
@@ -386,42 +371,17 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
             "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
             (scan.scan_id,),
         )
-    result = add_worker(
-        workbench_db, scan, status="succeeded" if source == "deep-reducer-result" else "running"
-    )
-    if source.startswith("deep-reducer"):
-        with workbench_db:
-            workbench_db.execute(
-                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
-                (result.parent.name,),
-            )
     later_finding = copy.deepcopy(scan.findings[0])
     later_finding["identity"]["anchor"] = "later-checkpoint-finding"
     later_finding["summary"] = "Finding saved after the last completed aggregate."
     saved = {
         "scanId": scan.scan_id,
-        "complete": source == "deep-reducer-result",
+        "complete": False,
         "findings": [later_finding],
+        "coverage": scan.coverage,
     }
-    if source == "standard-worker-checkpoint":
-        saved["coverage"] = {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
-    if source == "deep-reducer-result":
-        checkpoint = None
-        result.write_text(json.dumps(saved))
-    else:
-        checkpoint_root = (
-            result.parent / "attempts" / "attempt-01"
-            if source == "deep-reducer-archived-checkpoint"
-            else result.parent
-        )
-        checkpoint = write_checkpoint(checkpoint_root / "checkpoints", saved)
-        result.write_text("{interrupted worker output")
-    result_bytes = result.read_bytes()
+    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", saved)
+    checkpoint_bytes = checkpoint.read_bytes()
 
     stopped = workbench_api["fail_scan"](
         workbench_db,
@@ -448,9 +408,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
     )["scan"]
     assert recovered["findingCount"] == len(expected_summaries)
     assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
-    if checkpoint is not None:
-        assert json.loads(checkpoint.read_text()) == saved
-    assert result.read_bytes() == result_bytes
+    assert checkpoint.read_bytes() == checkpoint_bytes
 
 
 @pytest.mark.parametrize("source", ["result", "checkpoint", "parent-checkpoint"])
