@@ -26,6 +26,37 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
 
 
+def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_api) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
+            "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
+            "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
+            "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"
+        )
+        connection.executemany(
+            "INSERT INTO scans VALUES (?, ?, ?)",
+            [("parent", "1", None), ("child", "2", "deep_pass"), ("rerun", "3", None)],
+        )
+        connection.executemany(
+            "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
+            [("p", "parent"), ("c", "child"), ("c2", "child"), ("r", "rerun")],
+        )
+        connection.executemany(
+            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'Confirmed')",
+            [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
+        )
+        matches = workbench_api["scan_history"].finding_matches
+        for occurrence, scan_id, started in (("p", "parent", "1"), ("r", "rerun", "3")):
+            rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
+            assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
+            assert known_since == "1"
+            assert known_scans == ["parent", "rerun"]
+        rows, _, _ = matches(connection, "c", "child", "2")
+        assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
+
+
 def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), *args],

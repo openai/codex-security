@@ -14,7 +14,6 @@ import stat
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -37,17 +36,16 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
-from project_scan_artifacts import project_scan_artifacts
+from project_scan_artifacts import merge_coverage, project_scan_artifacts
+from report_projection import retained_findings
 from workbench_composition import (
     COMPOSITION_CHECKPOINT,
-    CompositionCheckpoint,
     CompositionView,
     composition_children,
-    encode_composition_checkpoint,
     read_composition_checkpoint,
 )
 from workbench_constants import PHASES
-from workbench_scan_usage import _timestamp, stored_scan_cost_fields
+from workbench_scan_usage import merge_scan_cost
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
@@ -458,32 +456,6 @@ def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> N
     finding["identity"] = {"anchor": anchor}
 
 
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield current
-        provenance = current.get("provenance")
-        if not isinstance(provenance, dict):
-            continue
-        previous = provenance.get("previousFindings")
-        if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
-        sources = provenance.get("sourceFindings")
-        if isinstance(sources, list):
-            pending.extend(
-                source["finding"]
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
-
-
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -785,7 +757,7 @@ def merge_saved_results(
         for finding in draft["findings"]:
             if valid_finding(finding):
                 canonical_key = _finding_key(finding)
-                for retained in _retained_findings(finding):
+                for _, retained in retained_findings(finding):
                     retained_key = _finding_key(retained)
                     if retained is not finding:
                         represented_history.setdefault(retained_key, set()).add(
@@ -981,7 +953,7 @@ def merge_saved_results(
                         already_retained = any(
                             source_key == _finding_key(historical)
                             and source_content == _finding_content(historical)
-                            for historical in _retained_findings(retained)
+                            for _, historical in retained_findings(retained)
                         )
                         if (
                             not already_retained
@@ -1131,206 +1103,6 @@ def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None
             write_scan_local_bytes(scan_dir, relative, contents)
 
 
-def retire_legacy_run(connection: Any, scan_id: str) -> None:
-    with connection:
-        connection.execute(
-            "UPDATE deep_scan_runs SET status = 'interrupted', phase = 'terminal', cancel_requested = 1, "
-            "coordinator_generation = coordinator_generation + 1 WHERE scan_id = ? AND status = 'running'",
-            (scan_id,),
-        )
-
-
-def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
-    """Import completed v1 results once; ordinary scans own all subsequent execution."""
-    scan = db.require_scan(connection, scan["id"])
-    if scan["mode"] != "deep":
-        return scan
-    checkpoint = read_composition_checkpoint(scan)
-    if checkpoint is not None:
-        if checkpoint.get("legacy") is not None:
-            retire_legacy_run(connection, scan["id"])
-        return scan
-    run = connection.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
-    if run is None:
-        return scan
-    if (
-        scan["status"] != "running"
-        or scan["canceled_at"] is not None
-        or run["status"] not in {"running", "succeeded"}
-        or run["cancel_requested"]
-    ):
-        raise SystemExit("This Deep Scan has stopped and cannot resume.")
-    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    workers = connection.execute(
-        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id", (scan["id"],)
-    ).fetchall()
-    if run["status"] == "running":
-        # These are the retired coordinator's existing leases, read only during conversion.
-        last_seen = _timestamp(run["updated_at"])
-        grace = 120 if run["coordinator_generation"] == 1 else 30
-        if run["coordinator_generation"] != 1:
-            relative = f"artifacts/deep_discovery/coordinator-heartbeat-{run['coordinator_generation']}.json"
-            if (scan_dir / relative).exists():
-                heartbeat = _read_scan_local_json(
-                    scan_dir, relative, "Previous coordinator heartbeat"
-                )
-                if heartbeat.get("coordinatorGeneration") == run["coordinator_generation"]:
-                    timestamp = _timestamp(heartbeat.get("updatedAt"))
-                    if timestamp is not None:
-                        last_seen = (
-                            max(last_seen, timestamp) if last_seen is not None else timestamp
-                        )
-        active = run["coordinator_generation"] != 1 or any(
-            worker["status"] in {"queued", "running"} for worker in workers
-        )
-        if (
-            active
-            and last_seen is not None
-            and last_seen > _timestamp(db.now()) - timedelta(seconds=grace)
-        ):
-            raise SystemExit(
-                "The previous Deep Scan owner is still active; stop it before resuming with this version."
-            )
-    reducer = _latest_successful_reducer(workers)
-    accepted = [
-        worker
-        for worker in workers
-        if worker == reducer or (worker["kind"] == "discovery" and worker["status"] == "succeeded")
-    ]
-    warnings: list[str] = []
-    binding = db.workbench_completion_binding(scan, db.now())
-    documents = merge_saved_results(
-        scan_dir,
-        scan["id"],
-        binding,
-        accepted,
-        warnings,
-        stopped=run["status"] != "succeeded",
-        reason="Saved Deep Scan execution migrated to ordinary scans.",
-    )
-    aggregate = {
-        "scanId": scan["id"],
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        },
-    }
-    if documents is not None:
-        documents[2]["deferred"] = [
-            item for item in documents[2]["deferred"] if item.get("id") != "scan-stopped"
-        ]
-        _, _, manifest, findings, coverage, _, _ = _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=binding["coverageMode"],
-            completion_binding=binding,
-            draft_documents=documents,
-        )
-        aggregate.update(findings=findings["findings"], coverage=coverage)
-        for field in ("scope", "threatModel"):
-            if field in manifest["scan"]:
-                aggregate[field] = manifest["scan"][field]
-        for index, finding in enumerate(aggregate["findings"]):
-            original = copy.deepcopy(finding)
-            for field in ("findingId", "occurrenceId", "fingerprints"):
-                finding.pop(field, None)
-            source_id = f"legacy:{index}"
-            finding.setdefault("provenance", {}).update(
-                sourceFindingIds=[source_id],
-                sourceFindings=[{"id": source_id, "finding": original}],
-            )
-    coverage = aggregate["coverage"]
-    for field in (
-        "documentType",
-        "schemaVersion",
-        "scanId",
-        "mode",
-        "includePaths",
-        "excludePaths",
-        "receiptRefs",
-        "inventoryStrategy",
-    ):
-        coverage.pop(field, None)
-    for field in ("includePaths", "excludePaths"):
-        aggregate.get("scope", {}).pop(field, None)
-    merge_failures = 0
-    for worker in workers:
-        if worker["kind"] == "dedup":
-            if worker["status"] == "succeeded":
-                merge_failures = 0
-            elif worker["status"] == "failed":
-                merge_failures += 1
-        if worker["kind"] != "discovery" or worker in accepted:
-            continue
-        directory = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
-        coverage["deferred"].append(
-            {
-                "id": f"legacy-{worker['id']}",
-                "reason": f"Earlier independent scan did not merge. Saved work: {directory}.",
-            }
-        )
-    coverage["deferred"].extend({"reason": warning} for warning in warnings)
-    # The retired coordinator refunded these abandoned attempts when its lease expired.
-    # Preserve that budget so migration can dispatch their replacements.
-    interrupted_discoveries = sum(
-        worker["kind"] == "discovery"
-        and (
-            worker["status"] in {"queued", "running"}
-            or (
-                worker["status"] == "canceled"
-                and (
-                    (worker["error_message"] or "").startswith("coordinator_shutdown:")
-                    or (run["coordinator_generation"] == 1 and worker["error_message"] is None)
-                )
-            )
-        )
-        for worker in workers
-        if run["status"] == "running"
-    )
-    checkpoint: CompositionCheckpoint = {
-        "version": 2,
-        "startedAt": run["created_at"],
-        "passes": [],
-        "mergedScanIds": [],
-        "aggregate": aggregate,
-        "noNewStreak": run["consecutive_no_new"],
-        "consecutiveErrors": run["consecutive_errors"],
-        "mergeFailures": merge_failures,
-        "legacy": {
-            "originThreadId": scan["continuation_thread_id"] or scan["deep_scan_owner_thread_id"],
-            "discoveryRuns": run["discovery_runs_dispatched"] - interrupted_discoveries,
-            "coverage": copy.deepcopy(coverage),
-            **(
-                {"cost": cost}
-                if (cost := stored_scan_cost_fields(scan["cost_json"]).get("cost"))
-                else {}
-            ),
-        },
-        **(
-            {"terminalReason": run["terminal_reason"]}
-            if run["status"] == "succeeded" and run["terminal_reason"] is not None
-            else {}
-        ),
-    }
-    # Clear the old execution thread before publishing the checkpoint. A crash between
-    # these writes safely repeats conversion and never resumes the retired conversation.
-    with connection:
-        connection.execute(
-            "UPDATE scans SET deep_scan_owner_thread_id = COALESCE(deep_scan_owner_thread_id, "
-            "continuation_thread_id), continuation_thread_id = NULL WHERE id = ?",
-            (scan["id"],),
-        )
-    write_scan_local_bytes(
-        scan_dir, COMPOSITION_CHECKPOINT, encode_composition_checkpoint(checkpoint)
-    )
-    retire_legacy_run(connection, scan["id"])
-    return db.require_scan(connection, scan["id"])
-
-
 def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] | None:
     """Read one ordinary saved scan through its normal validation and recovery path."""
     child_dir = db.require_canonical_scan_directory(Path(child["scan_dir"]))
@@ -1392,16 +1164,18 @@ def save_composed_checkpoint(
         aggregate = {"findings": [], "coverage": {}}
     represented = set()
     for finding in aggregate["findings"]:
-        for retained in _retained_findings(finding):
+        for _, retained in retained_findings(finding):
             provenance = retained.get("provenance", {})
             represented.update(provenance.get("sourceFindingIds", []))
             represented.update(source["id"] for source in provenance.get("sourceFindings", []))
+    recovery_errors = {}
     for child in children.values():
         if child["id"] in merged_ids:
             continue
         try:
             draft = _stopped_child_draft(db, child, scan_dir)
-        except (ContractError, OSError, SystemExit, ValueError):
+        except (ContractError, OSError, SystemExit, ValueError) as exc:
+            recovery_errors[child["id"]] = str(exc)
             continue
         if draft is None:
             continue
@@ -1410,11 +1184,7 @@ def save_composed_checkpoint(
             for finding in draft["findings"]
             if not represented.intersection(finding["provenance"]["sourceFindingIds"])
         )
-        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-            rows = aggregate.setdefault("coverage", {}).setdefault(field, [])
-            for row in draft["coverage"].get(field, []):
-                if row not in rows:
-                    rows.append(row)
+        merge_coverage(aggregate.setdefault("coverage", {}), draft["coverage"])
     aggregate["scanId"] = scan["id"]
     aggregate["complete"] = False
     coverage = aggregate.setdefault("coverage", {})
@@ -1437,6 +1207,8 @@ def save_composed_checkpoint(
             else f"unmerged-{_digest(relative)[:16]}",
             "reason": f"Independent scan did not complete and merge. Saved work: {relative}.",
         }
+        if child is not None and child["id"] in recovery_errors:
+            note["reason"] += f" Recovery failed: {recovery_errors[child['id']]}"
         if note not in deferred:
             deferred.append(note)
     payload = _encoded(aggregate)
@@ -1683,11 +1455,7 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot preserve new results.")
         workspace = db.require_workspace(connection, scan["workspace_id"])
-        owner = (
-            scan["deep_scan_owner_thread_id"]
-            or scan["continuation_thread_id"]
-            or workspace["thread_id"]
-        )
+        owner = db.handoff.durable_owner_thread_id(scan, workspace)
         if args.thread_id is not None and args.thread_id != owner:
             raise SystemExit("Saved results can only be published from the owning Codex thread.")
         # The app can cancel before a continuation has claimed the scan.
@@ -1703,9 +1471,7 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
                 error_message="Saved results are owned by another continuation.",
             )
         if cost_json is not None:
-            stored = stored_scan_cost_fields(scan["cost_json"])
-            if "usage" in stored:
-                cost_json = json.dumps({**stored, "cost": json.loads(cost_json)})
+            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
             with connection:
                 connection.execute(
                     "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
@@ -1905,12 +1671,10 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 args.claim_token,
                 error_message="Scan failure is owned by another continuation.",
             )
+        if cost_json is not None:
+            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
         if scan["status"] == "failed":
             if cost_json is not None:
-                stored = stored_scan_cost_fields(scan["cost_json"])
-                incoming = json.loads(cost_json)
-                if "usage" in stored and "usage" not in incoming:
-                    cost_json = json.dumps({**stored, "cost": incoming})
                 connection.execute(
                     "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
                 )

@@ -12,6 +12,31 @@ from test_workbench_scan_composition import register
 from workbench_test_support import run_workbench, write_completed_contract
 
 
+def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [{"id": "surface", "notes": "Earlier observation"}],
+    }
+    addition = {
+        "surfaces": [
+            {"notes": "Earlier observation", "id": "surface"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }
+    workbench_api["saved_results"].merge_coverage(coverage, addition)
+    assert coverage == {
+        "completeness": "partial",
+        "surfaces": [
+            {"id": "surface", "notes": "Earlier observation"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "explicitExclusions": [],
+        "deferred": [],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }
+
+
 @pytest.fixture
 def projection_fixture(tmp_path):
     target = tmp_path / "target"

@@ -98,13 +98,6 @@ def composition_children(connection: sqlite3.Connection, scan: sqlite3.Row) -> l
     ).fetchall()
 
 
-def composition_child_ids(connection: sqlite3.Connection) -> set[str]:
-    return {
-        row["id"]
-        for row in connection.execute("SELECT id FROM scans WHERE parent_scan_role = 'deep_pass'")
-    }
-
-
 def composition_execution_threads(scan: sqlite3.Row) -> tuple[str, ...]:
     scan_dir = Path(scan["scan_dir"])
     try:

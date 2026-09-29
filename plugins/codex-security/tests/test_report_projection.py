@@ -132,6 +132,25 @@ def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
         assert markdown.count(text) == 1
 
 
+def test_retained_findings_visit_sources_before_history_and_handle_cycles() -> None:
+    previous = {"remediation": "Retain the earlier fix."}
+    source = {"provenance": {"previousFindings": [previous, None]}}
+    finding = {
+        "provenance": {
+            "sourceFindings": [{"id": "source:0", "finding": source}, {"finding": None}],
+            "previousFindings": [previous],
+        }
+    }
+    previous["provenance"] = {"previousFindings": [finding]}
+    assert [
+        (source_id, id(value)) for source_id, value in PROJECTION.retained_findings(finding)
+    ] == [
+        ("finding", id(finding)),
+        ("source:0", id(source)),
+        ("source:0", id(previous)),
+    ]
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]

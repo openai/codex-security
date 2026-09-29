@@ -19,6 +19,37 @@ CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
+def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
+    saved = workbench_api["saved_results"]
+    root = Path("/synthetic-scan")
+    children = [
+        {"id": "broken", "scan_dir": str(root / "broken")},
+        {"id": "retained", "scan_dir": str(root / "retained")},
+    ]
+    monkeypatch.setattr(saved, "read_composition_checkpoint", lambda _: None)
+    monkeypatch.setattr(saved, "composition_children", lambda *_: children)
+    monkeypatch.setattr(saved, "write_scan_local_bytes", lambda *_: None)
+    retained_coverage = {"surfaces": [{"id": "retained/surface", "summary": "Saved work"}]}
+    with mock.patch.object(
+        saved,
+        "_stopped_child_draft",
+        side_effect=[
+            ValueError("Synthetic malformed artifact"),
+            {"findings": [], "coverage": retained_coverage},
+        ],
+    ):
+        result = saved.save_composed_checkpoint(
+            None, None, {"id": "parent", "scan_dir": str(root)}, root
+        )
+    assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
+    assert result["coverage"]["deferred"][0] == {
+        "id": "unmerged-broken",
+        "reason": "Independent scan did not complete and merge. Saved work: broken. "
+        "Recovery failed: Synthetic malformed artifact",
+    }
+    assert result["complete"] is False
+
+
 @pytest.mark.parametrize("alias", ["exact", "case", "directory"])
 def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
     target = tmp_path / "target"
@@ -876,9 +907,8 @@ def test_native_parent_binds_once_and_keeps_native_claim(
 
 
 @pytest.mark.parametrize("target_entry", [False, True])
-@pytest.mark.parametrize("recipe_maximum", [None, 9])
-def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
-    tmp_path: Path, target_entry: bool, recipe_maximum: int | None
+def test_native_legacy_settings_remain_readable_without_rebinding(
+    tmp_path: Path, target_entry: bool
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -962,12 +992,7 @@ def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
         assert connection.execute(
             "SELECT deep_scan_owner_thread_id, continuation_thread_id, handoff_claim_token FROM scans"
         ).fetchall() == [("native-owner", None if target_entry else "native-owner", token)]
-    saved_recipe = recipe(target, "deep")
-    if recipe_maximum is None:
-        del saved_recipe["deepScan"]
-    else:
-        saved_recipe["deepScan"]["maxDiscoveryRuns"] = recipe_maximum
-    run_workbench(
+    rejected = run_workbench(
         state,
         "register-cli-scan",
         "--repository",
@@ -977,59 +1002,18 @@ def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
         "--registration-json-stdin",
         input_text=json.dumps(
             {
-                "recipe": saved_recipe,
+                "recipe": recipe(target, "deep"),
                 "scanId": scan["scanId"],
                 "threadId": "native-owner",
                 "claimToken": token,
             }
         ),
+        check=False,
     )
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["scanId"] == scan["scanId"]
-    assert joined["recipe"] == saved_recipe
-    assert "deepScanSettings" not in joined
-    assert joined["compositionCheckpoint"]["legacy"]["originThreadId"] == "native-owner"
-    assert joined["compositionCheckpoint"]["legacy"]["discoveryRuns"] == 3
-    assert joined["compositionCheckpoint"]["noNewStreak"] == 2
-    assert joined["compositionCheckpoint"]["consecutiveErrors"] == 1
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 0,
-        "completed": 2,
-        "maximum": recipe_maximum or 8,
-        "consolidating": False,
-    }
-    scan_dir = Path(scan["scanDir"])
-    saved_checkpoint = json.loads((scan_dir / CHECKPOINT).read_text())
-    children = []
-    for index in range(1, 3):
-        directory = f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(
-            state, target, scan_dir / directory, parent=scan["scanId"], role="deep_pass"
-        )
-        children.append(child)
-        saved_checkpoint["passes"].append({"directory": directory, "scanId": child["scanId"]})
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        *(("--claim-token", token) if token else ()),
-        input_text=json.dumps(saved_checkpoint),
-    )
-    child = children[0]
-    write_completed_contract(
-        Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
-    )
-    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 1,
-        "completed": 3,
-        "maximum": recipe_maximum or 8,
-        "consolidating": True,
-    }
+    assert "retired runtime. Start a fresh scan" in rejected["stderr"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT recipe_json FROM scans").fetchone() == (None,)
+        assert connection.execute("SELECT * FROM deep_scan_runs").fetchone() == legacy
 
 
 @pytest.mark.parametrize(
@@ -2103,9 +2087,12 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
         run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-    retained = run_workbench(state, *preserve)
+    retained = run_workbench(
+        state, *preserve, "--cost-json", json.dumps({"usage": usage, "cost": cost})
+    )
     assert retained["scan"]["findingCount"] == 1
     assert retained["scan"]["cost"] == cost
+    assert retained["scan"]["usage"] == usage
     assert retained["scan"]["progress"]["independentReviews"]["active"] == 0
     retained_child = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
     assert retained_child["progress"]["status"] == "failed"

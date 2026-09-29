@@ -46,6 +46,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from project_scan_artifacts import merge_coverage
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -1331,11 +1332,7 @@ def complete_scan_locked(
                 )
                 coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
                 coverage["completeness"] = "partial"
-                for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-                    rows = coverage.setdefault(field, [])
-                    for row in recovered["coverage"].get(field, []):
-                        if row not in rows:
-                            rows.append(row)
+                merge_coverage(coverage, recovered["coverage"])
                 documents = current_manifest, {"findings": recovered["findings"]}, coverage
             elif scan["mode"] != "deep":
                 documents = saved_results.merge_saved_results(
@@ -1405,6 +1402,7 @@ def complete_scan_locked(
             completed_at=completion_timestamp,
         )
         cost_json = parse_scan_cost(json.dumps({**cost_fields, "usage": measured_usage}))
+    cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = manifest["scan"]["completedAt"]
@@ -1516,6 +1514,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Cannot resume: the original checkout revision or contents changed."
                 )
+            scan_history.require_current_deep_runtime(connection, scan)
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1529,8 +1528,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                     (json.dumps(recipe, allow_nan=False), now(), scan_id),
                 )
             scan = require_scan(connection, scan_id)
-        with scan_completion_lock(scan_id):
-            scan = saved_results.migrate_legacy_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
         return scan_history.scan_registration(connection, scan, scan_contract)
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
@@ -3379,12 +3376,6 @@ def main() -> None:
                     workbench_completion_binding=workbench_completion_binding,
                     claim_token=args.claim_token,
                 )
-                if args.migrate and "sealedProducerVersion" not in result:
-                    with scan_completion_lock(scan["id"]):
-                        scan = saved_results.migrate_legacy_scan(
-                            _WORKBENCH_DB_CONTEXT, connection, scan
-                        )
-                    result = scan_history.scan_registration(connection, scan, scan_contract)
             except SystemExit as exc:
                 if not args.allow_unavailable:
                     raise

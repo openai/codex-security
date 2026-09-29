@@ -66,13 +66,7 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
-        cost_json = json.dumps(
-            {**existing, "cost": json.loads(cost_json)},
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -83,6 +77,16 @@ def reconcile_completed_scan_cost(
     except BaseException:
         connection.rollback()
         raise
+
+
+def merge_scan_cost(stored: str | None, incoming: str | None) -> str | None:
+    """Replace supplied cost/usage fields while retaining the other measured fields."""
+    fields = {**stored_scan_cost_fields(stored), **stored_scan_cost_fields(incoming)}
+    if not fields:
+        return None
+    return json.dumps(
+        fields if "usage" in fields else fields["cost"], separators=(",", ":"), allow_nan=False
+    )
 
 
 def collect_scan_usage(
