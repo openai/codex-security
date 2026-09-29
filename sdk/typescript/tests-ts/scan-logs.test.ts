@@ -220,9 +220,12 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).not.toContain("unrelated");
   });
 
-  test.each([undefined, "missing-owner"])(
-    "feedback collects known worker descendants without the owner log with continuation %s",
-    async (continuationThreadId) => {
+  test.each([
+    ["omitted", undefined],
+    ["recorded", "missing-owner"],
+  ] as const)(
+    "feedback collects known worker descendants without the owner log with %s continuation",
+    async (_label, continuationThreadId) => {
       const home = await temporaryHome();
       await writeSession(home, "owner-child", [], "missing-owner");
       await writeSession(home, "worker", [
