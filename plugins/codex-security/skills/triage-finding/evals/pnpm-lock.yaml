@@ -8,7 +8,7 @@ overrides:
   '@huggingface/transformers@4.2.0>sharp': 0.35.4
   '@openai/codex': 0.158.0
   '@openai/codex-sdk': 0.158.0
-  '@opencode-ai/sdk': 1.18.31
+  '@opencode-ai/sdk': 1.18.32
   onnxruntime-node@1.24.3>adm-zip: 0.6.0
 
 importers:
@@ -19,8 +19,8 @@ importers:
         specifier: 0.158.0
         version: 0.158.0
       '@opencode-ai/sdk':
-        specifier: 1.18.31
-        version: 1.18.31
+        specifier: 1.18.32
+        version: 1.18.32
       promptfoo:
         specifier: 0.123.1
         version: 0.123.1(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10)
@@ -1342,8 +1342,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.18.31':
-    resolution: {integrity: sha512-Raouthf8Lhe9edjvYeeSK7SgvdoU6bBjH9qV3f70dHoa6h+z0X2TMz/e22/wKp/StlFUZ4kIRpYYxFnY8/k01w==}
+  '@opencode-ai/sdk@1.18.32':
+    resolution: {integrity: sha512-Wi3WtH/cLA3C0ga05lyDb7zac+SzbST9MPwCve1Ffod0xwzHdy9G2gnxvMAR4RBRhKJS32Rgk2cR+fxBhAVSQw==}
 
   '@opentelemetry/api-logs@0.222.0':
     resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
@@ -5893,7 +5893,7 @@ snapshots:
   '@openai/codex@0.158.0-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.18.31':
+  '@opencode-ai/sdk@1.18.32':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -8410,7 +8410,7 @@ snapshots:
       '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.83)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.5)
       '@openai/codex-sdk': 0.158.0
       '@openai/codex-security': 0.1.27(@types/node@25.9.1)(graphql@17.0.2)
-      '@opencode-ai/sdk': 1.18.31
+      '@opencode-ai/sdk': 1.18.32
       '@playwright/browser-chromium': 1.63.0
       '@rollup/rollup-linux-x64-gnu': 4.63.1
       '@slack/web-api': 8.1.1
