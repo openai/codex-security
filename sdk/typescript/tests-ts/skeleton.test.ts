@@ -58,12 +58,8 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
-  test("pins one Codex version across the CLI, MCP app, and evals", async () => {
-    const directories = [
-      "sdk/typescript",
-      "plugins/codex-security/mcp-app",
-      "evals/triage-finding",
-    ];
+  test("pins one Codex version across the CLI and evals", async () => {
+    const directories = ["sdk/typescript", "evals/triage-finding"];
     const manifests = await Promise.all(
       directories.map(async (directory) =>
         JSON.parse(

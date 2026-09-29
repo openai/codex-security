@@ -52,9 +52,7 @@ const stoppedScanProbe = [
   "for field in ('findingId','occurrenceId','fingerprints'): finding.pop(field, None)",
   "finding.setdefault('provenance', {})['candidateId'] = 'checkpoint-candidate'",
   "payload = {'scanId': scan_id, 'findings': [finding], 'coverage': {'completeness': 'partial', 'surfaces': [], 'explicitExclusions': [], 'deferred': [{'candidateId': 'pending-validation', 'reason': 'Validation stopped with the scan.', 'paths': ['src/extract.py']}]}, 'threatModel': {'summary': 'Synthetic stopped-scan threat model.'}}",
-  "if source == 'accepted':",
-
-  "else:",
+  "if source != 'accepted':",
   "    checkpoint = {**payload, 'complete': False}",
   "    checkpoint_dir = scan_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",

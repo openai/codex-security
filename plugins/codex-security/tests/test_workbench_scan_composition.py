@@ -620,6 +620,88 @@ def native_scan_completion(tmp_path: Path):
     return state, target, arguments, started, complete
 
 
+@pytest.mark.parametrize("saved_recipe", [False, True])
+@pytest.mark.parametrize("artifact_state", ["unsealed", "sealed", "tampered"])
+def test_native_legacy_registration_only_rejoins_validated_sealed_results(
+    native_scan_completion, saved_recipe: bool, artifact_state: str
+) -> None:
+    state, target, _, started, complete = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    token = scan["handoffClaimToken"]
+    if artifact_state != "unsealed":
+        run_workbench(
+            state, "prepare-scan-completion", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+    if artifact_state == "tampered":
+        findings_path = directory / "findings.json"
+        findings_path.write_bytes(findings_path.read_bytes() + b" ")
+    checkpoint_path = directory / CHECKPOINT
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["legacy"] = {"discoveryRuns": 1, "coverage": {"completeness": "complete"}}
+    checkpoint_path.write_text(json.dumps(checkpoint))
+    identity_query = (
+        "SELECT recipe_json, continuation_thread_id, deep_scan_owner_thread_id, handoff_claim_token "
+        "FROM scans WHERE id = ?"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        if not saved_recipe:
+            connection.execute(
+                "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
+            )
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
+            "workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at, "
+            "terminal_reason, manifest_path) "
+            "SELECT id, 1, 'synthetic-legacy', 'succeeded', 'terminal', 1, 0, 3, 8, started_at, "
+            "updated_at, 'saturated', ? FROM scans WHERE id = ?",
+            (str(directory / "scan-manifest.json"), scan["scanId"]),
+        )
+        original_identity = connection.execute(identity_query, (scan["scanId"],)).fetchone()
+    originals = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", CHECKPOINT)
+    }
+    rebound = run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(directory),
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "scanId": scan["scanId"],
+                "threadId": "native-owner",
+                "claimToken": token,
+                "recipe": recipe(target, "deep"),
+            }
+        ),
+        check=artifact_state == "sealed",
+    )
+    if artifact_state == "sealed":
+        assert rebound["scanId"] == scan["scanId"]
+        resumed = run_workbench(
+            state, "get-cli-scan-resume", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+        assert (
+            resumed["sealedProducerVersion"]
+            == json.loads(originals["scan-manifest.json"])["scan"]["producer"]["version"]
+        )
+        assert complete()["progress"]["status"] == "complete"
+    else:
+        assert (
+            "retired runtime" if artifact_state == "unsealed" else "Cannot resume sealed scan"
+        ) in rebound["stderr"]
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()
+                == original_identity
+            )
+    assert {name: (directory / name).read_bytes() for name in originals} == originals
+
+
 @pytest.mark.parametrize("during_retry", [False, True])
 def test_native_target_retry_reuses_completed_result(
     native_scan_completion, workbench_api, monkeypatch, during_retry: bool

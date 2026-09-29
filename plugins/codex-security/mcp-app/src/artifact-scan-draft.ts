@@ -785,12 +785,23 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-/** Existing drafts must use the current semantic schema to continue writing. */
+/** Project current canonical metadata without coercing persisted finding details. */
 function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   try {
-    return parseScanDraft(input);
+    const projected = semanticScanDraft(
+      input.scanId as string,
+      input,
+      input.findings as JsonObject[],
+      requireObject(input.coverage, "saved scan draft coverage"),
+    );
+    return parseScanDraft({
+      ...input,
+      ...(isObject(input.scope) ? { scope: projected.scope } : {}),
+      findings: projected.findings,
+      coverage: projected.coverage,
+    });
   } catch (cause) {
     throw new Error(
       "Saved scan draft does not match the current schema. Start a new scan; the saved artifacts remain available.",

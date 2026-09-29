@@ -1402,7 +1402,6 @@ def complete_scan_locked(
             completed_at=completion_timestamp,
         )
         cost_json = parse_scan_cost(json.dumps({**cost_fields, "usage": measured_usage}))
-    cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = manifest["scan"]["completedAt"]
@@ -1514,7 +1513,17 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Cannot resume: the original checkout revision or contents changed."
                 )
-            scan_history.require_current_deep_runtime(connection, scan)
+            if (
+                scan_history.sealed_scan_producer_version(
+                    scan,
+                    scan_dir,
+                    artifact_path=artifact_path,
+                    read_json_object=read_json_object,
+                    workbench_completion_binding=workbench_completion_binding,
+                )
+                is None
+            ):
+                scan_history.require_current_deep_runtime(connection, scan)
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
