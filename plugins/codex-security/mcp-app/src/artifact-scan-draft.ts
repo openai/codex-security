@@ -14,10 +14,6 @@ import {
   type SemanticScan,
   type SemanticCoverage,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
-export {
-  preserveFindingDetails,
-  scanFindingIdentity,
-} from "../../../../sdk/typescript/src/scan-semantics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join, sep } from "node:path";
@@ -85,12 +81,11 @@ export const completedScanInputSchema = loadArtifactZodSchema(
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
-  publishDraft?: PublishScanDraft,
+  publishDraft: PublishScanDraft,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
-  if (!publishDraft) await saveScanDraftCheckpoint(context, parsed);
 
   for (;;) {
     signal?.throwIfAborted();
@@ -104,30 +99,7 @@ export async function recordCodexSecurityScanDraft(
     const hardening = await readExistingHardeningPortfolio(context);
     const draft = prepareSemanticScanDraft(context, reconciled, hardening);
     try {
-      if (publishDraft) {
-        await publishDraft(draft, preserved.previousDigest, parsed);
-      } else {
-        const destinations = await Promise.all([
-          artifactDestination(
-            context,
-            ["findings.json"],
-            "scan draft findings",
-          ),
-          artifactDestination(
-            context,
-            ["coverage.json"],
-            "scan draft coverage",
-          ),
-          artifactDestination(
-            context,
-            ["scan-manifest.json"],
-            "scan draft manifest",
-          ),
-        ]);
-        await replaceArtifactJson(destinations[0], draft.findings);
-        await replaceArtifactJson(destinations[1], draft.coverage);
-        await replaceArtifactJson(destinations[2], draft.manifest);
-      }
+      await publishDraft(draft, preserved.previousDigest, parsed);
       return {
         scanId: reconciled.scanId,
         findingCount: draft.findings.findings.length,
@@ -204,31 +176,6 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     },
     signal,
   );
-}
-
-/** Keep the semantic input before replacing canonical artifacts. */
-export async function saveScanDraftCheckpoint(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-): Promise<void> {
-  const { handoffClaimToken: _claim, ...snapshot } = input;
-  const contents = JSON.stringify(snapshot, null, 2) + "\n";
-  const name = scanDraftCheckpointName(input);
-  const destination = await artifactDestination(
-    context,
-    ["checkpoints", name],
-    "scan checkpoint",
-  );
-  try {
-    const existing = await fs.readFile(destination, "utf8");
-    if (existing !== contents)
-      throw new Error(
-        "scan checkpoint: existing content does not match its digest.",
-      );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await replaceArtifactJson(destination, snapshot);
-  }
 }
 
 async function preserveScanDraft(
@@ -480,7 +427,7 @@ async function readCurrentCheckpoints(
         "scan checkpoint: current checkpoint is not a safe file.",
       );
     }
-    const input = parsePersistedCheckpoint(
+    const input = parsePersistedScanDraft(
       parseJsonObject(
         await readArtifactText(
           context,
@@ -838,254 +785,17 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-/** Re-admit results persisted by older plugin versions without loosening live tool input. */
-export function parsePersistedScanDraft(
+/** Existing drafts must use the current semantic schema to continue writing. */
+function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
-  const compatible = structuredClone(input);
-  if (!Array.isArray(compatible.findings)) {
-    return parseScanDraft(compatible);
-  }
-  for (const finding of compatible.findings) {
-    if (!isObject(finding)) continue;
-    normalizePersistedFindingDetails(finding);
-  }
-  return parseScanDraft(compatible);
-}
-
-function parsePersistedCheckpoint(
-  input: Record<string, unknown>,
-): ScanDraftInput {
-  const compatible = structuredClone(input);
-  if (isObject(compatible.scope)) {
-    delete compatible.scope.includePaths;
-    delete compatible.scope.excludePaths;
-    if (Object.keys(compatible.scope).length === 0) delete compatible.scope;
-  }
-  if (isObject(compatible.coverage)) {
-    for (const field of [
-      "documentType",
-      "schemaVersion",
-      "scanId",
-      "mode",
-      "includePaths",
-      "excludePaths",
-      "receiptRefs",
-      "inventoryStrategy",
-    ])
-      delete compatible.coverage[field];
-  }
-  if (Array.isArray(compatible.findings)) {
-    for (const finding of compatible.findings) {
-      if (!isObject(finding)) continue;
-      delete finding.findingId;
-      delete finding.occurrenceId;
-      delete finding.fingerprints;
-    }
-  }
-  return parsePersistedScanDraft(compatible);
-}
-
-function normalizePersistedFindingDetails(finding: JsonObject): void {
-  const canonicalEvidence = Array.isArray(finding.codeEvidence)
-    ? finding.codeEvidence
-    : [];
-  const evidenceIds = new Set(
-    canonicalEvidence.flatMap((evidence) => {
-      if (!isObject(evidence)) return [];
-      const id = evidence.id;
-      return typeof id === "string" && id.trim().length > 0 ? [id] : [];
-    }),
-  );
-  if (Array.isArray(finding.code_evidence)) {
-    const compatibleEvidence: JsonObject[] = [];
-    for (const evidence of finding.code_evidence) {
-      if (!isObject(evidence)) continue;
-      const id = evidence.id;
-      const code = evidence.code;
-      if (
-        typeof id !== "string" ||
-        id.trim().length === 0 ||
-        typeof code !== "string" ||
-        code.trim().length === 0 ||
-        evidenceIds.has(id)
-      ) {
-        continue;
-      }
-      evidenceIds.add(id);
-      compatibleEvidence.push(evidence);
-    }
-    finding.code_evidence = compatibleEvidence;
-  } else if ("code_evidence" in finding) {
-    delete finding.code_evidence;
-  }
-
-  for (const [sectionName, listFields] of [
-    ["rootCause", ["evidenceRefs", "evidence_refs"]],
-    ["root_cause", ["evidenceRefs", "evidence_refs"]],
-    [
-      "validation",
-      [
-        "assertions",
-        "counterEvidence",
-        "evidence",
-        "evidenceRefs",
-        "evidence_refs",
-        "limitations",
-      ],
-    ],
-    [
-      "attackPath",
-      [
-        "assumptions",
-        "blindspots",
-        "controls",
-        "evidenceRefs",
-        "evidence_refs",
-        "limitations",
-        "preconditions",
-        "steps",
-      ],
-    ],
-  ] satisfies Array<[string, string[]]>) {
-    const section = finding[sectionName];
-    if (!isObject(section)) continue;
-    normalizePersistedStringLists(section, listFields);
-    filterPersistedEvidenceRefs(section, evidenceIds);
-  }
-
-  const rootCause = finding.rootCause;
-  if (isObject(rootCause)) {
-    if (
-      typeof rootCause.summary !== "string" ||
-      rootCause.summary.trim().length === 0
-    ) {
-      delete finding.rootCause;
-    } else {
-      removeUnsupportedPersistedStrings(rootCause, ["code", "language"]);
-    }
-  }
-  const legacyRootCause = finding.root_cause;
-  if (isObject(legacyRootCause)) {
-    removeUnsupportedPersistedStrings(legacyRootCause, [
-      "summary",
-      "code",
-      "language",
-    ]);
-  } else if (
-    "root_cause" in finding &&
-    (typeof legacyRootCause !== "string" || legacyRootCause.trim().length === 0)
-  ) {
-    delete finding.root_cause;
-  }
-
-  const validation = finding.validation;
-  if (isObject(validation)) {
-    removeUnsupportedPersistedStrings(validation, [
-      "method",
-      "status",
-      "summary",
-      "disposition",
-      "result",
-    ]);
-  }
-
-  const attackPath = finding.attackPath;
-  if (!isObject(attackPath)) return;
-  removeUnsupportedPersistedStrings(attackPath, ["summary"]);
-  for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
-    const detail = attackPath[field];
-    if (detail === null) {
-      delete attackPath[field];
-      continue;
-    }
-    if (typeof detail === "string") {
-      if (detail.trim().length === 0) delete attackPath[field];
-      continue;
-    }
-    if (!isObject(detail)) {
-      if (field in attackPath) delete attackPath[field];
-      continue;
-    }
-    removeUnsupportedPersistedStrings(detail, [
-      "summary",
-      "source",
-      "sink",
-      "outcome",
-      ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
-    ]);
-    normalizePersistedStringLists(detail, [
-      "evidenceRefs",
-      "evidence_refs",
-      "transformations",
-      ...(field === "reachability" ? ["preconditions"] : []),
-    ]);
-    filterPersistedEvidenceRefs(detail, evidenceIds);
-  }
-  for (const field of ["impact", "likelihood"]) {
-    const detail = attackPath[field];
-    if (isObject(detail)) {
-      removeUnsupportedPersistedStrings(detail, ["level", "rationale", "why"]);
-    } else if (
-      detail !== undefined &&
-      detail !== null &&
-      (typeof detail !== "string" || detail.trim().length === 0)
-    ) {
-      delete attackPath[field];
-    }
-  }
-}
-
-function normalizePersistedStringLists(
-  section: JsonObject,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    const normalized =
-      typeof value === "string"
-        ? value.trim().length > 0
-          ? [value]
-          : []
-        : Array.isArray(value)
-          ? value.filter(
-              (item): item is string =>
-                typeof item === "string" && item.trim().length > 0,
-            )
-          : [];
-    if (normalized.length > 0) section[field] = normalized;
-    else delete section[field];
-  }
-}
-
-function filterPersistedEvidenceRefs(
-  section: JsonObject,
-  evidenceIds: Set<string>,
-): void {
-  for (const field of ["evidenceRefs", "evidence_refs"]) {
-    const refs = section[field];
-    if (!Array.isArray(refs)) continue;
-    section[field] = refs.filter(
-      (ref): ref is string =>
-        typeof ref === "string" &&
-        ref.trim().length > 0 &&
-        evidenceIds.has(ref),
+  try {
+    return parseScanDraft(input);
+  } catch (cause) {
+    throw new Error(
+      "Saved scan draft does not match the current schema. Start a new scan; the saved artifacts remain available.",
+      { cause },
     );
-  }
-}
-
-function removeUnsupportedPersistedStrings(
-  section: JsonObject,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].trim().length === 0)
-    ) {
-      delete section[field];
-    }
   }
 }
 
@@ -1094,11 +804,6 @@ function requireBoundScan(
   input: CompletedScanInput,
   requireRunning: boolean,
 ): void {
-  if (context.layout !== "scan") {
-    throw new Error(
-      "scan draft: this operation requires an authoritative parent scan context.",
-    );
-  }
   requireMatchingScan(context, input);
   if (requireRunning && context.status !== "running") {
     throw new Error(

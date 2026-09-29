@@ -142,24 +142,10 @@ assert.throws(
     /symbolic project-roots denial metadata/i.test(error.message),
 );
 
-const pinnedFileUri = extra(
-  pinnedReadOnly,
-  "file:///tmp/codex-security-parent",
-);
-assert.deepEqual(resolveNativeParentSandbox(pinnedFileUri), {
-  filesystemDenies: [],
-});
-assert.deepEqual(
-  resolveNativeParentSandbox(
-    extra(pinnedReadOnly, "/tmp/codex-security-parent"),
-  ),
-  {
-    filesystemDenies: [],
-  },
-);
+const parentMetadata = extra(pinnedReadOnly);
 assert.deepEqual(
   resolveNativeParentSandbox({
-    requestInfo: pinnedFileUri,
+    requestInfo: parentMetadata,
   }),
   {
     filesystemDenies: [],
@@ -167,8 +153,8 @@ assert.deepEqual(
 );
 assert.deepEqual(
   resolveNativeParentSandbox({
-    _meta: pinnedFileUri._meta,
-    requestInfo: pinnedFileUri,
+    _meta: parentMetadata._meta,
+    requestInfo: parentMetadata,
   }),
   {
     filesystemDenies: [],
@@ -336,8 +322,6 @@ for (const invalid of [
       entries: [{ path: { type: "path", path: "" }, access: "read" }],
     },
   }),
-  extra(pinnedReadOnly, "relative/working-directory"),
-  extra(pinnedReadOnly, "file://remote-host/tmp/codex-security-parent"),
   {
     _meta: extra(pinnedReadOnly)._meta,
     requestInfo: extra({ ...pinnedReadOnly, network: "enabled" }),

@@ -8,7 +8,6 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan";
   scanId?: string;
   scope?: string;
   pluginRoot?: string;

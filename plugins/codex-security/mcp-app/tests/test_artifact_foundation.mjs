@@ -196,7 +196,6 @@ async function testScanContext() {
   assert.deepEqual(calls, [["get-scan", "--scan-id", scanId]]);
   assert.equal(context.root, await realpath(root));
   assert.equal(context.repoRoot, await realpath(repoRoot));
-  assert.equal(context.layout, "scan");
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
@@ -239,7 +238,6 @@ async function testSafeJsonAndJsonl() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
@@ -320,7 +318,6 @@ async function testAtomicReplaceAndAppend() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
@@ -393,7 +390,6 @@ async function testUnsafeArtifacts() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   for (const components of [
     [],

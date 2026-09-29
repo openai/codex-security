@@ -78,7 +78,7 @@ const reviewItemSchema = loadArtifactZodSchema(
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
 ): Promise<PreparedReviewItems> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );

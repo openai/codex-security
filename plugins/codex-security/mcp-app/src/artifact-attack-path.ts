@@ -86,7 +86,7 @@ export async function recordCodexSecurityCandidateAttackPaths(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate attack-path analysis requires a scan-bound artifact context.",
     );

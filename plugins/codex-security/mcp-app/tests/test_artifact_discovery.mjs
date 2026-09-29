@@ -114,7 +114,7 @@ try {
     "first\nsecond\n",
   );
 
-  const scan = await createContext(root, repoRoot, "scan", "scan");
+  const scan = await createContext(root, repoRoot, "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
@@ -393,7 +393,7 @@ async function verifyNormalizerFailuresPreserveOutput(context) {
 }
 
 async function verifyDiffInventoryAllowsDeletedFiles(root, repoRoot) {
-  const context = await createContext(root, repoRoot, "diff-output", "scan");
+  const context = await createContext(root, repoRoot, "diff-output");
   const inventory = path.join(
     context.root,
     "artifacts",
@@ -482,7 +482,7 @@ async function verifyEmptyReplacement(context) {
 }
 
 async function verifyWorkerContext(root, repoRoot) {
-  const worker = await createContext(root, repoRoot, "worker-output", "worker");
+  const worker = await createContext(root, repoRoot, "worker-output");
   const result = await recordCodexSecurityDiscoveryCandidates(
     {
       candidates: [rawCandidate()],
@@ -496,12 +496,7 @@ async function verifyWorkerContext(root, repoRoot) {
 }
 
 async function verifyMalformedLedgerIsNotModified(root, repoRoot) {
-  const context = await createContext(
-    root,
-    repoRoot,
-    "malformed-output",
-    "scan",
-  );
+  const context = await createContext(root, repoRoot, "malformed-output");
   const destination = path.join(
     context.root,
     "artifacts",
@@ -520,7 +515,7 @@ async function verifyMalformedLedgerIsNotModified(root, repoRoot) {
 async function verifySymlinkRejection(root, repoRoot) {
   if (process.platform === "win32") return;
 
-  const context = await createContext(root, repoRoot, "unsafe-output", "scan");
+  const context = await createContext(root, repoRoot, "unsafe-output");
   const outside = path.join(root, "outside.jsonl");
   await writeFile(outside, "outside must not change\n");
   const destination = path.join(
@@ -545,7 +540,7 @@ async function verifySymlinkRejection(root, repoRoot) {
   );
 }
 
-async function createContext(root, repoRoot, name, layout) {
+async function createContext(root, repoRoot, name) {
   const artifactRoot = path.join(root, name);
   const discoveryDirectory = path.join(
     artifactRoot,
@@ -560,7 +555,6 @@ async function createContext(root, repoRoot, name, layout) {
   return {
     root: artifactRoot,
     repoRoot,
-    layout,
     pluginRoot,
   };
 }

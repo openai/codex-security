@@ -424,7 +424,6 @@ async function createFixture(label) {
     scan: {
       root: scanRoot,
       repoRoot,
-      layout: "scan",
       scanId: "f84c8312-a602-4660-8e01-518a176cd75a",
       scope: ".",
       pluginRoot,
@@ -433,7 +432,7 @@ async function createFixture(label) {
     worker: {
       root: workerRoot,
       repoRoot,
-      layout: "worker",
+      scanId: undefined,
     },
   };
 }

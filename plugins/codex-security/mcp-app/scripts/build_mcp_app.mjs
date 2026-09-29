@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "./bundle_options.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const sdkRequire = createRequire(
@@ -70,24 +71,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     try {
       await build({
-        bundle: true,
-        banner: {
-          js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
-        },
-        define: { "import.meta.url": "__codexSecurityModuleUrl" },
+        ...mcpBundleOptions,
         entryPoints: [join(root, entryPoint)],
         inject:
           name === "server"
             ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
             : [],
-        external: ["fsevents"],
-        format: "cjs",
-        loader: { ".md": "text" },
         logLevel: "info",
-        logOverride: { "empty-import-meta": "silent" },
         outfile: bundle,
-        platform: "node",
-        target: "node20",
       });
       const runtime = brotliCompressSync(await readFile(bundle), {
         params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },

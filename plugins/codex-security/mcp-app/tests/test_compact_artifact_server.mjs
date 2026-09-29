@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1920,23 +1921,14 @@ async function testParentToolList(bundle) {
 
 async function bundleEntrypoint(entrypoint, outfile) {
   await build({
-    bundle: true,
-    banner: {
-      js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
-    },
+    ...mcpBundleOptions,
     define: {
       __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__codexSecurityModuleUrl",
+      ...mcpBundleOptions.define,
     },
     entryPoints: [path.join(applicationRoot, entrypoint)],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
     logLevel: "silent",
-    logOverride: { "empty-import-meta": "silent" },
     outfile,
-    platform: "node",
-    target: "node20",
   });
 }
 

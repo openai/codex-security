@@ -84,7 +84,6 @@ export async function createScanArtifactContext(
       rawRepoRoot,
       "Codex Security scan target root",
     ),
-    layout: "scan",
     scanId,
     ...defined("scope", optionalString(scan.scope)),
     ...defined("pluginRoot", options.pluginRoot),

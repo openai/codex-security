@@ -32,9 +32,8 @@ const module = await import(
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
-  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraft: publishScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  saveScanDraftCheckpoint,
   scanDraftInputSchema,
 } = module;
 
@@ -46,7 +45,6 @@ try {
   const context = {
     root,
     repoRoot: root,
-    layout: "scan",
     scanId,
     scope: ".",
     mode: "standard",
@@ -146,6 +144,31 @@ try {
   assert.equal(
     (await readJson(parentCheckpointRoot, "findings.json")).findings.length,
     1,
+  );
+
+  const unsupportedCheckpointContext = {
+    ...context,
+    root: path.join(root, "unsupported-checkpoint"),
+  };
+  const { handoffClaimToken: _oldClaim, ...oldCheckpoint } = {
+    ...input,
+    scope: { includePaths: ["."] },
+  };
+  await saveScanDraftCheckpoint(unsupportedCheckpointContext, oldCheckpoint);
+  await assert.rejects(
+    recordCodexSecurityScanDraft(unsupportedCheckpointContext, input),
+    /Saved scan draft does not match the current schema/,
+  );
+  const retained = await readdir(
+    path.join(unsupportedCheckpointContext.root, "checkpoints"),
+  );
+  assert.equal(retained.length, 1);
+  assert.deepEqual(
+    await readJson(
+      unsupportedCheckpointContext.root,
+      "checkpoints/" + retained[0],
+    ),
+    oldCheckpoint,
   );
 
   const interruptedParentRoot = path.join(
@@ -2247,8 +2270,8 @@ try {
     /handoffClaimToken/,
   );
   await assert.rejects(
-    recordCodexSecurityScanDraft({ ...context, layout: "worker" }, input),
-    /authoritative parent scan context/,
+    recordCodexSecurityScanDraft({ ...context, scanId: undefined }, input),
+    /scanId does not match/,
   );
   await assert.rejects(
     recordCodexSecurityScanDraft({ ...context, status: "complete" }, input),
@@ -2506,4 +2529,39 @@ async function recordFreshScanDraft(context, input) {
     }),
   ]);
   return recordCodexSecurityScanDraft(context, input);
+}
+
+// Exercise reconciliation with explicit fixture publication; production publishes under the workbench lock.
+function recordCodexSecurityScanDraft(context, input, publish, signal) {
+  return publishScanDraft(
+    context,
+    input,
+    publish ??
+      (async (draft, _digest, checkpoint) => {
+        await saveScanDraftCheckpoint(context, checkpoint);
+        for (const [name, document] of Object.entries({
+          "scan-manifest.json": draft.manifest,
+          "findings.json": draft.findings,
+          "coverage.json": draft.coverage,
+        }))
+          await writeFile(
+            path.join(context.root, name),
+            JSON.stringify(document) + "\n",
+          );
+      }),
+    signal,
+  );
+}
+
+async function saveScanDraftCheckpoint(context, input) {
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(snapshot))
+    .digest("hex");
+  const directory = path.join(context.root, "checkpoints");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    path.join(directory, digest + ".json"),
+    JSON.stringify(snapshot) + "\n",
+  );
 }

@@ -1,5 +1,4 @@
 import { isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
@@ -15,7 +14,6 @@ export function resolveNativeParentSandbox(
   extra: unknown,
 ): NativeParentSandbox {
   const state = trustedSandboxState(extra);
-  validateSandboxCwd(state.sandboxCwd);
 
   const profile = record(state.permissionProfile);
   if (!profile || profile.type !== "managed") {
@@ -171,29 +169,6 @@ function trustedSandboxState(extra: unknown): Record<string, unknown> {
   return state;
 }
 
-function validateSandboxCwd(value: unknown): void {
-  if (value === undefined) return;
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
-  if (value.startsWith("file:")) {
-    try {
-      if (isAbsolute(fileURLToPath(value))) return;
-    } catch {
-      throw unsupportedParentSandbox(
-        "the parent sandbox working directory is invalid",
-      );
-    }
-  }
-  if (!isAbsolute(value)) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
-}
-
 function resolveGlobScanMaxDepth(
   filesystem: Record<string, unknown>,
 ): number | undefined {
@@ -220,18 +195,10 @@ function resolveGlobScanMaxDepth(
 }
 
 function validateDenyMissingPathBehavior(entry: Record<string, unknown>): void {
-  const snakeCase = entry.missing_path_behavior;
-  const camelCase = entry.missingPathBehavior;
   if (
-    snakeCase != null &&
-    camelCase != null &&
-    !isDeepStrictEqual(snakeCase, camelCase)
+    entry.missing_path_behavior != null ||
+    entry.missingPathBehavior != null
   ) {
-    throw unsupportedParentSandbox(
-      "a parent filesystem denial has conflicting missing_path_behavior",
-    );
-  }
-  if (snakeCase != null || camelCase != null) {
     throw unsupportedParentSandbox(
       "a parent filesystem denial with missing_path_behavior cannot be preserved",
     );

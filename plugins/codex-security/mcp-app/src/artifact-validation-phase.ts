@@ -78,7 +78,7 @@ export async function recordCodexSecurityCandidateValidations(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate validation requires a scan-bound artifact context.",
     );

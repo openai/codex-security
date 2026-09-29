@@ -65,7 +65,7 @@ export async function standaloneArtifactContext(
   if (storage === "temporary") {
     // Resolve existing ancestors for stable imports without creating or requiring
     // the persistent collection. storageContext prepares the temporary root.
-    return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
+    return { root: await resolveStoragePath(root), repoRoot };
   }
   const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
@@ -75,7 +75,6 @@ export async function standaloneArtifactContext(
   return {
     root: await requireArtifactRoot(root, "Standalone artifacts"),
     repoRoot,
-    layout: "scan",
   };
 }
 
