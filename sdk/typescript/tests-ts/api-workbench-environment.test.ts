@@ -37,6 +37,7 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
     )!;
     expect(python).not.toBeNull();
     let helperCalls = 0;
+    let observedEnvironment: WorkbenchCommandOptions["environment"] | undefined;
     const client = new TestClient(
       { codexOverrides: { model: "unpriced-model" } },
       {
@@ -56,20 +57,14 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
           input?: string,
         ) => {
           helperCalls += 1;
-          const database = execFileSync(
-            python,
-            [
-              "-c",
-              "import sys; sys.path.insert(0, sys.argv[1]); from workbench_scan_usage import _codex_state_database; print(_codex_state_database())",
-              join(PLUGIN_ROOT, "scripts"),
-            ],
-            {
-              env: { ...process.env, ...options.environment },
-              encoding: "utf8",
-            },
-          ).trim();
-          expect(database).toBe(expectedDatabase);
           expect(options.environment["CODEX_HOME"]).toBe(runtimeHome);
+          expect(options.environment["CODEX_SQLITE_HOME"]).toBe(
+            source === "sqlite override" ? overrideHome : "",
+          );
+          expect(options.environment["CODEX_STATE_DB"]).toBe(
+            source === "database override" ? expectedDatabase : "",
+          );
+          observedEnvironment = options.environment;
           return mockWorkbench(args, input);
         },
         createCodex: () => {
@@ -82,6 +77,19 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
         "environment observed",
       );
       expect(helperCalls).toBeGreaterThan(0);
+      const database = execFileSync(
+        python,
+        [
+          "-c",
+          "import sys; sys.path.insert(0, sys.argv[1]); from workbench_scan_usage import _codex_state_database; print(_codex_state_database())",
+          join(PLUGIN_ROOT, "scripts"),
+        ],
+        {
+          env: { ...process.env, ...observedEnvironment },
+          encoding: "utf8",
+        },
+      ).trim();
+      expect(database).toBe(expectedDatabase);
     } finally {
       await client.close();
     }

@@ -39,11 +39,7 @@ import {
   reservePass,
   stopDiscovery,
 } from "./deep-scan-lifecycle.js";
-import {
-  savedScanFromWorkbench,
-  savedScansFromWorkbench,
-  type SavedScanRecord,
-} from "./workbench-types.js";
+import { type SavedScanRecord } from "./workbench-types.js";
 export {
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
@@ -52,20 +48,8 @@ export {
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
 
-/** A terminal checkpoint rejects execution while retaining read-only accounting. */
-export class TerminalDeepScanError extends ScanInterruptedError {
-  constructor(
-    message: string,
-    scanDir: string,
-    readonly accounting: {
-      constituents: ReadonlyArray<Readonly<ScanCost> | null> | null;
-      savedTotal: Readonly<ScanCost> | null;
-      legacyThreadId?: string;
-    },
-  ) {
-    super(message, scanDir);
-  }
-}
+/** A terminal checkpoint rejects execution without changing saved results. */
+export class TerminalDeepScanError extends ScanInterruptedError {}
 
 export interface DeepScanComposition {
   scanId: string;
@@ -130,10 +114,7 @@ function missingRunningSession(record: SavedScanRecord): boolean {
 
 /** Reject stopped discovery without writes, worker startup or cost notifications. */
 export async function terminalDeepScanError(
-  input: Pick<
-    DeepScanComposition,
-    "scanId" | "scanDir" | "repository" | "workbench" | "historicalCost"
-  >,
+  input: Pick<DeepScanComposition, "scanDir">,
   checkpoint?: DeepScanCheckpoint,
 ): Promise<TerminalDeepScanError | null> {
   const state = checkpoint ?? (await loadDeepScanCheckpoint(input.scanDir));
@@ -142,56 +123,9 @@ export async function terminalDeepScanError(
     (state.terminalReason !== "failed" && state.terminalReason !== "canceled")
   )
     return null;
-  let savedTotal: ScanCost | null = null;
-  let constituents: Array<Readonly<ScanCost> | null> | null = null;
-  try {
-    const saved = await input.workbench([
-      "get-scan",
-      "--scan-id",
-      input.scanId,
-    ]);
-    savedTotal = savedScanFromWorkbench(saved).cost ?? null;
-    validatePassDirectories(state);
-    const listed = await input.workbench([
-      "list-scans",
-      "--scan-root",
-      join(input.scanDir, "artifacts/deep-scan/passes"),
-    ]);
-    // A reserved slot cannot incur cost until its registration succeeds.
-    const costs: Array<Readonly<ScanCost> | null | undefined> =
-      state.passes.map((pass) =>
-        pass.scanId === undefined ? undefined : null,
-      );
-    for (const record of savedScansFromWorkbench(listed)) {
-      const index = savedPassIndex(input, state, record);
-      // Missing optional thread/cost persistence does not establish zero usage.
-      if (index >= 0)
-        costs[index] = missingRunningSession(record)
-          ? null
-          : (record.cost ?? null);
-    }
-    if (state.legacy) {
-      costs.push(
-        state.legacy.cost ??
-          (state.legacy.originThreadId
-            ? await input.historicalCost?.(state.legacy.originThreadId)
-            : null) ??
-          null,
-      );
-    }
-    if (state.costUnavailable) costs.push(null);
-    constituents = costs.filter((cost) => cost !== undefined);
-  } catch {
-    // Optional accounting must not replace the terminal rejection or a known total.
-  }
   return new TerminalDeepScanError(
     `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
     input.scanDir,
-    {
-      constituents,
-      savedTotal,
-      legacyThreadId: state.legacy?.originThreadId ?? undefined,
-    },
   );
 }
 
@@ -203,6 +137,10 @@ export async function runDeepScans(
   const state =
     (await loadDeepScanCheckpoint(scanDir)) ??
     newDeepScanCheckpoint(input.startedAt);
+  if (state.legacy)
+    throw new Error(
+      "Saved legacy Deep Scans cannot be resumed; their reports remain available.",
+    );
   if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
@@ -242,21 +180,6 @@ export async function runDeepScans(
     return queued.pending;
   };
   await save();
-  const previousRuns = state.legacy?.discoveryRuns ?? 0;
-  if (state.legacy && !state.legacy.cost) {
-    const cost = state.legacy.originThreadId
-      ? await input.historicalCost?.(state.legacy.originThreadId)
-      : null;
-    if (cost) {
-      state.legacy.cost = cost;
-      await save();
-    }
-    if (!cost && input.scanOptions.requireCost)
-      throw new Error(
-        "Restore the original Deep Scan session logs to verify its saved cost limit.",
-      );
-  }
-  if (state.legacy?.cost) input.onCost("legacy", state.legacy.cost);
   const validateMerge = await createScanMergeValidator(input.pluginRoot);
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
@@ -272,7 +195,7 @@ export async function runDeepScans(
           .map((pass) => pass.directory),
         state.mergedScanIds.some((id) => !completed.has(id))
           ? state.aggregate.coverage
-          : state.legacy?.coverage,
+          : undefined,
       ),
     };
   };
@@ -290,7 +213,7 @@ export async function runDeepScans(
       "--scan-root",
       join(scanDir, "artifacts/deep-scan/passes"),
     ]);
-    const records = savedScansFromWorkbench(listed);
+    const records = listed["scans"] as SavedScanRecord[];
     if (recoverOutcomes)
       records.sort((a, b) =>
         (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
@@ -377,7 +300,7 @@ export async function runDeepScans(
     polling = true;
     void workbench(["get-scan", "--scan-id", scanId])
       .then((result) => {
-        const { progress } = savedScanFromWorkbench(result);
+        const { progress } = result["scan"] as SavedScanRecord;
         if (
           progress["status"] === "canceled" ||
           progress["status"] === "failed"
@@ -405,7 +328,7 @@ export async function runDeepScans(
     if (!pending.length) {
       state.aggregate = {
         ...validateMerge({ scanId, findings: [] }, [], null).aggregate,
-        coverage: combineScanCoverage([], [], state.legacy?.coverage),
+        coverage: combineScanCoverage([]),
       };
       await save();
       return;
@@ -454,7 +377,7 @@ export async function runDeepScans(
       state,
       merged,
       pending.map((result) => result.scanId),
-      combineScanCoverage([...completed.values()], [], state.legacy?.coverage),
+      combineScanCoverage([...completed.values()]),
     );
     await save();
     await input.publish(state.aggregate!);
@@ -603,7 +526,7 @@ export async function runDeepScans(
       const batch = unfinished.slice(0, settings.workers);
       while (
         batch.length < settings.workers &&
-        previousRuns + state.passes.length < settings.maxDiscoveryRuns
+        state.passes.length < settings.maxDiscoveryRuns
       ) {
         batch.push(reservePass(state));
       }

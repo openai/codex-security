@@ -30,7 +30,6 @@ export interface ScanMergeInput {
 
 export interface ScanMergeResult {
   aggregate: ScanAggregate;
-  newFindings: number;
   /** Each novel issue belongs to the earliest input that discovered it. */
   newFindingScanIds: string[];
 }
@@ -164,35 +163,14 @@ function reconcileScanMerge(
     }
     return identity;
   };
-  let sourcesByIdentity: Map<string, Array<[string, JsonObject]>> | undefined;
   const retainSources = () => {
     const claimed = new Set<string>();
     for (const finding of aggregate.findings) {
       const provenance = finding.provenance;
-      let refs = provenance.sourceFindingIds;
-      if (refs === undefined) {
-        if (sourcesByIdentity === undefined) {
-          sourcesByIdentity = new Map();
-          for (const entry of sources) {
-            const identity = identityOf(entry[1]);
-            const group = sourcesByIdentity.get(identity) ?? [];
-            group.push(entry);
-            sourcesByIdentity.set(identity, group);
-          }
-        }
-        const matches = sourcesByIdentity.get(identityOf(finding)) ?? [];
-        if (
-          new Set(matches.map(([, source]) => JSON.stringify(source))).size > 1
-        ) {
-          throw new Error(
-            "Scan merge has ambiguous source findings; preserve each sourceFindingIds reference explicitly.",
-          );
-        }
-        refs = matches.map(([id]) => id);
-      }
-      if (refs.length === 0)
+      const refs = provenance.sourceFindingIds;
+      if (!refs?.length)
         throw new Error(
-          "Scan merge contains a finding with no assigned source finding.",
+          "Scan merge requires explicit sourceFindingIds for every finding.",
         );
       for (const id of refs) {
         if (!sources.has(id))
@@ -323,7 +301,6 @@ function reconcileScanMerge(
   }
   return {
     aggregate: structuredClone(aggregate),
-    newFindings: newFindings.length,
     newFindingScanIds: inputs
       .filter((_, index) => novelInputs.has(index))
       .map((input) => input.scanId),

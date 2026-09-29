@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
+import { semanticCoverage } from "./helpers/semantic-scan.js";
 import {
   createScanMergeValidator,
   type ScanMergeInput,
@@ -129,12 +130,7 @@ function input(scanId: string, findings = [finding()]): ScanMergeInput {
           sourceFindingIds: [`${scanId}:${index}`],
         },
       })),
-      coverage: {
-        completeness: "complete",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-      },
+      coverage: semanticCoverage(),
     },
     sourceFindings: findings.map((entry, index) => ({
       ...structuredClone(entry),
@@ -169,8 +165,8 @@ test("returned aggregates detach inherited history, candidates, originals and co
   raw.findings[0]!["summary"] = "Current synthesis.";
   provenance(raw.findings[0]!)["sourceFindingIds"] = ["source:0"];
   const before = structuredClone({ source, previous, raw });
-  const { aggregate, newFindings } = validate(raw, [], previous);
-  expect(newFindings).toBe(0);
+  const { aggregate, newFindingScanIds } = validate(raw, [], previous);
+  expect(newFindingScanIds).toEqual([]);
   const saved = provenance(aggregate.findings[0]!);
   expect(saved["sourceFindings"]).toEqual([
     { id: "source:0", finding: source.sourceFindings[0] },
@@ -214,26 +210,12 @@ test("a retained finding cannot split across outputs in either order", async () 
   expect({ previous, retained, split }).toEqual(before);
 });
 
-test("implicit source grouping keeps exact-source ambiguity checks and insertion order", async () => {
+test("requires explicit provenance even when source identities match", async () => {
   const validate = await createScanMergeValidator(pluginRoot);
-  const source = input("implicit");
-  source.sourceFindings.push(structuredClone(source.sourceFindings[0]!));
+  const source = input("explicit");
   const raw = submission([finding()]);
-  const result = validate(raw, [source], null).aggregate;
-  expect(provenance(result.findings[0]!)["sourceFindingIds"]).toEqual([
-    "implicit:0",
-    "implicit:1",
-  ]);
-  expect(provenance(result.findings[0]!)["sourceFindings"]).toEqual(
-    source.sourceFindings.map((entry, index) => ({
-      id: `implicit:${index}`,
-      finding: entry,
-    })),
-  );
-  source.sourceFindings[1]!["summary"] =
-    "Distinct evidence with the same identity.";
   expect(() => validate(raw, [source], null)).toThrow(
-    "ambiguous source findings",
+    "explicit sourceFindingIds",
   );
 });
 

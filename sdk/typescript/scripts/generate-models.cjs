@@ -18,6 +18,16 @@ function withoutAllOf(value) {
   );
 }
 
+function compileModel(schema, name) {
+  // allOf with contains or if/then hides object fields from the compiler.
+  return compile({ ...withoutAllOf(schema), title: name }, name, {
+    bannerComment: "",
+    format: false,
+    ignoreMinAndMaxItems: true,
+    unknownAny: true,
+  });
+}
+
 async function generate() {
   const documents = [
     ["scan-manifest.schema.json", "ScanManifest"],
@@ -27,15 +37,7 @@ async function generate() {
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
       const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
-      // json-schema-to-typescript drops object fields when allOf uses contains or if/then.
-      const input = withoutAllOf(schema);
-      input.title = name;
-      return compile(input, name, {
-        bannerComment: "",
-        format: false,
-        ignoreMinAndMaxItems: true,
-        unknownAny: true,
-      });
+      return compileModel(schema, name);
     }),
   );
 
@@ -101,13 +103,7 @@ async function generateSemanticModels() {
     ),
   );
   input.$defs.common = common;
-  input.title = "SemanticScan";
-  const model = await compile(withoutAllOf(input), "SemanticScan", {
-    bannerComment: "",
-    format: false,
-    ignoreMinAndMaxItems: true,
-    unknownAny: true,
-  });
+  const model = await compileModel(input, "SemanticScan");
   return format(
     [
       "/* Generated from the plugin semantic draft schema. Run `pnpm generate:models`. */",
@@ -121,12 +117,11 @@ async function generateSemanticModels() {
   );
 }
 
-Promise.all([generate(), generateSemanticModels()]).then((documents) => {
-  for (const [index, filename] of [
-    "models.ts",
-    "semantic-models.ts",
-  ].entries()) {
-    const models = documents[index];
+Promise.all([
+  generate().then((document) => ["models.ts", document]),
+  generateSemanticModels().then((document) => ["semantic-models.ts", document]),
+]).then((documents) => {
+  for (const [filename, models] of documents) {
     const output = join(packageRoot, "src", filename);
     if (process.argv.includes("--check")) {
       if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {

@@ -382,13 +382,13 @@ async function fixture(
       clearTimeout(timeout);
       try {
         await client.close();
-        // The Codex SDK removes child listeners during cleanup; exit state is retained.
-        for (const child of children)
-          while (child.exitCode === null && child.signalCode === null)
-            await new Promise<void>((resolve) => setImmediate(resolve));
       } finally {
         spawn.mockRestore();
       }
+      // The SDK removes child listeners during cleanup; exit state is retained.
+      for (const child of children)
+        while (child.exitCode === null && child.signalCode === null)
+          await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
 }

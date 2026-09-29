@@ -18,6 +18,7 @@ import {
   modelProviderConfigOverride,
   scanModelProvider,
   scanCompositionOverrides,
+  setScanSubagentBudget,
   writeCodexConfig,
   type JsonObject,
 } from "./config.js";
@@ -544,17 +545,7 @@ export function prepareMergeExecution(
   subagents: number,
 ): PreparedExecution {
   const config = structuredClone(session.sessionConfig);
-  const features = isRecord(config["features"]) ? config["features"] : {};
-  config["features"] = {
-    ...features,
-    multi_agent_v2: {
-      ...(isRecord(features["multi_agent_v2"])
-        ? features["multi_agent_v2"]
-        : {}),
-      enabled: true,
-      max_concurrent_threads_per_session: subagents + 1,
-    },
-  };
+  setScanSubagentBudget(config, subagents);
   return { ...session, policy: "merge", sessionConfig: config };
 }
 

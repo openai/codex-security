@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import {
-  exactUnion,
   preserveFindingDetails,
   type JsonObject,
 } from "../src/scan-semantics.js";
@@ -14,26 +13,45 @@ const source = { id: "saved:0", finding: evidence };
 const other = { id: "saved:1", finding: evidence };
 const changed = { id: source.id, finding: { ...evidence, severity: "low" } };
 
-const cases: [unknown[], unknown[]][] = [
-  [[source, other], [{ ...source }]],
-  [[source], [other, source]],
+const cases: [unknown[], unknown[], unknown[]][] = [
+  [[source, other], [{ ...source }], [source, other]],
+  [[source], [other, source], [source, other]],
   [
     [source, source],
     [other, other],
+    [source, other],
   ],
   [
     [changed, source],
     [structuredClone(source), structuredClone(changed)],
+    [changed, source],
   ],
-  [[source], [{ finding: evidence, id: source.id }]],
-  [[source], [{ ...source, annotation: "retain" }]],
-  [[source], [null, { finding: evidence }]],
+  [
+    [source],
+    [{ finding: evidence, id: source.id }],
+    [source, { finding: evidence, id: source.id }],
+  ],
+  [
+    [source],
+    [{ ...source, annotation: "retain" }],
+    [source, { ...source, annotation: "retain" }],
+  ],
+  [
+    [source],
+    [null, { finding: evidence }],
+    [source, null, { finding: evidence }],
+  ],
 ];
 test.each(
-  cases.map(([current, previous], index) => ({ current, previous, index })),
+  cases.map(([current, previous, expected], index) => ({
+    current,
+    previous,
+    expected,
+    index,
+  })),
 )(
   "original union matches exact JSON equality and first-occurrence order (case $index)",
-  ({ current, previous }) => {
+  ({ current, previous, expected }) => {
     const saved: JsonObject = {
       summary: "saved",
       provenance: { sourceFindings: previous },
@@ -45,7 +63,7 @@ test.each(
     const before = structuredClone({ current, previous });
     preserveFindingDetails(next, saved);
     expect((next["provenance"] as JsonObject)["sourceFindings"]).toEqual(
-      exactUnion(current, previous),
+      expected,
     );
     expect({ current, previous }).toEqual(before);
     expect(

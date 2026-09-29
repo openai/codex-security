@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, test } from "bun:test";
+import { semanticFinding, semanticCoverage } from "./helpers/semantic-scan.js";
 import { build } from "esbuild";
 import {
   combineScanCoverage,
@@ -34,22 +35,7 @@ beforeAll(async () => {
 });
 
 function finding(id = "shared", extra: JsonObject = {}): SemanticFinding {
-  return {
-    ruleId: "cross-site-scripting.request-output",
-    identity: { anchor: id },
-    title: "Unsafe request output",
-    summary: "A request-controlled value reaches an HTML response.",
-    severity: { level: "high" },
-    confidence: {
-      level: "high",
-      rationale: "The source establishes reachability.",
-    },
-    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
-    locations: [{ path: "src/render.js", startLine: 1, endLine: 2 }],
-    remediation: "Encode request-controlled values before emitting HTML.",
-    provenance: { source: "local_plugin" },
-    ...extra,
-  };
+  return semanticFinding({ identity: { anchor: id }, ...extra });
 }
 
 function child(
@@ -76,13 +62,7 @@ function child(
           sourceFindingIds: [`${scanId}:${index}`],
         },
       })),
-      coverage: {
-        completeness: "complete",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-        ...coverage,
-      },
+      coverage: semanticCoverage(coverage),
     },
   };
 }
@@ -117,7 +97,7 @@ describe("local scan merging", () => {
       { id: "first:0", finding: { summary: "Model-authored replacement." } },
     ];
     const result = merge(submission(submitted), [input], null);
-    expect(result.newFindings).toBe(1);
+    expect(result.newFindingScanIds).toEqual(["first"]);
     expect(sources(result.aggregate.findings[0]!)).toEqual([
       { id: "first:0", finding: input.sourceFindings[0]! },
     ]);
@@ -149,7 +129,7 @@ describe("local scan merging", () => {
       },
     });
     const result = merge(submission([combined]), [second], initial);
-    expect(result.newFindings).toBe(0);
+    expect(result.newFindingScanIds).toEqual([]);
     expect(sources(result.aggregate.findings[0]!)).toEqual([
       { id: "first:0", finding: first.sourceFindings[0]! },
       { id: "second:0", finding: second.sourceFindings[0]! },
@@ -163,13 +143,13 @@ describe("local scan merging", () => {
     );
   });
 
-  test("rejects omitted, invented, reused, and ambiguous sources", () => {
+  test("rejects omitted, invented, reused, and implicit sources", () => {
     const input = child("first", [finding(), finding("distinct")]);
     expect(() =>
       merge(submission([input.draft.findings[0]!]), [input], null),
     ).toThrow("unaccounted source");
     expect(() => merge(submission([finding("new")]), [input], null)).toThrow(
-      "no assigned source",
+      "explicit sourceFindingIds",
     );
     expect(() =>
       merge(
@@ -197,7 +177,7 @@ describe("local scan merging", () => {
       finding("shared", { summary: "Independent vulnerable path." }),
     ]);
     expect(() => merge(submission([finding()]), [collision], null)).toThrow(
-      "ambiguous source",
+      "explicit sourceFindingIds",
     );
   });
 
@@ -219,11 +199,11 @@ describe("local scan merging", () => {
       [next],
       previous,
     );
-    expect(accepted.newFindings).toBe(1);
+    expect(accepted.newFindingScanIds).toEqual([next.scanId]);
     expect(
       merge(submission(accepted.aggregate.findings), [], accepted.aggregate)
-        .newFindings,
-    ).toBe(0);
+        .newFindingScanIds,
+    ).toEqual([]);
   });
 
   test("validates findings before accepting a merge and excludes model-authored coverage", () => {
@@ -276,7 +256,7 @@ describe("local scan merging", () => {
       [next],
       previous,
     );
-    expect(result.newFindings).toBe(1);
+    expect(result.newFindingScanIds).toEqual([next.scanId]);
     const identities = result.aggregate.findings.map(scanFindingIdentity);
     expect(new Set(identities).size).toBe(2);
     expect(identities[0]).toBe(scanFindingIdentity(previous.findings[0]!));
@@ -308,7 +288,6 @@ describe("local scan merging", () => {
     expect(reordered.aggregate.findings.map(scanFindingIdentity)).toEqual(
       [...identities].reverse(),
     );
-    expect(reordered.newFindings).toBe(1);
     expect(reordered.newFindingScanIds).toEqual([next.scanId]);
   });
 
@@ -323,7 +302,6 @@ describe("local scan merging", () => {
       },
     });
     const duplicateOnly = merge(submission([shared]), [first, second], null);
-    expect(duplicateOnly.newFindings).toBe(1);
     expect(duplicateOnly.newFindingScanIds).toEqual(["first"]);
 
     const result = merge(
@@ -331,7 +309,6 @@ describe("local scan merging", () => {
       [first, second, third],
       null,
     );
-    expect(result.newFindings).toBe(2);
     expect(result.newFindingScanIds).toEqual(["first", "third"]);
     const rediscovered = child("fourth");
     const retained = structuredClone(result.aggregate.findings);
@@ -341,7 +318,6 @@ describe("local scan merging", () => {
       [rediscovered],
       result.aggregate,
     );
-    expect(repeated.newFindings).toBe(0);
     expect(repeated.newFindingScanIds).toEqual([]);
   });
 
@@ -358,7 +334,6 @@ describe("local scan merging", () => {
       merge(submission([], { threatModel }), [first, second], null),
     ).toEqual({
       aggregate: submission([], { threatModel }),
-      newFindings: 0,
       newFindingScanIds: [],
     });
   });
@@ -631,7 +606,7 @@ test("consolidates accepted aliases without counting their retained lineage as n
   const combined = structuredClone(previous.findings[0]!);
   provenance(combined)["sourceFindingIds"] = ["alias-a:0", "alias-b:0"];
   const result = merge(submission([combined]), [], previous);
-  expect(result.newFindings).toBe(0);
+  expect(result.newFindingScanIds).toEqual([]);
   expect(sources(result.aggregate.findings[0]!)).toHaveLength(2);
   expect(provenance(result.aggregate.findings[0]!)["previousFindings"]).toEqual(
     expect.arrayContaining([

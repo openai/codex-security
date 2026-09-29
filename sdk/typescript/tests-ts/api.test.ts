@@ -63,6 +63,7 @@ import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 import {
+  cancellationSetup,
   mockScanRegistration,
   mockWorkbench,
   shellEnvironmentReference,
@@ -668,16 +669,9 @@ describe("CodexSecurity finding validation", () => {
 
 describe("CodexSecurity orchestration", () => {
   test("records deeply nested caller cancellation as canceled instead of failed", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const commands: Array<readonly string[]> = [];
+    const { repository, scanDir, commands, controller, dependencies } =
+      await cancellationSetup(await temporaryDirectory());
     const started = Promise.withResolvers<void>();
-    const controller = new AbortController();
     let cancellationReason: unknown = new DOMException("aborted", "AbortError");
     for (let depth = 0; depth < 10; depth += 1) {
       cancellationReason = new ScanInterruptedError(
@@ -690,29 +684,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
-          if (args[0] === "get-scan-feedback") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              falsePositives: [],
-            };
-          }
-          return {};
-        },
+        ...dependencies,
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -759,34 +731,20 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("records a workbench AbortError as canceled instead of failed", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const commands: Array<readonly string[]> = [];
+    const { repository, commands, controller, dependencies } =
+      await cancellationSetup(await temporaryDirectory());
     const feedbackStarted = Promise.withResolvers<void>();
-    const controller = new AbortController();
 
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...dependencies,
         runWorkbench: async (
           options: unknown,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
           if (args[0] === "get-scan-feedback") {
             feedbackStarted.resolve();
             const signal = (options as { signal: AbortSignal }).signal;
@@ -801,7 +759,7 @@ describe("CodexSecurity orchestration", () => {
               );
             });
           }
-          return {};
+          return mockWorkbench(args, input);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -833,40 +791,26 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("records an ordinary failure as failed when cancellation follows it", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const commands: Array<readonly string[]> = [];
-    const controller = new AbortController();
+    const { repository, commands, controller, dependencies } =
+      await cancellationSetup(await temporaryDirectory());
 
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...dependencies,
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
           if (args[0] === "get-scan-feedback") {
             const failure = new Error("underlying scan failure");
             return await Promise.reject<never>(failure).finally(() => {
               controller.abort("caller canceled");
             });
           }
-          return {};
+          return mockWorkbench(args, input);
         },
         createCodex: () => {
           throw new Error("Codex must not start after feedback failure");
@@ -893,45 +837,26 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("records a client-close cancellation as canceled instead of failed", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const commands: Array<readonly string[]> = [];
+    const { repository, commands, dependencies } = await cancellationSetup(
+      await temporaryDirectory(),
+    );
     const feedbackStarted = Promise.withResolvers<void>();
     const releaseFeedback = Promise.withResolvers<void>();
-    let client: TestClient;
-
-    client = new TestClient(
+    const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...dependencies,
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
           if (args[0] === "get-scan-feedback") {
             feedbackStarted.resolve();
             await releaseFeedback.promise;
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              falsePositives: [],
-            };
           }
-          return {};
+          return mockWorkbench(args, input);
         },
         createCodex: () => {
           throw new Error("Codex must not start after client close");

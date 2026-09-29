@@ -14,16 +14,3 @@ export interface SavedScanRecord {
   cost?: ScanCost | null;
   [extension: string]: unknown;
 }
-
-/** Decode responses from the selected local workbench without dropping extensions. */
-export function savedScansFromWorkbench(
-  response: Record<string, unknown>,
-): SavedScanRecord[] {
-  return response["scans"] as SavedScanRecord[];
-}
-
-export function savedScanFromWorkbench(
-  response: Record<string, unknown>,
-): SavedScanRecord {
-  return response["scan"] as SavedScanRecord;
-}

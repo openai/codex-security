@@ -65,7 +65,6 @@ import { randomUUID } from "node:crypto";
 import {
   runDeepScans,
   ScanCostTrackingError,
-  TerminalDeepScanError,
   terminalDeepScanError,
 } from "./deep-scan.js";
 import {
@@ -77,10 +76,7 @@ import {
   compositionCheckpointFromWorkbench,
   type DeepScanCheckpointSummary,
 } from "./deep-scan-checkpoint.js";
-import {
-  savedScanFromWorkbench,
-  savedScansFromWorkbench,
-} from "./workbench-types.js";
+import type { SavedScanRecord } from "./workbench-types.js";
 import {
   collectResult,
   publishScan,
@@ -1219,7 +1215,6 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
-    let terminalMergeCost: ScanCost | null | undefined;
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -1489,43 +1484,8 @@ export class CodexSecurity {
         (options.resumeScanId !== undefined ||
           options.registeredScan !== undefined)
       ) {
-        const readHistoricalCost = async (
-          threadId: string,
-          scanDirectory: string,
-        ) => {
-          const historical = new ScanCostTracker({
-            codexHome: runtime.codexHome,
-            model,
-            repository: repo,
-            scanDirectory,
-          });
-          historical.start(threadId);
-          return (await historical.stop()).cost;
-        };
-        const terminal = await terminalDeepScanError({
-          scanId,
-          scanDir,
-          repository: repo,
-          workbench: (args) => workbench(workbenchOptions, args),
-          historicalCost: (threadId) => readHistoricalCost(threadId, scanDir),
-        });
-        if (terminal !== null) {
-          // A failed optional thread write does not prove the merge was free.
-          if (typeof resumeThreadId !== "string") terminalMergeCost = null;
-          const { constituents } = terminal.accounting;
-          if (
-            constituents !== null &&
-            typeof resumeThreadId === "string" &&
-            resumeThreadId !== terminal.accounting.legacyThreadId
-          ) {
-            terminalMergeCost = await readHistoricalCost(
-              resumeThreadId,
-              join(scanDir, "artifacts/deep-scan/merge"),
-            ).catch(() => null);
-          }
-          activeScan = { id: scanId, options: workbenchOptions };
-          throw terminal;
-        }
+        const terminal = await terminalDeepScanError({ scanDir });
+        if (terminal !== null) throw terminal;
       }
       await requireScanResumeSession({
         registration: registered,
@@ -1663,7 +1623,7 @@ export class CodexSecurity {
           "--scan-id",
           scanId,
         ]);
-        const savedScan = savedScanFromWorkbench(saved);
+        const savedScan = saved["scan"] as SavedScanRecord;
         const checkpoint = compositionCheckpointFromWorkbench(saved);
         resumeThreadId = savedScan["continuationThreadId"];
         restorePriorAccounting(checkpoint);
@@ -1695,7 +1655,7 @@ export class CodexSecurity {
             "--scan-root",
             join(scanDir, "artifacts/deep-scan/passes"),
           ]);
-          for (const child of savedScansFromWorkbench(children)) {
+          for (const child of children["scans"] as SavedScanRecord[]) {
             if (child.parentScanId === scanId)
               passCosts.set(child.scanId, child.cost ?? null);
           }
@@ -1736,16 +1696,6 @@ export class CodexSecurity {
           ]);
           const checkpoint = compositionCheckpointFromWorkbench(saved);
           restorePriorAccounting(checkpoint);
-          if (
-            options.maxCostUsd !== undefined &&
-            checkpoint?.legacy &&
-            !checkpoint.legacy.cost &&
-            (!checkpoint.legacy.originThreadId ||
-              !(await historicalCost(checkpoint.legacy.originThreadId)))
-          )
-            throw new CodexSecurityError(
-              "Restore the original Deep Scan session logs to verify its saved cost limit.",
-            );
         }
         activeScan = { id: scanId, options: workbenchOptions };
       }
@@ -2149,7 +2099,7 @@ export class CodexSecurity {
                 options.onScanStarted,
                 options.onObserverError,
               );
-              const checkpoint = await runDeepScans({
+              await runDeepScans({
                 scanId,
                 scanDir,
                 costUnavailable: passCosts.has("previous-work"),
@@ -2296,17 +2246,12 @@ export class CodexSecurity {
                     draft,
                   ),
               });
-              if (budgetRecovery !== null)
-                budgetRecovery.threadId ??=
-                  checkpoint.legacy?.originThreadId ?? null;
               const usage = await finalize(
                 undefined,
                 thread.id === null ? completeCost(null) : null,
               );
-              const resultThreadId =
-                thread.id ?? checkpoint.legacy?.originThreadId ?? null;
               return {
-                threadId: resultThreadId,
+                threadId: thread.id,
                 turnResult: { status: "completed", model, usage },
               };
             })()
@@ -2640,43 +2585,16 @@ export class CodexSecurity {
           this.#abortController.signal.aborted) &&
         isCancellationDerivedFailure(failure, signal);
 
-      let terminalCost: Readonly<ScanCost> | null = null;
-      if (error instanceof TerminalDeepScanError) {
-        const { constituents, savedTotal } = error.accounting;
-        terminalCost = savedTotal;
-        const costs =
-          constituents === null
-            ? null
-            : [
-                ...constituents,
-                ...(terminalMergeCost === undefined ? [] : [terminalMergeCost]),
-              ];
-        if (costs !== null && !costs.includes(null)) {
-          const recovered = costs.reduce<ScanCost | null>(
-            (total, cost) =>
-              cost === null ? total : addScanCosts(total, cost),
-            tracked?.cost ?? null,
-          );
-          if (
-            recovered &&
-            (!terminalCost ||
-              recovered.estimatedUsd > terminalCost.estimatedUsd)
-          )
-            terminalCost = recovered;
-        }
-      }
       const preservedCost =
-        error instanceof TerminalDeepScanError
-          ? terminalCost
-          : options.mode === "deep"
-            ? (completionCost ??
-              (tracked?.cost ||
-              (scanThreadId === undefined &&
-                options.resumeScanId === undefined &&
-                options.registeredScan === undefined)
-                ? completeCost(tracked?.cost ?? null)
-                : null))
-            : snapshot?.cost;
+        options.mode === "deep"
+          ? (completionCost ??
+            (tracked?.cost ||
+            (scanThreadId === undefined &&
+              options.resumeScanId === undefined &&
+              options.registeredScan === undefined)
+              ? completeCost(tracked?.cost ?? null)
+              : null))
+          : snapshot?.cost;
       if (
         activeScan !== null &&
         (options.deepScanPass || transportClosed || canceled)

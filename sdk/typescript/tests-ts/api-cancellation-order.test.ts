@@ -1,14 +1,13 @@
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { ScanCostTrackingError } from "../src/deep-scan.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
 import type { WorkbenchCommandOptions } from "../src/runtime.js";
-import { mockWorkbench, TestClient } from "./support/api-client.js";
 import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+  cancellationSetup,
+  mockWorkbench,
+  TestClient,
+} from "./support/api-client.js";
+import { createApiTestFixtures } from "./support/api-events.js";
 
 const fixtures = createApiTestFixtures();
 afterEach(fixtures.cleanup);
@@ -16,29 +15,16 @@ afterEach(fixtures.cleanup);
 test.each(["permission", "cost tracking"] as const)(
   "preserves an earlier %s failure when the caller cancels during cleanup",
   async (kind) => {
-    const root = await fixtures.temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await Promise.all(
-      [repository, codexHome, scanDir].map((path) =>
-        mkdir(path, { mode: 0o700 }),
-      ),
-    );
+    const { repository, scanDir, commands, controller, dependencies } =
+      await cancellationSetup(await fixtures.temporaryDirectory());
     const failure =
       kind === "permission"
         ? new ScanPermissionError("Selected permissions could not be verified")
         : new ScanCostTrackingError("Child usage is unavailable", scanDir);
-    const controller = new AbortController();
-    const commands: Array<readonly string[]> = [];
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...dependencies,
         runWorkbench: async (
           options: WorkbenchCommandOptions,
           args: readonly string[],

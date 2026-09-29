@@ -39,7 +39,6 @@ export async function registerScan(options: {
           "get-cli-scan-resume",
           "--scan-id",
           scanOptions.resumeScanId,
-          "--migrate",
         ])
       : await workbench(
           [
