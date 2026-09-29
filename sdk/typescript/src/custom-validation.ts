@@ -226,9 +226,9 @@ export async function runCustomValidation(options: {
       "The scan did not return an unsealed custom-validation draft.",
     );
   }
-  const findings = (
-    normalizePersistedFindings(findingsDocument) as typeof findingsDocument
-  ).findings;
+  const { findings } = normalizePersistedFindings(
+    findingsDocument,
+  ) as typeof findingsDocument;
   const [common, candidatesSchema, draft, coverageSchema] = await Promise.all([
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),

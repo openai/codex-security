@@ -125,7 +125,7 @@ async function publishDraft(
     },
   };
   await mkdir(join(scanDir, "drafts"), { recursive: true });
-  const draftPath = join(scanDir, "drafts", `${randomUUID()}.json`);
+  const draftPath = join(scanDir, "drafts", `${scanId}.json`);
   await save(draftPath, staged);
   expect(
     await workbench([
@@ -136,7 +136,6 @@ async function publishDraft(
       draftPath,
     ]),
   ).toMatchObject({ scanId, status: "draft_written" });
-  await rm(draftPath);
 }
 
 function result(
@@ -347,11 +346,9 @@ describe("custom validation", () => {
           candidates: Array<{ finding: unknown }>;
         }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
         expect(candidates.candidates).toHaveLength(3);
-        expect(candidates.candidates[0]!.finding).toMatchObject({
-          attackPath: { dataflow: { source: "Synthetic request input" } },
-        });
-        expect(candidates.candidates[0]!.finding).not.toHaveProperty(
-          "attackPath.dataflow.sink",
+        expect(candidates.candidates[0]!.finding).toHaveProperty(
+          "attackPath.dataflow",
+          { source: "Synthetic request input" },
         );
         return JSON.stringify(result("reportable", "reportable", "reportable"));
       },
@@ -394,17 +391,14 @@ describe("custom validation", () => {
     const f = await fixture(2);
     f.findings.findings[1]!.title = "";
     await save(join(f.scanDir, "findings.json"), f.findings);
-    let called = false;
     await expect(
       runCustomValidation({
         ...f,
         run: async () => {
-          called = true;
-          return JSON.stringify(result("reportable", "reportable"));
+          throw new Error("unexpected validation");
         },
       }),
     ).rejects.toThrow(/findings\[1\].*title/);
-    expect(called).toBe(false);
     expect(
       await json<FindingsDocument>(join(f.scanDir, "findings.json")),
     ).toEqual(f.findings);
