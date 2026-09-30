@@ -50,12 +50,6 @@ interface CandidateAttackPathsPayload {
 }
 
 /** The stored JSON Schema is the sole source of the nested attack-path contract. */
-export const candidateAttackPathSchema = loadArtifactZodSchema(
-  documents,
-  attackPathSchema.$id,
-  "attackPath",
-) as z.ZodType<CandidateAttackPathRecord>;
-
 const candidateAttackPathsPayloadSchema = loadArtifactZodSchema(
   documents,
   attackPathSchema.$id,

@@ -260,7 +260,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     )
     running_workspace = create_saved_workspace(state_dir, first_target)
     older_running = start_delivered_scan(state_dir, "--workspace-id", str(running_workspace["id"]))
-    complete_scan(state_dir, first_target, identity_anchor="first-finding")
+    repeated_first = complete_scan(state_dir, first_target, identity_anchor="first-finding")
     distinct_first = complete_scan(
         state_dir,
         first_target,
@@ -292,6 +292,23 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET started_at = '2026-08-01T00:00:00Z'")
+    expected_latest = {
+        first_target_id: max(
+            older_first["scanId"],
+            older_running["results"]["scanId"],
+            repeated_first["scanId"],
+            distinct_first["scanId"],
+        ),
+        second_target_id: latest_second["scanId"],
+    }
+    tied = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert [item["latestScan"]["scanId"] for item in tied] == sorted(
+        expected_latest.values(), reverse=True
+    )
+    assert {item["targetId"]: item["latestScan"]["scanId"] for item in tied} == expected_latest
 
 
 def test_composition_occurrences_only_publish_through_parent_or_explicit_import(

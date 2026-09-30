@@ -558,7 +558,7 @@ def merge_saved_results(
     valid_parent = True
     resolved: dict[str, str] = {}
     if parent:
-        # Only the current parent can supersede findings from earlier checkpoints.
+        # Only the unchanged current parent can supersede earlier checkpoints.
         for finding in parent["findings"]:
             if not valid_finding(finding):
                 valid_parent = False
@@ -612,7 +612,7 @@ def merge_saved_results(
             if relative == "parent" and parent_manifest:
                 finding = copy.deepcopy(value)
                 _ensure_finding_identity(finding, candidate_only=True)
-                if valid_finding(finding):
+                if valid_finding(value):
                     finding_positions.setdefault(_finding_key(finding), len(findings))
                 findings.append(finding)
                 continue

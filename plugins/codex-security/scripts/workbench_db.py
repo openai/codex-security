@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -1445,14 +1446,18 @@ def sealed_scan_producer_version(scan: sqlite3.Row) -> str | None:
 
 
 def cli_scan_resume(
-    connection: sqlite3.Connection, scan: sqlite3.Row, claim_token: str | None
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    claim_token: str | None,
+    *,
+    sealed_producer_version: Callable[[sqlite3.Row], str | None] | None = None,
 ) -> dict[str, Any]:
     result = scan_history.cli_scan_resume(
         connection,
         scan,
         parse_scan_recipe=parse_scan_recipe,
         scan_contract=scan_contract,
-        sealed_producer_version=sealed_scan_producer_version,
+        sealed_producer_version=sealed_producer_version or sealed_scan_producer_version,
         claim_token=claim_token,
     )
     composition = load_composition(connection, scan)
@@ -1509,6 +1514,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
+            resume_verifier = sealed_scan_producer_version
             if saved_recipe is None:
                 sealed_version = sealed_scan_producer_version(scan)
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
@@ -1524,8 +1530,14 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                         scan_id,
                     ),
                 )
+                resume_verifier = lambda _: sealed_version
             scan = require_scan(connection, scan_id)
-            return cli_scan_resume(connection, scan, registration.get("claimToken"))
+            return cli_scan_resume(
+                connection,
+                scan,
+                registration.get("claimToken"),
+                sealed_producer_version=resume_verifier,
+            )
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     requested_target = recipe["target"]

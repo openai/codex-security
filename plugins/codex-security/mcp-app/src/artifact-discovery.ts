@@ -68,12 +68,6 @@ export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
   Record<string, unknown>;
 
 /** Every exposed validator is derived from the checked-in JSON Schema source. */
-export const rawDiscoveryLocationSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "rawDiscoveryLocation",
-) as z.ZodType<RawDiscoveryLocation>;
-
 export const rawDiscoveryCandidateSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidateDefinitions.$id,

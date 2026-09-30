@@ -74,7 +74,6 @@ export async function createScanArtifactContext(
     "Codex Security scan " + scanId + " has no bound target context.",
   );
   const targetContract = asRecord(scan.contract);
-  const contractTarget = asRecord(targetContract?.target);
   return {
     root: await canonicalDirectory(
       rawRoot,
@@ -90,11 +89,6 @@ export async function createScanArtifactContext(
     ...defined("pythonCommand", options.pythonCommand),
     ...defined("targetContract", targetContract),
     ...defined("targetRevision", optionalString(scan.targetRevision)),
-    ...defined(
-      "targetSnapshotDigest",
-      optionalString(scan.targetSnapshotDigest) ??
-        optionalString(contractTarget?.requiredSnapshotDigest),
-    ),
     ...defined("handoffClaimToken", suppliedClaim ?? expectedClaim),
     ...defined("status", status),
     ...defined("mode", optionalString(scan.mode)),

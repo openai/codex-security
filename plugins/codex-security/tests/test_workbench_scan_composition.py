@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import sqlite3
 import subprocess
 import sys
+from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -2224,7 +2226,7 @@ def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path
 @pytest.mark.parametrize("saved_recipe", [False, True])
 @pytest.mark.parametrize("artifact_state", ["unsealed", "sealed", "tampered"])
 def test_native_legacy_registration_only_rejoins_validated_sealed_results(
-    native_scan_completion, saved_recipe: bool, artifact_state: str
+    native_scan_completion, workbench_api, monkeypatch, saved_recipe: bool, artifact_state: str
 ) -> None:
     state, target, _, started, complete = native_scan_completion
     scan = started["scan"]
@@ -2273,24 +2275,31 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
         name: (directory / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", CHECKPOINT)
     }
-    rebound = run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        input_text=json.dumps(
-            {
-                "scanId": scan["scanId"],
-                "threadId": "native-owner",
-                "claimToken": token,
-                "recipe": recipe(target, "deep"),
-            }
-        ),
-        check=artifact_state == "sealed",
-    )
+    registration = {
+        "scanId": scan["scanId"],
+        "threadId": "native-owner",
+        "claimToken": token,
+        "recipe": recipe(target, "deep"),
+    }
+    register_scan = workbench_api["register_cli_scan"]
+    verifier = mock.Mock(wraps=register_scan.__globals__["sealed_scan_producer_version"])
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    args = Namespace(repository=str(target), scan_dir=str(directory), registration_json_stdin=True)
+    with (
+        closing(sqlite3.connect(state / "workbench.sqlite3")) as connection,
+        mock.patch("sys.stdin", io.StringIO(json.dumps(registration))),
+        mock.patch.dict(register_scan.__globals__, sealed_scan_producer_version=verifier),
+    ):
+        connection.row_factory = sqlite3.Row
+        if artifact_state == "sealed":
+            rebound = register_scan(connection, args)
+        else:
+            error = (
+                "retired runtime" if artifact_state == "unsealed" else "Cannot resume sealed scan"
+            )
+            with pytest.raises(SystemExit, match=error):
+                register_scan(connection, args)
+        assert verifier.call_count == 1
     if artifact_state == "sealed":
         assert rebound["scanId"] == scan["scanId"]
         assert rebound["threadId"] == "saved-execution"
@@ -2309,9 +2318,6 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
         )
         assert complete()["progress"]["status"] == "complete"
     else:
-        assert (
-            "retired runtime" if artifact_state == "unsealed" else "Cannot resume sealed scan"
-        ) in rebound["stderr"]
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             assert (
                 connection.execute(identity_query, (scan["scanId"],)).fetchone()
