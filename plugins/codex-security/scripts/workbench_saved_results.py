@@ -533,16 +533,30 @@ def merge_saved_results(
 
     all_sources = ([("parent", parent)] if parent else []) + sources
     resolved: dict[str, str] = {}
-    for draft in [parent] if parent else []:
-        for finding in draft["findings"]:
-            if (
-                isinstance(finding, dict)
-                and valid_finding(finding)
-                and (candidate_id := finding_candidate_id(finding))
-            ):
+    parent_validity: list[bool] = []
+    # Only the unchanged current parent can supersede earlier checkpoints.
+    if parent:
+        for finding in parent["findings"]:
+            parent_validity.append(valid_finding(finding))
+            if not parent_validity[-1]:
+                continue
+            if candidate_id := finding_candidate_id(finding):
                 resolved.setdefault(candidate_id, "reported")
+            canonical_key = _finding_key(finding)
+            for _, retained in retained_findings(finding):
+                retained_key = _finding_key(retained)
+                if retained is not finding:
+                    represented_history.setdefault(retained_key, set()).add(
+                        _digest(_finding_content(retained))
+                    )
+                previous_key = represented.get(retained_key)
+                if retained_key not in represented:
+                    represented[retained_key] = canonical_key
+                elif previous_key != canonical_key:
+                    # Ambiguous history cannot suppress an independent source.
+                    represented[retained_key] = None
         for field in ("surfaces", "explicitExclusions"):
-            items = draft["coverage"].get(field, [])
+            items = parent["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
                 if (
                     isinstance(item, dict)
@@ -550,23 +564,7 @@ def merge_saved_results(
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                 ):
                     resolved.setdefault(item["candidateId"], item["disposition"])
-    # Only the current parent can supersede findings from earlier checkpoints.
-    for draft in [parent] if parent else []:
-        for finding in draft["findings"]:
-            if valid_finding(finding):
-                canonical_key = _finding_key(finding)
-                for _, retained in retained_findings(finding):
-                    retained_key = _finding_key(retained)
-                    if retained is not finding:
-                        represented_history.setdefault(retained_key, set()).add(
-                            _digest(_finding_content(retained))
-                        )
-                    previous_key = represented.get(retained_key)
-                    if retained_key not in represented:
-                        represented[retained_key] = canonical_key
-                    elif previous_key != canonical_key:
-                        # Ambiguous history cannot suppress an independent source.
-                        represented[retained_key] = None
+    parent_findings_valid = all(parent_validity)
     for relative, draft in all_sources:
         superseded = (
             parent is not None
@@ -584,19 +582,15 @@ def merge_saved_results(
             and coverage.get("completeness") in {"complete", "unknown"}
         ):
             coverage["completeness"] = "partial"
-        if (
-            superseded
-            and not stopped
-            and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
-        ):
+        if superseded and not stopped and parent_findings_valid:
             continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
             manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
-        for value in draft["findings"]:
+        for index, value in enumerate(draft["findings"]):
             if relative == "parent" and parent_manifest:
                 finding = copy.deepcopy(value)
                 _ensure_finding_identity(finding, candidate_only=True)
-                if valid_finding(finding):
+                if parent_validity[index]:
                     finding_positions.setdefault(_finding_key(finding), len(findings))
                 findings.append(finding)
                 continue

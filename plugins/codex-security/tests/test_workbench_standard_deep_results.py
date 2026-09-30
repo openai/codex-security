@@ -9,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from workbench_test_support import (
@@ -1423,3 +1424,43 @@ def test_merge_saved_results_deduplicates_open_questions(
     assert result is not None
     _, _, coverage = result
     assert coverage.get("openQuestions") == expected
+
+
+@pytest.mark.parametrize("checkpoint_count", [0, 4])
+def test_parent_validation_does_not_scale_with_superseded_checkpoints(
+    tmp_path: Path, workbench_api, checkpoint_count: int
+) -> None:
+    saved_results = workbench_api["saved_results"]
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    scan_id = "parent-validation"
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    findings = json.loads((scan_dir / "findings.json").read_text())
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    for index in range(checkpoint_count):
+        earlier = copy.deepcopy(findings["findings"][0])
+        earlier["summary"] = f"Superseded observation {index}."
+        write_checkpoint(
+            scan_dir / "checkpoints",
+            {"scanId": scan_id, "findings": [earlier], "coverage": coverage},
+        )
+    binding = {
+        "status": "completed",
+        "allowedTargetKinds": [manifest["target"]["kind"]],
+        "target": manifest["target"],
+        "scope": manifest["scope"],
+        "coverageMode": "repository",
+    }
+    with mock.patch.object(
+        saved_results, "_recover_unsealed_findings", wraps=saved_results._recover_unsealed_findings
+    ) as recover:
+        result = saved_results.merge_saved_results(
+            scan_dir, scan_id, binding, [], stopped=False, reason=""
+        )
+    assert result is not None
+    assert result[1]["findings"] == findings["findings"]
+    # Analyze the immutable parent once, then validate the final merged output.
+    assert recover.call_count == 2

@@ -196,18 +196,12 @@ def list_repositories(
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
-    scans_by_id = {scan["scanId"]: scan for scan in scans}
     scan_count_by_target: dict[str, int] = {}
-    for scan in scans:
+    latest_scan_by_target: dict[str, dict[str, Any]] = {}
+    for scan in sorted(scans, key=lambda scan: (scan["startedAt"], scan["scanId"]), reverse=True):
         target_id = scan["targetId"]
         scan_count_by_target[target_id] = scan_count_by_target.get(target_id, 0) + 1
-
-    latest_scan_by_target: dict[str, dict[str, Any]] = {}
-    for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY started_at DESC, id DESC"
-    ):
-        if row["id"] in scans_by_id:
-            latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        latest_scan_by_target.setdefault(target_id, scan)
 
     open_findings_by_target = Counter(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
