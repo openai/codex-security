@@ -42,7 +42,7 @@ try {
   await testSchemaSourceOfTruth();
   await testScanContext();
   await testSafeJsonAndJsonl();
-  await testAtomicReplaceAndAppend();
+  await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
 } finally {
@@ -199,7 +199,6 @@ async function testScanContext() {
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
-  assert.equal(context.targetSnapshotDigest, "sha256:fixture");
   assert.equal(context.handoffClaimToken, "fixture-claim");
   assert.equal(context.pluginRoot, "/fixture/plugin");
   assert.equal(context.pythonCommand, "python3");
@@ -277,10 +276,10 @@ async function testSafeJsonAndJsonl() {
     manifestComponents,
     "scan_manifest",
   );
-  await io.replaceArtifactJson(manifest, {
-    scanId: "fixture",
-    extension: true,
-  });
+  await io.replaceArtifactText(
+    manifest,
+    JSON.stringify({ scanId: "fixture", extension: true }) + "\n",
+  );
   assert.deepEqual(
     await io.readArtifactJsonObject(
       context,
@@ -314,7 +313,7 @@ async function testSafeJsonAndJsonl() {
   );
 }
 
-async function testAtomicReplaceAndAppend() {
+async function testAtomicReplacement() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
@@ -328,30 +327,21 @@ async function testAtomicReplaceAndAppend() {
   await io.replaceArtifactJsonl(destination, []);
   assert.equal(await readFile(destination, "utf8"), "");
 
-  await writeFile(destination, '{"candidate_id":"without-newline"}', "utf8");
-  await io.appendArtifactJsonl(destination, [{ candidate_id: "appended" }]);
-  assert.deepEqual(
-    await io.readArtifactJsonl(context, components, "discovery_candidates"),
-    [{ candidate_id: "without-newline" }, { candidate_id: "appended" }],
-  );
-
-  await io.replaceArtifactJsonl(destination, []);
+  const versions = Array.from({ length: 12 }, (_, index) => [
+    { candidate_id: "concurrent-" + index, evidence: String(index).repeat(8192) },
+    { candidate_id: "tail-" + index },
+  ]);
+  const expected = new Set(versions.map((rows) => JSON.stringify(rows)));
   await Promise.all(
-    Array.from({ length: 12 }, (_, index) =>
-      io.appendArtifactJsonl(destination, [
-        { candidate_id: "concurrent-" + index },
-      ]),
-    ),
-  );
-  const rows = await io.readArtifactJsonl(
-    context,
-    components,
-    "discovery_candidates",
-  );
-  assert.equal(rows.length, 12);
-  assert.deepEqual(
-    rows.map((row) => row.candidate_id).sort(),
-    Array.from({ length: 12 }, (_, index) => "concurrent-" + index).sort(),
+    versions.map(async (rows) => {
+      await io.replaceArtifactJsonl(destination, rows);
+      const observed = await io.readArtifactJsonl(
+        context,
+        components,
+        "discovery_candidates",
+      );
+      assert.ok(expected.has(JSON.stringify(observed)));
+    }),
   );
 }
 

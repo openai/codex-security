@@ -121,7 +121,6 @@ try {
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles(root, repoRoot);
   await verifyEmptyReplacement(scan);
-  await verifyWorkerContext(root, repoRoot);
   await verifyMalformedLedgerIsNotModified(root, repoRoot);
   await verifySymlinkRejection(root, repoRoot);
 } finally {
@@ -479,20 +478,6 @@ async function verifyEmptyReplacement(context) {
     "utf8",
   );
   assert.equal(content, "");
-}
-
-async function verifyWorkerContext(root, repoRoot) {
-  const worker = await createContext(root, repoRoot, "worker-output");
-  const result = await recordCodexSecurityDiscoveryCandidates(
-    {
-      candidates: [rawCandidate()],
-    },
-    worker,
-  );
-  assert.deepEqual(result, { operation: "replace", candidatesRecorded: 1 });
-  const page = await listCodexSecurityCandidates({}, worker);
-  assert.equal(page.rows.length, 1);
-  assert.match(page.rows[0].candidate_id, /^candidate-[a-f0-9]{16}$/u);
 }
 
 async function verifyMalformedLedgerIsNotModified(root, repoRoot) {

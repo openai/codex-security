@@ -56,12 +56,6 @@ export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
   "reviewItemsInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
 
-export const reviewItemsWorkerReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsWorkerInput",
-) as z.ZodType<ArtifactPage>;
-
 export const reviewItemsReaderOutputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
