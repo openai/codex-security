@@ -40,7 +40,10 @@ def finding_source_excerpt(
     source = scanned_source_text(scan, target, path)
     if not source or "\0" in source:
         return None
-    lines = source.splitlines()
+    # Match location validation and SARIF hashing: CR, LF, and CRLF are line breaks.
+    # Keep form feeds and Unicode separators within their original source lines.
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.removesuffix("\n").split("\n")
     if start_line < 1 or start_line > len(lines):
         return None
     last_affected_line = end_line if isinstance(end_line, int) else start_line

@@ -57,6 +57,7 @@ import {
   PluginBootstrapError,
   PluginPythonUnavailableError,
   type ProtectedScanPathKind,
+  SandboxUnavailableError,
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -87,6 +88,7 @@ const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
@@ -2512,28 +2514,37 @@ export async function bootstrapPlugin(
       : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
           () => null,
         );
-  if (staged?.version !== version) {
+  const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
+  const stagedMatches =
+    staged?.version === version &&
+    (await pluginContentsMatch(root, stagedRoot, options.signal));
+
+  if (!stagedMatches) {
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);
   }
+
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
     (error: unknown) => {
       if (nodeErrorCode(error) === "ENOENT") return "";
       throw error;
     },
   );
-  const marketplaces = parse(config)["marketplaces"];
+  const configuration = parse(config);
+  const marketplaces = configuration["marketplaces"];
   const registration = isRecord(marketplaces)
     ? marketplaces[MARKETPLACE_NAME]
     : undefined;
-  if (
-    !isRecord(registration) ||
-    registration["source_type"] !== "local" ||
-    typeof registration["source"] !== "string" ||
-    !(await sameFile(registration["source"], marketplace))
-  ) {
+
+  const registered =
+    isRecord(registration) &&
+    registration["source_type"] === "local" &&
+    typeof registration["source"] === "string" &&
+    (await sameFile(registration["source"], marketplace));
+
+  if (!registered) {
     await run(
       command,
       ["plugin", "marketplace", "add", marketplace],
@@ -2541,12 +2552,56 @@ export async function bootstrapPlugin(
       options.signal,
     );
   }
+
+  const installRecord = join(marketplace, "installed-plugin.json");
+  const previous: unknown = await readFile(installRecord, "utf8")
+    .then((value) => JSON.parse(value) as unknown)
+    .catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError) {
+        return null;
+      }
+      throw error;
+    });
+
+  const plugins = configuration["plugins"];
+  const plugin = isRecord(plugins)
+    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
+    : undefined;
+
+  // Codex replaces the shared install even at the same version. Reuse it so
+  // workers from an earlier scan can keep using their plugin files.
+  if (
+    stagedMatches &&
+    registered &&
+    isRecord(plugin) &&
+    plugin["enabled"] === true &&
+    isRecord(previous) &&
+    typeof previous["installedPath"] === "string" &&
+    previous["version"] === version &&
+    (await pluginContentsMatch(
+      root,
+      previous["installedPath"],
+      options.signal,
+      true,
+    ))
+  ) {
+    return {
+      pluginRoot: root,
+      marketplaceRoot: marketplace,
+      installedRoot: previous["installedPath"],
+      marketplaceName: MARKETPLACE_NAME,
+      name,
+      version,
+    };
+  }
+
   const output = await run(
     command,
     ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
     environment,
     options.signal,
   );
+
   let installed: unknown;
   try {
     installed = JSON.parse(output);
@@ -2556,6 +2611,7 @@ export async function bootstrapPlugin(
       { cause: error },
     );
   }
+
   if (
     !isRecord(installed) ||
     typeof installed["installedPath"] !== "string" ||
@@ -2565,6 +2621,16 @@ export async function bootstrapPlugin(
       "Codex plugin install did not return the selected plugin path and version.",
     );
   }
+
+  await writeFile(
+    installRecord,
+    JSON.stringify({
+      installedPath: installed["installedPath"],
+      version,
+    }),
+    { mode: 0o600, signal: options.signal },
+  );
+
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
@@ -2573,6 +2639,71 @@ export async function bootstrapPlugin(
     name,
     version,
   };
+}
+
+async function pluginContentsMatch(
+  source: string,
+  destination: string,
+  signal?: AbortSignal,
+  allowExtraFiles = false,
+): Promise<boolean> {
+  throwIfSignalAborted(signal);
+
+  const sourceMetadata = await lstat(source);
+  const destinationMetadata = await lstat(destination).catch(
+    (error: unknown) => {
+      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? "")) {
+        return null;
+      }
+      throw error;
+    },
+  );
+
+  if (destinationMetadata === null) return false;
+
+  if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
+    if (
+      sourceMetadata.size !== destinationMetadata.size ||
+      (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
+    ) {
+      return false;
+    }
+
+    const [sourceBytes, destinationBytes] = await Promise.all([
+      readFile(source, { signal }),
+      readFile(destination, { signal }),
+    ]);
+
+    return sourceBytes.equals(destinationBytes);
+  }
+
+  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
+    return false;
+  }
+
+  const entries = await readdir(source);
+
+  if (
+    !allowExtraFiles &&
+    entries.length !== (await readdir(destination)).length
+  ) {
+    return false;
+  }
+
+  for (const entry of entries) {
+    if (
+      !(await pluginContentsMatch(
+        join(source, entry),
+        join(destination, entry),
+        signal,
+        allowExtraFiles,
+      ))
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export async function pluginMetadata(
@@ -2775,6 +2906,39 @@ export async function runCodexCommand(
   });
   child.stdin.end(input);
   return await completion;
+}
+
+export async function probeCodexSandbox(
+  command: CodexCommand,
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<void> {
+  // This preflight covers the Unix sandbox backends.
+  if (process.platform === "win32") return;
+  // Reuse the resolved Codex executable instead of looking up a probe on PATH.
+  const args = ["sandbox", "--", command.command, "--version"];
+  const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+  let detail: string;
+  try {
+    const result = await runCodexCommand(
+      command,
+      args,
+      environment,
+      undefined,
+      signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+    );
+    if (result.success) return;
+    detail =
+      result.stderr.trim() ||
+      result.stdout.trim() ||
+      `Codex exited with status ${result.exitCode}.`;
+  } catch (error) {
+    signal?.throwIfAborted();
+    detail = processErrorDetail(error);
+  }
+  throw new SandboxUnavailableError(
+    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+  );
 }
 
 async function runPluginCommand(

@@ -542,8 +542,11 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--hidden",
                     "--no-require-git",
                     "--null",
+                    # Also exclude descendants when the scope starts inside .git.
                     "--glob",
-                    "!.git/**",
+                    "!**/.git",
+                    "--glob",
+                    "!**/.git/**",
                     "--",
                     str(scope_path.relative_to(repo)),
                 ]
