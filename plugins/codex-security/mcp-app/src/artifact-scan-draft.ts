@@ -151,18 +151,8 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
                   Buffer.from(contents).toString("utf8"),
                 );
               },
-              remove: async (relative) => {
-                const path = await artifactDestination(
-                  context,
-                  relative.split("/"),
-                  "staged scan draft",
-                );
-                await fs.rm(path, { force: true });
-              },
             },
             workbench: (args) => runWorkbench([...args]),
-            onCleanupError: (error) =>
-              console.warn("Could not remove staged scan draft:", error),
           },
           checkpoint,
           draft,
@@ -383,14 +373,7 @@ async function readCurrentCheckpoints(
   context: ArtifactContext,
   excludedCheckpoint: string,
 ): Promise<Array<{ name: string; input: ScanDraftInput }>> {
-  // A scan created before the pending-directory boundary is imported once by
-  // the locked writer. Historical files remain available as evidence afterward.
-  const components = (await lstatIfExists(
-    join(context.root, "checkpoints", "pending", ".initialized"),
-  ))
-    ? ["checkpoints", "pending"]
-    : ["checkpoints"];
-  const root = join(context.root, ...components);
+  const root = join(context.root, "checkpoints", "pending");
   const metadata = await lstatIfExists(root);
   if (metadata === undefined) return [];
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -412,11 +395,33 @@ async function readCurrentCheckpoints(
     if (!entry.name.endsWith(".json") || entry.name === excludedCheckpoint)
       continue;
     // Markers precede history writes and can be acknowledged while we read.
-    const contents = await readOptionalArtifactText(
+    let contents = await readOptionalArtifactText(
       context,
       ["checkpoints", entry.name],
       "current scan checkpoint",
     );
+    if (contents === undefined) {
+      const stagedPath = await readOptionalArtifactText(
+        context,
+        ["checkpoints", "pending", entry.name],
+        "current scan checkpoint marker",
+      );
+      if (stagedPath) {
+        if (!/^drafts\/[0-9a-fA-F-]+\.checkpoint\.json$/u.test(stagedPath))
+          throw new Error("scan checkpoint: invalid staged checkpoint path.");
+        contents = await readOptionalArtifactText(
+          context,
+          stagedPath.split("/"),
+          "staged scan checkpoint",
+        );
+        if (
+          contents !== undefined &&
+          createHash("sha256").update(contents).digest("hex") + ".json" !==
+            entry.name
+        )
+          throw new Error("scan checkpoint: staged checkpoint digest changed.");
+      }
+    }
     if (contents === undefined) continue;
     const input = parsePersistedScanDraft(
       parseJsonObject(contents, "current scan checkpoint"),

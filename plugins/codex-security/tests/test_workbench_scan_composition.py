@@ -27,14 +27,18 @@ CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
+def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple[Path, Path]:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text(source)
+    return tmp_path / "state", target
+
+
 @pytest.mark.parametrize("accepted", [False, True])
 def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_failure(
     tmp_path: Path, workbench_api, accepted: bool
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
@@ -161,10 +165,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
 
 @pytest.mark.parametrize("name", ["current", "legacy"])
 def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan", mode="deep")
     fixture = Path(__file__).parent / "fixtures/composition-checkpoints" / f"{name}.json"
     original = json.loads(fixture.read_text())
@@ -203,10 +204,7 @@ def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypat
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
     tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan", mode="deep")
     original = checkpoint(state, scan)
     updated = {**original, "noNewStreak": 1}
@@ -295,10 +293,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 def test_standard_resume_retains_registration_before_and_after_thread_binding(
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan")
     resume = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
     assert resume["scanId"] == scan["scanId"]
@@ -352,10 +347,7 @@ def test_resume_distinguishes_empty_artifact_drafts_from_sealed_results(
 def test_native_parent_serializes_concurrent_starts_with_different_context(
     tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch, other_context: str | None
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     run_workbench(state, "database-info")
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with mock.patch.object(
@@ -403,10 +395,7 @@ def test_native_parent_serializes_concurrent_starts_with_different_context(
 
 @pytest.fixture
 def native_scan_completion(tmp_path: Path):
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     arguments = (
         "begin-deep-scan",
         "--thread-id",
@@ -669,10 +658,7 @@ def test_completed_native_result_does_not_prevent_new_scans(native_scan_completi
 def test_native_parent_binds_once_and_keeps_native_claim(
     tmp_path: Path, rejoin_context: str | None
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     arguments = (
         "begin-deep-scan",
         "--thread-id",
@@ -987,10 +973,7 @@ def test_composition_checkpoint_advances_discovery_without_regressing_resumed_pr
 
 
 def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     run_workbench(
         state, "set-scan-thread", "--scan-id", parent["scanId"], "--thread-id", "merge-thread"
@@ -1083,10 +1066,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
 def test_get_scan_counts_saved_reviews_without_reading_composition_checkpoint(
     tmp_path: Path, workbench_api, monkeypatch, legacy_reviews: int, with_child: bool
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent = register(state, target, tmp_path / "parent", mode="deep")
     if with_child:
         child = register(
@@ -1137,10 +1117,7 @@ def test_get_scan_counts_saved_reviews_without_reading_composition_checkpoint(
 def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent_dir = tmp_path / "parent"
     parent = register(state, target, parent_dir, mode="deep")
     # A generic rerun remains public even when its directory resembles a pass.
@@ -1211,10 +1188,7 @@ def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
 def test_history_hides_composition_children_without_parent_artifacts(
     tmp_path: Path, missing: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent_dir = tmp_path / "scan"
     parent = register(state, target, parent_dir, mode="deep")
     rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
@@ -1270,10 +1244,7 @@ def test_history_hides_composition_children_without_parent_artifacts(
 def test_archiving_composition_preserves_children_and_reuses_pass_directories(
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     directory = tmp_path / "scan"
     parent = register(state, target, directory, mode="deep")
     child_path = "artifacts/deep-scan/passes/pass-1"
@@ -1364,10 +1335,7 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
 def test_stopped_standard_cannot_resume_and_preserves_checkpoint(
     tmp_path: Path, action: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan")
     write_completed_contract(Path(scan["scanDir"]), scan["scanId"], target, relative_path="app.py")
     run_workbench(
@@ -1387,10 +1355,7 @@ def test_stopped_standard_cannot_resume_and_preserves_checkpoint(
 
 
 def test_stopped_standard_does_not_rebind_another_scans_coverage(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
     scan = register(state, target, tmp_path / "scan")
     directory = Path(scan["scanDir"])
     write_completed_contract(directory, scan["scanId"], target, relative_path="app.py")
@@ -1414,10 +1379,7 @@ def test_stopped_standard_does_not_rebind_another_scans_coverage(tmp_path: Path)
 def test_native_cancel_retains_accepted_and_later_unmerged_findings(
     tmp_path: Path, accepted_membership: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     children = []
@@ -1748,10 +1710,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
 def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
     tmp_path: Path, action: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
@@ -1929,10 +1888,7 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
 def test_cancel_before_first_merge_preserves_ordinary_children(
     tmp_path: Path, child_state: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     children = []
@@ -2066,10 +2022,7 @@ def test_cancel_before_first_merge_preserves_ordinary_children(
 
 
 def test_running_pass_retains_paid_receipt_before_resume_and_failure(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan")
     run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "paid-pass")
     cost = {
@@ -2098,10 +2051,7 @@ def test_running_pass_retains_paid_receipt_before_resume_and_failure(tmp_path: P
 
 
 def test_native_budget_completion_checks_claim_before_publication(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     scan = run_workbench(
         state,
         "begin-deep-scan",
@@ -2226,10 +2176,7 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
 
 @pytest.mark.parametrize("alias", ["exact", "case", "directory"])
 def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
     parent = register(state, target, tmp_path / "parent", mode="deep")
     parent_dir = Path(parent["scanDir"])
     child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
@@ -2374,10 +2321,7 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
 
 
 def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
+    state, target = _scan_workspace(tmp_path)
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     pass_directory = "artifacts/deep-scan/passes/pass-1"

@@ -131,7 +131,9 @@ try {
       path.join(
         parentCheckpointRoot,
         "checkpoints",
-        (await readdir(path.join(parentCheckpointRoot, "checkpoints")))[0],
+        (await readdir(path.join(parentCheckpointRoot, "checkpoints"))).find(
+          (name) => name.endsWith(".json"),
+        ),
       ),
       "utf8",
     ),
@@ -235,9 +237,9 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     recordCodexSecurityScanDraft(unsupportedCheckpointContext, input),
     /Saved scan draft does not match the current schema/,
   );
-  const retained = await readdir(
-    path.join(unsupportedCheckpointContext.root, "checkpoints"),
-  );
+  const retained = (
+    await readdir(path.join(unsupportedCheckpointContext.root, "checkpoints"))
+  ).filter((name) => name.endsWith(".json"));
   assert.equal(retained.length, 1);
   assert.deepEqual(
     await readJson(
@@ -306,8 +308,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   await mkdir(pendingRoot);
   await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
   const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
-  await mkdir(pendingDirectory);
-  await writeFile(path.join(pendingDirectory, ".initialized"), "");
+  await mkdir(pendingDirectory, { recursive: true });
   await writeFile(
     path.join(pendingRoot, "checkpoints", "obsolete.json"),
     "{old incompatible evidence",
@@ -357,6 +358,63 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       { ...input, findings: [] },
     ),
     /current scan checkpoint: stored JSON is malformed/,
+  );
+
+  const stagedRoot = path.join(root, "marked-staged-checkpoint");
+  const stagedContext = { ...context, root: stagedRoot };
+  const stagedDirectory = path.join(stagedRoot, "checkpoints", "pending");
+  await mkdir(stagedDirectory, { recursive: true });
+  await mkdir(path.join(stagedRoot, "drafts"));
+  const { handoffClaimToken: _stagedClaim, ...stagedInput } = input;
+  const stagedContents = JSON.stringify({
+    ...stagedInput,
+    findings: [interruptedFinding],
+    complete: false,
+  });
+  const stagedName =
+    createHash("sha256").update(stagedContents).digest("hex") + ".json";
+  const stagedRelative = `drafts/${scanId}.checkpoint.json`;
+  const stagedPath = path.join(stagedRoot, stagedRelative);
+  const markerPath = path.join(stagedDirectory, stagedName);
+  await writeFile(stagedPath, stagedContents);
+  const reconcileStaged = async () => {
+    let published;
+    await recordCodexSecurityScanDraft(
+      stagedContext,
+      { ...input, findings: [] },
+      async (draft, _digest, _checkpoint, names) => {
+        published = { findings: draft.findings.findings, names };
+      },
+    );
+    return published;
+  };
+  assert.deepEqual(await reconcileStaged(), { findings: [], names: [] });
+  await writeFile(markerPath, stagedRelative);
+  const retainedStage = await reconcileStaged();
+  assert.equal(retainedStage.findings.length, 1);
+  assert.equal(
+    retainedStage.findings[0].provenance.candidateId,
+    interruptedFinding.provenance.candidateId,
+  );
+  assert.deepEqual(retainedStage.names, [stagedName]);
+  await writeFile(stagedPath, stagedContents + "\n");
+  await assert.rejects(reconcileStaged(), /staged checkpoint digest changed/);
+  if (process.platform !== "win32") {
+    await rm(stagedPath);
+    await symlink(producerPath, stagedPath);
+    await assert.rejects(reconcileStaged(), /not a safe regular file/);
+    await rm(stagedPath);
+  }
+  await writeFile(markerPath, "../outside.json");
+  await assert.rejects(reconcileStaged(), /invalid staged checkpoint path/);
+  await writeFile(
+    path.join(stagedRoot, "checkpoints", stagedName),
+    stagedContents,
+  );
+  assert.deepEqual(
+    await reconcileStaged(),
+    retainedStage,
+    "immutable history takes precedence over its obsolete staging marker",
   );
 
   const deepParentRoot = path.join(root, "accepted-deep-parent");
@@ -430,12 +488,12 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     "partial",
   );
   const savedDeepCheckpoints = await Promise.all(
-    (await readdir(path.join(deepParentRoot, "checkpoints"))).map(
-      async (name) => [
+    (await readdir(path.join(deepParentRoot, "checkpoints")))
+      .filter((name) => name.endsWith(".json"))
+      .map(async (name) => [
         name,
         await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"),
-      ],
-    ),
+      ]),
   );
   const acceptedDeepDraft = {
     ...input,
@@ -518,7 +576,6 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     1,
     "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints",
   );
-  assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
 
   const semanticFinding = {
     ...finding,
@@ -1114,7 +1171,11 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     await assert.rejects(readFile(path.join(root, name)), { code: "ENOENT" });
   }
-  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
+  assert.equal(
+    (await readdir(path.join(root, "drafts"))).length,
+    2,
+    "failed publication retains both staged files for the validated recovery owner",
+  );
 
   let conflictAttempts = 0;
   const retried = await recordCodexSecurityScanDraft(
@@ -2681,7 +2742,8 @@ async function saveScanDraftCheckpoint(context, input) {
     .update(JSON.stringify(snapshot))
     .digest("hex");
   const directory = path.join(context.root, "checkpoints");
-  await mkdir(directory, { recursive: true });
+  await mkdir(path.join(directory, "pending"), { recursive: true });
+  await writeFile(path.join(directory, "pending", digest + ".json"), "");
   const checkpointPath = path.join(directory, digest + ".json");
   await writeFile(checkpointPath, JSON.stringify(snapshot) + "\n");
   return checkpointPath;

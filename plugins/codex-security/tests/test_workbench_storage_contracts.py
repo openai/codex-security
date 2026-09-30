@@ -93,10 +93,10 @@ def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) 
         state, "write-scan-draft", "--scan-id", scan["scanId"], "--draft-path", str(staged)
     )
     pending = scan_dir / "checkpoints/pending"
-    assert (pending / ".initialized").is_file()
     assert not (pending / earlier.name).exists()
     assert (pending / concurrent.name).read_bytes() == b""
     assert earlier.is_file()  # The immutable evidence is retained after acknowledgment.
+    assert not staged.exists()  # The locked publisher owns successful cleanup.
     incoming = drafts / f"{uuid.uuid4()}.checkpoint.json"
     incoming.write_text(
         json.dumps(
@@ -125,7 +125,7 @@ def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) 
     assert len(list(pending.glob("*.json"))) == 2
 
 
-def test_stopped_scan_preserves_parent_with_malformed_historical_checkpoint(tmp_path: Path) -> None:
+def test_stopped_scan_preserves_parent_with_malformed_pending_checkpoint(tmp_path: Path) -> None:
     target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
     target.mkdir()
     (target / "app.py").write_text("\n" * 50)
@@ -136,6 +136,8 @@ def test_stopped_scan_preserves_parent_with_malformed_historical_checkpoint(tmp_
     history = scan_dir / "checkpoints"
     history.mkdir(mode=0o700)
     (history / name).write_bytes(contents)
+    (history / "pending").mkdir()
+    (history / "pending" / name).write_bytes(b"")
 
     stopped = run_workbench(
         state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
@@ -152,9 +154,9 @@ def test_stopped_scan_preserves_parent_with_malformed_historical_checkpoint(tmp_
     assert f"checkpoints/{name}" not in manifest["preservedSources"]
 
 
-@pytest.mark.parametrize("before_history", [False, True])
-def test_checkpoint_recovers_after_publication_runs_out_of_space(
-    tmp_path: Path, workbench_api, monkeypatch, before_history: bool
+@pytest.mark.parametrize("failure", ["history", "canonical", "cleanup", None])
+def test_draft_publication_acknowledges_or_retains_stages(
+    tmp_path: Path, workbench_api, monkeypatch, failure: str | None
 ) -> None:
     target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
     target.mkdir()
@@ -191,7 +193,9 @@ def test_checkpoint_recovers_after_publication_runs_out_of_space(
 
     def write(directory, relative, payload):
         nonlocal history_saved
-        if history_saved or (before_history and relative == f"checkpoints/{name}"):
+        if (failure == "canonical" and history_saved) or (
+            failure == "history" and relative == f"checkpoints/{name}"
+        ):
             raise OSError(errno.ENOSPC, "Synthetic disk full during checkpoint publication")
         original_write(directory, relative, payload)
         if relative == f"checkpoints/{name}":
@@ -200,30 +204,71 @@ def test_checkpoint_recovers_after_publication_runs_out_of_space(
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with monkeypatch.context() as patch:
         patch.setattr(saved, "write_scan_local_bytes", write)
+        original_remove = saved._remove_scan_local_file_if_exists
+
+        def remove(directory, relative):
+            if failure == "cleanup" and relative.startswith("drafts/"):
+                raise OSError(errno.EIO, "Synthetic cleanup failure")
+            original_remove(directory, relative)
+
+        patch.setattr(saved, "_remove_scan_local_file_if_exists", remove)
         with workbench_api["connect"]() as connection:
-            with pytest.raises(OSError, match="Synthetic disk full"):
-                workbench_api["write_scan_draft"](
-                    connection,
-                    argparse.Namespace(
-                        scan_id=scan["scanId"],
-                        claim_token=None,
-                        draft_path=str(draft),
-                        checkpoint_path=str(checkpoint),
-                        expected_draft_digest=None,
-                    ),
-                )
-    # SDK and MCP publication remove both staging files even when the writer fails.
-    draft.unlink()
-    checkpoint.unlink()
+            arguments = argparse.Namespace(
+                scan_id=scan["scanId"],
+                claim_token=None,
+                draft_path=str(draft),
+                checkpoint_path=str(checkpoint),
+                expected_draft_digest=None,
+            )
+            if failure in {"history", "canonical"}:
+                with pytest.raises(OSError, match="Synthetic disk full"):
+                    workbench_api["write_scan_draft"](connection, arguments)
+            else:
+                result = workbench_api["write_scan_draft"](connection, arguments)
+                assert result["status"] == "draft_written"
+                assert draft.exists() is (failure == "cleanup")
+                assert checkpoint.exists() is (failure == "cleanup")
+                assert not (scan_dir / "checkpoints/pending" / name).exists()
+                return
+    # The publisher keeps failed stages; only a validated pending marker authorizes recovery.
+    assert draft.is_file()
+    assert checkpoint.read_bytes() == checkpoint_bytes
+    assert (scan_dir / "checkpoints/pending" / name).read_text() == checkpoint.relative_to(
+        scan_dir
+    ).as_posix()
     stopped = run_workbench(
         state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
     )["scan"]
-    assert stopped["findingCount"] == (0 if before_history else 1)
-    assert stopped["reportAvailable"] is not before_history
+    assert stopped["findingCount"] == 1
+    assert stopped["reportAvailable"] is True
     assert stopped["resultsRecoveryNeeded"] is False
-    if before_history:
+    if failure == "history":
         assert not (scan_dir / "checkpoints" / name).exists()
     else:
         assert (scan_dir / "checkpoints" / name).read_bytes() == checkpoint_bytes
-        manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
-        assert f"checkpoints/{name}" in manifest["preservedSources"]
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert f"checkpoints/{name}" in manifest["preservedSources"]
+
+
+def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
+    tmp_path: Path, workbench_api
+) -> None:
+    saved = workbench_api["saved_results"]
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    stage_path = "drafts/00000000-0000-0000-0000-000000000001.checkpoint.json"
+    payload = {"scanId": "fixture", "findings": [], "coverage": {}}
+    contents = json.dumps(payload).encode()
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    saved.write_scan_local_bytes(scan_dir, stage_path, contents)
+    saved.write_scan_local_bytes(scan_dir, "checkpoints/" + "0" * 64 + ".json", b"old evidence")
+    assert list(saved._saved_result_paths(scan_dir)) == []
+    saved.write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", stage_path.encode())
+    assert list(saved._saved_result_paths(scan_dir)) == [f"checkpoints/{name}"]
+    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload
+    saved.write_scan_local_bytes(scan_dir, stage_path, contents + b"\n")
+    with pytest.raises(saved.ContractError, match="changed after publication failed"):
+        saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")
+    # Existing history takes precedence over a changed leftover stage.
+    saved.write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload

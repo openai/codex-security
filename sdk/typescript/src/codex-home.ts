@@ -48,11 +48,24 @@ export function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
 ): string | undefined {
-  const exact = environment[requested]?.trim();
-  if (exact) return exact;
-  return Object.entries(environment)
-    .find(
-      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-    )?.[1]
-    ?.trim();
+  return rawEnvironmentValue(environment, requested)?.trim();
+}
+
+export function rawEnvironmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined && exact.trim() !== "") return exact;
+  const upper = requested.toUpperCase();
+  for (const [name, value] of Object.entries(environment)) {
+    if (
+      name.toUpperCase() === upper &&
+      value !== undefined &&
+      value.trim() !== ""
+    ) {
+      return value;
+    }
+  }
+  return undefined;
 }

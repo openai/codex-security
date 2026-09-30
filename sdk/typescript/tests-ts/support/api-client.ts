@@ -77,7 +77,6 @@ export class TestClient extends CodexSecurity {
             throw new Error("Unexpected projection in test");
           },
           restore: async () => {},
-          restoreMany: async () => {},
           prepareDirectory: async () => {},
           remove: async () => {},
         }),

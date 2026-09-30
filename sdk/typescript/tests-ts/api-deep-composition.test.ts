@@ -5,13 +5,11 @@ import { existsSync } from "node:fs";
 import {
   appendFile,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +27,8 @@ import type { ScanSessionEvent } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
 import { publishDraft } from "./support/scan-publication.js";
+import { createApiTestFixtures } from "./support/api-events.js";
+import { tokenUsageEvent } from "./support/usage-rollout.js";
 import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
@@ -43,7 +43,8 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
-const roots: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 type CapturedNativeScan = {
@@ -95,12 +96,6 @@ async function nativeScanFactory() {
   ).prepareNativeScan;
 }
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 test.each([
   { budget: false, partialCheckpoint: true },
   { budget: false, partialCheckpoint: true, completedCleanup: true },
@@ -137,10 +132,7 @@ test.each([
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "ordinary-composition-")),
-    );
-    roots.push(root);
+    const root = await temporaryDirectory();
     const repo = join(root, "repo");
     const codexHome = join(root, "codex");
     let scanDir = join(root, "scan");
@@ -687,18 +679,12 @@ process.exit(0);
                             "sessions",
                             `rollout-${thread.id}.jsonl`,
                           ),
-                          JSON.stringify({
-                            type: "event_msg",
-                            payload: {
-                              type: "token_count",
-                              info: {
-                                total_token_usage: {
-                                  input_tokens: 10,
-                                  output_tokens: 3,
-                                },
-                              },
-                            },
-                          }) + "\n",
+                          JSON.stringify(
+                            tokenUsageEvent({
+                              input_tokens: 10,
+                              output_tokens: 3,
+                            }),
+                          ) + "\n",
                         );
                         const error = new ScanTransportClosedError(
                           "mcp_transport_closed",
@@ -805,18 +791,12 @@ process.exit(0);
                               "sessions",
                               `rollout-${thread.id}.jsonl`,
                             ),
-                            JSON.stringify({
-                              type: "event_msg",
-                              payload: {
-                                type: "token_count",
-                                info: {
-                                  total_token_usage: {
-                                    input_tokens: 10,
-                                    output_tokens: 3,
-                                  },
-                                },
-                              },
-                            }) + "\n",
+                            JSON.stringify(
+                              tokenUsageEvent({
+                                input_tokens: 10,
+                                output_tokens: 3,
+                              }),
+                            ) + "\n",
                           ),
                         ]);
                         if (completedCleanup) {

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from workbench_test_support import (
@@ -17,6 +18,48 @@ from workbench_test_support import (
     write_checkpoint,
     write_completed_contract,
 )
+
+
+@pytest.mark.parametrize("historical_count", [0, 5, 20])
+def test_recovery_validation_does_not_scale_with_superseded_checkpoints(
+    tmp_path: Path, workbench_api, historical_count: int
+) -> None:
+    saved = workbench_api["saved_results"]
+    scan_dir, target = tmp_path / "scan", tmp_path / "target"
+    scan_dir.mkdir(mode=0o700)
+    target.mkdir()
+    scan_id = str(uuid.uuid4())
+    write_completed_contract(scan_dir, scan_id, target)
+    findings = [finding_fixture(identity_anchor=f"finding-{index}") for index in range(3)]
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": findings}))
+    scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    for index in range(historical_count):
+        write_checkpoint(
+            scan_dir / "checkpoints",
+            {
+                "scanId": scan_id,
+                "findings": [],
+                "coverage": {"openQuestions": [f"Superseded question {index}"]},
+            },
+        )
+    binding = {
+        "status": "completed",
+        "allowedTargetKinds": [scan["target"]["kind"]],
+        "target": scan["target"],
+        "scope": scan["scope"],
+        "coverageMode": "repository",
+    }
+    with (
+        mock.patch.object(saved, "_read_json", wraps=saved._read_json) as read_schema,
+        mock.patch.object(
+            saved, "_recover_unsealed_findings", wraps=saved._recover_unsealed_findings
+        ) as recover,
+    ):
+        result = saved.merge_saved_results(scan_dir, scan_id, binding, [], stopped=False, reason="")
+    assert result is not None
+    assert result[1]["findings"] == findings
+    assert read_schema.call_count == 1
+    assert recover.call_count == len(findings)
 
 
 @pytest.mark.parametrize("termination", ["failed", "canceled"])
@@ -1170,9 +1213,7 @@ def test_complete_parent_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
             "deferred": [{"id": "obsolete-work", "reason": "This was later completed."}],
         },
     }
-    checkpoints = scan_dir / "checkpoints"
-    checkpoints.mkdir()
-    (checkpoints / ("0" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
     stop_scan(state_dir, scan_id, "Stopped after the parent draft completed.", status="failed")
 
@@ -1230,8 +1271,9 @@ def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> N
     strong["confidence"]["level"] = "high"
     strong["summary"] = "Later strong checkpoint evidence."
     checkpoint_dir = scan_dir / "checkpoints"
-    checkpoint_dir.mkdir(exist_ok=True)
+    (checkpoint_dir / "pending").mkdir(parents=True)
     for name, finding in (("0" * 64, weak), ("f" * 64, strong)):
+        (checkpoint_dir / "pending" / f"{name}.json").write_bytes(b"")
         (checkpoint_dir / f"{name}.json").write_text(
             json.dumps(
                 {

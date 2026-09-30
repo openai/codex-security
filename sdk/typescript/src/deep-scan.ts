@@ -184,10 +184,7 @@ export async function runDeepScans(
   await save();
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
-  const coverage = new Map<
-    string,
-    { draft: { coverage: SemanticScan["coverage"] } }
-  >();
+  const coverage = new Map<string, SemanticScan["coverage"]>();
   const updateAggregateCoverage = (): void => {
     if (state.aggregate === null) return;
     const merged = new Set(state.mergedScanIds);
@@ -276,9 +273,7 @@ export async function runDeepScans(
           record.scanDir,
           signal,
         );
-        coverage.set(record.scanId, {
-          draft: { coverage: projected.draft.coverage },
-        });
+        coverage.set(record.scanId, projected.draft.coverage);
         if (!state.mergedScanIds.includes(record.scanId))
           completed.set(record.scanId, projected);
         if (recoverOutcomes)
@@ -462,9 +457,7 @@ export async function runDeepScans(
             signal,
           );
           completed.set(result.manifest.scan.id, projected);
-          coverage.set(result.manifest.scan.id, {
-            draft: { coverage: projected.draft.coverage },
-          });
+          coverage.set(result.manifest.scan.id, projected.draft.coverage);
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
           observePassCompletion(state, pass);

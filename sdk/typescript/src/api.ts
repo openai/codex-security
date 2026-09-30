@@ -2335,8 +2335,6 @@ export class CodexSecurity {
                       },
                       writer: artifactWriter!,
                       workbench: ownedWorkbench,
-                      onCleanupError: (error) =>
-                        warnCleanupFailed(options, error),
                     },
                     draft,
                   ),

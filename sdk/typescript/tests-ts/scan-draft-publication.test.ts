@@ -2,10 +2,9 @@ import { expect, test } from "bun:test";
 import { writeSemanticScanDraft } from "../src/scan-draft-publication.js";
 
 test.each([false, true])(
-  "staging cleanup preserves publication outcome (failure: %p)",
+  "workbench owns staged publication outcome (failure: %p)",
   async (fail) => {
     const failure = new Error("publication failed");
-    const removed: string[] = [];
     const staged = new Map<string, unknown>();
     let invocation: readonly string[] = [];
     const publication = writeSemanticScanDraft(
@@ -29,17 +28,10 @@ test.each([false, true])(
           async restore(path, contents) {
             staged.set(path, JSON.parse(Buffer.from(contents).toString()));
           },
-          async remove(path) {
-            removed.push(path);
-            throw new Error("cleanup unavailable");
-          },
         },
         async workbench(args) {
           invocation = args;
           if (fail) throw failure;
-        },
-        onCleanupError() {
-          throw new Error("optional diagnostic failed");
         },
       },
       {
@@ -56,7 +48,7 @@ test.each([false, true])(
     );
     if (fail) await expect(publication).rejects.toBe(failure);
     else await publication;
-    expect(removed).toEqual([...staged.keys()]);
+    expect(staged.size).toBe(2);
     expect(invocation.slice(-4)).toEqual([
       "--expected-draft-digest",
       "accepted-draft-digest",

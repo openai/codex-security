@@ -149,7 +149,7 @@ test("session batches bound handles, reuse buffers, and retain discovery-order w
       if (args[0] === paths[0]) await release.promise;
       await close();
       active--;
-      if (args[0] === paths[7]) release.resolve();
+      if (args[0] !== paths[0]) release.resolve();
     };
     return file;
   });

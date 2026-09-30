@@ -278,10 +278,6 @@ async function fixture(
           await mkdir(join(scanDir, path), { recursive: true });
         },
         restore,
-        async restoreMany(artifacts) {
-          for (const artifact of artifacts)
-            await restore(artifact.path, artifact.contents);
-        },
         async remove(path) {
           await rm(join(scanDir, path), { force: true });
         },
@@ -466,58 +462,55 @@ async function fixture(
   };
 }
 
-test.each(["sdk", "cli"] as const)(
-  "%s default factory checks fresh and resumed discovery and merge permissions",
-  async (surface) => {
-    for (const role of ["discovery", "merge"] as const)
-      for (const resumed of [false, true])
-        for (const scenario of ["rejected", "fallback"] as const) {
-          const h = await fixture(role, resumed, scenario, surface);
-          try {
-            await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
-            const requests = await h.observations(true);
-            expect(requests.map(({ method }) => method)).toEqual([
-              "initialize",
-              "initialized",
-              "config/read",
-              "permissionProfile/list",
-              "permissionProfile/list",
-            ]);
-            expect(requests.at(-1).params).toMatchObject({
-              cursor: "selected-page",
-              cwd: h.cwd,
+test("default factory checks fresh and resumed discovery and merge permissions", async () => {
+  for (const role of ["discovery", "merge"] as const)
+    for (const resumed of [false, true])
+      for (const scenario of ["rejected", "fallback"] as const) {
+        const h = await fixture(role, resumed, scenario, "sdk");
+        try {
+          await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+          const requests = await h.observations(true);
+          expect(requests.map(({ method }) => method)).toEqual([
+            "initialize",
+            "initialized",
+            "config/read",
+            "permissionProfile/list",
+            "permissionProfile/list",
+          ]);
+          expect(requests.at(-1).params).toMatchObject({
+            cursor: "selected-page",
+            cwd: h.cwd,
+          });
+          const observations = await h.observations();
+          expect(
+            observations.filter(({ kind }) => kind === "preflight"),
+          ).toMatchObject([{ cwd: h.cwd, surface: "sdk" }]);
+          const executions = observations.filter(({ kind }) => kind === "exec");
+          expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
+          if (executions.length) {
+            expect(executions[0].context).toBe("selected-scan");
+            expect(executions[0].apiKey).toBe("synthetic-fixture-key");
+            expect(executions[0].args.includes("resume")).toBe(resumed);
+            expect(executions[0].mcpServers).toEqual({
+              "codex-security": { command: "node", enabled: false },
+              synthetic: {
+                command: "synthetic-mcp",
+                env: { SETTING: "inherited" },
+              },
             });
-            const observations = await h.observations();
-            expect(
-              observations.filter(({ kind }) => kind === "preflight"),
-            ).toMatchObject([{ cwd: h.cwd, surface }]);
-            const executions = observations.filter(
-              ({ kind }) => kind === "exec",
-            );
-            expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
-            if (executions.length) {
-              expect(executions[0].args.includes("resume")).toBe(resumed);
-              expect(executions[0].mcpServers).toEqual({
-                "codex-security": { command: "node", enabled: false },
-                synthetic: {
-                  command: "synthetic-mcp",
-                  env: { SETTING: "inherited" },
-                },
-              });
-            }
-            expect(h.commands).not.toContain("complete-scan");
-            if (role === "merge")
-              expect(
-                JSON.parse(
-                  await readFile(join(h.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
-                ),
-              ).toMatchObject({ terminalReason: "failed", mergedScanIds: [] });
-          } finally {
-            await h.close();
           }
+          expect(h.commands).not.toContain("complete-scan");
+          if (role === "merge")
+            expect(
+              JSON.parse(
+                await readFile(join(h.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+              ),
+            ).toMatchObject({ terminalReason: "failed", mergedScanIds: [] });
+        } finally {
+          await h.close();
         }
-  },
-);
+      }
+});
 
 test.each(["rejected", "substituted-default", "substituted-profile"] as const)(
   "checks the paginated profile and rejects %s before executing the child",

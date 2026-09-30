@@ -56,10 +56,6 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), bytes);
       },
-      async restoreMany(artifacts: { path: string; contents: Buffer }[]) {
-        for (const { path, contents } of artifacts)
-          await this.restore(path, contents);
-      },
     };
     const prompt = await scanMergePrompt(
       parentId,

@@ -243,7 +243,10 @@ test("combines coverage without namespacing twice or mutating completed inputs",
   const two = child("two", []);
   two.draft.coverage.openQuestions = ["Question?"];
   const original = structuredClone(one);
-  const combined = combineScanCoverage([one, two], ["Unfinished pass."]);
+  const combined = combineScanCoverage(
+    [one.draft.coverage, two.draft.coverage],
+    ["Unfinished pass."],
+  );
   expect(combined.completeness).toBe("partial");
   expect(combined.surfaces).toEqual(one.draft.coverage.surfaces);
   expect(combined.deferred).toEqual([
@@ -257,7 +260,9 @@ test("combines coverage without namespacing twice or mutating completed inputs",
     combineScanCoverage([], [], semanticCoverage({ completeness: "unknown" }))
       .completeness,
   ).toBe("unknown");
-  expect(combineScanCoverage([two]).completeness).toBe("complete");
+  expect(combineScanCoverage([two.draft.coverage]).completeness).toBe(
+    "complete",
+  );
   expect(combineScanCoverage([]).completeness).toBe("partial");
 });
 
@@ -270,7 +275,7 @@ import assert from "node:assert/strict";
 import { combineScanCoverage } from "./scan-merge.ts";
 const deferred = Array.from({length:150000}, (_,i)=>({reason:String(i)}));
 const coverage = {completeness:"partial",surfaces:[],explicitExclusions:[],deferred};
-assert.deepEqual(combineScanCoverage([{draft:{coverage}}]).deferred,deferred);
+assert.deepEqual(combineScanCoverage([coverage]).deferred,deferred);
 `,
     },
     bundle: true,
@@ -302,7 +307,7 @@ test("publishes host target and scope with the selected original finding", () =>
         },
       },
     },
-    { ...aggregate, coverage: combineScanCoverage([input]) },
+    { ...aggregate, coverage: combineScanCoverage([input.draft.coverage]) },
   );
   expect(prepared.manifest.scan.target.revision).toBe("pinned");
   expect(prepared.manifest.scan.scope.includePaths).toEqual(["src"]);
@@ -357,14 +362,10 @@ test("model input excludes all coverage and retains complete source evidence onc
   );
   let writes = 0;
   const prompt = await scanMergePrompt(parent, [two], previous, root, {
-    async restore() {
-      throw new Error("Expected batch publication");
-    },
-    async restoreMany(artifacts) {
+    async restore(path, contents) {
       writes++;
-      expect(artifacts).toEqual([
-        { path: "artifacts/deep-scan/merge-inputs.json", contents: bytes },
-      ]);
+      expect(path).toBe("artifacts/deep-scan/merge-inputs.json");
+      expect(contents).toEqual(bytes);
     },
   });
   expect(writes).toBe(1);

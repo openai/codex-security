@@ -124,7 +124,6 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
         "coverage": documents["coverage"],
     }
     checkpoint_path = write_checkpoint(scan_dir / "checkpoints", payload)
-    write_checkpoint(scan_dir / "checkpoints/pending", payload)
     drafts = scan_dir / "drafts"
     drafts.mkdir()
     staged = drafts / f"{uuid.uuid4()}.json"

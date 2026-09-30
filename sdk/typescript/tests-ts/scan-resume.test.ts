@@ -33,6 +33,7 @@ import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
+import { tokenUsageEvent } from "./support/usage-rollout.js";
 import {
   completedEvents,
   createApiTestFixtures,
@@ -195,6 +196,17 @@ async function interruptedScan(
     }),
   );
   const scanId = registration["scanId"] as string;
+  const saveCheckpoint = (checkpoint: DeepScanCheckpoint) =>
+    command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
   const threadId = randomUUID();
   if (startedMerge)
     await command([
@@ -279,16 +291,7 @@ async function interruptedScan(
       noNewStreak: startedMerge ? 1 : 0,
       consecutiveErrors: 0,
     };
-    await command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(state),
-    );
+    await saveCheckpoint(state);
   }
   const checkpoint = join(scanDir, "checkpoint.json");
   await writeFile(checkpoint, '{"completed":"setup"}\n');
@@ -300,6 +303,7 @@ async function interruptedScan(
     python,
     environment,
     command,
+    saveCheckpoint,
     recipe,
     scanId,
     threadId,
@@ -396,16 +400,7 @@ test("CLI merge failure retains accepted ordinary scans and the original thread"
   ) as DeepScanCheckpoint;
   checkpoint.mergedScanIds = [];
   checkpoint.aggregate = null;
-  await f.command(
-    [
-      "save-scan-artifact",
-      "--scan-id",
-      f.scanId,
-      "--artifact-path",
-      DEEP_SCAN_CHECKPOINT,
-    ],
-    JSON.stringify(checkpoint),
-  );
+  await f.saveCheckpoint(checkpoint);
   const childBefore = await readFile(join(f.childDir!, "findings.json"));
   let resumedThread: string | undefined;
   const stderr = capture();
@@ -487,16 +482,7 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
   ) as DeepScanCheckpoint;
   checkpoint.terminalReason = "capped";
-  await f.command(
-    [
-      "save-scan-artifact",
-      "--scan-id",
-      f.scanId,
-      "--artifact-path",
-      DEEP_SCAN_CHECKPOINT,
-    ],
-    JSON.stringify(checkpoint),
-  );
+  await f.saveCheckpoint(checkpoint);
   await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
@@ -526,16 +512,7 @@ test.each(["failed", "canceled"] as const)(
       await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.terminalReason = terminalReason;
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
+    await f.saveCheckpoint(checkpoint);
     await f.command([
       "preserve-scan-results",
       "--scan-id",
@@ -650,15 +627,7 @@ test("bulk recovery completes a sealed legacy attempt without another scan", asy
         type: "session_meta",
         payload: { id: f.threadId, cwd: f.scanDir, timestamp: startedAt },
       },
-      {
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 1000, output_tokens: 100 },
-          },
-        },
-      },
+      tokenUsageEvent({ input_tokens: 1000, output_tokens: 100 }),
     ]
       .map((event) => JSON.stringify(event))
       .join("\n") + "\n",
@@ -790,15 +759,9 @@ test.each([
     if (alreadyFinished) await finishDiscovery(f);
     await appendFile(
       f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
-          },
-        },
-      }) + "\n",
+      JSON.stringify(
+        tokenUsageEvent({ input_tokens: 10000, output_tokens: 2000 }),
+      ) + "\n",
     );
     const stdout = capture();
     const stderr = capture();
@@ -963,18 +926,10 @@ test.each([
         join(f.codexHome, "sessions", `rollout-${threadId}.jsonl`),
         [
           { type: "session_meta", payload: { id: threadId, cwd } },
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: {
-                  input_tokens: inputTokens,
-                  output_tokens: outputTokens,
-                },
-              },
-            },
-          },
+          tokenUsageEvent({
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+          }),
         ]
           .map((event) => JSON.stringify(event))
           .join("\n") + "\n",
@@ -1022,16 +977,7 @@ test.each([
         await writeUsage(threadId, scanDir, input, output);
       checkpoint.passes.push({ directory, scanId });
     }
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
+    await f.saveCheckpoint(checkpoint);
     await publishDraft(
       f.command,
       f.registration,
@@ -1282,15 +1228,7 @@ test.each([
             type: "session_meta",
             payload: { id: siblingThread, cwd: siblingDir },
           },
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: { input_tokens: 1000, output_tokens: 100 },
-              },
-            },
-          },
+          tokenUsageEvent({ input_tokens: 1000, output_tokens: 100 }),
         ]
           .map((event) => JSON.stringify(event))
           .join("\n") + "\n",
@@ -1306,15 +1244,9 @@ test.each([
       checkpoint.passes[0]!.completed = true;
       await appendFile(
         f.sessionPath,
-        JSON.stringify({
-          type: "event_msg",
-          payload: {
-            type: "token_count",
-            info: {
-              total_token_usage: { input_tokens: 1000, output_tokens: 100 },
-            },
-          },
-        }) + "\n",
+        JSON.stringify(
+          tokenUsageEvent({ input_tokens: 1000, output_tokens: 100 }),
+        ) + "\n",
       );
       await f.command([
         "preserve-scan-results",
@@ -1346,16 +1278,7 @@ test.each([
         checkpoint.aggregate,
       );
     }
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
+    await f.saveCheckpoint(checkpoint);
     let before = await f.command(["get-scan", "--scan-id", f.scanId]);
     let savedCheckpoint = await readFile(checkpointPath);
     const childFindings = f.childDir
@@ -1394,19 +1317,11 @@ test.each([
                       cwd: join(f.scanDir, "artifacts/deep-scan/merge"),
                     },
                   },
-                  {
-                    type: "event_msg",
-                    payload: {
-                      type: "token_count",
-                      info: {
-                        total_token_usage: {
-                          input_tokens: 10,
-                          cached_input_tokens: 2,
-                          output_tokens: 3,
-                        },
-                      },
-                    },
-                  },
+                  tokenUsageEvent({
+                    input_tokens: 10,
+                    cached_input_tokens: 2,
+                    output_tokens: 3,
+                  }),
                 ]
                   .map((event) => JSON.stringify(event))
                   .join("\n") + "\n",
@@ -1551,15 +1466,9 @@ test("sealed legacy results retain their saved accounting", async () => {
   };
   await appendFile(
     f.sessionPath,
-    JSON.stringify({
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: {
-          total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
-        },
-      },
-    }) + "\n",
+    JSON.stringify(
+      tokenUsageEvent({ input_tokens: 10000, output_tokens: 2000 }),
+    ) + "\n",
   );
   const coverage = semanticCoverage({
     completeness: "partial",
@@ -1584,16 +1493,7 @@ test("sealed legacy results retain their saved accounting", async () => {
       cost,
     },
   };
-  await f.command(
-    [
-      "save-scan-artifact",
-      "--scan-id",
-      f.scanId,
-      "--artifact-path",
-      DEEP_SCAN_CHECKPOINT,
-    ],
-    JSON.stringify(checkpoint),
-  );
+  await f.saveCheckpoint(checkpoint);
   const artifactNames = [
     "scan-manifest.json",
     "findings.json",
@@ -1675,15 +1575,9 @@ test.each([
     });
     await appendFile(
       f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 1000, output_tokens: 10 },
-          },
-        },
-      }) + "\n",
+      JSON.stringify(
+        tokenUsageEvent({ input_tokens: 1000, output_tokens: 10 }),
+      ) + "\n",
     );
     await finishDiscovery(f);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
@@ -1852,10 +1746,7 @@ test.each([
                 }),
           },
         },
-        {
-          type: "event_msg",
-          payload: { type: "token_count", info: { total_token_usage: usage } },
-        },
+        tokenUsageEvent(usage),
       ]
         .map((event) => JSON.stringify(event))
         .join("\n") + "\n",
@@ -1907,16 +1798,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         startedAt,
       ]);
     } else {
-      await f.command(
-        [
-          "save-scan-artifact",
-          "--scan-id",
-          f.scanId,
-          "--artifact-path",
-          DEEP_SCAN_CHECKPOINT,
-        ],
-        JSON.stringify(checkpoint),
-      );
+      await f.saveCheckpoint(checkpoint);
     }
     const names = [
       "scan-manifest.json",
@@ -2092,18 +1974,12 @@ with sqlite3.connect(sys.argv[1]) as connection:
             type: "session_meta",
             payload: { id: threadId, cwd, timestamp },
           }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: {
-                  input_tokens: inputTokens,
-                  output_tokens: outputTokens,
-                },
-              },
-            },
-          }),
+          JSON.stringify(
+            tokenUsageEvent({
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+            }),
+          ),
           "",
         ].join("\n"),
       );
@@ -2403,15 +2279,9 @@ test.each([
     );
     await appendFile(
       f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
-          },
-        },
-      }) + "\n",
+      JSON.stringify(
+        tokenUsageEvent({ input_tokens: 10000, output_tokens: 2000 }),
+      ) + "\n",
     );
     await finishDiscovery(f);
     const oldPlugin = join(f.root, "old-plugin");
@@ -2907,16 +2777,7 @@ test.each(
       coverage: semanticCoverage({ completeness: "partial" }),
     };
     checkpoint.terminalReason = "capped";
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
+    await f.saveCheckpoint(checkpoint);
     await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate);
     if (sealed)
       await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);

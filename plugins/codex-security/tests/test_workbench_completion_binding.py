@@ -1176,8 +1176,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": json.loads((scan_dir / "coverage.json").read_text()),
     }
-    (scan_dir / "checkpoints").mkdir()
-    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]

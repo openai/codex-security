@@ -1,3 +1,5 @@
+import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
+export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { EXTERNAL_CODEX_PROVIDERS, isExternalModelProvider } from "./config.js";
@@ -199,25 +201,6 @@ export function withoutCodexHome(
       ([name]) => name.toUpperCase() !== "CODEX_HOME",
     ),
   );
-}
-
-export function environmentValue(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested];
-  if (exact !== undefined && exact.trim() !== "") return exact;
-  const upper = requested.toUpperCase();
-  for (const [name, value] of Object.entries(environment)) {
-    if (
-      name.toUpperCase() === upper &&
-      value !== undefined &&
-      value.trim() !== ""
-    ) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

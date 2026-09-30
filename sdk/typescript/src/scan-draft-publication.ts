@@ -10,10 +10,8 @@ export interface ScanDraftPublicationOptions {
   scanDir: string;
   writer: {
     restore(path: string, contents: Uint8Array): Promise<void>;
-    remove(path: string): Promise<void>;
   };
   workbench: (args: readonly string[]) => Promise<unknown>;
-  onCleanupError: (error: unknown) => void;
   expectedDigest?: string;
   reconciledCheckpointIds?: readonly string[];
   claimToken?: string;
@@ -41,52 +39,34 @@ export async function writePreparedScanDraft(
 ): Promise<void> {
   const draftPath = `drafts/${randomUUID()}.json`;
   const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
-  const staged: string[] = [];
-  try {
-    await options.writer.restore(
-      draftPath,
-      Buffer.from(
-        JSON.stringify({
-          ...documents,
-          reconciledCheckpointIds: options.reconciledCheckpointIds ?? [],
-        }),
-      ),
-    );
-    staged.push(draftPath);
-    const { handoffClaimToken: _claim, ...checkpoint } = draft;
-    await options.writer.restore(
-      checkpointPath,
-      Buffer.from(JSON.stringify(checkpoint)),
-    );
-    staged.push(checkpointPath);
-    await options.workbench([
-      "write-scan-draft",
-      "--scan-id",
-      draft.scanId,
-      "--draft-path",
-      join(options.scanDir, draftPath),
-      "--checkpoint-path",
-      join(options.scanDir, checkpointPath),
-      ...(options.expectedDigest === undefined
-        ? []
-        : ["--expected-draft-digest", options.expectedDigest]),
-      ...(options.claimToken === undefined
-        ? []
-        : ["--claim-token", options.claimToken]),
-    ]);
-  } finally {
-    await Promise.all(
-      staged.map(async (path) => {
-        try {
-          await options.writer.remove(path);
-        } catch (error) {
-          try {
-            options.onCleanupError(error);
-          } catch {
-            /* Publication owns the outcome. */
-          }
-        }
+  // The locked workbench writer owns acknowledgement and successful-stage cleanup.
+  await options.writer.restore(
+    draftPath,
+    Buffer.from(
+      JSON.stringify({
+        ...documents,
+        reconciledCheckpointIds: options.reconciledCheckpointIds ?? [],
       }),
-    );
-  }
+    ),
+  );
+  const { handoffClaimToken: _claim, ...checkpoint } = draft;
+  await options.writer.restore(
+    checkpointPath,
+    Buffer.from(JSON.stringify(checkpoint)),
+  );
+  await options.workbench([
+    "write-scan-draft",
+    "--scan-id",
+    draft.scanId,
+    "--draft-path",
+    join(options.scanDir, draftPath),
+    "--checkpoint-path",
+    join(options.scanDir, checkpointPath),
+    ...(options.expectedDigest === undefined
+      ? []
+      : ["--expected-draft-digest", options.expectedDigest]),
+    ...(options.claimToken === undefined
+      ? []
+      : ["--claim-token", options.claimToken]),
+  ]);
 }

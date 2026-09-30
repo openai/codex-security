@@ -25,6 +25,7 @@ from finalize_scan_contract import (
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
+    _read_json,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _recover_unsealed_findings,
@@ -34,7 +35,6 @@ from finalize_scan_contract import (
     finalize_scan,
     finding_candidate_id,
     open_scan_local_file_descriptor,
-    prepare_scan_local_directory,
     write_scan_local_bytes,
 )
 from project_scan_artifacts import merge_coverage, project_scan_artifacts
@@ -116,18 +116,34 @@ def _children(scan_dir: Path, relative: str) -> list[str]:
 
 
 def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
-    directory = (
-        "checkpoints/pending"
-        if (scan_dir / "checkpoints/pending/.initialized").is_file()
-        else "checkpoints"
-    )
-    for name in _children(scan_dir, directory):
+    for name in _children(scan_dir, "checkpoints/pending"):
         if re.fullmatch(r"[0-9a-f]{64}\.json", name):
             yield f"checkpoints/{name}"
 
 
 def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dict[str, Any], str]:
-    draft = _read_scan_local_json(scan_dir, relative, "Saved scan checkpoint")
+    try:
+        draft = _read_scan_local_json(scan_dir, relative, "Saved scan checkpoint")
+    except ContractError as error:
+        if not isinstance(error.__cause__, FileNotFoundError):
+            raise
+        # A validated stage can outlive a failed history write. Keep the logical
+        # checkpoint identity stable for frozen receipts and acknowledgement.
+        name = Path(relative).name
+        if not re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", relative):
+            raise ContractError("saved checkpoint is missing") from None
+        with os.fdopen(
+            open_scan_local_file_descriptor(
+                scan_dir, f"checkpoints/pending/{name}", "Pending checkpoint"
+            ),
+            "rb",
+        ) as handle:
+            staged = handle.read().decode("utf-8")
+        if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.checkpoint\.json", staged):
+            raise ContractError("pending checkpoint has no valid staged source") from None
+        draft, contents = _read_scan_local_json_bytes(scan_dir, staged, "Staged scan checkpoint")
+        if hashlib.sha256(contents).hexdigest() != name.removesuffix(".json"):
+            raise ContractError("staged checkpoint changed after publication failed") from None
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
     if not isinstance(draft.get("findings"), list) or not isinstance(draft.get("coverage"), dict):
@@ -515,34 +531,55 @@ def merge_saved_results(
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
+    finding_schema = _read_json(
+        Path(__file__).resolve().parent.parent / "schemas" / "findings.schema.json"
+    )
+    finding_validity: dict[str, bool] = {}
 
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
+        key = _digest(value)
+        if key in finding_validity:
+            return finding_validity[key]
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
-        if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0], candidate_only=True)
+        _ensure_finding_identity(document["findings"][0], candidate_only=True)
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
-            Path(__file__).resolve().parent.parent / "schemas",
+            finding_schema,
             scan_dir,
             [],
         )
-        return bool(document["findings"])
+        finding_validity[key] = bool(document["findings"])
+        return finding_validity[key]
 
     all_sources = ([("parent", parent)] if parent else []) + sources
+    valid_parent = True
     resolved: dict[str, str] = {}
-    for draft in [parent] if parent else []:
-        for finding in draft["findings"]:
-            if (
-                isinstance(finding, dict)
-                and valid_finding(finding)
-                and (candidate_id := finding_candidate_id(finding))
-            ):
+    if parent:
+        # Only the current parent can supersede findings from earlier checkpoints.
+        for finding in parent["findings"]:
+            if not valid_finding(finding):
+                valid_parent = False
+                continue
+            if candidate_id := finding_candidate_id(finding):
                 resolved.setdefault(candidate_id, "reported")
+            canonical_key = _finding_key(finding)
+            for _, retained in retained_findings(finding):
+                retained_key = _finding_key(retained)
+                if retained is not finding:
+                    represented_history.setdefault(retained_key, set()).add(
+                        _digest(_finding_content(retained))
+                    )
+                previous_key = represented.get(retained_key)
+                if retained_key not in represented:
+                    represented[retained_key] = canonical_key
+                elif previous_key != canonical_key:
+                    # Ambiguous history cannot suppress an independent source.
+                    represented[retained_key] = None
         for field in ("surfaces", "explicitExclusions"):
-            items = draft["coverage"].get(field, [])
+            items = parent["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
                 if (
                     isinstance(item, dict)
@@ -550,23 +587,6 @@ def merge_saved_results(
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                 ):
                     resolved.setdefault(item["candidateId"], item["disposition"])
-    # Only the current parent can supersede findings from earlier checkpoints.
-    for draft in [parent] if parent else []:
-        for finding in draft["findings"]:
-            if valid_finding(finding):
-                canonical_key = _finding_key(finding)
-                for _, retained in retained_findings(finding):
-                    retained_key = _finding_key(retained)
-                    if retained is not finding:
-                        represented_history.setdefault(retained_key, set()).add(
-                            _digest(_finding_content(retained))
-                        )
-                    previous_key = represented.get(retained_key)
-                    if retained_key not in represented:
-                        represented[retained_key] = canonical_key
-                    elif previous_key != canonical_key:
-                        # Ambiguous history cannot suppress an independent source.
-                        represented[retained_key] = None
     for relative, draft in all_sources:
         superseded = (
             parent is not None
@@ -584,11 +604,7 @@ def merge_saved_results(
             and coverage.get("completeness") in {"complete", "unknown"}
         ):
             coverage["completeness"] = "partial"
-        if (
-            superseded
-            and not stopped
-            and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
-        ):
+        if superseded and not stopped and valid_parent:
             continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
             manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
@@ -1273,25 +1289,10 @@ def stop_composition_children(db: Any, connection: Any, composition: Composition
             )
 
 
-def initialize_pending_checkpoints(scan_dir: Path) -> None:
-    if (scan_dir / "checkpoints/pending/.initialized").is_file():
-        return
-    prepare_scan_local_directory(scan_dir, "checkpoints/pending")
-    for name in _children(scan_dir, "checkpoints"):
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            # Pending entries index immutable history, including malformed evidence.
-            os.close(
-                open_scan_local_file_descriptor(scan_dir, f"checkpoints/{name}", "Saved checkpoint")
-            )
-            write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", b"")
-    write_scan_local_bytes(scan_dir, "checkpoints/pending/.initialized", b"")
-
-
-def save_pending_checkpoint(scan_dir: Path, payload: bytes) -> str:
-    initialize_pending_checkpoints(scan_dir)
+def save_pending_checkpoint(scan_dir: Path, payload: bytes, staged_path: str = "") -> str:
     name = f"{hashlib.sha256(payload).hexdigest()}.json"
     # Publish the index first so every saved checkpoint remains discoverable.
-    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", b"")
+    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", staged_path.encode("utf-8"))
     write_scan_local_bytes(scan_dir, f"checkpoints/{name}", payload)
     return name
 
@@ -1308,8 +1309,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        initialize_pending_checkpoints(scan_dir)
         acknowledged = set()
+        checkpoint_relative = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -1326,7 +1327,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
-            acknowledged.add(save_pending_checkpoint(scan_dir, checkpoint_contents))
+            acknowledged.add(
+                save_pending_checkpoint(scan_dir, checkpoint_contents, checkpoint_relative)
+            )
         if (
             args.expected_draft_digest is not None
             and args.expected_draft_digest != _scan_draft_digest(scan_dir)
@@ -1373,6 +1376,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if scan["mode"] == "standard":
             phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
             advance_scan_phase(db, connection, scan_id, phase)
+        # Failed publication leaves its inputs available for retry/recovery. Only
+        # this acknowledged write can remove its own per-attempt stage paths.
+        for staged in (relative, checkpoint_relative):
+            if staged is not None:
+                try:
+                    _remove_scan_local_file_if_exists(scan_dir, staged)
+                except (ContractError, OSError):
+                    pass  # Optional cleanup must not change publication's outcome.
     return {"scanId": scan_id, "status": "draft_written"}
 
 
