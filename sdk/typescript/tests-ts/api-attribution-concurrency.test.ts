@@ -62,6 +62,7 @@ describe("delegated scan attribution", () => {
                 OPENAI_API_KEY: `synthetic-${surface}-key`,
               },
               resolvePluginPython: async () => "/managed/python",
+              probeCodexSandbox: async () => {},
               prepareOutputDir: async () => scanDirectory,
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (

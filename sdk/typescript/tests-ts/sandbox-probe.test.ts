@@ -2,6 +2,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -50,6 +51,8 @@ async function syntheticCodex(root: string, exitCode: number): Promise<string> {
     command,
     [
       "#!/bin/sh",
+      'printf \'%s\\n\' "$@" >> "$0.args"',
+      'printf \'%s\\n\' "$PATH" "$CODEX_HOME" "$PROBE_SETTING" > "$0.environment"',
       'if [ "$1" != sandbox ]; then exit 0; fi',
       `if [ ${exitCode} -ne 0 ]; then echo "${SANDBOX_DENIAL}" >&2; fi`,
       `exit ${exitCode}`,
@@ -72,17 +75,67 @@ describe("Codex sandbox probe", () => {
       );
       expect(failure).toBeInstanceOf(SandboxUnavailableError);
       expect(failure?.message).toContain(SANDBOX_DENIAL);
-      expect(failure?.message).toContain(`${command} sandbox -- true`);
+      expect(failure?.message).toContain(
+        `${command} sandbox -- ${command} --version`,
+      );
     },
   );
 
   test.skipIf(process.platform === "win32")(
-    "accepts a sandbox that runs the probe command",
+    "uses the resolved executable and preserves the scan environment",
+    async () => {
+      const root = await temporaryDirectory();
+      const commandDirectory = join(root, "installed tools");
+      await mkdir(commandDirectory);
+      const command = await syntheticCodex(commandDirectory, 0);
+      const environment = {
+        PATH: join(root, "repository", "bin"),
+        CODEX_HOME: join(root, "codex-home"),
+        PROBE_SETTING: "scan-specific-setting",
+      };
+      await expect(
+        probeCodexSandbox({ command }, environment),
+      ).resolves.toBeUndefined();
+      expect(await readFile(`${command}.args`, "utf8")).toBe(
+        ["sandbox", "--", command, "--version", ""].join("\n"),
+      );
+      expect(await readFile(`${command}.environment`, "utf8")).toBe(
+        [
+          environment.PATH,
+          environment.CODEX_HOME,
+          environment.PROBE_SETTING,
+          "",
+        ].join("\n"),
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves cancellation before the probe starts",
+    async () => {
+      const root = await temporaryDirectory();
+      const reason = new Error("scan canceled");
+      const signal = AbortSignal.abort(reason);
+      await expect(
+        probeCodexSandbox(
+          { command: await syntheticCodex(root, 0) },
+          {},
+          signal,
+        ),
+      ).rejects.toBe(reason);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "reports an executable that cannot be started",
     async () => {
       const root = await temporaryDirectory();
       await expect(
-        probeCodexSandbox({ command: await syntheticCodex(root, 0) }, {}),
-      ).resolves.toBeUndefined();
+        probeCodexSandbox({ command: join(root, "missing-codex") }, {}),
+      ).rejects.toMatchObject({
+        name: SandboxUnavailableError.name,
+        message: expect.stringContaining("ENOENT"),
+      });
     },
   );
 
@@ -116,6 +169,7 @@ describe("Codex sandbox probe", () => {
             CODEX_SECURITY_STATE_DIR: state,
           },
           resolveCodexCommand: () => ({ command }),
+          probeCodexSandbox,
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
@@ -126,6 +180,9 @@ describe("Codex sandbox probe", () => {
           name: SandboxUnavailableError.name,
           message: expect.stringContaining(SANDBOX_DENIAL),
         });
+        expect(await readFile(`${command}.args`, "utf8")).toBe(
+          ["sandbox", "--", command, "--version", ""].join("\n"),
+        );
       } finally {
         await client.close();
       }

@@ -1124,6 +1124,7 @@ async function testWorkerRuntimeSettings() {
       "GIT_SSH_COMMAND",
       "GIT_CONFIG_GLOBAL",
       "CODEX_CLI_PATH",
+      "CODEX_HOME",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
       "OPENAI_API_KEY",
@@ -1152,17 +1153,22 @@ async function testWorkerRuntimeSettings() {
       };
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active scan config.toml");
+      const codexHome = path.join(fixture.root, "scan home");
       const promptPath = path.join(fixture.root, "prompt.md");
+      await mkdir(codexHome);
       await writeFile(configPath, configuration);
       await writeFile(promptPath, "synthetic worker configuration fixture");
       process.env.CODEX_CLI_PATH = process.execPath;
+      process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = path.join(
         fixture.root,
         "deep settings.toml",
       );
-      childProcess.spawn = (command, args, options) =>
-        originalSpawn(
+      const launches = [];
+      childProcess.spawn = (command, args, options) => {
+        launches.push({ command, args, environment: options.env });
+        return originalSpawn(
           command,
           command === process.execPath ||
             command === path.toNamespacedPath(process.execPath)
@@ -1170,6 +1176,7 @@ async function testWorkerRuntimeSettings() {
             : args,
           options,
         );
+      };
       syncBuiltinESMExports();
       const executor = new CodexSdkWorkerExecutor({
         model: "gpt-6-sol",
@@ -1186,6 +1193,7 @@ async function testWorkerRuntimeSettings() {
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"]) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          launches.length = 0;
           await executor.run({
             kind,
             promptPath,
@@ -1203,6 +1211,37 @@ async function testWorkerRuntimeSettings() {
             },
             signal: new AbortController().signal,
           });
+          const workerLaunches = launches.filter(
+            ({ args }) => args[0] === "exec",
+          );
+          assert.equal(workerLaunches.length, 1);
+          const workerLaunch = workerLaunches[0];
+          assert.equal(
+            workerLaunch.command,
+            process.platform === "win32"
+              ? path.toNamespacedPath(process.execPath)
+              : process.execPath,
+          );
+          assert.equal(
+            workerLaunch.environment.CODEX_CLI_PATH,
+            process.execPath,
+          );
+          assert.equal(
+            workerLaunch.environment.CODEX_HOME,
+            await realpath(codexHome),
+          );
+          assert.equal(
+            workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
+            configPath,
+          );
+          assert.equal(
+            workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+          );
+          assert.equal(
+            workerPermissionProfileOverride(workerLaunch.args),
+            'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
+          );
           const invocation = JSON.parse(
             await readFile(fixture.markerPath, "utf8"),
           );

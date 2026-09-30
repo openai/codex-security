@@ -455,6 +455,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
 }
@@ -3496,7 +3497,7 @@ export class CodexSecurity {
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
       const codexCommand = this.#codexCommand();
-      await probeCodexSandbox(
+      await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
         codexCommand,
         { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
         signal,
