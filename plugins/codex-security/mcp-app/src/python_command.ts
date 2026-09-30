@@ -21,7 +21,7 @@ const MISSING_PYTHON_HELPER_MESSAGE =
 export async function resolvePythonCommand(
   options: ResolvePythonCommandOptions = {},
 ): Promise<string> {
-  const configuredPython = options.configuredPython ?? process.env.PYTHON;
+  const configuredPython = options.configuredPython ?? process.env["PYTHON"];
   if (configuredPython?.trim()) {
     return configuredPython.trim();
   }
@@ -96,4 +96,28 @@ export function missingPythonHelperMessage(
     return undefined;
   }
   return MISSING_PYTHON_HELPER_MESSAGE;
+}
+
+export function workbenchCommandTimeout(command: string | undefined): number {
+  return [
+    "begin-deep-scan",
+    "complete-scan",
+    "export-findings",
+    "get-scan",
+    "get-workspace",
+    "inspect-setup",
+    "list-findings",
+    "preserve-scan-results",
+    "recover-scan-results",
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "save-workspace",
+    "set-finding-triage",
+    "set-finding-remediation",
+    "start-headless-standard-scan",
+    "start-prompt-only-scan",
+    "start-scan",
+  ].includes(command ?? "")
+    ? 300_000
+    : 30_000;
 }

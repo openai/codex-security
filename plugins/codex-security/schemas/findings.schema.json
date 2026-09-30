@@ -207,7 +207,7 @@
             "properties": {
               "reportPath": {
                 "type": "string",
-                "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
+                "pattern": "^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$"
               }
             }
           },

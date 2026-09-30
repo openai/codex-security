@@ -117,9 +117,23 @@ def archive_scan(
         )
     if previous_scan["status"] == "running":
         raise SystemExit("Cannot archive the output of a running scan.")
-    artifacts = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
+    scans = connection.execute(
+        """
+        WITH RECURSIVE descendants AS (
+            SELECT id, scan_dir FROM scans WHERE id = ?
+            UNION
+            SELECT scans.id, scans.scan_dir FROM scans
+            JOIN descendants ON scans.parent_scan_id = descendants.id
+        )
+        SELECT id, scan_dir FROM descendants
+        """,
         (previous_scan["id"],),
+    ).fetchall()
+    scans = [scan for scan in scans if Path(scan["scan_dir"]).is_relative_to(scan_dir)]
+    artifacts = connection.execute(
+        "SELECT scan_id, kind, path FROM scan_artifacts "
+        "WHERE scan_id IN (SELECT value FROM json_each(?))",
+        (json.dumps([scan["id"] for scan in scans]),),
     ).fetchall()
     if archived_scan_dir is None:
         if artifacts:
@@ -129,10 +143,12 @@ def archive_scan(
         archived_scan_dir = Path(
             tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
         ).resolve()
-    connection.execute(
-        "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(archived_scan_dir), timestamp, previous_scan["id"]),
-    )
+    for scan in scans:
+        relative_directory = Path(scan["scan_dir"]).relative_to(scan_dir)
+        connection.execute(
+            "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
+            (str(archived_scan_dir / relative_directory), timestamp, scan["id"]),
+        )
     for artifact in artifacts:
         try:
             relative_path = Path(artifact["path"]).relative_to(scan_dir)
@@ -142,7 +158,7 @@ def archive_scan(
             "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
             (
                 str(archived_scan_dir / relative_path),
-                previous_scan["id"],
+                artifact["scan_id"],
                 artifact["kind"],
             ),
         )

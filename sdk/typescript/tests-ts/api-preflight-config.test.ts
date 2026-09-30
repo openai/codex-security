@@ -947,4 +947,52 @@ describe("CodexSecurity preflight configuration", () => {
     expect(scanModelProvider(config)).toBe("amazon-bedrock");
     expect(JSON.stringify(config)).not.toContain("synthetic-");
   });
+
+  test("preserves cyber_access_program in sanitized scan configuration and profiles", () => {
+    const config = scanPreflightCodexConfig({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "daybreakBlue",
+      profile: "daybreak-red",
+      profiles: {
+        "daybreak-red": {
+          model: "gpt-5.6-sol",
+          cyber_access_program: "daybreakRed",
+        },
+      },
+    });
+
+    expect(config).toEqual({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "daybreakBlue",
+      profile: "daybreak-red",
+      profiles: {
+        "daybreak-red": {
+          model: "gpt-5.6-sol",
+          cyber_access_program: "daybreakRed",
+        },
+      },
+    });
+  });
+
+  test("filters invalid cyber_access_program values in preflight configuration", () => {
+    const config = scanPreflightCodexConfig({
+      model: "gpt-5.6-sol",
+      cyber_access_program: "",
+      profiles: {
+        invalid: {
+          model: "gpt-5.6-sol",
+          cyber_access_program: 123 as unknown as string,
+        },
+      },
+    });
+
+    expect(config).toEqual({
+      model: "gpt-5.6-sol",
+      profiles: {
+        invalid: {
+          model: "gpt-5.6-sol",
+        },
+      },
+    });
+  });
 });

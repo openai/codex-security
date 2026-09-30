@@ -1,0 +1,1428 @@
+import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
+import { randomUUID } from "node:crypto";
+import * as childProcess from "node:child_process";
+import { existsSync } from "node:fs";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import type {
+  ThreadEvent,
+  ThreadOptions,
+  TurnOptions,
+} from "@openai/codex-sdk";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { build } from "esbuild";
+import { CodexSecurity, type ScanOptions } from "../src/api.js";
+import type { JsonObject } from "../src/config.js";
+import type { ScanSessionEvent } from "../src/cost.js";
+import type { ScanActivity } from "../src/scan-activity.js";
+import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import { publishDraft } from "./support/scan-publication.js";
+import { createApiTestFixtures } from "./support/api-events.js";
+import { tokenUsageEvent } from "./support/usage-rollout.js";
+import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
+import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
+import { ScanTransportClosedError } from "../src/scan-execution.js";
+import {
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "../src/errors.js";
+import type { ScanProgress } from "../src/worker-progress.js";
+import { readSavedScanLogs, type ScanLogSource } from "../src/scan-logs.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+const pluginRoot = fileURLToPath(
+  new URL("../../../plugins/codex-security/", import.meta.url),
+);
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
+
+type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
+type CapturedNativeScan = {
+  client: { config: ClientArguments[0]; dependencies: ClientArguments[1] };
+  options: ScanOptions;
+};
+
+// Capture only the constructor boundary; keep the adapter's runtime preparation
+// and the SDK's ordinary scan execution real without process-wide module mocks.
+async function nativeScanFactory() {
+  const entry = new URL(
+    "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+    import.meta.url,
+  );
+  const bundle = await build({
+    bundle: true,
+    entryPoints: [fileURLToPath(entry)],
+    define: { "import.meta.url": JSON.stringify(entry.href) },
+    format: "cjs",
+    platform: "node",
+    write: false,
+    plugins: [
+      {
+        name: "capture-native-client",
+        setup(build) {
+          build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
+            path: "client",
+            namespace: "fixture",
+          }));
+          build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
+            resolveDir: fileURLToPath(new URL(".", entry)),
+            contents: `export { selectedScanEnvironment } from ${JSON.stringify(fileURLToPath(new URL("../src/api.ts", import.meta.url)))};
+            export class CodexSecurity { constructor(config, dependencies) { this.config = config; this.dependencies = dependencies; } }`,
+          }));
+        },
+      },
+    ],
+  });
+  const module = { exports: {} };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(
+    createRequire(import.meta.url),
+    module,
+    module.exports,
+  );
+  return (
+    module.exports as {
+      prepareNativeScan(input: unknown): Promise<CapturedNativeScan>;
+    }
+  ).prepareNativeScan;
+}
+
+test.each([
+  { budget: false, partialCheckpoint: true },
+  { budget: false, partialCheckpoint: true, completedCleanup: true },
+  {
+    budget: false,
+    partialCheckpoint: true,
+    native: "discovery",
+    requiredCost: true,
+  },
+  { budget: false },
+  { budget: true },
+  { budget: true, firstChildBudget: true },
+  { budget: false, native: "discovery" },
+  { budget: false, native: "discovery", provider: { env_key: "PROVIDER_KEY" } },
+  { budget: false, native: "sealed", provider: { env_key: "PROVIDER_KEY" } },
+] as {
+  budget: boolean;
+  firstChildBudget?: boolean;
+  partialCheckpoint?: boolean;
+  completedCleanup?: boolean;
+  requiredCost?: boolean;
+  provider?: JsonObject;
+  native?: "discovery" | "sealed";
+}[])(
+  "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
+  async ({
+    budget,
+    firstChildBudget,
+    partialCheckpoint,
+    completedCleanup,
+    requiredCost,
+    provider,
+    native,
+  }) => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    if (python === null) throw new Error("Python is required for this test.");
+    const root = await temporaryDirectory();
+    const repo = join(root, "repo");
+    const codexHome = join(root, "codex");
+    let scanDir = join(root, "scan");
+    await Promise.all([mkdir(repo), mkdir(codexHome)]);
+    await Promise.all(
+      ["app.py", "routes.py", "models.py", "helpers.py"].map((name) =>
+        writeFile(join(repo, name), "print('public synthetic fixture')\n"),
+      ),
+    );
+    const childFindings: JsonObject[] = JSON.parse(
+      await readFile(
+        join(pluginRoot, "examples/completed-scan/findings.json"),
+        "utf8",
+      ),
+    ).findings.slice(0, 1);
+    for (const finding of childFindings) {
+      for (const field of ["findingId", "occurrenceId", "fingerprints"])
+        delete finding[field];
+      finding["locations"] = [{ path: "app.py", startLine: 1, endLine: 1 }];
+      if (partialCheckpoint)
+        finding["codeEvidence"] = [
+          {
+            id: "source",
+            label: "Reviewed source",
+            path: "app.py",
+            startLine: 1,
+            code: "print('public synthetic fixture')",
+            explanation:
+              "Synthetic source evidence retained before interruption.",
+          },
+        ];
+    }
+    const pendingCandidate = partialCheckpoint
+      ? {
+          ...structuredClone(childFindings[0]!),
+          identity: { anchor: "pending-source-review" },
+          title: "Pending source review",
+          validation: {
+            summary: "Independent validation is pending.",
+            counterEvidence: ["A caller restriction remains to be verified."],
+          },
+        }
+      : undefined;
+    const version = JSON.parse(
+      await readFile(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"),
+    ).version;
+    let runtimeVersion = version;
+    const customProvider = provider?.["env_key"] === "PROVIDER_KEY";
+    const environment = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      CODEX_CLI_PATH: process.execPath,
+      SYNTHETIC_SCAN_SETTING: "inherited",
+      GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+      GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
+      CODEX_SAFETY_IDENTIFIER: "ambient-identifier",
+      ...(customProvider ? { PROVIDER_KEY: "synthetic-provider-key" } : {}),
+      ...(native ? { OPENAI_API_KEY: "synthetic-native-key" } : {}),
+      ...(provider === undefined
+        ? {}
+        : {
+            OPENAI_API_KEY: customProvider
+              ? undefined
+              : "synthetic-provider-key",
+            CODEX_API_KEY: customProvider ? undefined : "synthetic-native-key",
+          }),
+    };
+    const nativeSettings = {
+      model: "gpt-6-astra",
+      model_reasoning_effort: "ultra",
+      forced_login_method: "chatgpt",
+      cli_auth_credentials_store: "file",
+      ...(provider === undefined
+        ? {}
+        : { model_provider: "custom", model_providers: { custom: provider } }),
+      mcp_servers: {
+        synthetic: {
+          command: "synthetic-mcp",
+          env: { FIXTURE_TOKEN: "saved-mcp-setting" },
+        },
+      },
+      shell_environment_policy: {
+        inherit: "core",
+        set: { FIXTURE_SETTING: "saved-shell-setting" },
+      },
+    };
+    let ambientConfig = stringifyToml(nativeSettings);
+    const managedHome = join(
+      environment.CODEX_SECURITY_STATE_DIR,
+      "codex-home",
+    );
+    const managedAuth = JSON.stringify({ auth_mode: "chatgpt", account: "C" });
+    const managedConfig = 'model = "managed-decoy"\n';
+    const accountLog = join(root, "account-status.jsonl");
+    const loginFixture = join(root, "login-fixture.mjs");
+    const prepareNative =
+      native === "discovery" ? await nativeScanFactory() : undefined;
+    if (prepareNative) {
+      environment.CODEX_CLI_PATH = Bun.which("node")!;
+      await mkdir(managedHome, { recursive: true });
+      await Promise.all([
+        writeFile(
+          loginFixture,
+          `
+import { appendFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+if (args.at(-2) !== "login" || args.at(-1) !== "status") throw new Error("Unexpected fixture command");
+if (!args.includes('cli_auth_credentials_store="file"')) throw new Error("Expected saved file credential store");
+const home = process.env.CODEX_HOME;
+const { account } = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
+appendFileSync(${JSON.stringify(accountLog)}, JSON.stringify({ home, account, args }) + "\\n");
+console.log("Logged in using ChatGPT");
+process.exit(0);
+`,
+        ),
+        writeFile(join(codexHome, "config.toml"), ambientConfig),
+        writeFile(
+          join(codexHome, "auth.json"),
+          JSON.stringify({ auth_mode: "chatgpt", account: "A" }),
+        ),
+        writeFile(join(managedHome, "auth.json"), managedAuth),
+        writeFile(join(managedHome, "config.toml"), managedConfig),
+      ]);
+    }
+    const commandOptions = { python, pluginRoot, environment };
+    let registeredScan: ScanOptions["registeredScan"];
+    if (native) {
+      const started = await runWorkbench(commandOptions, [
+        "begin-deep-scan",
+        "--thread-id",
+        "native-owner",
+        "--target-path",
+        repo,
+        "--scope",
+        ".",
+        "--scan-root",
+        join(root, "scans"),
+      ]);
+      const scan = started["scan"] as JsonObject;
+      scanDir = scan["scanDir"] as string;
+      registeredScan = {
+        scanId: scan["scanId"] as string,
+        scanDir,
+        threadId: "native-owner",
+        handoffClaimToken: scan["handoffClaimToken"] as string,
+      };
+    }
+    let controller = new AbortController();
+    let interrupted = false;
+    let checkpointSignal: AbortSignal | undefined;
+    let mergeAttempts = 0;
+    let savedExecutionThread: string | undefined;
+    let sealedArtifacts: Map<string, Buffer<ArrayBuffer>> | undefined;
+    const registrations = new Map<string, JsonObject>();
+    const followUpThreads: string[] = [];
+    const previousFollowUp = native === "sealed" ? randomUUID() : undefined;
+    let childTurns = 0;
+    let threadCount = 0;
+    const progressRuns: ScanProgress[][] = [];
+    let progress: ScanProgress[];
+    const workerRuns: Array<{
+      threads: Set<string>;
+      activities: ScanActivity[];
+      sessions: ScanSessionEvent[];
+    }> = [];
+    let workerRun: (typeof workerRuns)[number];
+    const workbenches = new Map<string, WorkbenchCommandOptions>();
+    const commands: Array<{ command: string; id: string | undefined }> = [];
+    const turns: Array<{
+      id: string;
+      mode: string;
+      cwd: string;
+      prompt: string;
+      config: unknown;
+      overrides?: string[];
+      executable?: string;
+      environment: Record<string, string>;
+      account?: string;
+      resumed: boolean;
+    }> = [];
+    let nativeOptions: ScanOptions | undefined;
+    let nativeRecipe: JsonObject | undefined;
+    const makeClient = async () => {
+      let prepared: CapturedNativeScan | undefined;
+      if (prepareNative) {
+        const nativeEnvironment: NodeJS.ProcessEnv = {
+          ...environment,
+          OPENAI_API_KEY: undefined,
+          CODEX_API_KEY: undefined,
+          CODEX_SAFETY_IDENTIFIER: customProvider
+            ? environment.CODEX_SAFETY_IDENTIFIER
+            : undefined,
+          CODEX_SECURITY_CONFIG_PATH: undefined,
+          CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: undefined,
+        };
+        const before = Object.fromEntries(
+          Object.keys(nativeEnvironment).map((key) => [key, process.env[key]]),
+        );
+        try {
+          for (const [key, value] of Object.entries(nativeEnvironment)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+          }
+          prepared = await prepareNative({
+            scan: {
+              ...registeredScan,
+              targetPath: repo,
+              userContext: "Inspect the synthetic source.",
+            },
+            recipe: nativeRecipe ?? {
+              postScanPrompt: "Post-scan instructions once.",
+            },
+            savedDeepScanSettings: {
+              workers: 1,
+              subagents: 3,
+              stopAfterNoNew: 1,
+              maxDiscoveryRuns: 4,
+              maxTimeHours: 1,
+            },
+            threadId: registeredScan!.threadId,
+            pluginRoot: PLUGIN_ROOT,
+            pythonPath: python,
+            parentSandbox: { filesystemDenies: [join(root, "private")] },
+          });
+          nativeOptions = prepared.options;
+        } finally {
+          for (const [key, value] of Object.entries(before)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+          }
+        }
+      }
+      return new CodexSecurity(
+        prepared?.client.config ?? {
+          pluginPath: pluginRoot,
+          codexOverrides: {
+            model: "gpt-6-astra",
+            model_reasoning_effort: "ultra",
+            ...(provider === undefined
+              ? {}
+              : {
+                  model_provider: "custom",
+                  cli_auth_credentials_store: "file",
+                  model_providers: { custom: provider },
+                }),
+          },
+        },
+        {
+          environment,
+          inheritedPermissions: {
+            filesystem: { [join(root, "private")]: "deny" },
+            network: { enabled: false },
+          },
+          prepareRuntime: async () => ({
+            codexHome,
+            environment,
+            credentialsAvailable: true,
+            persistentCredentialHome: true,
+            plugin: {
+              pluginRoot,
+              installedRoot: pluginRoot,
+              marketplaceRoot: pluginRoot,
+              marketplaceName: "codex-security-sdk",
+              name: "codex-security",
+              version: runtimeVersion,
+            },
+          }),
+          ...prepared?.client.dependencies,
+          resolvePluginPython: async () => python,
+          runWorkbench: async (options, args, input) => {
+            const result = await runWorkbench(options, args, input);
+            const id = args.includes("--scan-id")
+              ? args[args.indexOf("--scan-id") + 1]
+              : undefined;
+            commands.push({ command: args[0]!, id });
+            if (args[0] === "register-cli-scan") {
+              expect(JSON.parse(input!).parentScanRole).toBe(
+                args.includes("--parent-scan-id") ? "deep_pass" : undefined,
+              );
+              const scanId = result["scanId"] as string;
+              registrations.set(scanId, {
+                ...result,
+                mode: JSON.parse(input!).recipe.mode,
+                recipe: JSON.parse(input!).recipe,
+              });
+              workbenches.set(scanId, options);
+            }
+            if (args[0] === "get-cli-scan-resume")
+              workbenches.set(result["scanId"] as string, options);
+            if (
+              native === "sealed" &&
+              !interrupted &&
+              args[0] === "prepare-scan-completion" &&
+              id === registeredScan!.scanId
+            ) {
+              await writeFile(
+                join(scanDir, "artifacts/deep-scan/execution-threads.json"),
+                JSON.stringify([previousFollowUp]),
+              );
+              const manifest = JSON.parse(
+                await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+              );
+              sealedArtifacts = new Map(
+                await Promise.all(
+                  [
+                    "scan-manifest.json",
+                    "report.md",
+                    ...manifest.scan.artifacts.map(
+                      (artifact: { path: string }) => artifact.path,
+                    ),
+                  ].map(
+                    async (path: string) =>
+                      [path, await readFile(join(scanDir, path))] as const,
+                  ),
+                ),
+              );
+              interrupted = true;
+              controller.abort(
+                new ScanTransportClosedError("mcp_transport_closed"),
+              );
+            }
+            return result;
+          },
+          createCodex: (options) => {
+            if (provider !== undefined) {
+              expect(options.apiKey).toBeUndefined();
+              expect(options.env?.["OPENAI_API_KEY"]).toBe(
+                environment.OPENAI_API_KEY,
+              );
+              expect(options.env?.["CODEX_API_KEY"]).toBe(
+                environment.CODEX_API_KEY,
+              );
+            }
+            const env = options.env!;
+            const id = env["CODEX_SECURITY_SCAN_ID"]!;
+            const makeThread = (
+              threadOptions: ThreadOptions,
+              savedThreadId: string | null = null,
+            ) => {
+              threadCount += 1;
+              const thread = {
+                id: savedThreadId,
+                async runStreamed(prompt: string, turnOptions?: TurnOptions) {
+                  const record = registrations.get(id)!;
+                  const mode = record["mode"] as string;
+                  let groups: Array<{
+                    sourceFindingIds: string[];
+                    canonicalSourceFindingId: string;
+                  }> = [];
+                  if (
+                    mode === "deep" &&
+                    prompt !== "Post-scan instructions once."
+                  ) {
+                    mergeAttempts += 1;
+                    const mergePath = join(
+                      record["scanDir"] as string,
+                      "artifacts/deep-scan/merge-inputs.json",
+                    );
+                    expect(
+                      JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)),
+                    ).toBe(mergePath);
+                    const payload = JSON.parse(
+                      await readFile(mergePath, "utf8"),
+                    );
+                    expect(payload.findings.length).toBeGreaterThan(0);
+                    const sourceFindingIds = payload.sources.map(
+                      (source: { id: string }) => source.id,
+                    );
+                    for (const source of sourceFindingIds)
+                      expect(
+                        registrations.get(source.split(":")[0]),
+                      ).toMatchObject({ mode: "standard" });
+                    groups = [
+                      {
+                        sourceFindingIds,
+                        canonicalSourceFindingId: sourceFindingIds[0],
+                      },
+                    ];
+                  }
+                  turns.push({
+                    id,
+                    mode,
+                    cwd: threadOptions.workingDirectory!,
+                    prompt,
+                    config: options.config,
+                    overrides: options.configOverrides,
+                    executable: options.codexPathOverride,
+                    environment: options.env!,
+                    resumed: savedThreadId !== null,
+                    ...(prepareNative
+                      ? {
+                          account: JSON.parse(
+                            await readFile(
+                              join(env["CODEX_HOME"]!, "auth.json"),
+                              "utf8",
+                            ),
+                          ).account,
+                        }
+                      : {}),
+                  });
+                  if (prepareNative) {
+                    expect(env["CODEX_HOME"]).toBe(codexHome);
+                    expect(options.apiKey).toBeUndefined();
+                    expect(env).not.toHaveProperty("OPENAI_API_KEY");
+                    expect(env).not.toHaveProperty("CODEX_API_KEY");
+                    expect(options.config).toMatchObject(nativeSettings);
+                    const preflight = parseToml(
+                      await readFile(
+                        env["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(preflight).not.toHaveProperty("mcp_servers");
+                    expect(preflight).not.toHaveProperty(
+                      "shell_environment_policy",
+                    );
+                    expect(preflight).toMatchObject({
+                      model: nativeSettings.model,
+                      model_reasoning_effort:
+                        nativeSettings.model_reasoning_effort,
+                      features: {
+                        multi_agent_v2: {
+                          enabled: true,
+                          max_concurrent_threads_per_session: 4,
+                        },
+                      },
+                    });
+                    expect(
+                      await readFile(join(codexHome, "config.toml"), "utf8"),
+                    ).toBe(ambientConfig);
+                  }
+                  async function* events(): AsyncGenerator<ThreadEvent> {
+                    thread.id ??= randomUUID();
+                    const sessionHome = env["CODEX_HOME"]!;
+                    await mkdir(join(sessionHome, "sessions"), {
+                      recursive: true,
+                    });
+                    await appendFile(
+                      join(
+                        sessionHome,
+                        "sessions",
+                        `rollout-${thread.id}.jsonl`,
+                      ),
+                      JSON.stringify({
+                        type: "session_meta",
+                        payload: {
+                          id: thread.id,
+                          cwd: threadOptions.workingDirectory,
+                        },
+                      }) + "\n",
+                    );
+                    if (prompt === "Post-scan instructions once.") {
+                      followUpThreads.push(thread.id);
+                      await writeFile(
+                        join(
+                          sessionHome,
+                          "sessions",
+                          `rollout-${thread.id}-worker.jsonl`,
+                        ),
+                        JSON.stringify({
+                          type: "session_meta",
+                          payload: {
+                            id: `${thread.id}-worker`,
+                            parent_thread_id: thread.id,
+                          },
+                        }) + "\n",
+                      );
+                    }
+                    if (mode === "standard") {
+                      const delegated = `${thread.id}-worker`;
+                      workerRun.threads.add(thread.id);
+                      workerRun.threads.add(delegated);
+                      await writeFile(
+                        join(
+                          sessionHome,
+                          "sessions",
+                          `rollout-${delegated}.jsonl`,
+                        ),
+                        [
+                          {
+                            type: "session_meta",
+                            payload: {
+                              id: delegated,
+                              parent_thread_id: thread.id,
+                            },
+                          },
+                          {
+                            type: "response_item",
+                            payload: {
+                              type: "function_call",
+                              name: "exec_command",
+                              call_id: "shared-command",
+                              arguments: JSON.stringify({
+                                cmd: "printf synthetic-worker",
+                              }),
+                            },
+                          },
+                          {
+                            type: "response_item",
+                            payload: {
+                              type: "function_call_output",
+                              call_id: "shared-command",
+                              output: "synthetic-worker",
+                            },
+                          },
+                        ]
+                          .map((event) => JSON.stringify(event))
+                          .join("\n") + "\n",
+                      );
+                    }
+                    yield { type: "thread.started", thread_id: thread.id };
+                    if (mode === "standard") {
+                      for (const type of [
+                        "item.started",
+                        "item.completed",
+                      ] as const)
+                        yield {
+                          type,
+                          item: {
+                            id: "shared-command",
+                            type: "command_execution",
+                            command: "printf synthetic-worker",
+                            aggregated_output: "synthetic-worker",
+                            status:
+                              type === "item.started"
+                                ? "in_progress"
+                                : "completed",
+                            exit_code: 0,
+                          },
+                        };
+                      childTurns += 1;
+                      const directory = record["scanDir"] as string;
+                      if (
+                        native === "discovery" &&
+                        childTurns === 2 &&
+                        !interrupted
+                      ) {
+                        interrupted = true;
+                        await appendFile(
+                          join(
+                            sessionHome,
+                            "sessions",
+                            `rollout-${thread.id}.jsonl`,
+                          ),
+                          JSON.stringify(
+                            tokenUsageEvent({
+                              input_tokens: 10,
+                              output_tokens: 3,
+                            }),
+                          ) + "\n",
+                        );
+                        const error = new ScanTransportClosedError(
+                          "mcp_transport_closed",
+                        );
+                        controller.abort(error);
+                        throw error;
+                      }
+                      const reviewed = directory.endsWith("pass-1") ? 2 : 3;
+                      for (const [phase, filesCompleted] of [
+                        ["discovery", 0],
+                        ["discovery", reviewed],
+                        ["reporting", reviewed],
+                      ] as const) {
+                        const before = progress.at(-1)!.filesCompleted;
+                        yield {
+                          type: "item.completed",
+                          item: {
+                            id: `${id}-${phase}-${filesCompleted}`,
+                            type: "agent_message",
+                            text:
+                              "CODEX_SECURITY_SCAN_PROGRESS " +
+                              JSON.stringify({
+                                phase,
+                                filesCompleted,
+                                filesTotal: 4,
+                              }),
+                          },
+                        };
+                        await new Promise<void>((resolve) =>
+                          setImmediate(resolve),
+                        );
+                        expect(progress.at(-1)).toMatchObject({
+                          phase: "discovery",
+                          filesTotal: 4,
+                        });
+                        expect(
+                          progress.at(-1)!.filesCompleted,
+                        ).toBeGreaterThanOrEqual(
+                          Math.max(before, filesCompleted),
+                        );
+                        expect(
+                          progress.at(-1)!.filesCompleted,
+                        ).toBeLessThanOrEqual(3);
+                      }
+                      const draft: SemanticScan = {
+                        scanId: id,
+                        ...(partialCheckpoint ? { complete: false } : {}),
+                        findings: childFindings as SemanticFinding[],
+                        coverage: {
+                          completeness: partialCheckpoint
+                            ? "partial"
+                            : "complete",
+                          surfaces: [],
+                          explicitExclusions: [],
+                          deferred: partialCheckpoint
+                            ? [
+                                {
+                                  id: "pending-candidate",
+                                  candidateId: "pending-candidate",
+                                  reason:
+                                    "Independent source validation is pending.",
+                                  candidate: pendingCandidate!,
+                                },
+                              ]
+                            : [],
+                        },
+                      };
+                      if (partialCheckpoint) {
+                        const documents = prepareSemanticScanDraft(
+                          {
+                            targetContract: record["contract"] as JsonObject,
+                            mode: "standard",
+                            targetRevision: record["targetRevision"] as string,
+                          },
+                          draft,
+                        );
+                        checkpointSignal = turnOptions!.signal;
+                        // A Deep discovery worker has no workbench MCP. Its
+                        // ordinary unsealed files must survive interruption.
+                        await Promise.all([
+                          writeFile(
+                            join(directory, "scan-manifest.json"),
+                            JSON.stringify({
+                              scan: { ...documents.manifest.scan, id },
+                            }),
+                          ),
+                          writeFile(
+                            join(directory, "findings.json"),
+                            JSON.stringify({
+                              ...documents.findings,
+                              scanId: id,
+                            }),
+                          ),
+                          writeFile(
+                            join(directory, "coverage.json"),
+                            JSON.stringify({
+                              ...documents.coverage,
+                              scanId: id,
+                            }),
+                          ),
+                          appendFile(
+                            join(
+                              sessionHome,
+                              "sessions",
+                              `rollout-${thread.id}.jsonl`,
+                            ),
+                            JSON.stringify(
+                              tokenUsageEvent({
+                                input_tokens: 10,
+                                output_tokens: 3,
+                              }),
+                            ) + "\n",
+                          ),
+                        ]);
+                        if (completedCleanup) {
+                          try {
+                            yield {
+                              type: "turn.completed",
+                              usage: {
+                                input_tokens: 10,
+                                cached_input_tokens: 0,
+                                cache_write_input_tokens: 0,
+                                output_tokens: 3,
+                                reasoning_output_tokens: 0,
+                              },
+                            };
+                          } finally {
+                            controller.abort(
+                              new Error("Synthetic user cancellation"),
+                            );
+                          }
+                          return;
+                        }
+                        if (native) {
+                          // Native cancellation records the stop before draining SDK work.
+                          await runWorkbench(commandOptions, [
+                            "cancel-scan",
+                            "--scan-id",
+                            registeredScan!.scanId,
+                            "--defer-publication",
+                            "--thread-id",
+                            registeredScan!.threadId,
+                          ]);
+                        }
+                        controller.abort(
+                          new Error("Synthetic user cancellation"),
+                        );
+                        throw controller.signal.reason;
+                      }
+                      await publishDraft(
+                        (args) => runWorkbench(workbenches.get(id)!, [...args]),
+                        record,
+                        "standard",
+                        draft,
+                      );
+                    }
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        id: "response",
+                        type: "agent_message",
+                        text:
+                          mode === "deep"
+                            ? JSON.stringify({ scanId: id, groups })
+                            : "Complete",
+                      },
+                    };
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens:
+                          budget &&
+                          mode === "standard" &&
+                          childTurns === (firstChildBudget ? 1 : 2)
+                            ? 100000
+                            : 10,
+                        cached_input_tokens: 0,
+                        output_tokens: 3,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 0,
+                      },
+                    } as ThreadEvent;
+                  }
+                  return { events: events() };
+                },
+              };
+              return thread;
+            };
+            return {
+              startThread: (threadOptions) => makeThread(threadOptions),
+              resumeThread: (threadId, threadOptions) =>
+                makeThread(threadOptions, threadId),
+            };
+          },
+        },
+        { surface: "sdk" },
+      );
+    };
+    let client = await makeClient();
+    const originalSpawn = childProcess.spawn;
+    const loginSpawn = prepareNative
+      ? spyOn(childProcess, "spawn").mockImplementation(((
+          ...spawnArgs: Parameters<typeof childProcess.spawn>
+        ) => {
+          const [command, args, options] = spawnArgs;
+          if (
+            options?.env?.["CODEX_HOME"] === codexHome &&
+            Array.isArray(args) &&
+            args.at(-2) === "login" &&
+            args.at(-1) === "status"
+          ) {
+            return originalSpawn(command, [loginFixture, ...args], options);
+          }
+          return originalSpawn(...spawnArgs);
+        }) as typeof childProcess.spawn)
+      : undefined;
+    try {
+      const scanOptions: ScanOptions = {
+        mode: "deep",
+        preserveProviderEnvironment: provider !== undefined,
+        workers: 1,
+        subagents: 3,
+        stopAfterNoNew: 1,
+        maxDiscoveryRuns: 4,
+        maxTimeHours: 1,
+        outputDir: scanDir,
+        registeredScan,
+        ...(native && !prepareNative
+          ? { safetyIdentifier: "saved-native-identifier" }
+          : {}),
+        scanPrompt: "Inspect the synthetic source.",
+        ...(budget
+          ? { maxCostUsd: 0.001 }
+          : requiredCost
+            ? { maxCostUsd: 1 }
+            : {}),
+        postScanPrompt: "Post-scan instructions once.",
+        onProgress: (update) => progress.push(update),
+        onActivity: (activity) => workerRun.activities.push(activity),
+        onSessionEvent: (event) => workerRun.sessions.push(event),
+      };
+      const run = () => {
+        progress = [];
+        progressRuns.push(progress);
+        workerRun = { threads: new Set(), activities: [], sessions: [] };
+        workerRuns.push(workerRun);
+        return client.run(repo, {
+          ...scanOptions,
+          ...nativeOptions,
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(
+              Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
+            ),
+          ]),
+        });
+      };
+      const assertFollowUpLogs = async (scan: ScanLogSource) => {
+        expect(followUpThreads).toHaveLength(1);
+        if (previousFollowUp)
+          expect(scan.executionThreadIds).toContain(previousFollowUp);
+        const logs = await readSavedScanLogs(scan, codexHome);
+        for (const id of followUpThreads) {
+          expect(scan.executionThreadIds).toContain(id);
+          expect(logs.sessions.map((session) => session.threadId)).toContain(
+            id,
+          );
+          expect(logs.sessions.map((session) => session.threadId)).toContain(
+            `${id}-worker`,
+          );
+          expect(scan.continuationThreadId).not.toBe(id);
+        }
+      };
+      if (firstChildBudget || partialCheckpoint) {
+        await expect(run()).rejects.toBeInstanceOf(
+          partialCheckpoint ? ScanInterruptedError : ScanCostLimitExceededError,
+        );
+        expect(mergeAttempts).toBe(0);
+        expect(turns.map((turn) => turn.mode)).toEqual(["standard"]);
+        expect(registrations.size).toBe(2);
+        const parent = [...registrations.values()].find(
+          ({ mode }) => mode === "deep",
+        )!;
+        const saved = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          parent["scanId"] as string,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: partialCheckpoint ? "canceled" : "failed" },
+        });
+        const child = [...registrations.values()].find(
+          ({ mode }) => mode === "standard",
+        )!;
+        const savedChild = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          child["scanId"] as string,
+        ]);
+        const childCost = (savedChild["scan"] as JsonObject)["cost"];
+        expect(childCost).toBeDefined();
+        expect((saved["scan"] as JsonObject)["cost"]).toEqual(childCost);
+        expect(
+          JSON.parse(
+            await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+          ),
+        ).toMatchObject({
+          ...(native
+            ? {}
+            : { terminalReason: partialCheckpoint ? "canceled" : "capped" }),
+          aggregate: null,
+          mergedScanIds: [],
+        });
+        const findings = JSON.parse(
+          await readFile(join(scanDir, "findings.json"), "utf8"),
+        ).findings;
+        expect(findings).toHaveLength(1);
+        expect(findings[0]).toMatchObject(childFindings[0]!);
+        const coverage = JSON.parse(
+          await readFile(join(scanDir, "coverage.json"), "utf8"),
+        );
+        expect(coverage.completeness).toBe("partial");
+        if (partialCheckpoint) {
+          expect(controller.signal.aborted).toBe(true);
+          expect(checkpointSignal!.aborted).toBe(!completedCleanup);
+          expect(
+            commands.filter(
+              ({ command }) =>
+                command === "complete-scan" || command === "write-scan-draft",
+            ),
+          ).toEqual([]);
+          expect((childCost as JsonObject)["estimatedUsd"]).toBeGreaterThan(0);
+          expect(findings[0].provenance.sourceFindings).toHaveLength(1);
+          expect(findings[0].provenance.sourceFindings[0]).toMatchObject({
+            id: `${child["scanId"]}:0`,
+            finding: childFindings[0],
+          });
+          expect(coverage.deferred).toContainEqual(
+            expect.objectContaining({
+              id: `${child["scanId"]}/pending-candidate`,
+              candidateId: expect.stringMatching(
+                new RegExp(`^${child["scanId"]}:`),
+              ),
+              sourceCandidateId: "pending-candidate",
+              reason: "Independent source validation is pending.",
+              candidate: pendingCandidate,
+            }),
+          );
+          // Check the model-facing file contract, not exact instruction wording.
+          for (const field of [
+            "scan.complete",
+            "coverage.deferred",
+            "candidateId",
+          ])
+            expect(turns[0]!.prompt).toContain(field);
+        }
+        return;
+      }
+      if (native === "discovery" || native === "sealed") {
+        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        const saved = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          registeredScan!.scanId,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        savedExecutionThread = (saved["scan"] as JsonObject)[
+          "continuationThreadId"
+        ] as string;
+        expect(savedExecutionThread).not.toBe(registeredScan!.threadId);
+        const checkpoint = JSON.parse(
+          await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+        );
+        if (native === "discovery") {
+          expect(checkpoint).toMatchObject({
+            noNewStreak: 0,
+            consecutiveErrors: 0,
+          });
+          expect(checkpoint.terminalReason).toBeUndefined();
+          const child = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            checkpoint.passes[1].scanId,
+          ]);
+          expect(child["scan"]).toMatchObject({
+            progress: { status: "running" },
+          });
+          expect(
+            ((child["scan"] as JsonObject)["cost"] as JsonObject)[
+              "estimatedUsd"
+            ],
+          ).toBeGreaterThan(0);
+        } else runtimeVersion = "99.0.0";
+        expect(
+          commands.filter(({ command }) => command === "fail-scan"),
+        ).toEqual([]);
+        controller = new AbortController();
+        environment.CODEX_SAFETY_IDENTIFIER = "changed-ambient-identifier";
+        await client.close();
+        if (prepareNative) {
+          nativeRecipe = (
+            await runWorkbench(commandOptions, [
+              "get-scan-recipe",
+              "--scan-id",
+              registeredScan!.scanId,
+            ])
+          )["recipe"] as JsonObject;
+          expect(nativeRecipe["config"]).toMatchObject(nativeSettings);
+          ambientConfig = stringifyToml({
+            model: "competing-ambient-model",
+            model_reasoning_effort: "low",
+            cli_auth_credentials_store: "keyring",
+            mcp_servers: { synthetic: { command: "competing-mcp" } },
+            shell_environment_policy: {
+              set: { FIXTURE_SETTING: "competing-shell" },
+            },
+          });
+          await Promise.all([
+            writeFile(
+              join(codexHome, "auth.json"),
+              JSON.stringify({ auth_mode: "chatgpt", account: "B" }),
+            ),
+            writeFile(join(codexHome, "config.toml"), ambientConfig),
+          ]);
+        }
+        client = await makeClient();
+        if (native === "discovery") {
+          const sessionPath = join(
+            codexHome,
+            "sessions",
+            `rollout-${savedExecutionThread}.jsonl`,
+          );
+          const sessionBytes = await readFile(sessionPath);
+          const checkpointPath = join(scanDir, DEEP_SCAN_CHECKPOINT);
+          const checkpointBytes = await readFile(checkpointPath);
+          const activityBefore = [threadCount, turns.length];
+          await rm(sessionPath);
+          try {
+            await expect(run()).rejects.toThrow("The original Codex session");
+            expect([threadCount, turns.length]).toEqual(activityBefore);
+            expect(await readFile(checkpointPath)).toEqual(checkpointBytes);
+            for (const scanId of [
+              registeredScan!.scanId,
+              checkpoint.passes[1].scanId,
+            ]) {
+              const saved = await runWorkbench(commandOptions, [
+                "get-scan",
+                "--scan-id",
+                scanId,
+              ]);
+              expect(saved["scan"]).toMatchObject({
+                progress: { status: "running" },
+              });
+            }
+          } finally {
+            await writeFile(sessionPath, sessionBytes);
+          }
+        }
+      }
+      const result = await run();
+      for (const observed of workerRuns) {
+        const labels = new Map<string, number>();
+        for (const event of observed.sessions) {
+          if (!observed.threads.has(event.threadId)) {
+            expect(event.worker).toBeUndefined();
+            continue;
+          }
+          expect(event.worker).toBeGreaterThan(0);
+          if (labels.has(event.threadId))
+            expect(event.worker).toBe(labels.get(event.threadId));
+          labels.set(event.threadId, event.worker!);
+        }
+        expect(new Set(labels.keys())).toEqual(observed.threads);
+        expect(new Set(labels.values()).size).toBe(labels.size);
+        for (const threadId of observed.threads)
+          expect(
+            observed.activities
+              .filter(({ id }) => id === `${threadId}:shared-command`)
+              .map(({ worker, status }) => ({ worker, status })),
+          ).toEqual([
+            { worker: labels.get(threadId), status: "running" },
+            { worker: labels.get(threadId), status: "completed" },
+          ]);
+      }
+      for (const updates of progressRuns) {
+        const counts = updates.map((update) => update.filesCompleted);
+        expect(counts).toEqual([...counts].sort((left, right) => left - right));
+        expect(updates.every((update) => update.filesTotal === 4)).toBe(true);
+        expect(Math.max(...counts)).toBeLessThanOrEqual(3);
+      }
+      expect(progressRuns.flat()).toContainEqual({
+        phase: "discovery",
+        filesCompleted: 3,
+        filesTotal: 4,
+      });
+      if (savedExecutionThread)
+        expect(result.threadId).toBe(savedExecutionThread);
+      if (sealedArtifacts) {
+        for (const [path, bytes] of sealedArtifacts)
+          expect(await readFile(join(scanDir, path))).toEqual(bytes);
+        expect(result.manifest.scan.producer.version).toBe(version);
+      }
+      expect(result.findings.findings).toHaveLength(budget ? 2 : 1);
+      expect(result.coverage.completeness).toBe(
+        budget ? "partial" : "complete",
+      );
+      const checkpoint = JSON.parse(
+        await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+      );
+      expect(checkpoint.terminalReason).toBe(budget ? "capped" : "saturated");
+      expect(checkpoint.noNewStreak).toBe(budget ? 0 : 1);
+      expect(checkpoint.passes).toHaveLength(2);
+      expect(checkpoint.mergedScanIds).toHaveLength(budget ? 1 : 2);
+      expect(registrations.size).toBe(3);
+      if (provider !== undefined) {
+        for (const registration of registrations.values()) {
+          const saved = registration["recipe"] as JsonObject;
+          expect(saved["preserveProviderEnvironment"]).toBe(true);
+          expect(
+            (saved["config"] as JsonObject)["model_providers"],
+          ).toMatchObject({ custom: provider });
+          expect(
+            (saved["config"] as JsonObject)["cli_auth_credentials_store"],
+          ).toBe("file");
+        }
+        expect(environment.OPENAI_API_KEY).toBe(
+          customProvider ? undefined : "synthetic-provider-key",
+        );
+        expect(environment.CODEX_API_KEY).toBe(
+          customProvider ? undefined : "synthetic-native-key",
+        );
+      }
+      for (const turn of turns) {
+        const servers = (turn.config as JsonObject | undefined)?.[
+          "mcp_servers"
+        ] as JsonObject | undefined;
+        expect(servers?.["codex-security"]).toEqual({
+          command: "node",
+          enabled: false,
+        });
+        if (prepareNative)
+          expect(servers?.["synthetic"]).toEqual(
+            nativeSettings.mcp_servers.synthetic,
+          );
+        const permission = turn.overrides?.find((value) =>
+          value.startsWith("permissions.codex_security_scan="),
+        );
+        expect(permission).toBeDefined();
+        expect(parseToml(permission!)).toMatchObject({
+          permissions: {
+            codex_security_scan: {
+              filesystem: {
+                [join(root, "private")]: "deny",
+                ":root": "read",
+                ":workspace_roots": "write",
+              },
+              network: { enabled: false },
+            },
+          },
+        });
+        expect(await realpath(turn.executable!)).toBe(
+          await realpath(environment.CODEX_CLI_PATH),
+        );
+        expect(turn.environment["SYNTHETIC_SCAN_SETTING"]).toBe("inherited");
+        expect(turn.environment["CODEX_SECURITY_GIT"]).toMatch(
+          /git(?:\.exe)?$/iu,
+        );
+        expect(turn.environment["GIT_SSH_COMMAND"]).toBe(
+          environment.GIT_SSH_COMMAND,
+        );
+        expect(turn.environment["GIT_CONFIG_GLOBAL"]).toBe(
+          environment.GIT_CONFIG_GLOBAL,
+        );
+        expect(turn.environment["CODEX_SAFETY_IDENTIFIER"]).toBe(
+          native && !prepareNative
+            ? "saved-native-identifier"
+            : customProvider
+              ? "ambient-identifier"
+              : undefined,
+        );
+        if (customProvider) {
+          expect(turn.environment["PROVIDER_KEY"]).toBe(
+            "synthetic-provider-key",
+          );
+          expect(turn.environment).not.toHaveProperty("OPENAI_API_KEY");
+          expect(turn.environment).not.toHaveProperty("CODEX_API_KEY");
+        }
+      }
+      const children = turns.filter((turn) => turn.mode === "standard");
+      const configByChild = new Map(
+        children.map((turn) => [
+          turn.id,
+          turn.environment["CODEX_SECURITY_CONFIG_PATH"],
+        ]),
+      );
+      if (prepareNative) {
+        for (const config of configByChild.values())
+          expect(config).toBeDefined();
+        expect(new Set(configByChild.values()).size).toBe(configByChild.size);
+      }
+      expect(children).toHaveLength(native === "discovery" ? 3 : 2);
+      expect(new Set(children.map((turn) => turn.id)).size).toBe(2);
+      if (prepareNative) {
+        if (customProvider) {
+          expect(existsSync(accountLog)).toBe(false);
+          expect(nativeRecipe!["safetyIdentifier"]).toBe("ambient-identifier");
+        } else {
+          const accounts = (await readFile(accountLog, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(accounts[0]).toMatchObject({ home: codexHome, account: "A" });
+          expect(accounts.at(-1)).toMatchObject({
+            home: codexHome,
+            account: "B",
+          });
+          for (const { args } of accounts)
+            expect(args).toContain('cli_auth_credentials_store="file"');
+          expect(
+            accounts.every(
+              ({ home, account }) =>
+                home === codexHome && ["A", "B"].includes(account),
+            ),
+          ).toBe(true);
+        }
+        expect(
+          children.map(({ account, resumed }) => ({ account, resumed })),
+        ).toEqual([
+          { account: "A", resumed: false },
+          { account: "A", resumed: false },
+          { account: "B", resumed: true },
+        ]);
+        expect(
+          turns
+            .filter(
+              ({ mode, prompt }) =>
+                mode === "deep" && prompt !== "Post-scan instructions once.",
+            )
+            .map(({ account }) => account),
+        ).toEqual(["A", "B"]);
+        expect(result.cost!.estimatedUsd).toBeGreaterThan(0);
+        expect(existsSync(join(codexHome, "sessions"))).toBe(true);
+        expect(existsSync(join(managedHome, "sessions"))).toBe(false);
+        expect(await readFile(join(managedHome, "auth.json"), "utf8")).toBe(
+          managedAuth,
+        );
+        expect(await readFile(join(managedHome, "config.toml"), "utf8")).toBe(
+          managedConfig,
+        );
+        expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(
+          ambientConfig,
+        );
+      }
+      for (const child of children) {
+        expect(child.prompt).toContain("Inspect the synthetic source.");
+        expect(child.prompt).not.toContain("sourceFindingIds");
+        expect(child.config).toMatchObject({
+          model: "gpt-6-astra",
+          model_reasoning_effort: "ultra",
+          features: {
+            multi_agent_v2: {
+              enabled: true,
+              max_concurrent_threads_per_session: 4,
+            },
+          },
+        });
+        const completed = checkpoint.mergedScanIds.includes(child.id);
+        expect(
+          commands.filter(
+            (command) =>
+              command.command === "complete-scan" && command.id === child.id,
+          ),
+        ).toHaveLength(completed ? 1 : 0);
+        const record = registrations.get(child.id)!;
+        const manifest = JSON.parse(
+          await readFile(
+            join(record["scanDir"] as string, "scan-manifest.json"),
+            "utf8",
+          ),
+        );
+        expect(manifest.scan.complete).not.toBe(false);
+      }
+      expect(
+        commands.filter(
+          (command) =>
+            command.command ===
+              (budget ? "complete-budget-exhausted-scan" : "complete-scan") &&
+            command.id === result.manifest.scan.id,
+        ),
+      ).toHaveLength(1);
+      expect(
+        turns.filter((turn) => turn.prompt === "Post-scan instructions once."),
+      ).toHaveLength(budget ? 0 : 1);
+      if (!budget) {
+        const saved = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          result.manifest.scan.id,
+        ]);
+        const scan = saved["scan"] as ScanLogSource;
+        expect(scan.continuationThreadId).toBe(result.threadId!);
+        await assertFollowUpLogs(scan);
+      }
+      if (budget) {
+        expect(result.cost!.estimatedUsd).toBeGreaterThan(0.001);
+        expect(result.coverage.deferred.length).toBeGreaterThan(0);
+        const stopped = await runWorkbench(
+          { ...workbenches.get(children[1]!.id)!, signal: undefined },
+          ["get-scan", "--scan-id", children[1]!.id],
+        );
+        expect((stopped["scan"] as JsonObject)["cost"]).toBeDefined();
+      }
+      const listed = await runWorkbench(
+        { ...workbenches.get(result.manifest.scan.id)!, signal: undefined },
+        ["list-scans"],
+      );
+      const listedIds = (listed["scans"] as JsonObject[]).map(
+        (scan) => scan["scanId"],
+      );
+      expect(listedIds).toContain(result.manifest.scan.id);
+      expect(listedIds).toHaveLength(1);
+    } finally {
+      try {
+        await client.close();
+      } finally {
+        loginSpawn?.mockRestore();
+      }
+    }
+    if (prepareNative) {
+      expect(existsSync(join(codexHome, "sessions"))).toBe(true);
+      expect(
+        JSON.parse(await readFile(join(codexHome, "auth.json"), "utf8")),
+      ).toEqual({ auth_mode: "chatgpt", account: "B" });
+      expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(
+        ambientConfig,
+      );
+    }
+  },
+);

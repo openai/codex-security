@@ -60,11 +60,17 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
+    def unlink_if_exists(
+        root: Path,
+        relative_path: str,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
+        (root / relative_path).unlink(missing_ok=True)
+
     backend.open_read_fd.side_effect = open_read_fd
     backend.atomic_write.side_effect = atomic_write
-    backend.unlink_if_exists.side_effect = lambda root, relative_path: (
-        root / relative_path
-    ).unlink(missing_ok=True)
+    backend.unlink_if_exists.side_effect = unlink_if_exists
 
     with (
         mock.patch.object(finalizer.os, "supports_dir_fd", set()),

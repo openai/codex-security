@@ -248,6 +248,78 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("projects private saved recipe config in public history output", async () => {
+    const publicConfig = {
+      model: "model-test",
+      model_provider: "custom",
+      model_reasoning_effort: "high",
+      approval_policy: "on-request",
+    };
+    const recipe = {
+      repository: "/repo",
+      config: {
+        ...publicConfig,
+        model_providers: {
+          custom: {
+            http_headers: { Authorization: "Bearer SYNTHETIC_PRIVATE_TOKEN" },
+          },
+        },
+        forced_chatgpt_workspace_id: "SYNTHETIC_PRIVATE_WORKSPACE",
+      },
+      knowledgeBasePaths: ["/knowledge"],
+      deepScan: { maxDiscoveryRuns: 12 },
+    };
+    const originalRecipe = structuredClone(recipe);
+    const response = {
+      scan: {
+        scanId: "scan-1",
+        targetPath: "/repo",
+        mode: "deep",
+        progress: { status: "complete" },
+        findings: [],
+      },
+      recipe,
+    };
+    const cases = [
+      ["scans", "show", "scan-1"],
+      ["scans", "show", "scan-1", "--json"],
+      [
+        "findings",
+        "false-positive",
+        "occurrence-1",
+        "--reason",
+        "Synthetic reason.",
+        "--json",
+      ],
+    ];
+    for (const argv of cases) {
+      const stdout = capture(true);
+      const stderr = capture();
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          stderr.stream,
+          dependencies({ onWorkbench: () => response }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toBe("");
+      expect(stdout.text()).not.toContain("SYNTHETIC_PRIVATE");
+      if (argv.includes("--json")) {
+        expect(JSON.parse(stdout.text()).recipe).toEqual({
+          ...originalRecipe,
+          config: publicConfig,
+        });
+      } else {
+        expect(stdout.text()).toContain("model=model-test");
+        expect(stdout.text()).toContain("approval_policy=on-request");
+        expect(stdout.text()).toContain("/knowledge");
+      }
+      expect(response.recipe).toBe(recipe);
+      expect(recipe).toEqual(originalRecipe);
+    }
+  });
+
   test("shows saved scan activity without starting Codex", async () => {
     const state = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-cli-logs-")),

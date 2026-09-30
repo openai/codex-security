@@ -65,7 +65,7 @@ export async function standaloneArtifactContext(
   if (storage === "temporary") {
     // Resolve existing ancestors for stable imports without creating or requiring
     // the persistent collection. storageContext prepares the temporary root.
-    return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
+    return { root: await resolveStoragePath(root), repoRoot };
   }
   const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
@@ -75,7 +75,6 @@ export async function standaloneArtifactContext(
   return {
     root: await requireArtifactRoot(root, "Standalone artifacts"),
     repoRoot,
-    layout: "scan",
   };
 }
 
@@ -171,6 +170,15 @@ export async function saveCodexSecurityArtifact(
   }
   const parts =
     input.path === undefined ? undefined : supplementalPath(input, context);
+  // Deep Scan runtime state belongs to the host.
+  if (
+    input.storage === "persistent" &&
+    parts?.slice(0, 2).join("/").toLowerCase() === "artifacts/deep-scan"
+  ) {
+    throw new Error(
+      "Use the existing scan tools for canonical artifacts, ledgers and checkpoints.",
+    );
+  }
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

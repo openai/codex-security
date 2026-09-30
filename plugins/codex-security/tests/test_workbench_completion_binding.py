@@ -14,7 +14,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     source_plugin_version,
     stable_target_id,
@@ -67,7 +67,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
 
@@ -265,10 +265,11 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
     late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
-    write_checkpoint(
-        scan_dir / "checkpoints",
-        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
-    )
+    for directory in ("checkpoints", "checkpoints/pending"):
+        write_checkpoint(
+            scan_dir / directory,
+            {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+        )
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
 
     manifest = json.loads(manifest_path.read_text())
@@ -572,19 +573,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            coordinator_manifest = scan_dir / "coordinator-manifest.json"
-            coordinator_manifest.write_text("{}\n")
-            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-                connection.execute(
-                    """
-                    UPDATE deep_scan_runs
-                    SET status = 'succeeded', phase = 'terminal',
-                        terminal_reason = 'capped', manifest_path = ?,
-                        completed_at = updated_at
-                    WHERE scan_id = ?
-                    """,
-                    (str(coordinator_manifest), scan_id),
-                )
+            mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
         write_completed_contract(
             scan_dir,
             scan_id,
@@ -875,10 +864,8 @@ def test_deep_completion_preserves_running_scan_after_transient_report_failure(
     assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
     preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert preserved["progress"]["status"] == "running"
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-        ).fetchone() == ("succeeded",)
+    checkpoint = json.loads((scan_dir / "artifacts/deep-scan/checkpoint.json").read_text())
+    assert checkpoint["terminalReason"] == "saturated"
     assert {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
@@ -1189,8 +1176,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": json.loads((scan_dir / "coverage.json").read_text()),
     }
-    (scan_dir / "checkpoints").mkdir()
-    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]

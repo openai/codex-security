@@ -180,7 +180,7 @@ try {
     }),
     sdk.ScanInterruptedError,
   );
-  assert.equal((await savedScan(1)).progress.status, "failed");
+  assert.equal((await savedScan(1)).progress.status, "canceled");
   assert.equal(finished.has(1), true);
 
   let closing;
@@ -195,7 +195,7 @@ try {
   );
   assert.ok(closing);
   await closing;
-  assert.equal((await savedScan(2)).progress.status, "failed");
+  assert.equal((await savedScan(2)).progress.status, "canceled");
   assert.equal(finished.has(2), true);
   assert.equal(turns.length, 3);
   await assert.rejects(client.run(repository), /CodexSecurity is closed/u);

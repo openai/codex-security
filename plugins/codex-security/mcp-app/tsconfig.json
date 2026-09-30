@@ -4,6 +4,7 @@
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "lib": ["esnext", "dom"],
     "noEmit": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
@@ -11,5 +12,5 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["main.ts", "artifact-writer-main.ts", "helpers-main.ts", "server.ts", "src"]
+  "include": ["main.ts", "helpers-main.ts", "server.ts", "src"]
 }

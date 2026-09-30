@@ -1,4 +1,4 @@
-"""Per-finding severity checkpoints and the selection requested for each scan."""
+"""Reusable severity checkpoints and the assessments saved for each scan."""
 
 import argparse
 import json
@@ -27,12 +27,19 @@ FIELDS = {
 }
 
 
-def assessments(connection: sqlite3.Connection, finding_ids: list[str]) -> list[dict[str, Any]]:
+def assessments(
+    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str | None = None
+) -> list[dict[str, Any]]:
+    table = "finding_severity_assessments" if scan_id is None else "scan_severity_assessments"
+    scope = "" if scan_id is None else "WHERE assessment.scan_id = ?"
+    parameters = (
+        (json.dumps(finding_ids),) if scan_id is None else (json.dumps(finding_ids), scan_id)
+    )
     rows = connection.execute(
-        """SELECT assessment.* FROM json_each(?) AS selected
-        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
-        ORDER BY selected.key""",
-        (json.dumps(finding_ids),),
+        f"""SELECT assessment.* FROM json_each(?) AS selected
+        JOIN {table} AS assessment ON assessment.finding_id = selected.value
+        {scope} ORDER BY selected.key""",
+        parameters,
     )
     return [{key: row[column] for key, column in FIELDS.items()} for row in rows]
 
@@ -59,7 +66,30 @@ def checkpoint(
                     payload["knowledgeBaseSha256"],
                 ),
             )
-            return {"assessments": assessments(connection, payload["findingIds"])}
+            rows = connection.execute(
+                """SELECT * FROM (
+                    SELECT assessment.*, selected.key AS finding_order,
+                        ROW_NUMBER() OVER (PARTITION BY assessment.finding_id
+                            ORDER BY (assessment.scan_id = ?) DESC, assessment.assessed_at DESC, assessment.scan_id) AS rank
+                    FROM json_each(?) AS selected
+                    JOIN scan_severity_assessments AS assessment
+                        ON assessment.finding_id = selected.key
+                        AND assessment.input_sha256 = selected.value
+                    WHERE assessment.rubric_sha256 IS ?
+                        AND assessment.knowledge_base_sha256 IS ?
+                ) WHERE rank = 1 ORDER BY finding_order""",
+                (
+                    payload["scanId"],
+                    json.dumps(payload["inputs"]),
+                    payload["rubricSha256"],
+                    payload["knowledgeBaseSha256"],
+                ),
+            )
+            return {
+                "assessments": [
+                    {key: row[column] for key, column in FIELDS.items()} for row in rows
+                ]
+            }
     if payload["action"] != "save":
         raise SystemExit("Unknown severity checkpoint action.")
     finding = payload["finding"]
@@ -73,15 +103,23 @@ def checkpoint(
             is None
         ):
             upsert_finding(connection, finding, timestamp)
-        columns = ", ".join(FIELDS.values())
-        parameters = ", ".join("?" for _ in FIELDS)
-        updates = ", ".join(f"{column} = excluded.{column}" for column in FIELDS.values())
+        row = {
+            "scan_id": payload["scanId"],
+            **{column: assessment[key] for key, column in FIELDS.items()},
+        }
+        columns = ", ".join(row)
+        parameters = ", ".join("?" for _ in row)
+        updates = ", ".join(f"{column} = excluded.{column}" for column in row)
+        conflict = f"DO UPDATE SET {updates}"
+        if payload.get("reused"):
+            conflict += " WHERE " + " OR ".join(
+                f"scan_severity_assessments.{column} IS NOT excluded.{column}"
+                for column in ("input_sha256", "rubric_sha256", "knowledge_base_sha256")
+            )
         connection.execute(
-            f"""INSERT INTO finding_severity_assessments ({columns})
-            VALUES ({parameters})
-            ON CONFLICT(finding_id) DO UPDATE SET
-            {updates}""",
-            tuple(assessment[key] for key in FIELDS),
+            f"INSERT INTO scan_severity_assessments ({columns}) VALUES ({parameters}) "
+            f"ON CONFLICT(scan_id, finding_id) {conflict}",
+            tuple(row.values()),
         )
     return {}
 
@@ -105,13 +143,21 @@ def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
         if row is None:
             return {}
         finding_ids = json.loads(row["finding_ids_json"])
+        has_scan_assessments = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'"
+            ).fetchone()
+            is not None
+        )
         return {
             "scanId": scan_id,
             "findingIds": finding_ids,
             "assessedAt": row["assessed_at"],
             "rubricSha256": row["rubric_sha256"],
             "knowledgeBaseSha256": row["knowledge_base_sha256"],
-            "assessments": assessments(connection, finding_ids),
+            "assessments": assessments(
+                connection, finding_ids, scan_id if has_scan_assessments else None
+            ),
         }
 
 

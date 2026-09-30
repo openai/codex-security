@@ -1,7 +1,5 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 import { parse as parseToml, type TomlTable } from "smol-toml";
-import { writeCodexConfig, type JsonObject } from "./config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -19,9 +17,6 @@ export type DeepScanSources = Record<
 export interface ResolvedDeepScanConfig {
   settings: Required<DeepScanOptions>;
   sources: DeepScanSources;
-  source: string;
-  document: TomlTable;
-  overrides: DeepScanOptions;
 }
 
 export function deepScanOptions(
@@ -110,79 +105,7 @@ export async function resolveDeepScanConfig(
   return {
     settings,
     sources,
-    source,
-    document,
-    overrides: explicit,
   };
-}
-
-export async function writeDeepScanConfig(
-  destination: string,
-  resolved: ResolvedDeepScanConfig,
-): Promise<void> {
-  const [source, target] = await Promise.all([
-    canonicalConfigPath(resolved.source),
-    runtimeConfigPath(destination),
-  ]);
-  let document = resolved.document;
-  const sameFile = source === target;
-  if (sameFile) {
-    if (Object.keys(resolved.overrides).length === 0) return;
-    document = await readDeepScanDocument(destination);
-  }
-  // An isolated runtime needs a complete snapshot. An ambient file keeps
-  // inherited defaults unset so future releases can still update them.
-  const settings = sameFile ? resolved.overrides : resolved.settings;
-  const retainAmbientSettings =
-    sameFile &&
-    DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
-  await writeCodexConfig(destination, {
-    ...document,
-    deep_scan: {
-      ...(retainAmbientSettings
-        ? (document["deep_scan"] as TomlTable | undefined)
-        : {}),
-      ...Object.fromEntries(
-        DEEP_SCAN_SETTINGS.filter(([name]) => settings[name] !== undefined).map(
-          ([name, key]) => [key, settings[name]],
-        ),
-      ),
-    },
-  } as JsonObject);
-}
-
-async function runtimeConfigPath(path: string): Promise<string> {
-  try {
-    return await canonicalConfigPath(path);
-  } catch (error) {
-    if (
-      (error as NodeJS.ErrnoException).code !== "ELOOP" ||
-      !(await lstat(path)).isSymbolicLink()
-    )
-      throw error;
-    // A stale cyclic file link is replaced by writeCodexConfig's atomic rename.
-    // Errors resolving its parent (or the ambient source) still fail the write.
-    return join(await canonicalConfigPath(dirname(path)), basename(path));
-  }
-}
-
-async function canonicalConfigPath(path: string): Promise<string> {
-  let existing = resolve(path);
-  const missing: string[] = [];
-  while (true) {
-    try {
-      return join(await realpath(existing), ...missing);
-    } catch (error) {
-      const parent = dirname(existing);
-      if (
-        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
-        parent === existing
-      )
-        throw error;
-      missing.unshift(basename(existing));
-      existing = parent;
-    }
-  }
 }
 
 async function readDeepScanDocument(

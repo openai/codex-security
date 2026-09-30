@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fsPromises } from "node:fs";
+import { promises as fs } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   realpath,
-  rename,
   rm,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -35,10 +34,8 @@ const module = await import(
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
-  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraft: publishScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
-  saveScanDraftCheckpoint,
   scanDraftInputSchema,
 } = module;
 
@@ -50,7 +47,6 @@ try {
   const context = {
     root,
     repoRoot: root,
-    layout: "scan",
     scanId,
     scope: ".",
     mode: "standard",
@@ -119,447 +115,10 @@ try {
     coverage,
   };
 
-  const workerRoot = path.join(root, "worker-output");
-  await mkdir(workerRoot);
-  const workerContext = {
-    root: workerRoot,
-    repoRoot: root,
-    layout: "worker",
-    scanId,
-  };
-  const workerInput = {
-    scanId,
-    scope: { summary: "Archive handling" },
-    threatModel: { summary: "Untrusted users may upload archives." },
-    findings: [finding],
-    coverage,
-  };
-  const workerResultPath = path.join(workerRoot, "result.json");
-
-  const checkpointRoot = path.join(root, "checkpoint-worker");
-  await mkdir(checkpointRoot);
-  const checkpointContext = { ...workerContext, root: checkpointRoot };
-  const checkpoint = { ...workerInput, complete: false };
-  await recordCodexSecurityWorkerScanDraft(checkpointContext, checkpoint);
-  const checkpointFiles = await readdir(
-    path.join(checkpointRoot, "checkpoints"),
-  );
-  assert.equal(checkpointFiles.length, 1);
-  assert.deepEqual(
-    JSON.parse(
-      await readFile(
-        path.join(checkpointRoot, "checkpoints", checkpointFiles[0]),
-        "utf8",
-      ),
-    ),
-    checkpoint,
-  );
-  const checkpointBytes = await readFile(
-    path.join(checkpointRoot, "checkpoints", checkpointFiles[0]),
-  );
-  await recordCodexSecurityWorkerScanDraft(checkpointContext, {
-    ...workerInput,
-    findings: [],
-  });
-  assert.deepEqual(
-    JSON.parse(await readFile(path.join(checkpointRoot, "result.json"), "utf8"))
-      .findings,
-    [finding],
-    "a later write cannot silently remove a saved validated finding",
-  );
-  assert.deepEqual(
-    await readFile(
-      path.join(checkpointRoot, "checkpoints", checkpointFiles[0]),
-    ),
-    checkpointBytes,
-  );
-  assert.equal(
-    (await readdir(path.join(checkpointRoot, "checkpoints"))).length,
-    3,
-    "raw and reconciled drafts remain immutable while the head selects the accepted result",
-  );
-
-  const interruptedRoot = path.join(root, "interrupted-checkpoint-worker");
-  await mkdir(interruptedRoot);
-  const interruptedContext = { ...workerContext, root: interruptedRoot };
   const interruptedFinding = structuredClone(finding);
   interruptedFinding.identity = { anchor: "interrupted-checkpoint" };
   interruptedFinding.provenance.candidateId = "interrupted-checkpoint";
   interruptedFinding.extensions.candidateId = "interrupted-checkpoint";
-  await saveScanDraftCheckpoint(
-    interruptedContext,
-    {
-      ...workerInput,
-      complete: false,
-      findings: [interruptedFinding],
-      coverage: {
-        ...coverage,
-        completeness: "partial",
-        deferred: [
-          {
-            candidateId: "interrupted-review",
-            reason: "Review was checkpointed.",
-          },
-        ],
-      },
-    },
-    false,
-  );
-  await recordCodexSecurityWorkerScanDraft(interruptedContext, {
-    ...workerInput,
-    findings: [],
-  });
-  const interruptedResult = JSON.parse(
-    await readFile(path.join(interruptedRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(interruptedResult.findings, [interruptedFinding]);
-  assert.equal(
-    interruptedResult.coverage.deferred.some(
-      (item) => item.candidateId === "interrupted-review",
-    ),
-    true,
-  );
-
-  const rejectedIncompleteRoot = path.join(root, "rejected-incomplete-worker");
-  await mkdir(rejectedIncompleteRoot);
-  const rejectedIncompleteContext = {
-    ...workerContext,
-    root: rejectedIncompleteRoot,
-  };
-  await recordCodexSecurityWorkerScanDraft(
-    rejectedIncompleteContext,
-    workerInput,
-  );
-  await recordCodexSecurityWorkerScanDraft(rejectedIncompleteContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [
-        {
-          candidateId: finding.provenance.candidateId,
-          label: "Archive extraction",
-          disposition: "rejected",
-          notes: "The incomplete writer rejected this candidate.",
-        },
-      ],
-      deferred: [
-        {
-          candidateId: "late-incomplete-review",
-          reason: "This arrived after the worker completed.",
-        },
-      ],
-    },
-  });
-  const acceptedHead = JSON.parse(
-    await readFile(
-      path.join(rejectedIncompleteRoot, "checkpoint-head.json"),
-      "utf8",
-    ),
-  );
-  const acceptedHeadDraft = JSON.parse(
-    await readFile(
-      path.join(rejectedIncompleteRoot, "checkpoints", acceptedHead.checkpoint),
-      "utf8",
-    ),
-  );
-  assert.notEqual(
-    acceptedHeadDraft.complete,
-    false,
-    "a rejected incomplete write must not become the authoritative checkpoint head",
-  );
-  assert.deepEqual(acceptedHeadDraft.findings, [finding]);
-  const acceptedResult = JSON.parse(
-    await readFile(path.join(rejectedIncompleteRoot, "result.json"), "utf8"),
-  );
-  assert.equal(
-    acceptedResult.coverage.deferred.some(
-      (item) => item.candidateId === "late-incomplete-review",
-    ),
-    false,
-    "a rejected incomplete write must not change the completed result",
-  );
-
-  const deferredDoesNotRejectRoot = path.join(
-    root,
-    "deferred-does-not-reject-worker",
-  );
-  await mkdir(deferredDoesNotRejectRoot);
-  const deferredDoesNotRejectContext = {
-    ...workerContext,
-    root: deferredDoesNotRejectRoot,
-  };
-  await recordCodexSecurityWorkerScanDraft(
-    deferredDoesNotRejectContext,
-    workerInput,
-  );
-  await recordCodexSecurityWorkerScanDraft(deferredDoesNotRejectContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "A stale worker row still says validation is pending.",
-        },
-      ],
-    },
-  });
-  const deferredDoesNotReject = JSON.parse(
-    await readFile(path.join(deferredDoesNotRejectRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    deferredDoesNotReject.findings,
-    [finding],
-    "deferred coverage is not an explicit rejection of an already validated finding",
-  );
-
-  const rejection = {
-    candidateId: finding.provenance.candidateId,
-    label: "Archive extraction",
-    disposition: "rejected",
-    notes: "The source enforces containment before the write.",
-  };
-  await recordCodexSecurityWorkerScanDraft(checkpointContext, {
-    ...workerInput,
-    findings: [],
-    coverage: { ...coverage, surfaces: [rejection] },
-  });
-  const rejectedCheckpoint = JSON.parse(
-    await readFile(path.join(checkpointRoot, "result.json"), "utf8"),
-  );
-  assert.equal(rejectedCheckpoint.findings.length, 0);
-  assert.deepEqual(rejectedCheckpoint.coverage.surfaces[0].finding, finding);
-
-  const rejectionWithoutNotesRoot = path.join(
-    root,
-    "rejection-without-notes-worker",
-  );
-  await mkdir(rejectionWithoutNotesRoot);
-  const rejectionWithoutNotesContext = {
-    ...workerContext,
-    root: rejectionWithoutNotesRoot,
-  };
-  await recordCodexSecurityWorkerScanDraft(
-    rejectionWithoutNotesContext,
-    checkpoint,
-  );
-  const { notes: _notes, ...rejectionWithoutNotes } = rejection;
-  await recordCodexSecurityWorkerScanDraft(rejectionWithoutNotesContext, {
-    ...workerInput,
-    findings: [],
-    coverage: { ...coverage, surfaces: [rejectionWithoutNotes] },
-  });
-  const rejectedWithoutNotes = JSON.parse(
-    await readFile(path.join(rejectionWithoutNotesRoot, "result.json"), "utf8"),
-  );
-  assert.equal(rejectedWithoutNotes.findings.length, 0);
-  assert.deepEqual(rejectedWithoutNotes.coverage.surfaces[0].finding, finding);
-
-  const carriedContextRoot = path.join(root, "carried-context-worker");
-  await mkdir(carriedContextRoot);
-  const carriedContext = { ...workerContext, root: carriedContextRoot };
-  await recordCodexSecurityWorkerScanDraft(carriedContext, {
-    ...workerInput,
-    complete: false,
-  });
-  const {
-    scope: _scope,
-    threatModel: _threatModel,
-    ...workerWithoutContext
-  } = workerInput;
-  await recordCodexSecurityWorkerScanDraft(
-    carriedContext,
-    workerWithoutContext,
-  );
-  const carriedWorker = JSON.parse(
-    await readFile(path.join(carriedContextRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(carriedWorker.scope, workerInput.scope);
-  assert.deepEqual(carriedWorker.threatModel, workerInput.threatModel);
-
-  const coverageProgressRoot = path.join(root, "coverage-progress-worker");
-  await mkdir(coverageProgressRoot);
-  const coverageProgressContext = {
-    ...workerContext,
-    root: coverageProgressRoot,
-  };
-  const pendingQuestion =
-    "Does the alternate archive handler enforce containment?";
-  await recordCodexSecurityWorkerScanDraft(coverageProgressContext, {
-    ...workerInput,
-    complete: false,
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [
-        {
-          id: "surface-archive",
-          label: "Archive extraction",
-          disposition: "needs_follow_up",
-          notes: "Containment review is pending.",
-        },
-      ],
-      openQuestions: [pendingQuestion],
-    },
-  });
-  await recordCodexSecurityWorkerScanDraft(coverageProgressContext, {
-    ...workerInput,
-    coverage: {
-      ...coverage,
-      surfaces: [
-        {
-          id: "surface-archive",
-          label: "Archive extraction",
-          disposition: "reported",
-          notes: "The reachable extraction path lacks containment.",
-        },
-      ],
-    },
-  });
-  const progressedCoverage = JSON.parse(
-    await readFile(path.join(coverageProgressRoot, "result.json"), "utf8"),
-  ).coverage;
-  assert.deepEqual(
-    progressedCoverage.surfaces.map(({ id, disposition }) => ({
-      id,
-      disposition,
-    })),
-    [{ id: "surface-archive", disposition: "reported" }],
-  );
-  assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
-  assert.equal(progressedCoverage.completeness, "complete");
-
-  const renamedProgressRoot = path.join(
-    root,
-    "renamed-coverage-progress-worker",
-  );
-  await mkdir(renamedProgressRoot);
-  const renamedProgressContext = {
-    ...workerContext,
-    root: renamedProgressRoot,
-  };
-  const staleSurfaces = [
-    {
-      label: "ZIP entry candidate awaiting validation",
-      disposition: "needs_follow_up",
-      notes: "The archive candidate still needs validation.",
-    },
-    {
-      id: "surface-legacy-archive",
-      label: "Original archive extraction surface",
-      disposition: "needs_follow_up",
-      notes: "The archive candidate still needs validation.",
-    },
-  ];
-  const resolvedCoverage = {
-    ...coverage,
-    surfaces: [
-      {
-        label: "Validated archive path traversal",
-        disposition: "reported",
-        notes: "The archive candidate was validated.",
-      },
-    ],
-  };
-  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: staleSurfaces,
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "Archive path traversal validation is pending.",
-        },
-      ],
-    },
-  });
-  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
-    ...workerInput,
-    complete: false,
-    coverage: resolvedCoverage,
-  });
-  const resolvedProgress = JSON.parse(
-    await readFile(path.join(renamedProgressRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    resolvedProgress.coverage.surfaces,
-    resolvedCoverage.surfaces,
-  );
-  assert.equal(resolvedProgress.coverage.completeness, "complete");
-
-  await saveScanDraftCheckpoint(
-    renamedProgressContext,
-    {
-      ...workerInput,
-      complete: false,
-      coverage: {
-        ...resolvedCoverage,
-        completeness: "partial",
-        surfaces: [...resolvedCoverage.surfaces, ...staleSurfaces],
-      },
-    },
-    false,
-  );
-  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
-    ...workerInput,
-    complete: true,
-    coverage: resolvedCoverage,
-  });
-  const finalProgress = JSON.parse(
-    await readFile(path.join(renamedProgressRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(finalProgress.coverage.surfaces, resolvedCoverage.surfaces);
-  assert.equal(finalProgress.coverage.completeness, "complete");
-
-  const anchorRoot = path.join(root, "anchor-is-not-candidate-worker");
-  await mkdir(anchorRoot);
-  const anchorContext = { ...workerContext, root: anchorRoot };
-  const anchor = "shared-finding-and-deferred-label";
-  const { candidateId: _provenanceCandidate, ...anchorProvenance } =
-    finding.provenance;
-  const { candidateId: _extensionCandidate, ...anchorExtensions } =
-    finding.extensions;
-  const anchoredFinding = {
-    ...finding,
-    identity: { anchor },
-    provenance: anchorProvenance,
-    extensions: anchorExtensions,
-  };
-  await recordCodexSecurityWorkerScanDraft(anchorContext, {
-    ...workerInput,
-    complete: false,
-    findings: [anchoredFinding],
-  });
-  await recordCodexSecurityWorkerScanDraft(anchorContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        { id: anchor, reason: "An unrelated review item remains pending." },
-      ],
-    },
-  });
-  const anchorResult = JSON.parse(
-    await readFile(path.join(anchorRoot, "result.json"), "utf8"),
-  );
-  assert.equal(anchorResult.findings.length, 1);
-  assert.deepEqual(anchorResult.findings[0].identity, { anchor });
-  assert.equal("finding" in anchorResult.coverage.deferred[0], false);
 
   const parentCheckpointRoot = path.join(root, "checkpoint-parent");
   await mkdir(parentCheckpointRoot);
@@ -572,7 +131,9 @@ try {
       path.join(
         parentCheckpointRoot,
         "checkpoints",
-        (await readdir(path.join(parentCheckpointRoot, "checkpoints")))[0],
+        (await readdir(path.join(parentCheckpointRoot, "checkpoints"))).find(
+          (name) => name.endsWith(".json"),
+        ),
       ),
       "utf8",
     ),
@@ -589,31 +150,126 @@ try {
     1,
   );
 
+  // This is the exact current parent payload that merge_saved_results persists.
+  const producerCheckpoint = JSON.parse(
+    execFileSync(
+      process.env.PYTHON ??
+        (process.platform === "win32" ? "python" : "python3"),
+      [
+        "-B",
+        "-c",
+        `
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_saved_results import _read_saved_parent_result
+print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
+`,
+        path.resolve(import.meta.dirname, "../../scripts"),
+        parentCheckpointRoot,
+        scanId,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  assert.deepEqual(producerCheckpoint.scope.includePaths, ["."]);
+  assert.deepEqual(producerCheckpoint.coverage.includePaths, ["."]);
+  assert.deepEqual(producerCheckpoint.coverage.excludePaths, []);
+  assert.equal(producerCheckpoint.coverage.mode, "repository");
+  assert.equal(producerCheckpoint.coverage.inventoryStrategy, "repository");
+  const producerContext = { ...context, root: parentCheckpointRoot };
+  const producerPath = await saveScanDraftCheckpoint(
+    producerContext,
+    producerCheckpoint,
+  );
+  const producerBytes = await readFile(producerPath, "utf8");
+  await recordCodexSecurityScanDraft(producerContext, {
+    ...input,
+    findings: [],
+  });
+  assert.deepEqual(
+    (await readJson(parentCheckpointRoot, "findings.json")).findings,
+    producerCheckpoint.findings,
+  );
+  assert.deepEqual(
+    (await readJson(parentCheckpointRoot, "coverage.json")).includePaths,
+    ["."],
+  );
+  assert.equal(await readFile(producerPath, "utf8"), producerBytes);
+  for (const [name, changed, expected] of [
+    [
+      "scan-identity",
+      { scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608" },
+      /different scan/,
+    ],
+    [
+      "coverage",
+      { coverage: { ...producerCheckpoint.coverage, completeness: "invalid" } },
+      /current schema/,
+    ],
+  ]) {
+    const invalidContext = {
+      ...context,
+      root: path.join(root, "producer-" + name),
+    };
+    await saveScanDraftCheckpoint(invalidContext, {
+      ...producerCheckpoint,
+      ...changed,
+    });
+    await assert.rejects(
+      recordCodexSecurityScanDraft(invalidContext, input),
+      expected,
+    );
+  }
+
+  const unsupportedCheckpointContext = {
+    ...context,
+    root: path.join(root, "unsupported-checkpoint"),
+  };
+  const { handoffClaimToken: _oldClaim, ...oldCheckpoint } = {
+    ...input,
+    findings: [
+      { ...finding, validation: { assertions: "obsolete string list" } },
+    ],
+  };
+  await saveScanDraftCheckpoint(unsupportedCheckpointContext, oldCheckpoint);
+  await assert.rejects(
+    recordCodexSecurityScanDraft(unsupportedCheckpointContext, input),
+    /Saved scan draft does not match the current schema/,
+  );
+  const retained = (
+    await readdir(path.join(unsupportedCheckpointContext.root, "checkpoints"))
+  ).filter((name) => name.endsWith(".json"));
+  assert.equal(retained.length, 1);
+  assert.deepEqual(
+    await readJson(
+      unsupportedCheckpointContext.root,
+      "checkpoints/" + retained[0],
+    ),
+    oldCheckpoint,
+  );
+
   const interruptedParentRoot = path.join(
     root,
     "interrupted-checkpoint-parent",
   );
   await mkdir(interruptedParentRoot);
   const interruptedParentContext = { ...context, root: interruptedParentRoot };
-  await saveScanDraftCheckpoint(
-    interruptedParentContext,
-    {
-      ...input,
-      complete: false,
-      findings: [interruptedFinding],
-      coverage: {
-        ...coverage,
-        completeness: "partial",
-        deferred: [
-          {
-            candidateId: "interrupted-parent-review",
-            reason: "Review was checkpointed.",
-          },
-        ],
-      },
+  await saveScanDraftCheckpoint(interruptedParentContext, {
+    ...input,
+    complete: false,
+    findings: [interruptedFinding],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [
+        {
+          candidateId: "interrupted-parent-review",
+          reason: "Review was checkpointed.",
+        },
+      ],
     },
-    false,
-  );
+  });
   await recordCodexSecurityScanDraft(interruptedParentContext, {
     ...input,
     findings: [],
@@ -647,6 +303,119 @@ try {
     input.scope.summary,
   );
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
+
+  const pendingRoot = path.join(root, "pending-only-checkpoints");
+  await mkdir(pendingRoot);
+  await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
+  const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
+  await mkdir(pendingDirectory, { recursive: true });
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "obsolete.json"),
+    "{old incompatible evidence",
+  );
+  const pendingInput = { ...input, findings: [interruptedFinding] };
+  await writeFile(path.join(pendingDirectory, "pending.json"), "");
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "pending.json"),
+    JSON.stringify(pendingInput),
+  );
+  // A stopped writer may leave its marker before publishing immutable history.
+  await writeFile(path.join(pendingDirectory, "interrupted.json"), "");
+  const originalReaddir = fs.readdir;
+  fs.readdir = async (...args) => {
+    const entries = await originalReaddir(...args);
+    if (args[0] === pendingDirectory)
+      await rm(path.join(pendingDirectory, "pending.json"));
+    return entries;
+  };
+  try {
+    await recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    );
+  } finally {
+    fs.readdir = originalReaddir;
+  }
+  assert.deepEqual(
+    new Set(
+      (await readJson(pendingRoot, "findings.json")).findings.map(
+        (item) => item.provenance.candidateId,
+      ),
+    ),
+    new Set([
+      finding.provenance.candidateId,
+      interruptedFinding.provenance.candidateId,
+    ]),
+  );
+
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "interrupted.json"),
+    "{malformed saved history",
+  );
+  await assert.rejects(
+    recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    ),
+    /current scan checkpoint: stored JSON is malformed/,
+  );
+
+  const stagedRoot = path.join(root, "marked-staged-checkpoint");
+  const stagedContext = { ...context, root: stagedRoot };
+  const stagedDirectory = path.join(stagedRoot, "checkpoints", "pending");
+  await mkdir(stagedDirectory, { recursive: true });
+  await mkdir(path.join(stagedRoot, "drafts"));
+  const { handoffClaimToken: _stagedClaim, ...stagedInput } = input;
+  const stagedContents = JSON.stringify({
+    ...stagedInput,
+    findings: [interruptedFinding],
+    complete: false,
+  });
+  const stagedName =
+    createHash("sha256").update(stagedContents).digest("hex") + ".json";
+  const stagedRelative = `drafts/${scanId}.checkpoint.json`;
+  const stagedPath = path.join(stagedRoot, stagedRelative);
+  const markerPath = path.join(stagedDirectory, stagedName);
+  await writeFile(stagedPath, stagedContents);
+  const reconcileStaged = async () => {
+    let published;
+    await recordCodexSecurityScanDraft(
+      stagedContext,
+      { ...input, findings: [] },
+      async (draft, _digest, _checkpoint, names) => {
+        published = { findings: draft.findings.findings, names };
+      },
+    );
+    return published;
+  };
+  assert.deepEqual(await reconcileStaged(), { findings: [], names: [] });
+  await writeFile(markerPath, stagedRelative);
+  const retainedStage = await reconcileStaged();
+  assert.equal(retainedStage.findings.length, 1);
+  assert.equal(
+    retainedStage.findings[0].provenance.candidateId,
+    interruptedFinding.provenance.candidateId,
+  );
+  assert.deepEqual(retainedStage.names, [stagedName]);
+  await writeFile(stagedPath, stagedContents + "\n");
+  await assert.rejects(reconcileStaged(), /staged checkpoint digest changed/);
+  if (process.platform !== "win32") {
+    await rm(stagedPath);
+    await symlink(producerPath, stagedPath);
+    await assert.rejects(reconcileStaged(), /not a safe regular file/);
+    await rm(stagedPath);
+  }
+  await writeFile(markerPath, "../outside.json");
+  await assert.rejects(reconcileStaged(), /invalid staged checkpoint path/);
+  await writeFile(
+    path.join(stagedRoot, "checkpoints", stagedName),
+    stagedContents,
+  );
+  assert.deepEqual(
+    await reconcileStaged(),
+    retainedStage,
+    "immutable history takes precedence over its obsolete staging marker",
+  );
 
   const deepParentRoot = path.join(root, "accepted-deep-parent");
   await mkdir(deepParentRoot);
@@ -719,12 +488,12 @@ try {
     "partial",
   );
   const savedDeepCheckpoints = await Promise.all(
-    (await readdir(path.join(deepParentRoot, "checkpoints"))).map(
-      async (name) => [
+    (await readdir(path.join(deepParentRoot, "checkpoints")))
+      .filter((name) => name.endsWith(".json"))
+      .map(async (name) => [
         name,
         await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"),
-      ],
-    ),
+      ]),
   );
   const acceptedDeepDraft = {
     ...input,
@@ -806,273 +575,6 @@ try {
     deepWorkbenchWrites,
     1,
     "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints",
-  );
-  assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
-
-  const pendingRoot = path.join(root, "pending-worker");
-  await mkdir(pendingRoot);
-  const pendingContext = { ...workerContext, root: pendingRoot };
-  const candidate = {
-    summary: "An unvalidated archive extraction candidate.",
-    evidence: "Original nested-worker source trace.",
-  };
-  const pending = {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        {
-          candidateId: finding.provenance.candidateId,
-          reason: "Pending parent validation",
-          candidate,
-        },
-      ],
-    },
-  };
-  await recordCodexSecurityWorkerScanDraft(pendingContext, pending);
-  await recordCodexSecurityWorkerScanDraft(pendingContext, workerInput);
-  const resolved = JSON.parse(
-    await readFile(path.join(pendingRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(resolved.coverage.deferred, []);
-  assert.equal(resolved.coverage.completeness, "complete");
-  assert.deepEqual(resolved.findings[0].provenance.originalCandidates, [
-    candidate,
-  ]);
-
-  await rm(path.join(pendingRoot, "result.json"));
-  await recordCodexSecurityWorkerScanDraft(pendingContext, pending);
-  await recordCodexSecurityWorkerScanDraft(pendingContext, {
-    ...workerInput,
-    findings: [],
-    coverage: { ...coverage, surfaces: [rejection] },
-  });
-  const resolvedRejection = JSON.parse(
-    await readFile(path.join(pendingRoot, "result.json"), "utf8"),
-  );
-  assert.deepEqual(resolvedRejection.coverage.deferred, []);
-  assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
-
-  const undefinedCandidateRoot = path.join(root, "undefined-candidate-worker");
-  await mkdir(undefinedCandidateRoot);
-  const undefinedCandidateContext = {
-    ...workerContext,
-    root: undefinedCandidateRoot,
-  };
-  await recordCodexSecurityWorkerScanDraft(undefinedCandidateContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        { reason: "An unrelated anonymous review item remains pending." },
-      ],
-    },
-  });
-  const literalUndefinedFinding = structuredClone(finding);
-  literalUndefinedFinding.provenance.candidateId = "undefined";
-  literalUndefinedFinding.extensions.candidateId = "undefined";
-  await recordCodexSecurityWorkerScanDraft(undefinedCandidateContext, {
-    ...workerInput,
-    complete: false,
-    findings: [literalUndefinedFinding],
-    coverage: { ...coverage, completeness: "partial", surfaces: [] },
-  });
-  const undefinedCandidateResult = JSON.parse(
-    await readFile(path.join(undefinedCandidateRoot, "result.json"), "utf8"),
-  );
-  assert.equal(undefinedCandidateResult.coverage.deferred.length, 1);
-  assert.equal(
-    undefinedCandidateResult.coverage.deferred[0].reason,
-    "An unrelated anonymous review item remains pending.",
-  );
-
-  for (const [index, previousFindings] of [
-    "legacy metadata",
-    { opaque: true },
-    7,
-  ].entries()) {
-    const historyRoot = path.join(root, `legacy-history-${index}`);
-    await mkdir(historyRoot);
-    const historyContext = { ...workerContext, root: historyRoot };
-    const earlierFinding = {
-      ...finding,
-      summary: "Earlier verified source proof.",
-      provenance: { ...finding.provenance, previousFindings },
-    };
-    await recordCodexSecurityWorkerScanDraft(historyContext, {
-      ...workerInput,
-      findings: [earlierFinding],
-    });
-    await recordCodexSecurityWorkerScanDraft(historyContext, workerInput);
-    const savedHistory = JSON.parse(
-      await readFile(path.join(historyRoot, "result.json"), "utf8"),
-    );
-    const original = structuredClone(earlierFinding);
-    delete original.provenance.previousFindings;
-    assert.deepEqual(
-      savedHistory.findings[0].provenance.previousFindings,
-      [original],
-      "opaque legacy metadata is not interpreted as finding history, but the original proof survives",
-    );
-    const snapshots = await Promise.all(
-      (await readdir(path.join(historyRoot, "checkpoints"))).map(async (name) =>
-        JSON.parse(
-          await readFile(path.join(historyRoot, "checkpoints", name), "utf8"),
-        ),
-      ),
-    );
-    assert.deepEqual(
-      snapshots.find(
-        (snapshot) => snapshot.findings[0].summary === earlierFinding.summary,
-      ).findings[0].provenance.previousFindings,
-      previousFindings,
-      "the immutable snapshot retains otherwise opaque legacy data",
-    );
-  }
-
-  await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(workerContext, {
-      ...workerInput,
-      scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608",
-    }),
-    /scanId does not match/,
-  );
-  await assert.rejects(readFile(workerResultPath), { code: "ENOENT" });
-  await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(workerContext, {
-      ...workerInput,
-      coverage: {
-        ...coverage,
-        deferred: [
-          { reason: "The archive upload runtime remains unavailable." },
-        ],
-      },
-    }),
-    /complete coverage cannot contain deferred/,
-  );
-  await assert.rejects(readFile(workerResultPath), { code: "ENOENT" });
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(workerContext, workerInput),
-    {
-      scanId,
-      findingCount: 1,
-      surfaceCount: 1,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(
-    JSON.parse(await readFile(workerResultPath, "utf8")),
-    workerInput,
-  );
-  const outOfScopeFinding = {
-    ...finding,
-    title: "Outside the selected scope",
-    locations: [{ path: "outside/secret.py", startLine: 12 }],
-  };
-  const misleadingPrefixFinding = {
-    ...finding,
-    title: "Sibling path is not in scope",
-    locations: [{ path: "src-private/secret.py", startLine: 14 }],
-  };
-  const supportedScopedFinding = {
-    ...finding,
-    title: "In-scope finding with outside supporting code",
-    locations: [
-      { path: "outside/support.py", startLine: 8 },
-      { path: "./src/extract.py", startLine: 41 },
-    ],
-  };
-  const scopedWorkerInput = {
-    ...workerInput,
-    findings: [
-      outOfScopeFinding,
-      supportedScopedFinding,
-      misleadingPrefixFinding,
-    ],
-  };
-  const originalScopedWorkerInput = structuredClone(scopedWorkerInput);
-  // Scope-filtering cases are independent scans, not revisions of the saved audit above.
-  const resetWorkerDraft = async () =>
-    Promise.all([
-      rm(workerResultPath, { force: true }),
-      rm(path.join(workerRoot, "checkpoints"), {
-        recursive: true,
-        force: true,
-      }),
-      rm(path.join(workerRoot, "checkpoint-head.json"), { force: true }),
-    ]);
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "src" },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 1,
-      surfaceCount: 1,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(JSON.parse(await readFile(workerResultPath, "utf8")), {
-    ...scopedWorkerInput,
-    findings: [supportedScopedFinding],
-  });
-  assert.deepEqual(scopedWorkerInput, originalScopedWorkerInput);
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "src/extract.py" },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 1,
-      surfaceCount: 1,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(JSON.parse(await readFile(workerResultPath, "utf8")), {
-    ...scopedWorkerInput,
-    findings: [supportedScopedFinding],
-  });
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "." },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 3,
-      surfaceCount: 1,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(
-    JSON.parse(await readFile(workerResultPath, "utf8")),
-    scopedWorkerInput,
-  );
-  for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
-    await assert.rejects(readFile(path.join(workerRoot, name)), {
-      code: "ENOENT",
-    });
-  }
-  await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(context, workerInput),
-    /bound worker context/,
   );
 
   const semanticFinding = {
@@ -1669,7 +1171,11 @@ try {
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     await assert.rejects(readFile(path.join(root, name)), { code: "ENOENT" });
   }
-  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
+  assert.equal(
+    (await readdir(path.join(root, "drafts"))).length,
+    2,
+    "failed publication retains both staged files for the validated recovery owner",
+  );
 
   let conflictAttempts = 0;
   const retried = await recordCodexSecurityScanDraft(
@@ -1712,6 +1218,7 @@ try {
   const staleCheckpoint = {
     ...input,
     complete: false,
+    findings: [finding, interruptedFinding],
     coverage: {
       ...coverage,
       completeness: "partial",
@@ -1756,6 +1263,13 @@ try {
       }
       assert.notEqual(staged.manifest.scan.complete, false);
       assert.deepEqual(
+        staged.findings.findings.map((entry) => entry.provenance.candidateId),
+        [
+          finding.provenance.candidateId,
+          interruptedFinding.provenance.candidateId,
+        ],
+      );
+      assert.deepEqual(
         staged.coverage.surfaces.map(({ id, disposition }) => ({
           id,
           disposition,
@@ -1766,367 +1280,206 @@ try {
   );
   assert.equal(monotonicWrites, 2);
 
-  const archivedRetryRoot = path.join(root, "archived-retry-worker");
-  const archivedRetryOutput = path.join(archivedRetryRoot, "output");
-  await mkdir(archivedRetryOutput, { recursive: true });
-  const archivedRetryContext = { ...workerContext, root: archivedRetryOutput };
-  await recordCodexSecurityWorkerScanDraft(archivedRetryContext, {
-    ...workerInput,
-    complete: false,
-  });
-  const checkpointOnlyFinding = structuredClone(finding);
-  checkpointOnlyFinding.title = "Checkpoint-only finding";
-  checkpointOnlyFinding.identity = { anchor: "checkpoint-only-finding" };
-  checkpointOnlyFinding.provenance.candidateId = "checkpoint-only-candidate";
-  checkpointOnlyFinding.extensions.candidateId = "checkpoint-only-candidate";
-  await saveScanDraftCheckpoint(archivedRetryContext, {
-    ...workerInput,
-    complete: false,
-    findings: [finding, checkpointOnlyFinding],
-  });
-  await mkdir(path.join(archivedRetryRoot, "attempts"));
-  await rename(
-    archivedRetryOutput,
-    path.join(archivedRetryRoot, "attempts", "attempt-01"),
-  );
-  await mkdir(archivedRetryOutput);
-  const {
-    scope: _archivedScope,
-    threatModel: _archivedThreatModel,
-    ...replacementAttempt
-  } = workerInput;
-  await recordCodexSecurityWorkerScanDraft(archivedRetryContext, {
-    ...replacementAttempt,
-    findings: [],
-  });
-  const archivedRetryResult = JSON.parse(
-    await readFile(path.join(archivedRetryOutput, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    new Set(
-      archivedRetryResult.findings.map((item) => item.provenance.candidateId),
-    ),
-    new Set([finding.provenance.candidateId, "checkpoint-only-candidate"]),
-    "a replacement attempt must reconcile newer checkpoints with an older archived result",
-  );
-  assert.deepEqual(
-    archivedRetryResult.scope,
-    workerInput.scope,
-    "a replacement attempt must retain the scope from archived checkpoints",
-  );
-  assert.deepEqual(
-    archivedRetryResult.threatModel,
-    workerInput.threatModel,
-    "a replacement attempt must retain the threat model from archived checkpoints",
-  );
-
-  const archivedResolutionRoot = path.join(root, "archived-resolution-worker");
-  const archivedResolutionOutput = path.join(archivedResolutionRoot, "output");
-  await mkdir(archivedResolutionOutput, { recursive: true });
-  const archivedResolutionContext = {
-    ...workerContext,
-    root: archivedResolutionOutput,
-  };
-  await recordCodexSecurityWorkerScanDraft(archivedResolutionContext, {
-    ...workerInput,
-    complete: false,
-  });
-  const demotedCandidate = {
-    candidateId: finding.provenance.candidateId,
-    reason: "The later attempt demoted this candidate for more review.",
-  };
-  await recordCodexSecurityWorkerScanDraft(archivedResolutionContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [demotedCandidate],
-    },
-  });
-  await mkdir(path.join(archivedResolutionRoot, "attempts"));
-  await rename(
-    archivedResolutionOutput,
-    path.join(archivedResolutionRoot, "attempts", "attempt-01"),
-  );
-  await mkdir(archivedResolutionOutput);
-  await recordCodexSecurityWorkerScanDraft(archivedResolutionContext, {
-    ...replacementAttempt,
-    findings: [],
-  });
-  const archivedResolutionResult = JSON.parse(
-    await readFile(path.join(archivedResolutionOutput, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    archivedResolutionResult.findings,
-    [finding],
-    "deferred coverage does not reject a validated finding from an archived attempt",
-  );
-  assert.deepEqual(archivedResolutionResult.coverage.deferred, []);
-
-  const repeatedCheckpointRoot = path.join(root, "repeated-checkpoint-worker");
-  const repeatedCheckpointOutput = path.join(repeatedCheckpointRoot, "output");
-  const repeatedCheckpointContext = {
-    ...workerContext,
-    root: repeatedCheckpointOutput,
-  };
-  await mkdir(repeatedCheckpointOutput, { recursive: true });
-  let repeatedFindingDraft = {
-    ...workerInput,
-    complete: false,
-  };
-  await recordCodexSecurityWorkerScanDraft(
-    repeatedCheckpointContext,
-    repeatedFindingDraft,
-  );
-  const [findingCheckpointName] = await readdir(
-    path.join(repeatedCheckpointOutput, "checkpoints"),
-  );
-  repeatedFindingDraft = JSON.parse(
-    await readFile(
-      path.join(repeatedCheckpointOutput, "checkpoints", findingCheckpointName),
-      "utf8",
-    ),
-  );
-  await recordCodexSecurityWorkerScanDraft(repeatedCheckpointContext, {
-    ...workerInput,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [demotedCandidate],
-    },
-  });
-  const demotionCheckpointName = (
-    await readdir(path.join(repeatedCheckpointOutput, "checkpoints"))
-  ).find((name) => name !== findingCheckpointName);
-  assert.ok(demotionCheckpointName);
-  const oldCheckpointTime = new Date("2026-01-01T00:00:00.000Z");
-  const newerDemotionTime = new Date("2026-01-01T00:00:10.000Z");
-  await utimes(
-    path.join(repeatedCheckpointOutput, "checkpoints", findingCheckpointName),
-    oldCheckpointTime,
-    oldCheckpointTime,
-  );
-  for (const path_ of [
-    path.join(repeatedCheckpointOutput, "checkpoints", demotionCheckpointName),
-    path.join(repeatedCheckpointOutput, "result.json"),
-  ]) {
-    await utimes(path_, newerDemotionTime, newerDemotionTime);
-  }
-  await saveScanDraftCheckpoint(
-    repeatedCheckpointContext,
-    repeatedFindingDraft,
-  );
-  await mkdir(path.join(repeatedCheckpointRoot, "attempts"));
-  await rename(
-    repeatedCheckpointOutput,
-    path.join(repeatedCheckpointRoot, "attempts", "attempt-01"),
-  );
-  await mkdir(repeatedCheckpointOutput);
-  await recordCodexSecurityWorkerScanDraft(repeatedCheckpointContext, {
-    ...replacementAttempt,
-    findings: [],
-  });
-  const repeatedCheckpointResult = JSON.parse(
-    await readFile(path.join(repeatedCheckpointOutput, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    repeatedCheckpointResult.findings.map(
-      (item) => item.provenance.candidateId,
-    ),
-    [finding.provenance.candidateId],
-    "a byte-identical repeated checkpoint must supersede an intervening demotion",
-  );
-
-  const multiAttemptRoot = path.join(root, "multi-attempt-resolution-worker");
-  const multiAttemptOutput = path.join(multiAttemptRoot, "output");
-  const multiAttemptContext = { ...workerContext, root: multiAttemptOutput };
-  const multiAttemptArchive = path.join(multiAttemptRoot, "attempts");
-  await mkdir(multiAttemptOutput, { recursive: true });
-  await recordCodexSecurityWorkerScanDraft(multiAttemptContext, {
-    ...workerInput,
-    complete: false,
-  });
-  await mkdir(multiAttemptArchive);
-  await rename(
-    multiAttemptOutput,
-    path.join(multiAttemptArchive, "attempt-01"),
-  );
-  await mkdir(multiAttemptOutput);
-  await recordCodexSecurityWorkerScanDraft(multiAttemptContext, {
-    ...replacementAttempt,
-    complete: false,
-    findings: [],
-    coverage: {
-      ...coverage,
-      completeness: "partial",
-      surfaces: [],
-      deferred: [demotedCandidate],
-    },
-  });
-  await rename(
-    multiAttemptOutput,
-    path.join(multiAttemptArchive, "attempt-02"),
-  );
-  await mkdir(multiAttemptOutput);
-  await recordCodexSecurityWorkerScanDraft(multiAttemptContext, {
-    ...replacementAttempt,
-    findings: [],
-  });
-  const multiAttemptResult = JSON.parse(
-    await readFile(path.join(multiAttemptOutput, "result.json"), "utf8"),
-  );
-  assert.deepEqual(
-    multiAttemptResult.findings,
-    [finding],
-    "a newer archived deferred row cannot reject an older validated finding",
-  );
-  assert.deepEqual(
-    multiAttemptResult.coverage.deferred,
-    [],
-    "the retained finding resolves the stale archived deferred row",
-  );
-
-  const malformedArchivedRoot = path.join(
-    root,
-    "malformed-archived-result-worker",
-  );
-  const malformedArchivedOutput = path.join(malformedArchivedRoot, "output");
-  const malformedArchivedContext = {
-    ...workerContext,
-    root: malformedArchivedOutput,
-  };
-  await mkdir(malformedArchivedOutput, { recursive: true });
-  await recordCodexSecurityWorkerScanDraft(malformedArchivedContext, {
-    ...workerInput,
-    complete: false,
-  });
-  await writeFile(
-    path.join(malformedArchivedOutput, "result.json"),
-    "{malformed",
-  );
-  await mkdir(path.join(malformedArchivedRoot, "attempts"));
-  await rename(
-    malformedArchivedOutput,
-    path.join(malformedArchivedRoot, "attempts", "attempt-01"),
-  );
-  await mkdir(malformedArchivedOutput);
-  await recordCodexSecurityWorkerScanDraft(malformedArchivedContext, {
-    ...replacementAttempt,
-    findings: [],
-  });
-  assert.deepEqual(
-    JSON.parse(
-      await readFile(path.join(malformedArchivedOutput, "result.json"), "utf8"),
-    ).findings,
-    [finding],
-    "valid checkpoints must recover evidence when an archived result is malformed",
-  );
-
-  const crossScanRetryRoot = path.join(root, "cross-scan-retry-worker");
-  const crossScanRetryOutput = path.join(crossScanRetryRoot, "output");
-  await mkdir(crossScanRetryOutput, { recursive: true });
-  const crossScanRetryContext = {
-    ...workerContext,
-    root: crossScanRetryOutput,
-  };
-  await recordCodexSecurityWorkerScanDraft(crossScanRetryContext, {
-    ...workerInput,
-    complete: false,
-  });
-  const crossScanAttempts = path.join(crossScanRetryRoot, "attempts");
-  const crossScanAttempt = path.join(crossScanAttempts, "attempt-01");
-  await mkdir(crossScanAttempts);
-  await rename(crossScanRetryOutput, crossScanAttempt);
-  const crossScanResultPath = path.join(crossScanAttempt, "result.json");
-  const crossScanResult = JSON.parse(
-    await readFile(crossScanResultPath, "utf8"),
-  );
-  crossScanResult.scanId = "11111111-1111-4111-8111-111111111111";
-  await writeFile(crossScanResultPath, JSON.stringify(crossScanResult));
-  await mkdir(crossScanRetryOutput);
-  await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(crossScanRetryContext, {
-      ...replacementAttempt,
+  for (const terminal of [false, true]) {
+    const pendingRoot = path.join(root, `candidate-resolution-${terminal}`);
+    await mkdir(pendingRoot);
+    const pendingContext = { ...context, root: pendingRoot };
+    const pending = {
+      ...input,
+      complete: false,
       findings: [],
-    }),
-    /scanId does not match the authoritative workbench scan/u,
-    "a retry must reject archived findings from another scan",
-  );
-
-  const unreadableRetryRoot = path.join(root, "unreadable-retry-worker");
-  const unreadableRetryOutput = path.join(unreadableRetryRoot, "output");
-  const unreadableAttempt = path.join(
-    unreadableRetryRoot,
-    "attempts",
-    "attempt-01",
-  );
-  const unreadableCheckpointRoot = path.join(unreadableAttempt, "checkpoints");
-  await mkdir(unreadableCheckpointRoot, { recursive: true });
-  await mkdir(unreadableRetryOutput);
-  const originalLstat = fsPromises.lstat;
-  fsPromises.lstat = async (candidate, ...arguments_) => {
-    if (
-      path.resolve(String(candidate)) === path.resolve(unreadableCheckpointRoot)
-    ) {
-      throw Object.assign(new Error("permission denied by test filesystem"), {
-        code: "EACCES",
-      });
-    }
-    return originalLstat(candidate, ...arguments_);
-  };
-  try {
-    await assert.rejects(
-      recordCodexSecurityWorkerScanDraft(
-        { ...workerContext, root: unreadableRetryOutput },
-        workerInput,
-      ),
-      /EACCES|permission denied/u,
-      "an unreadable archived attempt must not be treated as an empty archive",
+      coverage: {
+        completeness: "partial",
+        explicitExclusions: [],
+        surfaces: [
+          {
+            id: "pending-surface",
+            candidateId: "pending-candidate",
+            label: "Synthetic review",
+            disposition: "needs_follow_up",
+          },
+        ],
+        deferred: [
+          {
+            candidateId: "pending-candidate",
+            reason: "Dependency evidence remains unavailable.",
+          },
+        ],
+      },
+    };
+    await recordCodexSecurityScanDraft(pendingContext, pending);
+    await recordCodexSecurityScanDraft(pendingContext, {
+      ...pending,
+      complete: terminal,
+      coverage: {
+        ...pending.coverage,
+        completeness: terminal ? "complete" : "partial",
+        surfaces: terminal
+          ? [{ ...pending.coverage.surfaces[0], disposition: "rejected" }]
+          : [],
+        deferred: terminal ? [] : pending.coverage.deferred,
+      },
+    });
+    const saved = await readJson(pendingRoot, "coverage.json");
+    assert.equal(saved.completeness, terminal ? "complete" : "partial");
+    assert.equal(
+      saved.surfaces[0].disposition,
+      terminal ? "rejected" : "needs_follow_up",
     );
-  } finally {
-    fsPromises.lstat = originalLstat;
+    assert.equal(saved.deferred.length, terminal ? 0 : 1);
   }
-
-  const partialDeferredRoot = path.join(root, "partial-deferred-worker");
-  await mkdir(partialDeferredRoot);
-  const partialDeferredContext = {
-    ...workerContext,
-    root: partialDeferredRoot,
-  };
-  const partialDeferredFinding = {
-    summary: "Partial evidence captured before validation.",
-  };
-  await recordCodexSecurityWorkerScanDraft(partialDeferredContext, {
-    ...workerInput,
+  const extensionRoot = path.join(root, "current-extension-candidate");
+  await mkdir(extensionRoot);
+  const extensionContext = { ...context, root: extensionRoot };
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
     complete: false,
     findings: [],
     coverage: {
       ...coverage,
       completeness: "partial",
-      surfaces: [],
       deferred: [
         {
-          candidateId: finding.provenance.candidateId,
-          reason: "Validation is pending.",
-          finding: partialDeferredFinding,
+          candidateId: finding.extensions.candidateId,
+          reason: "Review pending.",
         },
       ],
     },
   });
-  await recordCodexSecurityWorkerScanDraft(partialDeferredContext, workerInput);
-  const resolvedPartialDeferred = JSON.parse(
-    await readFile(path.join(partialDeferredRoot, "result.json"), "utf8"),
-  );
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
+    findings: [{ ...finding, provenance: { source: "local_plugin" } }],
+  });
   assert.deepEqual(
-    resolvedPartialDeferred.findings[0].provenance.previousFindings,
-    [partialDeferredFinding],
+    (await readJson(extensionRoot, "coverage.json")).deferred,
+    [],
   );
+
+  const surfaceRoot = path.join(root, "explicit-surface-resolution");
+  await mkdir(surfaceRoot);
+  const surfaceContext = { ...context, root: surfaceRoot };
+  const surfaceDraft = {
+    ...input,
+    findings: [],
+    complete: false,
+    coverage: {
+      completeness: "partial",
+      explicitExclusions: [],
+      surfaces: [
+        {
+          id: "pending-surface",
+          label: "Synthetic review",
+          disposition: "needs_follow_up",
+        },
+      ],
+      deferred: [
+        { reason: "Synthetic review pending", surfaceIds: ["pending-surface"] },
+      ],
+    },
+  };
+  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
+  await recordCodexSecurityScanDraft(surfaceContext, {
+    ...surfaceDraft,
+    complete: true,
+    coverage: {
+      ...surfaceDraft.coverage,
+      completeness: "complete",
+      deferred: [],
+      surfaces: [
+        { ...surfaceDraft.coverage.surfaces[0], disposition: "not_applicable" },
+      ],
+    },
+  });
+  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
+  assert.equal(
+    (await readJson(surfaceRoot, "coverage.json")).completeness,
+    "complete",
+  );
+  assert.deepEqual((await readJson(surfaceRoot, "coverage.json")).deferred, []);
+
+  for (const [name, candidate] of [
+    ["candidate-id", { candidateId: "candidate-still-pending" }],
+    [
+      "original-candidate",
+      {
+        id: "candidate-still-pending",
+        candidate: {
+          title: "Independent observation",
+          summary: "Needs a source trace.",
+        },
+      },
+    ],
+    ["original-finding", { id: "candidate-still-pending", finding }],
+  ]) {
+    const sharedSurfaceRoot = path.join(
+      root,
+      `independent-candidate-on-reported-surface-${name}`,
+    );
+    await mkdir(sharedSurfaceRoot);
+    const sharedSurfaceContext = { ...context, root: sharedSurfaceRoot };
+    const unresolved = {
+      ...candidate,
+      surfaceIds: ["pending-surface"],
+      reason: "Independent candidate still needs evidence.",
+    };
+    await recordCodexSecurityScanDraft(sharedSurfaceContext, {
+      ...surfaceDraft,
+      coverage: {
+        ...surfaceDraft.coverage,
+        deferred: [unresolved],
+      },
+    });
+    const resolvedSurfaceDraft = {
+      ...surfaceDraft,
+      complete: true,
+      coverage: {
+        ...surfaceDraft.coverage,
+        completeness: "complete",
+        deferred: [],
+        surfaces: [
+          {
+            ...surfaceDraft.coverage.surfaces[0],
+            candidateId: "candidate-already-reported",
+            disposition: "reported",
+          },
+        ],
+      },
+    };
+    await recordCodexSecurityScanDraft(
+      sharedSurfaceContext,
+      resolvedSurfaceDraft,
+    );
+    const retainedCoverage = await readJson(sharedSurfaceRoot, "coverage.json");
+    assert.equal(retainedCoverage.completeness, "partial");
+    const retainedCandidate = {
+      ...unresolved,
+      id: candidate.candidateId ?? candidate.id,
+    };
+    assert.deepEqual(retainedCoverage.deferred, [retainedCandidate]);
+
+    await recordCodexSecurityScanDraft(sharedSurfaceContext, {
+      ...resolvedSurfaceDraft,
+      coverage: {
+        ...resolvedSurfaceDraft.coverage,
+        surfaces: [
+          ...resolvedSurfaceDraft.coverage.surfaces,
+          {
+            label: "Independent candidate review",
+            candidateId: candidate.candidateId ?? candidate.id,
+            disposition: "rejected",
+          },
+        ],
+      },
+    });
+    assert.equal(
+      (await readJson(sharedSurfaceRoot, "coverage.json")).completeness,
+      "complete",
+    );
+    assert.deepEqual(
+      (await readJson(sharedSurfaceRoot, "coverage.json")).deferred,
+      [],
+    );
+  }
 
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
@@ -2408,21 +1761,6 @@ try {
   assert.deepEqual(
     (await readJson(root, "findings.json")).findings[0].identity,
     explicitIdentity,
-  );
-
-  const identityRoot = path.join(root, "preserved-finding-identity-worker");
-  await mkdir(identityRoot);
-  const identityContext = { ...workerContext, root: identityRoot };
-  await recordCodexSecurityWorkerScanDraft(identityContext, {
-    ...workerInput,
-    findings: [{ ...finding, identity: explicitIdentity }],
-  });
-  await recordCodexSecurityWorkerScanDraft(identityContext, workerInput);
-  assert.deepEqual(
-    JSON.parse(await readFile(path.join(identityRoot, "result.json"), "utf8"))
-      .findings[0].identity,
-    explicitIdentity,
-    "a later refinement inherits the stable identity of the matched saved finding",
   );
 
   await recordFreshScanDraft(context, {
@@ -3115,8 +2453,8 @@ try {
     /handoffClaimToken/,
   );
   await assert.rejects(
-    recordCodexSecurityScanDraft({ ...context, layout: "worker" }, input),
-    /authoritative parent scan context/,
+    recordCodexSecurityScanDraft({ ...context, scanId: undefined }, input),
+    /scanId does not match/,
   );
   await assert.rejects(
     recordCodexSecurityScanDraft({ ...context, status: "complete" }, input),
@@ -3374,4 +2712,39 @@ async function recordFreshScanDraft(context, input) {
     }),
   ]);
   return recordCodexSecurityScanDraft(context, input);
+}
+
+// Exercise reconciliation with explicit fixture publication; production publishes under the workbench lock.
+function recordCodexSecurityScanDraft(context, input, publish, signal) {
+  return publishScanDraft(
+    context,
+    input,
+    publish ??
+      (async (draft, _digest, checkpoint) => {
+        await saveScanDraftCheckpoint(context, checkpoint);
+        for (const [name, document] of Object.entries({
+          "scan-manifest.json": draft.manifest,
+          "findings.json": draft.findings,
+          "coverage.json": draft.coverage,
+        }))
+          await writeFile(
+            path.join(context.root, name),
+            JSON.stringify(document) + "\n",
+          );
+      }),
+    signal,
+  );
+}
+
+async function saveScanDraftCheckpoint(context, input) {
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(snapshot))
+    .digest("hex");
+  const directory = path.join(context.root, "checkpoints");
+  await mkdir(path.join(directory, "pending"), { recursive: true });
+  await writeFile(path.join(directory, "pending", digest + ".json"), "");
+  const checkpointPath = path.join(directory, digest + ".json");
+  await writeFile(checkpointPath, JSON.stringify(snapshot) + "\n");
+  return checkpointPath;
 }

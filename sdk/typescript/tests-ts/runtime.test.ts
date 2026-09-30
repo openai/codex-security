@@ -1,3 +1,4 @@
+import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
@@ -37,7 +38,6 @@ import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -88,7 +88,11 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  prepareScanFindings,
+  prepareSemanticScanDraft,
+} from "../src/scan-semantics.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -218,6 +222,7 @@ describe("plugin runtime preparation", () => {
     expect(candidates).toEqual([
       join(packageRoot, "dist", "_bundled_plugin"),
       join(packageRoot, "_bundled_plugin"),
+      packageRoot,
     ]);
     expect(
       candidates.every((candidate) => {
@@ -227,6 +232,9 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
+    expect(bundledPluginCandidates(join(packageRoot, "mcp"))).toContain(
+      packageRoot,
+    );
   });
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {
@@ -298,74 +306,26 @@ describe("plugin runtime preparation", () => {
   });
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+    const findings = prepareScanFindings([
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-a" },
+      }),
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-b" },
+      }),
+    ]);
+
+    expect(
+      findings.map(
+        (finding) => (finding["identity"] as { anchor: string }).anchor,
       ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const source =
-      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string, fallback: string) => value || fallback) as (
-      findings: Array<{
-        title: string;
-        extensions: { candidateId: string };
-      }>,
-    ) => Array<{ identity: { anchor: string } }>;
-
-    const findings = buildFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
-    ]);
-
-    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
-      "candidate-a",
-      "candidate-b",
-    ]);
+    ).toEqual(["candidate-a", "candidate-b"]);
   });
 
   test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-
-    type Surface = {
-      id?: string;
-      label: string;
-      disposition: string;
-      receiptRefs?: string[];
-    };
-    type Deferred = { id: string; reason: string; surfaceIds: string[] };
-    const buildCoverage = new Function(
-      "semanticIdentifier",
-      "coverageMode",
-      "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
-    )(
-      (label: string) => label.toLowerCase(),
-      () => "deep_repository",
-      () => "repository",
-    ) as (
-      context: Record<string, unknown>,
-      contract: Record<string, unknown>,
-      coverage: { surfaces: Surface[]; deferred: Deferred[] },
-      scope: { includePaths: string[]; excludePaths: string[] },
-      target: Record<string, unknown>,
-    ) => {
-      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
-      deferred: Deferred[];
-    };
-
-    const coverage = {
+    const coverage = semanticCoverage({
       surfaces: [
         {
           id: "surface-web",
@@ -395,15 +355,22 @@ describe("plugin runtime preparation", () => {
           surfaceIds: ["surface-web", "surface_uploads"],
         },
       ],
-    };
+    });
     const original = structuredClone(coverage);
-    const canonical = buildCoverage(
-      { mode: "deep" },
-      {},
-      coverage,
-      { includePaths: ["."], excludePaths: [] },
-      {},
-    );
+    const canonical = prepareSemanticScanDraft(
+      {
+        mode: "deep",
+        targetContract: {
+          target: {
+            allowedKinds: ["git_worktree"],
+            targetId: "fixture",
+            displayName: "fixture",
+          },
+          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+        },
+      },
+      { scanId: "fixture", findings: [], coverage },
+    ).coverage;
 
     expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
       "surface-web",
@@ -421,7 +388,7 @@ describe("plugin runtime preparation", () => {
       "artifacts/primary.json",
     ]);
     expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect(canonical.deferred).toEqual(coverage.deferred);
+    expect<unknown>(canonical.deferred).toEqual(coverage.deferred);
     expect(coverage).toEqual(original);
   });
 
@@ -1693,6 +1660,188 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("keeps an active coordinator's cwd usable across same-version bootstraps", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const output = join(root, "output");
+    await mkdir(home);
+    await mkdir(output);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      WINDIR: process.env["WINDIR"],
+      HOME: home,
+      USERPROFILE: home,
+      CODEX_HOME: home,
+      TMPDIR: root,
+      TMP: root,
+      TEMP: root,
+    };
+    const codexCommand = resolveCodexCommand(environment);
+    const options = { codexCommand, environment };
+    const first = await bootstrapPlugin(home, selected, options);
+    const identity = await stat(first.installedRoot, { bigint: true });
+    // The coordinator stays alive in the installed directory while a second
+    // scan bootstraps. Its later worker inherits that cwd even with --cd.
+    const coordinator = childProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const { spawnSync } = require("node:child_process");
+          process.stdin.once("data", () => {
+            const result = spawnSync(${JSON.stringify(codexCommand.command)},
+              ["exec", "--skip-git-repo-check", "--cd", ${JSON.stringify(output)}],
+              { input: "", encoding: "utf8", timeout: 10000 });
+            console.log(JSON.stringify({ status: result.status, stderr: result.stderr, error: result.error?.message }));
+          });
+          console.log("ready");
+        `,
+      ],
+      { cwd: first.installedRoot, env: environment, stdio: "pipe" },
+    );
+    const completion = once(coordinator, "close");
+    try {
+      await once(coordinator.stdout, "data");
+      const second = await bootstrapPlugin(home, selected, options);
+      expect(second.installedRoot).toBe(first.installedRoot);
+      const current = await stat(second.installedRoot, { bigint: true });
+      expect([current.dev, current.ino]).toEqual([identity.dev, identity.ino]);
+      let output = "";
+      coordinator.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+        output += chunk;
+      });
+      coordinator.stdin.end("start worker\n");
+      expect((await completion)[0]).toBe(0);
+      const result = JSON.parse(output) as {
+        status: number;
+        stderr: string;
+        error?: string;
+      };
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      // Empty stdin stops before authentication or any model request.
+      expect(result.stderr).toContain("No prompt provided via stdin");
+      expect(result.stderr).not.toContain("os error 2");
+    } finally {
+      coordinator.kill();
+      await completion;
+    }
+  });
+
+  test.each([
+    "unchanged contents",
+    "runtime-generated files",
+    "relocated source",
+    "changed source file",
+    "removed source file",
+    "missing installed directory",
+    "missing installed helper",
+    "changed installed helper",
+    "disabled plugin",
+    "missing marketplace registration",
+    "interrupted install record",
+  ])("bootstraps a cached plugin with %s", async (change) => {
+    const root = await temporaryDirectory();
+    let selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    // Codex owns the cache layout; only its returned path identifies the install.
+    const installed = join(home, "codex-managed-install");
+    const configPath = join(home, "config.toml");
+    await mkdir(home);
+    let installs = 0;
+    const registration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+    const configuration = `${registration}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`;
+    const options = {
+      codexCommand: { command: "/codex" },
+      runCodex: async (_command: unknown, args: readonly string[]) => {
+        if (args[1] === "marketplace") {
+          await writeFile(configPath, registration);
+          return "";
+        }
+        installs += 1;
+        await rm(installed, { recursive: true, force: true });
+        await fsPromises.cp(
+          join(marketplace, "plugins", "codex-security"),
+          installed,
+          { recursive: true },
+        );
+        await writeFile(configPath, configuration);
+        return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+      },
+    };
+    await bootstrapPlugin(home, selected, options);
+
+    switch (change) {
+      case "runtime-generated files":
+        await mkdir(join(installed, "scripts", "__pycache__"));
+        await writeFile(
+          join(installed, "scripts", "__pycache__", "helper.pyc"),
+          "generated",
+        );
+        break;
+      case "relocated source":
+        selected = await plugin(join(root, "relocated"));
+        break;
+      case "changed source file":
+        await writeFile(
+          join(selected, "scripts", "helper.py"),
+          "print('hi')\n",
+        );
+        break;
+      case "removed source file":
+        await rm(join(selected, "scripts", "helper.py"));
+        break;
+      case "missing installed directory":
+        await rm(installed, { recursive: true });
+        break;
+      case "missing installed helper":
+        await rm(join(installed, "scripts", "helper.py"));
+        break;
+      case "changed installed helper":
+        await writeFile(
+          join(installed, "scripts", "helper.py"),
+          "print('no')\n",
+        );
+        break;
+      case "disabled plugin":
+        await writeFile(
+          configPath,
+          configuration.replace("enabled = true", "enabled = false"),
+        );
+        break;
+      case "missing marketplace registration":
+        await writeFile(configPath, "");
+        break;
+      case "interrupted install record":
+        await writeFile(join(marketplace, "installed-plugin.json"), "{");
+        break;
+    }
+
+    const result = await bootstrapPlugin(home, selected, options);
+    expect(result.installedRoot).toBe(installed);
+    expect(result.pluginRoot).toBe(selected);
+    expect(installs).toBe(
+      [
+        "unchanged contents",
+        "runtime-generated files",
+        "relocated source",
+      ].includes(change)
+        ? 1
+        : 2,
+    );
+    if (change === "removed source file") {
+      expect(existsSync(join(installed, "scripts", "helper.py"))).toBe(false);
+    } else {
+      expect(
+        await readFile(join(installed, "scripts", "helper.py"), "utf8"),
+      ).toBe(await readFile(join(selected, "scripts", "helper.py"), "utf8"));
+    }
+    expect(await readFile(configPath, "utf8")).toBe(configuration);
+  });
+
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -2108,16 +2257,23 @@ describe("plugin runtime preparation", () => {
       });
       await writeFile(join(scanDir, artifact), expected);
       const python = await resolvePluginPython({ environment });
+      const restorationSignal = new AbortController();
       const restorer = await prepareScanArtifactRestorer(
         {
           python,
           pluginRoot: upgraded.installedRoot,
           environment,
+          signal: restorationSignal.signal,
         },
         scanDir,
       );
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      restorationSignal.abort();
       await restorer.restore(artifact, expected);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      await expect(
+        restorer.restore("../outside.bin", expected),
+      ).rejects.toThrow("safely restore");
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
       const rolloutPath = join(root, "cached-rollout.jsonl");
@@ -2135,6 +2291,55 @@ describe("plugin runtime preparation", () => {
       });
     },
   );
+
+  test("keeps scan artifact directories, staging and cleanup inside the checked root", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const sibling = join(root, "sibling");
+    await Promise.all([
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(sibling, { mode: 0o700 }),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const writer = await prepareScanArtifactRestorer(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment: {} },
+      scanDir,
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    await writer.restore(
+      "artifacts/deep-scan/merge/retained.json",
+      Buffer.from("{}"),
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    expect(
+      await readFile(
+        join(scanDir, "artifacts/deep-scan/merge/retained.json"),
+        "utf8",
+      ),
+    ).toBe("{}");
+    await writer.restore("drafts/staged.json", Buffer.from("{}"));
+    await writer.remove("drafts/staged.json");
+    expect(await readdir(join(scanDir, "drafts"))).toEqual([]);
+
+    await writeFile(join(sibling, "retained.json"), "preserved");
+    await symlink(
+      sibling,
+      join(scanDir, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const operation of [
+      () => writer.prepareDirectory("linked/merge"),
+      () => writer.restore("linked/staged.json", Buffer.from("{}")),
+      () => writer.remove("linked/retained.json"),
+    ]) {
+      await expect(operation()).rejects.toThrow("Could not safely");
+      expect(await readdir(sibling)).toEqual(["retained.json"]);
+      expect(await readFile(join(sibling, "retained.json"), "utf8")).toBe(
+        "preserved",
+      );
+    }
+  });
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
@@ -3288,10 +3493,8 @@ describe("runtime directories and plugin Python boundary", () => {
             );
           }),
         ]);
-        const ended = once(first.stdout, "end");
         first.stdout.end();
         first.stderr.end();
-        await ended;
         first.exitCode = 2;
         first.emit("close", 2, null);
         await nextTurn();
@@ -3460,6 +3663,86 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(count).toBe(expected);
     expect(observed).toBe(expected);
   });
+
+  test.each(["queued", "chunked"] as const)(
+    "streams %s Windows credential descriptors through EOF",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `streams ${kind} Windows credential descriptors through EOF`,
+        )
+      ) {
+        return;
+      }
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null as number | null,
+        signalCode: null,
+        kill: () => true,
+      });
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => child,
+      }));
+      const expected =
+        kind === "queued"
+          ? Array.from({ length: 4096 }, (_, i) => `descriptor-${i}`)
+          : ["first", "café", "middle", "last"];
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const observed: string[] = [];
+      const outcome = streamWindowsCredentialAclDescriptors(
+        "synthetic-credential-inspector",
+        [],
+        async (descriptor) => {
+          observed.push(descriptor);
+          if (observed.length === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      );
+      try {
+        if (kind === "queued") {
+          // End with more queued lines than readline's watermark while the
+          // first asynchronous descriptor inspection is still pending.
+          child.stdout.end(`${expected.join("\n")}\n`);
+        } else {
+          child.stdout.write(
+            Buffer.concat([Buffer.from("first\r\ncaf"), Buffer.from([0xc3])]),
+          );
+        }
+        await entered.promise;
+        if (kind === "chunked") {
+          child.stdout.end(
+            Buffer.concat([
+              Buffer.from([0xa9]),
+              Buffer.from("\r\n\r\nmiddle\rlast"),
+            ]),
+          );
+        }
+        child.stderr.end();
+        child.exitCode = 0;
+        child.emit("close", 0, null);
+        await nextTurn();
+        expect(observed).toEqual([expected[0]!]);
+        release.resolve();
+        expect(await outcome).toBe(expected.length);
+        expect(observed).toEqual(expected);
+      } finally {
+        release.resolve();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        mock.module("node:child_process", () => ({
+          ...childProcess,
+          spawn: originalSpawn,
+        }));
+      }
+    },
+  );
 
   test("preserves Windows credential ACL subprocess failures while streaming", async () => {
     await expect(
@@ -5527,9 +5810,9 @@ describe("runtime directories and plugin Python boundary", () => {
           "archived_scan_dir = Path(sys.argv[3])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
           "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
           "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
@@ -5579,9 +5862,9 @@ describe("runtime directories and plugin Python boundary", () => {
           "scan_dir = Path(sys.argv[2])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
           "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
           "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",

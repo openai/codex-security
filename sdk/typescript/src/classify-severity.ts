@@ -1,10 +1,8 @@
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { z } from "incur";
 import type { CodexSecurityConfig } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { prepareKnowledgeBase } from "./knowledge-base.js";
+import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -59,11 +57,15 @@ export interface SeverityClassification {
 
 /** @internal Per-finding persistence used by saved-scan classification. */
 export interface SeverityClassificationCheckpoint {
-  load(result: SeverityClassification): Promise<SeverityAssessment[]>;
+  load(
+    result: SeverityClassification,
+    findings: readonly SeverityClassificationFinding[],
+  ): Promise<SeverityAssessment[]>;
   save(
     finding: SeverityClassificationFinding,
     assessment: SeverityAssessment,
     result: SeverityClassification,
+    reused?: boolean,
   ): Promise<void>;
 }
 
@@ -147,7 +149,7 @@ export async function classifySeverityInternal(
     assessments: [],
   };
   const cached = new Map(
-    (await checkpoint?.load(result))?.map((assessment) => [
+    (await checkpoint?.load(result, findings))?.map((assessment) => [
       assessment.findingId,
       assessment,
     ]),
@@ -160,6 +162,7 @@ export async function classifySeverityInternal(
       validateSeverityClassification({ ...result, assessments: [previous] }, [
         finding,
       ]);
+      await checkpoint?.save(finding, previous, result, true);
       result.assessments.push(previous);
       continue;
     }
@@ -239,23 +242,11 @@ async function readDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const prepared = await prepareKnowledgeBase(paths, signal);
-  try {
-    const files = (await readdir(prepared.path)).sort();
-    const contents = await Promise.all(
-      files.map((file) =>
-        readFile(join(prepared.path, file), { encoding: "utf8", signal }),
-      ),
-    );
-    if (contents.every((text) => !text.trim())) {
-      throw new CodexSecurityError(
-        "Classification documents must not be empty.",
-      );
-    }
-    return contents;
-  } finally {
-    await prepared.cleanup();
+  const contents = await readKnowledgeBaseDocuments(paths, signal);
+  if (contents.every((text) => !text.trim())) {
+    throw new CodexSecurityError("Classification documents must not be empty.");
   }
+  return contents;
 }
 
 /** @internal Check parsed assessments against the actual finding evidence. */

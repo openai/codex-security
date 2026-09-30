@@ -781,10 +781,18 @@ and `scanOptions.auth` to select credentials.
 
 ### Configure deep scans
 
-For `scan --mode deep`, `--workers` sets discovery concurrency and `--subagents`
-sets subagents per worker. `--stop-after-no-new` stops after that many runs
-without new issues. `--max-discovery-runs` and `--max-time-hours` cap discovery
-runs and duration. SDK equivalents:
+For `scan --mode deep`, `--workers` sets the number of independent Standard scans
+in each batch, and `--subagents` sets subagents per scan. Each batch finishes and
+merges before the next starts. With `--workers 1`, each scan is merged immediately.
+
+`--stop-after-no-new` stops after that many successfully merged scans without new
+issues. Within each batch, scans count in their original order, and each new
+issue is credited to the first scan that found it. A scan credited with a new
+issue resets the count; other successful scans increase it. The scan checks this
+threshold after each batch merge, so a batch can pass the threshold. Failures do not count as
+no-new results, and retries do not consume additional discovery runs.
+`--max-discovery-runs` and `--max-time-hours` cap discovery runs and duration.
+SDK equivalents:
 
 ```ts
 await security.run("/path/to/repository", {
@@ -819,6 +827,19 @@ four workers. Unknown keys are rejected.
 
 `max_time_hours` accepts positive values up to 96, including fractional hours.
 At the deadline, discovery stops; the scan combines and returns completed findings.
+If the deadline expires before any child starts, the result is an empty sealed
+report with partial coverage and a `null` `threadId`; no model turn is needed.
+Failed or canceled checkpoints are terminal and cannot be resumed as running work.
+
+Knowledge documents are extracted once for a Deep Scan. Every child receives the
+same immutable content, even if the original files change during the scan. Resume
+checks the saved content digest and rejects changed inputs before starting work.
+
+Merge inputs retain exact original findings and evidence. A compact index points
+to complete retained source and history records; the merger must read those records
+before consolidating findings. Host validation preserves every source reference,
+while merge-quality evaluation also checks independent issues, canonical repairs,
+and severity. See the [completed-report evaluation](scripts/merge-eval/README.md).
 
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
@@ -1065,8 +1086,9 @@ completed results, including partial coverage, and repositories never started.
 For each failed or interrupted repository, it checks the latest attempt:
 
 - A sealed scan is recorded in `results.jsonl` without scanning again.
-- An eligible running Deep Scan resumes its original session, keeping its scan
-  ID, completed workers, artifacts, saved settings, and accumulated cost.
+- An eligible running Deep Scan resumes saved work in its original output
+  directory, keeping its scan ID, completed workers, artifacts, saved settings,
+  and accumulated cost.
 - A failed, canceled, or otherwise unavailable scan starts a new attempt at the
   CSV's pinned revision. Attempt numbers account for both receipts and existing
   directories. Old artifacts and checkouts are preserved; new attempts use
@@ -1525,7 +1547,7 @@ Replacement files resolve from the invocation directory. Custom validation keeps
 | `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to the latest completed one. `--show-linked-findings` includes earlier finding links. |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
-| `scans resume SCAN_ID`                                | Resume an interrupted Deep Scan in its original session and output directory.                               |
+| `scans resume SCAN_ID`                                | Resume saved Deep Scan work in its original output directory.                                               |
 | `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
 | `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
 | `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
@@ -1543,7 +1565,7 @@ npx @openai/codex-security scans resume SCAN_ID
 ```
 
 The scan must still be `running`, with its original checkout, output directory,
-and owning Codex session available in the same Codex Security state directory.
+and Codex Security state directory available.
 The checkout's identity, revision, and contents must match the saved target.
 Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
 
@@ -1556,12 +1578,23 @@ Older records that did not save these values cannot reconstruct them. Bulk
 recovery still requires matching campaign inputs and options; it uses the supplied
 post-scan prompt when the scan has no saved prompt.
 It keeps the scan ID, completed workers, artifacts, and accumulated session cost.
-The existing coordinator recovers interrupted workers after its lease expires.
 If discovery finished before the interruption, resume completes and seals the
 same scan. No archiving or new attempt directory is needed. A failed connection
 leaves the existing scan available for another resume attempt.
 
-Compatible saved scans can resume after a plugin update. Already-sealed results
+Compatible saved scans can resume after a plugin update. Unsealed scans from the
+retired Deep Scan runtime cannot resume; start a fresh scan instead. Saved drafts
+must match the current schema. Recover unfinished worker or reducer fragments
+from that runtime with the prior release; the current runtime reads parent drafts
+and ordinary scan checkpoints. Existing report files remain available, and
+rejecting a failed or canceled checkpoint leaves its saved accounting unchanged.
+Historical checkpoints without a pending checkpoint index are no longer imported
+automatically into unfinished scans. Use the prior release to finish those scans,
+or start a fresh scan; completed reports remain readable.
+Older unreleased builds identified child scans by their artifact paths. That
+state is no longer migrated; start fresh scans for those database snapshots.
+Existing report files remain available.
+Already-sealed results
 keep their original producer version and contents when completion is recorded.
 Unsupported or invalid sealed artifacts are rejected before resuming, preserving
 the saved scan state and files.

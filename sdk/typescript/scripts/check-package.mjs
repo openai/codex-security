@@ -2,7 +2,11 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
+import {
+  assertPublicPackageContents,
+  MAX_EXPANDED_ASSET_BYTES,
+} from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { regularTarListingLines } from "./package-tar-listing.mjs";
@@ -25,7 +29,6 @@ if (archive === undefined || args.length > 2) {
   );
 }
 
-const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 const archiveBytes = gunzipSync(readFileSync(archive), {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
 });
@@ -49,9 +52,11 @@ function tar(args, encoding = "buffer") {
 
 let offset = 0;
 const archiveFiles = new Map();
+const archiveMetadata = [];
 for (; offset + 512 <= archiveBytes.byteLength;) {
   const header = archiveBytes.subarray(offset, offset + 512);
   if (header.every((byte) => byte === 0)) {
+    archiveMetadata.push(header);
     offset += 512;
     continue;
   }
@@ -80,6 +85,12 @@ for (; offset + 512 <= archiveBytes.byteLength;) {
       path,
       archiveBytes.subarray(contentsStart, contentsStart + size),
     );
+    archiveMetadata.push(
+      header,
+      archiveBytes.subarray(contentsStart + size, nextOffset),
+    );
+  } else {
+    archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
   }
   offset = nextOffset;
 }
@@ -177,6 +188,7 @@ const distFiles = new Set(
     "classify-scan-severity",
     "severity-store",
     "cloud-publish",
+    "codex-home",
     "codex-prompt",
     "component-plan",
     "component-scan",
@@ -191,6 +203,23 @@ const distFiles = new Set(
     "deep-progress",
     "deep-config",
     "deep-scan-defaults",
+    "deep-scan",
+    "deep-scan-checkpoint",
+    "deep-scan-lifecycle",
+    "scan-execution",
+    "scan-accounting",
+    "scan-draft-publication",
+    "execution-auth",
+    "execution-preparation",
+    "scan-events",
+    "scan-monitoring",
+    "scan-publication",
+    "scan-registration",
+    "scan-preparation",
+    "scan-merge",
+    "scan-semantics",
+    "semantic-models",
+    "workbench-types",
     "project-config",
     "project-config-schema",
     "prompt-files",
@@ -210,6 +239,7 @@ const distFiles = new Set(
     "mock-scan",
     "owner-evidence",
     "patch-tui",
+    "permission-profile",
     "publication",
     "publication-events",
     "publication-store",
@@ -335,40 +365,6 @@ assertExpectedGitHead(
   process.env.CODEX_SECURITY_EXPECTED_GIT_HEAD,
 );
 
-const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
-
-const payloads = [archiveBytes.toString("utf8")];
-const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
-const compressedParts = new Map();
-for (const file of files) {
-  const match = /^(.*\.br)\.part-([0-9]+)$/iu.exec(file);
-  if (match === null) continue;
-  const [, name, part] = match;
-  const parts = compressedParts.get(name) ?? [];
-  parts.push({ file, part: Number(part) });
-  compressedParts.set(name, parts);
-}
-
-function brotliPayload(bytes, file) {
-  const result = brotliDecompressSync(bytes, {
-    info: true,
-    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
-  });
-  if (result.engine.bytesWritten !== bytes.length) {
-    throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
-  }
-  return result.buffer;
-}
-
-for (const file of compressedFiles) {
-  payloads.push(brotliPayload(archiveFile(file), file).toString("utf8"));
-}
-for (const parts of compressedParts.values()) {
-  parts.sort((left, right) => left.part - right.part);
-  const bytes = Buffer.concat(parts.map(({ file }) => archiveFile(file)));
-  payloads.push(brotliPayload(bytes, parts[0].file).toString("utf8"));
-}
 for (const file of files) {
   if (/\.png$/iu.test(file)) {
     const digest = createHash("sha256").update(archiveFile(file)).digest("hex");
@@ -378,11 +374,7 @@ for (const file of files) {
   }
 }
 
-for (const contents of payloads) {
-  if (internalMarker.test(contents)) {
-    throw new Error("npm tarball contains an internal reference.");
-  }
-}
+assertPublicPackageContents(archiveFiles, Buffer.concat(archiveMetadata));
 
 if (args.length === 1) {
   const smoke = spawnSync(

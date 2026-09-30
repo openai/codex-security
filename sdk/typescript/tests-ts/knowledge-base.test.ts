@@ -16,11 +16,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import {
+  prepareKnowledgeBase,
+  readKnowledgeBaseSnapshot,
+} from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
+
+test("ordinary passes share immutable extracted inputs while resume detects document changes", async () => {
+  const root = await temporaryDirectory();
+  const source = join(root, "policy.md");
+  await writeFile(source, "Original policy.");
+  const snapshot = await readKnowledgeBaseSnapshot([source]);
+  await writeFile(source, "Updated policy.");
+  const first = await prepareKnowledgeBase(snapshot);
+  const second = await prepareKnowledgeBase(snapshot);
+  const changed = await prepareKnowledgeBase([source]);
+  try {
+    expect(first.sha256).toBe(second.sha256);
+    expect(changed.sha256).not.toBe(first.sha256);
+    for (const prepared of [first, second]) {
+      const [document] = await readdir(prepared.path);
+      expect(await readFile(join(prepared.path, document!), "utf8")).toBe(
+        "Original policy.",
+      );
+    }
+  } finally {
+    await Promise.all([first.cleanup(), second.cleanup(), changed.cleanup()]);
+  }
+});
 
 afterEach(async () => {
   await Promise.all(

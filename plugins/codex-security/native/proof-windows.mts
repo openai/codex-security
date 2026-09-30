@@ -466,7 +466,7 @@ async function worker(path: string): Promise<void> {
 const pythonOracle = String.raw`
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
-from workbench_db import acquire_completion_file_lock, release_completion_file_lock, is_file_lock_contention, windows_file_lock
+from workbench.storage import acquire_completion_file_lock, release_completion_file_lock, is_file_lock_contention, windows_file_lock
 fd = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o600)
 def send(kind, **values):
     print(json.dumps({"type": kind, **values}), flush=True)
