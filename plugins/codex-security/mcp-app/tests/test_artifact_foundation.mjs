@@ -328,7 +328,10 @@ async function testAtomicReplacement() {
   assert.equal(await readFile(destination, "utf8"), "");
 
   const versions = Array.from({ length: 12 }, (_, index) => [
-    { candidate_id: "concurrent-" + index, evidence: String(index).repeat(8192) },
+    {
+      candidate_id: "concurrent-" + index,
+      evidence: String(index).repeat(8192),
+    },
     { candidate_id: "tail-" + index },
   ]);
   const expected = new Set(versions.map((rows) => JSON.stringify(rows)));
