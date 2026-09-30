@@ -29,12 +29,11 @@ bun scripts/merge-eval/replay.ts /absolute/path/to/python3 12
 ```
 
 One harness reports input-publication time and completion-to-sealed-parent time,
-with raw alternating paired samples and p50/p95. Separate and batch checked
-writers currently publish the same single input artifact, so this comparison
-does not imply a reduced process count. Every sample verifies input bytes,
-retained child bytes, parent finding count, partial coverage, rendered output and
-seals. Model output is fixed; these measurements exclude model and discovery
-latency.
+with raw samples and p50/p95 across the requested repetitions (12 by default).
+Each repetition publishes the single merge-input artifact through the production
+checked writer and verifies input bytes, retained child bytes, parent finding
+count, partial coverage, rendered output and seals. Model output is fixed; these
+measurements exclude model and discovery latency.
 
 An explicit model run uses the existing Codex login and incurs model usage:
 

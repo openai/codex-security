@@ -2295,20 +2295,8 @@ describe("plugin runtime preparation", () => {
       restorationSignal.abort();
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
-      await restorer.restoreMany([
-        { path: artifact, contents: Buffer.from([9, 0, 8]) },
-        { path: "artifacts/second.bin", contents: expected },
-        { path: artifact, contents: expected },
-      ]);
-      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
-      expect(await readFile(join(scanDir, "artifacts/second.bin"))).toEqual(
-        expected,
-      );
       await expect(
-        restorer.restoreMany([
-          { path: "../outside.bin", contents: expected },
-          { path: artifact, contents: Buffer.from([7]) },
-        ]),
+        restorer.restore("../outside.bin", expected),
       ).rejects.toThrow("safely restore");
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 

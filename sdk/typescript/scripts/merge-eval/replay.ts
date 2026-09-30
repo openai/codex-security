@@ -38,7 +38,7 @@ if (
   Number(repetitions) < 1
 )
   throw new Error(
-    "Usage: bun scripts/merge-eval/replay.ts PYTHON_EXECUTABLE [PAIRS]",
+    "Usage: bun scripts/merge-eval/replay.ts PYTHON_EXECUTABLE [REPETITIONS]",
   );
 const root = await realpath(
   await mkdtemp(join(tmpdir(), "completed-merge-replay-")),
@@ -50,8 +50,7 @@ const fixture = mergeFixtures().find(
   (entry) => entry.name === "independent-similar-titles",
 )!;
 const samples: {
-  pair: number;
-  mode: string;
+  repetition: number;
   inputPublication: number;
   completionToSealedParent: number;
 }[] = [];
@@ -67,198 +66,187 @@ try {
       join(repo, "src", `setting-${index}.ts`),
       "// Completed synthetic observation.\n",
     );
-  for (let pair = 0; pair < Number(repetitions); pair++) {
-    for (const mode of pair % 2
-      ? ["batch", "separate"]
-      : ["separate", "batch"]) {
-      const scanDir = join(root, `${pair}-${mode}`);
-      const childDir = join(scanDir, "artifacts/deep-scan/passes/pass-1");
-      await mkdir(scanDir, { mode: 0o700 });
-      const options = {
-        python,
-        pluginRoot,
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-      };
-      const registration = await runWorkbench(
-        options,
-        [
-          "register-cli-scan",
-          "--repository",
-          repo,
-          "--scan-dir",
-          scanDir,
-          "--recipe-json-stdin",
-        ],
-        JSON.stringify({
+  for (let repetition = 0; repetition < Number(repetitions); repetition++) {
+    const scanDir = join(root, String(repetition));
+    const childDir = join(scanDir, "artifacts/deep-scan/passes/pass-1");
+    await mkdir(scanDir, { mode: 0o700 });
+    const options = {
+      python,
+      pluginRoot,
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+    };
+    const registration = await runWorkbench(
+      options,
+      [
+        "register-cli-scan",
+        "--repository",
+        repo,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json-stdin",
+      ],
+      JSON.stringify({
+        repository: repo,
+        mode: "deep",
+        target: { kind: "repository", paths: [] },
+        config: {},
+      }),
+    );
+    const scanId = registration["scanId"] as string;
+    const owned = (args: readonly string[], input?: string) =>
+      runWorkbench(options, [...args, ...claim(registration)], input);
+    const checkedWriter = await prepareScanArtifactRestorer(options, scanDir);
+    let inputPublication = 0;
+    const writer = {
+      async restore(path: string, contents: Uint8Array) {
+        const start = performance.now();
+        await checkedWriter.restore(path, contents);
+        inputPublication += performance.now() - start;
+        assert.deepEqual(await readFile(join(scanDir, path)), contents);
+      },
+    };
+    await mkdir(childDir, { recursive: true, mode: 0o700 });
+    const child = await runWorkbench(
+      options,
+      [
+        "register-cli-scan",
+        "--repository",
+        repo,
+        "--scan-dir",
+        childDir,
+        "--parent-scan-id",
+        scanId,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
           repository: repo,
-          mode: "deep",
+          mode: "standard",
           target: { kind: "repository", paths: [] },
           config: {},
-        }),
-      );
-      const scanId = registration["scanId"] as string;
-      const owned = (args: readonly string[], input?: string) =>
-        runWorkbench(options, [...args, ...claim(registration)], input);
-      const checkedWriter = await prepareScanArtifactRestorer(options, scanDir);
-      let inputPublication = 0;
-      const writer = {
-        restore: checkedWriter.restore,
-        async restoreMany(artifacts: { path: string; contents: Buffer }[]) {
-          const start = performance.now();
-          if (mode === "batch") await checkedWriter.restoreMany!(artifacts);
-          else
-            for (const { path, contents } of artifacts)
-              await checkedWriter.restore(path, contents);
-          inputPublication += performance.now() - start;
-          for (const { path, contents } of artifacts)
-            assert.deepEqual(await readFile(join(scanDir, path)), contents);
         },
-      };
-      await mkdir(childDir, { recursive: true, mode: 0o700 });
-      const child = await runWorkbench(
-        options,
-        [
-          "register-cli-scan",
-          "--repository",
-          repo,
-          "--scan-dir",
-          childDir,
-          "--parent-scan-id",
+        parentScanRole: "deep_pass",
+      }),
+    );
+    const childId = child["scanId"] as string;
+    const childDraft = { ...fixture.inputs[0]!.draft, scanId: childId };
+    const childDocuments = prepareSemanticScanDraft(
+      { targetContract: child["contract"] as JsonObject, mode: "standard" },
+      childDraft,
+    );
+    for (const [path, contents] of [
+      ["scan-manifest.json", childDocuments.manifest],
+      ["findings.json", childDocuments.findings],
+      ["coverage.json", childDocuments.coverage],
+    ] as const)
+      await writeFile(join(childDir, path), JSON.stringify(contents));
+    await runWorkbench(options, [
+      "complete-scan",
+      "--scan-id",
+      childId,
+      ...claim(child),
+    ]);
+    const completed = new ScanResult({
+      ...(await loadContract(childDir, { pluginRoot })),
+      scanDir: childDir,
+      threadId: "synthetic-completed-child",
+      turnResult: {},
+    });
+    const before = await readFile(join(childDir, "findings.json"));
+    let lastChild = 0;
+    let projectedChild: ScanMergeInput | undefined;
+    const publish = (draft: SemanticScan) =>
+      writeSemanticScanDraft(
+        {
+          scanDir,
+          contract: {
+            targetContract: registration["contract"] as JsonObject,
+            mode: "deep",
+          },
+          writer: checkedWriter,
+          workbench: owned,
+          onCleanupError(error) {
+            console.error(error);
+          },
+        },
+        draft,
+      );
+    await runDeepScans({
+      scanId,
+      scanDir,
+      repository: repo,
+      pluginRoot,
+      startedAt: new Date().toISOString(),
+      settings: {
+        workers: 1,
+        subagents: 0,
+        stopAfterNoNew: 1,
+        stopAfterConsecutiveErrors: 1,
+        maxDiscoveryRuns: 1,
+        maxTimeHours: 1,
+      },
+      scanOptions: {},
+      signal: new AbortController().signal,
+      writer,
+      async projectChild(sourceScanId, sourceDirectory, signal) {
+        projectedChild = await checkedWriter.projectChild(
           scanId,
-          "--registration-json-stdin",
-        ],
-        JSON.stringify({
-          recipe: {
-            repository: repo,
-            mode: "standard",
-            target: { kind: "repository", paths: [] },
-            config: {},
-          },
-          parentScanRole: "deep_pass",
-        }),
-      );
-      const childId = child["scanId"] as string;
-      const childDraft = { ...fixture.inputs[0]!.draft, scanId: childId };
-      const childDocuments = prepareSemanticScanDraft(
-        { targetContract: child["contract"] as JsonObject, mode: "standard" },
-        childDraft,
-      );
-      for (const [path, contents] of [
-        ["scan-manifest.json", childDocuments.manifest],
-        ["findings.json", childDocuments.findings],
-        ["coverage.json", childDocuments.coverage],
-      ] as const)
-        await writeFile(join(childDir, path), JSON.stringify(contents));
-      await runWorkbench(options, [
-        "complete-scan",
-        "--scan-id",
-        childId,
-        ...claim(child),
-      ]);
-      const completed = new ScanResult({
-        ...(await loadContract(childDir, { pluginRoot })),
-        scanDir: childDir,
-        threadId: "synthetic-completed-child",
-        turnResult: {},
-      });
-      const before = await readFile(join(childDir, "findings.json"));
-      let lastChild = 0;
-      let projectedChild: ScanMergeInput | undefined;
-      const publish = (draft: SemanticScan) =>
-        writeSemanticScanDraft(
-          {
-            scanDir,
-            contract: {
-              targetContract: registration["contract"] as JsonObject,
-              mode: "deep",
-            },
-            writer: checkedWriter,
-            workbench: owned,
-            onCleanupError(error) {
-              console.error(error);
-            },
-          },
-          draft,
+          sourceScanId,
+          sourceDirectory,
+          signal,
         );
-      await runDeepScans({
-        scanId,
-        scanDir,
-        repository: repo,
-        pluginRoot,
-        startedAt: new Date().toISOString(),
-        settings: {
-          workers: 1,
-          subagents: 0,
-          stopAfterNoNew: 1,
-          stopAfterConsecutiveErrors: 1,
-          maxDiscoveryRuns: 1,
-          maxTimeHours: 1,
+        return projectedChild;
+      },
+      workbench: (args, input) =>
+        args.includes("--scan-id")
+          ? owned(args, input)
+          : runWorkbench(options, [...args], input),
+      createClient: () => ({
+        async run(_repo, options) {
+          await options?.onRegisteredScan?.(child);
+          lastChild = performance.now();
+          return completed;
         },
-        scanOptions: {},
-        signal: new AbortController().signal,
-        writer,
-        async projectChild(sourceScanId, sourceDirectory, signal) {
-          projectedChild = await checkedWriter.projectChild(
-            scanId,
-            sourceScanId,
-            sourceDirectory,
-            signal,
-          );
-          return projectedChild;
-        },
-        workbench: (args, input) =>
-          args.includes("--scan-id")
-            ? owned(args, input)
-            : runWorkbench(options, [...args], input),
-        createClient: () => ({
-          async run(_repo, options) {
-            await options?.onRegisteredScan?.(child);
-            lastChild = performance.now();
-            return completed;
-          },
-          async close() {},
-        }),
-        merge: async () => {
-          assert(projectedChild);
-          assert.deepEqual(
-            await readFile(
-              join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
-            ),
-            scanMergeModelInputs([projectedChild], null),
-          );
-          return {
-            scanId,
-            groups: projectedChild.draft.findings.map((finding) => ({
-              sourceFindingIds: finding.provenance.sourceFindingIds!,
-              canonicalSourceFindingId:
-                finding.provenance.sourceFindingIds![0]!,
-            })),
-          };
-        },
-        publish,
-        onCost() {},
-        onRetry(message) {
-          throw new Error(message);
-        },
-      });
-      await owned(["prepare-scan-completion", "--scan-id", scanId]);
-      await owned(["complete-scan", "--scan-id", scanId]);
-      const elapsed = performance.now() - lastChild;
-      const parent = await loadContract(scanDir, { pluginRoot });
-      assert.equal(parent.findings.findings.length, fixture.expected.length);
-      assert.equal(parent.coverage.completeness, "partial");
-      assert.deepEqual(await readFile(join(childDir, "findings.json")), before);
-      assert.match(
-        await readFile(join(scanDir, "report.md"), "utf8"),
-        /repair-47/,
-      );
-      samples.push({
-        pair,
-        mode,
-        inputPublication,
-        completionToSealedParent: elapsed,
-      });
-    }
+        async close() {},
+      }),
+      merge: async () => {
+        assert(projectedChild);
+        assert.deepEqual(
+          await readFile(
+            join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+          ),
+          scanMergeModelInputs([projectedChild], null),
+        );
+        return {
+          scanId,
+          groups: projectedChild.draft.findings.map((finding) => ({
+            sourceFindingIds: finding.provenance.sourceFindingIds!,
+            canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
+          })),
+        };
+      },
+      publish,
+      onCost() {},
+      onRetry(message) {
+        throw new Error(message);
+      },
+    });
+    await owned(["prepare-scan-completion", "--scan-id", scanId]);
+    await owned(["complete-scan", "--scan-id", scanId]);
+    const elapsed = performance.now() - lastChild;
+    const parent = await loadContract(scanDir, { pluginRoot });
+    assert.equal(parent.findings.findings.length, fixture.expected.length);
+    assert.equal(parent.coverage.completeness, "partial");
+    assert.deepEqual(await readFile(join(childDir, "findings.json")), before);
+    assert.match(
+      await readFile(join(scanDir, "report.md"), "utf8"),
+      /repair-47/,
+    );
+    samples.push({
+      repetition,
+      inputPublication,
+      completionToSealedParent: elapsed,
+    });
   }
   const quantile = (values: number[], fraction: number) =>
     [...values].sort((a, b) => a - b)[Math.ceil(values.length * fraction) - 1];
@@ -269,26 +257,15 @@ try {
           "Last required child result to sealed/indexed parent, fixed correct model output; no discovery or model latency",
         findings: fixture.expected.length,
         summary: Object.fromEntries(
-          ["separate", "batch"].map((mode) => [
-            mode,
-            Object.fromEntries(
-              ["inputPublication", "completionToSealedParent"].map((timing) => {
-                const values = samples
-                  .filter((sample) => sample.mode === mode)
-                  .map(
-                    (sample) =>
-                      sample[
-                        timing as
-                          "inputPublication" | "completionToSealedParent"
-                      ],
-                  );
-                return [
-                  timing,
-                  { p50: quantile(values, 0.5), p95: quantile(values, 0.95) },
-                ];
-              }),
-            ),
-          ]),
+          (["inputPublication", "completionToSealedParent"] as const).map(
+            (timing) => {
+              const values = samples.map((sample) => sample[timing]);
+              return [
+                timing,
+                { p50: quantile(values, 0.5), p95: quantile(values, 0.95) },
+              ];
+            },
+          ),
         ),
         samples,
       },

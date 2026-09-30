@@ -357,14 +357,10 @@ test("model input excludes all coverage and retains complete source evidence onc
   );
   let writes = 0;
   const prompt = await scanMergePrompt(parent, [two], previous, root, {
-    async restore() {
-      throw new Error("Expected batch publication");
-    },
-    async restoreMany(artifacts) {
+    async restore(path, contents) {
       writes++;
-      expect(artifacts).toEqual([
-        { path: "artifacts/deep-scan/merge-inputs.json", contents: bytes },
-      ]);
+      expect(path).toBe("artifacts/deep-scan/merge-inputs.json");
+      expect(contents).toEqual(bytes);
     },
   });
   expect(writes).toBe(1);

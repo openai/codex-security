@@ -304,10 +304,6 @@ async function harness(
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), contents);
       },
-      async restoreMany(artifacts) {
-        for (const { path, contents } of artifacts)
-          await this.restore(path, contents);
-      },
     },
     async publish(draft) {
       published.push(structuredClone(draft));

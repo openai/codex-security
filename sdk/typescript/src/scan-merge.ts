@@ -317,9 +317,7 @@ export async function scanMergePrompt(
   writer: ScanArtifactRestorer,
 ): Promise<string> {
   const path = "artifacts/deep-scan/merge-inputs.json";
-  await writer.restoreMany([
-    { path, contents: scanMergeModelInputs(inputs, previous) },
-  ]);
+  await writer.restore(path, scanMergeModelInputs(inputs, previous));
   return `Group the assigned completed, validated findings. Do not inspect repository code, discover or validate findings, edit files, run subagents, or start another scan.
 
 Merge only the same actionable root issue using remediation-subsumption: correcting either canonical issue must correct every absorbed observation. Shared titles, subsystem, CWE, route or sink family do not establish duplicates. Keep distinct reachable instances and distinct required repairs in separate groups. Treat previously accepted groups as indivisible; their sourceFindingIds must remain together.

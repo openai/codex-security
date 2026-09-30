@@ -278,10 +278,6 @@ async function fixture(
           await mkdir(join(scanDir, path), { recursive: true });
         },
         restore,
-        async restoreMany(artifacts) {
-          for (const artifact of artifacts)
-            await restore(artifact.path, artifact.contents);
-        },
         async remove(path) {
           await rm(join(scanDir, path), { force: true });
         },
