@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { sessionFiles } from "./cost.js";
+import { sessionFiles, type ScanCostTracker } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -62,6 +64,99 @@ export function readSavedScanLogs(
   });
 }
 
+interface ScanLogInvocation {
+  turns: () => Promise<{ threadId: string; turnId: string }[]>;
+  write?: Promise<void>;
+}
+
+const scanLogInvocations = new Map<string, Set<ScanLogInvocation>>();
+
+// Bound ownership to the streamed turn itself, then resolve native task IDs on
+// the existing incremental reader without blocking scan execution on log I/O.
+export async function* recordScanLogTurn<T extends { readonly type: string }>(
+  options: {
+    scanId: string;
+    threadId: () => string | null;
+    codexHome: string;
+    tracker: ScanCostTracker;
+    pendingWrites: Set<Promise<void>>;
+  },
+  run: () => Promise<{ events: AsyncGenerator<T> }>,
+  onError: (error: unknown) => void,
+): AsyncGenerator<T> {
+  const warn = (error: unknown) => {
+    try {
+      onError(error);
+    } catch {}
+  };
+  const startedAt = Date.now();
+  let endedAt: number | undefined;
+  const path = scanLogTurnsPath(options.codexHome, options.scanId);
+  const invocations =
+    scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
+  const invocation: ScanLogInvocation = {
+    turns: async () => {
+      const threadId = options.threadId();
+      if (threadId === null) return [];
+      return await options.tracker.logTurns(
+        threadId,
+        startedAt,
+        endedAt ?? Date.now(),
+      );
+    },
+  };
+  invocations.add(invocation);
+  scanLogInvocations.set(path, invocations);
+  const forget = () => {
+    invocations.delete(invocation);
+    if (invocations.size === 0) scanLogInvocations.delete(path);
+  };
+  try {
+    yield* (await run()).events;
+  } finally {
+    if (options.threadId() === null) {
+      forget();
+    } else {
+      // End the ownership window synchronously, then move session discovery and
+      // attribution persistence fully off the scan turn path. Client cleanup and
+      // log reads explicitly settle these optional writes when they need them.
+      endedAt = Date.now();
+      const write = invocation
+        .turns()
+        .then(async (turns) => {
+          if (turns.length === 0) return;
+          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+          await appendFile(
+            path,
+            turns.map((turn) => JSON.stringify(turn) + "\n").join(""),
+            { mode: 0o600 },
+          );
+        })
+        .catch(warn)
+        .finally(() => {
+          forget();
+          options.pendingWrites.delete(write);
+        });
+      invocation.write = write;
+      options.pendingWrites.add(write);
+    }
+  }
+}
+
+export async function settleScanLogTurns(
+  pendingWrites: ReadonlySet<Promise<void>>,
+): Promise<void> {
+  await Promise.all(pendingWrites);
+}
+
+function scanLogTurnsPath(codexHome: string, scanId: string): string {
+  return join(
+    codexHome,
+    "scan-log-turns",
+    createHash("sha256").update(scanId).digest("hex") + ".jsonl",
+  );
+}
+
 interface SessionLog {
   threadId: string;
   parentThreadId: string | null;
@@ -106,12 +201,46 @@ export async function findScanSession(
 }
 
 export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(
     typeof options.codexHome === "string"
       ? [options.codexHome]
       : options.codexHome,
   );
+
+  // Active attribution can discover a child rollout that did not exist when the
+  // log read began. Settle/inspect it first, then discover sessions so directly
+  // attributed children are present in the selected log map.
+  const ownedTurns = new Map<string, Set<string>>();
+  for (const home of homes) {
+    const path = scanLogTurnsPath(home, options.scanId);
+    const invocations =
+      scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
+    await Promise.all([...invocations].map((invocation) => invocation.write));
+    const records: Record<string, unknown>[] = (
+      await Promise.all(
+        [...invocations].map((invocation) =>
+          invocation.turns().catch(() => []),
+        ),
+      )
+    ).flat();
+    try {
+      for await (const record of sessionEvents(path)) records.push(record);
+    } catch {
+      // Attribution is optional; native logs still use the completion boundary.
+    }
+    for (const record of records) {
+      if (
+        typeof record["threadId"] !== "string" ||
+        typeof record["turnId"] !== "string"
+      )
+        continue;
+      const turns = ownedTurns.get(record["threadId"]) ?? new Set<string>();
+      turns.add(record["turnId"]);
+      ownedTurns.set(record["threadId"], turns);
+    }
+  }
+
+  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
@@ -129,14 +258,16 @@ export async function readScanLogs(options: ScanLogOptions) {
     );
   }
 
-  const included = new Set([
+  const explicitlyIncluded = new Set([
     ...(options.threadId ? [options.threadId] : []),
     ...(options.threadIds ?? []),
     ...(options.executionThreadIds ?? []),
   ]);
+  const included = new Set([...explicitlyIncluded, ...ownedTurns.keys()]);
   // A Desktop owner can contain other work. Include its log without treating
-  // the whole conversation tree as part of this scan.
-  const traversed = new Set(options.executionThreadIds ?? included);
+  // the whole conversation tree as part of this scan. Directly attributed
+  // threads are selected too, but do not widen descendant traversal.
+  const traversed = new Set(options.executionThreadIds ?? explicitlyIncluded);
   const pending = [...traversed];
   for (const parentId of pending) {
     const parent = logs.get(parentId)?.[0];
@@ -165,9 +296,11 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
+  const completedAt = Date.parse(options.completedAt ?? "");
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
     let replaying = false;
+    let scanTurn = false;
     for await (const event of sessionEvents(session.path)) {
       const payload = event["payload"];
       if (event["type"] === "session_meta" && isRecord(payload)) {
@@ -185,6 +318,24 @@ export async function readScanLogs(options: ScanLogOptions) {
           continue;
         }
         replaying = false;
+      }
+      const timestamp =
+        typeof event["timestamp"] === "string"
+          ? Date.parse(event["timestamp"])
+          : NaN;
+      if (
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started"
+      ) {
+        // Completion is recorded before the terminal tool result and reply.
+        scanTurn =
+          timestamp <= completedAt ||
+          (typeof payload["turn_id"] === "string" &&
+            ownedTurns.get(session.threadId)?.has(payload["turn_id"]) === true);
+      }
+      if (!scanTurn && timestamp > completedAt) {
+        continue;
       }
       events.push({ threadId: session.threadId, event });
     }
