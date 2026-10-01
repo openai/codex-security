@@ -20,7 +20,8 @@ when the category names credential, secret, hardcoding, or private-key exposure.
 Mentions in resolved questions, intermediate responses, or deferred coverage
 do not count.
 
-The grader rejects unrelated non-supporting locations and incomplete coverage.
+Every location must cite a fixture file and an in-bounds line range. The grader
+rejects unrelated non-supporting locations and incomplete coverage.
 Deferred work, surfaces needing follow-up, or exclusions that match fixture
 files make coverage incomplete. Exclusions outside the generated repository
 are allowed. Supporting locations, including the production `expected_control`

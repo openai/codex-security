@@ -167,16 +167,50 @@ for (const negativeIndex of [0, 1, 2, 3]) {
   });
 }
 
-for (const role of ["supporting", "expected_control"]) {
+for (const role of [
+  "supporting",
+  "support",
+  "context",
+  "consumer",
+  "expected_control",
+]) {
   test(`benign ${role} context does not become a false positive`, () => {
     const fixture = createFixture();
-    const result = retainedResult(fixture);
-    result.findings[0].locations.push({
-      path: fixture.negatives[0],
-      startLine: 1,
-      role,
-    });
-    assert.equal(gradeResult(result, fixture).passed, true);
+    for (const path of [
+      fixture.negatives[0],
+      `./${fixture.negatives[0]}`,
+      `.\\${fixture.negatives[0].replaceAll("/", "\\")}`,
+    ]) {
+      const result = retainedResult(fixture);
+      result.findings[0].locations.push({
+        path,
+        startLine: 1,
+        endLine: null,
+        role,
+      });
+      assert.equal(gradeResult(result, fixture).passed, true);
+      result.findings[0].locations.at(-1).endLine = 4;
+      assert.equal(gradeResult(result, fixture).passed, true);
+    }
+  });
+
+  test(`rejects invalid ${role} source citations`, () => {
+    const fixture = createFixture();
+    for (const location of [
+      { path: "src/absent.py", startLine: 999 },
+      { path: "src/runtime_config.py", startLine: 0 },
+      { path: "src/runtime_config.py", startLine: -1, endLine: 1 },
+      { path: "src/runtime_config.py", startLine: 999 },
+      { path: "src/runtime_config.py", startLine: 3, endLine: 1 },
+      { path: "src/runtime_config.py", startLine: 1, endLine: 999 },
+    ]) {
+      const result = retainedResult(fixture);
+      result.findings[0].locations.push({ ...location, role });
+      const report = gradeResult(result, fixture);
+      assert.equal(report.recall, 1);
+      assert.equal(report.falsePositiveCount, 1);
+      assert.equal(report.passed, false);
+    }
   });
 }
 

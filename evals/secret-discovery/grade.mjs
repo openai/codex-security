@@ -61,6 +61,19 @@ function normalizeSourcePath(path) {
   return path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
 }
 
+function validSourceRange(location, fixture) {
+  const source = fixture.files[normalizeSourcePath(location.path)];
+  const end = location.endLine ?? location.startLine;
+  return (
+    typeof source === "string" &&
+    Number.isInteger(location.startLine) &&
+    Number.isInteger(end) &&
+    location.startLine > 0 &&
+    end >= location.startLine &&
+    end <= source.trimEnd().split("\n").length
+  );
+}
+
 function matchesLocation(location, expected) {
   const end = location.endLine ?? location.startLine;
   return (
@@ -111,16 +124,10 @@ function validEvidence(finding, fixture) {
   }));
   return (
     evidence.length > 0 &&
-    evidence.every((entry) => {
-      const source = fixture.files[normalizeSourcePath(entry.path)];
-      return (
-        typeof source === "string" &&
-        Boolean(entry.code?.trim()) &&
-        Number.isInteger(entry.startLine) &&
-        entry.startLine > 0 &&
-        entry.endLine <= source.trimEnd().split("\n").length
-      );
-    }) &&
+    evidence.every(
+      (entry) =>
+        Boolean(entry.code?.trim()) && validSourceRange(entry, fixture),
+    ) &&
     fixture.positives
       .filter((expected) => matches(finding, expected))
       .every((expected) =>
@@ -151,12 +158,13 @@ export function gradeResult(result, fixture, repo) {
     const unexpectedLocations = (finding.locations ?? [])
       .filter(
         (location) =>
-          !supportingLocation(location) &&
-          !fixture.positives.some(
-            (expected) =>
-              matchesLocation(location, expected) ||
-              matchesConsumer(location, expected),
-          ),
+          !validSourceRange(location, fixture) ||
+          (!supportingLocation(location) &&
+            !fixture.positives.some(
+              (expected) =>
+                matchesLocation(location, expected) ||
+                matchesConsumer(location, expected),
+            )),
       )
       .map((location) => location.path);
     if (unexpectedLocations.length) return [{ index, unexpectedLocations }];
