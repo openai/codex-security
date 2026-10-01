@@ -22,6 +22,7 @@
 - reuse unchanged plugins across concurrent scans ([#1082](https://github.com/openai/codex-security/pull/1082))
 - deduplicate tracked ignored files in scoped inventories ([#1077](https://github.com/openai/codex-security/pull/1077))
 - bump Codex SDK and CLI to 0.159.3 ([#1170](https://github.com/openai/codex-security/pull/1170))
+- bump MCP SDK to 1.30.1 in MCP app and evals ([#1171](https://github.com/openai/codex-security/pull/1171))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
