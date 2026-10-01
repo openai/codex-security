@@ -50,32 +50,52 @@ installing dependencies.
 ## CI and OpenAI scans
 
 The [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml) runs behavior
-tests on every pull request, including drafts, regardless of which files changed.
-Pull request jobs do not receive inference credentials. A Codex Security scan is
-available through a manual run on the protected default branch, after approval
-of the `invoice-desk-inference` GitHub environment.
+tests whenever a pull request targeting `main` is opened, reopened, updated, or edited,
+including drafts and forks, regardless of which files changed. After that run
+finishes, the [OpenAI scan workflow](../../.github/workflows/invoice-desk-scan.yml)
+automatically queues a scan of the PR's exact head commit, even if the behavior
+tests failed. It checks the PR's current base and head through GitHub's API;
+closed PRs, PRs targeting other branches, cancelled runs, and superseded commits
+are skipped. New scans cancel older scans for the same PR.
 
-Before enabling inference, configure that environment with required reviewers
-and a deployment branch rule allowing only the protected default branch. Store
-a dedicated service-account key as its `OPENAI_API_KEY` environment secret,
-with access to `gpt-5.6-sol`. Do not use a repository or organization Actions
-secret for this workflow. The credential must also permit API access from the
-selected runner's network; creating a service account does not establish that
-permission. Missing credentials fail the scan job with a setup error.
+Both workflows must reach `main` before automatic scanning is active because
+GitHub loads [workflow_run workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
+from the default branch. Edits also trigger a run so retargeting an existing PR
+to `main` is covered. The scan workflow and its target resolver run from protected `main`, while the source to
+analyze comes from the PR. The original PR job receives no inference credentials.
+The scan still waits for approval of the `invoice-desk-inference` environment;
+automatic triggering does not remove that approval requirement. GitHub may also
+require approval before running a first-time contributor's PR workflow.
+
+Configure that environment with required reviewers and a deployment branch rule
+allowing only protected `main`. Store a dedicated service-account key as its
+`OPENAI_API_KEY` environment secret, with access to `gpt-5.6-sol`. Do not use a
+repository or organization Actions secret for this workflow. The credential must
+also permit API access from the selected runner's network; creating a service
+account does not establish that permission. Missing credentials fail the scan
+job with a setup error. **Invoice Desk OpenAI scan → Run workflow** on `main`
+remains available for a manual baseline scan.
 
 This adapts the existing [GitHub Actions example](../github-actions/README.md) to
 OpenAI inference. It pins CLI 0.1.30 and uses standard mode with high effort on
 Node.js 24 and Python 3.12. It scans the entire standalone application on each
 run, not a PR diff, so unchanged seeded cases remain in scope. Inference consumes
-API usage, and newer runs cancel older runs for the same ref.
+API usage.
 
-The workflow installs the CLI outside the checkout, copies only `app/` into a
-fresh directory, and starts the scanner from that directory with separate state.
+The workflow installs the CLI outside the checkout and exports only the `app/`
+Git tree into a fresh directory. Archive extraction rejects paths and links that
+escape that directory. It does not install dependencies from the PR, execute the
+application or its tests in the inference job, or download PR-produced artifacts.
 The sample documentation, threat model, tests, answer key, and previous reports
-are not scan input. The API key is available only in the scan step; no GitHub token
-is passed to the scanner. Review changes to the application and workflow before
-merging and approving an inference run. A passing pull request check verifies
-application behavior only; it does not mean a source scan ran.
+are not scan input. The API key is available only in the scan step; no GitHub
+token is passed to the scanner. Review the source commit before approving an
+inference run.
+
+Results appear under **Actions → Invoice Desk OpenAI scan**. Because the scan
+runs as a separate workflow on `main`, its result is not a PR status check or a
+merge gate. The summary identifies the PR number and source commit so its
+results can be matched to the PR revision. A passing behavior check alone does
+not mean a source scan completed.
 
 The Actions summary shows the total finding count, severity counts, and coverage.
 A seven-day artifact contains the Markdown report, findings and coverage JSON,

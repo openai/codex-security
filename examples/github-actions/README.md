@@ -97,10 +97,13 @@ you are authorized to submit to the configured inference provider.
 
 The repository's [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml)
 adapts this example to `--provider openai --auth api-key` using an
-`OPENAI_API_KEY` secret in a protected GitHub environment. Pull requests run
-behavior tests without inference credentials. Approved manual runs on the
-protected default branch scan a standalone copy of the synthetic app, show
-counts and coverage in the Actions summary, and save reports plus SARIF as
-artifacts. The workflow does not upload the sample's intentional vulnerabilities
-to Code Scanning or post PR comments.
+`OPENAI_API_KEY` secret in a protected GitHub environment. Pull requests to
+`main` run behavior tests without inference credentials. A separate
+[scan workflow](../../.github/workflows/invoice-desk-scan.yml) on protected `main`
+automatically queues a scan of each PR's application source, including forks and
+drafts, and waits for the existing environment approval. It shows the PR number,
+source commit, counts, and coverage in the Actions summary and saves reports
+plus SARIF as artifacts. Manual baseline scans remain available. The scan does
+not create a PR status check, upload the sample's intentional vulnerabilities to
+Code Scanning, or post PR comments.
 See the [setup and reporting guide](../invoice-desk/README.md#ci-and-openai-scans).

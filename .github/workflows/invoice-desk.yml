@@ -2,8 +2,8 @@ name: Invoice Desk sample
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
-  workflow_dispatch:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
 
 permissions:
   contents: read
@@ -25,126 +25,5 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      - name: Check application behavior and ten seeded scenarios
-        run: node --test examples/invoice-desk/qa/app.test.mjs
-
-  scan:
-    name: OpenAI source scan
-    # Inference runs only from the protected default branch after environment approval.
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
-      github.ref_protected
-    environment: invoice-desk-inference
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CODEX_SECURITY_VERSION: "0.1.30"
-
-    steps:
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install Codex Security outside the checkout
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          npm install --prefix "$RUNNER_TEMP/codex-security-cli" \
-            --ignore-scripts --no-audit --no-fund \
-            --registry=https://registry.npmjs.org/ \
-            "@openai/codex-security@$CODEX_SECURITY_VERSION"
-          echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Check out the approved workflow commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Prepare the standalone application
-        shell: bash
-        run: cp -R "$GITHUB_WORKSPACE/examples/invoice-desk/app" "$RUNNER_TEMP/invoice-desk"
-
-      - name: Scan with OpenAI inference
-        id: scan
-        working-directory: ${{ runner.temp }}/invoice-desk
-        shell: bash
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
-        run: |
-          if [[ -z "$OPENAI_API_KEY" ]]; then
-            echo "::error::Configure OPENAI_API_KEY in the protected invoice-desk-inference environment."
-            echo "exit-code=2" >> "$GITHUB_OUTPUT"
-            exit 2
-          fi
-          scan_status=0
-          codex-security scan . \
-            --provider openai --auth api-key \
-            --model gpt-5.6-sol --effort high --mode standard \
-            --headless --format json \
-            --output-dir "$RUNNER_TEMP/invoice-desk-scan" \
-            > "$RUNNER_TEMP/invoice-desk-result.json" || scan_status=$?
-          echo "exit-code=$scan_status" >> "$GITHUB_OUTPUT"
-          exit "$scan_status"
-
-      - name: Export completed findings as SARIF
-        if: ${{ !cancelled() && steps.scan.outputs.exit-code == '0' }}
-        shell: bash
-        env:
-          CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
-        run: |
-          codex-security export "$RUNNER_TEMP/invoice-desk-scan" \
-            --export-format sarif \
-            --source-root "$RUNNER_TEMP/invoice-desk" \
-            --output "$RUNNER_TEMP/invoice-desk.sarif"
-
-      - name: Summarize the scan
-        if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
-        shell: bash
-        env:
-          SCAN_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
-        run: |
-          python3 - <<'PY'
-          from collections import Counter
-          import json
-          import os
-          from pathlib import Path
-
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-              summary.write("## Invoice Desk security scan\n\n")
-              if os.environ["SCAN_EXIT_CODE"] != "0":
-                  summary.write("The scan did not complete. Check the scan step and any saved reports; this is not a clean security result.\n")
-              else:
-                  root = Path(os.environ["RUNNER_TEMP"]) / "invoice-desk-scan"
-                  findings = json.loads((root / "findings.json").read_text())["findings"]
-                  coverage = json.loads((root / "coverage.json").read_text())["completeness"]
-                  counts = Counter(finding["severity"]["level"] for finding in findings)
-                  summary.write(f"Reported findings: **{len(findings)}**. Coverage: **{coverage}**.\n\n")
-                  summary.write("| Severity | Count |\n| --- | --- |\n")
-                  for severity in ("critical", "high", "medium", "low", "informational"):
-                      summary.write(f"| {severity} | {counts[severity]} |\n")
-                  summary.write("\nDownload the report artifact to review findings against the ten expected root causes. Raw counts can include additional findings or duplicates; this run does not assert scanner recall.\n")
-              summary.write("\nScanner: @openai/codex-security@" + os.environ["CODEX_SECURITY_VERSION"] + "; OpenAI gpt-5.6-sol; standard mode; high effort.\n")
-          PY
-
-      - name: Save reports
-        if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: invoice-desk-scan-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 7
-          if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/invoice-desk-result.json
-            ${{ runner.temp }}/invoice-desk.sarif
-            ${{ runner.temp }}/invoice-desk-scan/report.md
-            ${{ runner.temp }}/invoice-desk-scan/scan-manifest.json
-            ${{ runner.temp }}/invoice-desk-scan/coverage.json
-            ${{ runner.temp }}/invoice-desk-scan/findings.json
+      - name: Check application behavior and scan targeting
+        run: node --test examples/invoice-desk/qa/app.test.mjs .github/scripts/invoice-desk-target.test.mjs
