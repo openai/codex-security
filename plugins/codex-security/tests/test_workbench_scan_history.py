@@ -39,6 +39,41 @@ def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, 
     return json.loads(completed.stdout)
 
 
+@pytest.mark.parametrize("complete", [False, True])
+def test_rename_persists_without_changing_scan_results(tmp_path: Path, complete: bool) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=complete)
+    before = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+
+    renamed = run_workbench(
+        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  Release audit  "
+    )
+
+    assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
+    after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert after == {**before, "name": "Release audit"}
+    listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
+    assert [(item["scanId"], item["name"]) for item in listed] == [
+        (scan["scanId"], "Release audit")
+    ]
+
+
+def test_rename_rejects_blank_names(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
+
+    blank = run_workbench(
+        state_dir, "rename-scan", "--scan-id", scan["scanId"], "--name=  ", check=False
+    )
+    assert blank["returncode"] != 0
+    assert "Scan name cannot be empty" in blank["stderr"]
+    assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
+
+
 def compare_scan_pair(
     state_dir: Path,
     before: dict[str, Any],
