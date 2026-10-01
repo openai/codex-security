@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
 import { codexSecurityCredentialHome } from "../src/runtime.js";
+import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION, BUNDLED_PLUGIN_VERSION } from "../src/version.js";
+import {
+  completedAt,
+  laterTurnEvents,
+  terminalScanEvents,
+} from "./support/terminal-rollout.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/feedback.mjs", import.meta.url),
@@ -115,6 +121,40 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
     ),
   ).toEqual(["thread-1", "worker-1"]);
   expect(existsSync(attachments[0].path)).toBe(false);
+  context.expectClosed();
+});
+
+test("attaches the complete terminal scan turn without later conversation work", async () => {
+  const context = await setup();
+  const metadata = {
+    type: "session_meta",
+    payload: { id: "thread-1", timestamp: "2026-08-21T12:00:00Z" },
+  };
+  await writeFile(
+    join(context.home, "sessions", "rollout-root.jsonl"),
+    [metadata, ...terminalScanEvents, ...laterTurnEvents]
+      .map((event) => JSON.stringify(event))
+      .join("\n"),
+  );
+  const scan = {
+    ...context.options.scan,
+    executionThreadIds: [],
+    progress: { status: "complete", updatedAt: completedAt },
+  };
+  await sendFeedback({ ...context.options, scan }, context.startCodex);
+  const { attachments } = await context.transcript();
+  expect(attachments).toHaveLength(1);
+  const attached = JSON.parse(attachments[0].content);
+  expect(attached).toEqual(
+    await readSavedScanLogs(
+      scan,
+      [context.home, context.environment.CODEX_HOME],
+      { allowMissingRoot: true },
+    ),
+  );
+  expect(attached.events.map(({ event }: { event: unknown }) => event)).toEqual(
+    [metadata, ...terminalScanEvents],
+  );
   context.expectClosed();
 });
 

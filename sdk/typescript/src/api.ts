@@ -163,6 +163,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { recordScanLogTurn, settleScanLogTurns } from "./scan-logs.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
@@ -485,6 +486,7 @@ export class CodexSecurity {
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
+  readonly #scanLogWrites = new Set<Promise<void>>();
   #runtimePromise: Promise<PreparedRuntime> | null = null;
   #runtime: PreparedRuntime | null = null;
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
@@ -1938,13 +1940,30 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
+      const runOwnedTurn = async (input: string) => ({
+        events: recordScanLogTurn(
+          {
+            scanId,
+            threadId: () => thread.id,
+            codexHome: runtime.codexHome,
+            tracker,
+            pendingWrites: this.#scanLogWrites,
+          },
+          () => thread.runStreamed(input, { signal }),
+          (error) =>
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not save scan log attribution: ${safeErrorMessage(error)}`,
+            ),
+        ),
+      });
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
+        runPostScan = () => runOwnedTurn(postScanPrompt);
       }
-      const { events } = await thread.runStreamed(prompt, {
-        signal,
-      });
+      const { events } = await runOwnedTurn(prompt);
       checkOpen();
 
       const result = await runScanEvents({
@@ -2571,6 +2590,7 @@ export class CodexSecurity {
   }
 
   async #cleanupRuntime(runtime: PreparedRuntime): Promise<void> {
+    await settleScanLogTurns(this.#scanLogWrites);
     const cleanupResults = await Promise.allSettled(
       [
         runtime.persistentCredentialHome ? undefined : runtime.codexHome,

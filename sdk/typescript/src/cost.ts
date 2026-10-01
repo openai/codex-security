@@ -36,8 +36,13 @@ interface SessionReasoning {
   activity: ScanActivity | null;
 }
 
+interface SessionTurn {
+  startedAt: number | null;
+}
+
 interface SessionUsage {
   offset: number;
+  turns: Map<string, SessionTurn>;
   pendingLine: Buffer[];
   pendingLineBytes: number;
   unreadable: boolean;
@@ -84,6 +89,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    turns: new Map(),
     pendingLine: [],
     pendingLineBytes: 0,
     unreadable: false,
@@ -182,6 +188,59 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
+  public async logTurns(
+    threadId: string,
+    startedAt: number,
+    endedAt: number,
+  ): Promise<{ threadId: string; turnId: string }[]> {
+    const update = this.#pending.then(async () => {
+      // Attribution is optional and runs after the owned turn has yielded back to
+      // its caller. Read native rollout state here rather than putting a full
+      // CODEX_HOME walk on the scan turn path.
+      await this.#readSessions(undefined, false);
+
+      const included = new Set([threadId]);
+      const scanDirectory = this.#options.scanDirectory;
+      if (scanDirectory !== undefined) {
+        for (const session of this.#sessions.values()) {
+          if (session.threadId === null || session.workingDirectory === null)
+            continue;
+          // The resumed/finishing owner can be a shared Desktop thread, so do
+          // not recursively claim all of its descendants. Scan workers are
+          // identifiable by the scan directory, including independent Deep Scan
+          // roots, while the owner itself is included explicitly above.
+          if (
+            session.workingDirectory === scanDirectory ||
+            isScanArtifactDirectory(scanDirectory, session.workingDirectory)
+          ) {
+            included.add(session.threadId);
+          }
+        }
+      }
+
+      const turns: { threadId: string; turnId: string }[] = [];
+      for (const session of this.#sessions.values()) {
+        if (session.threadId === null || !included.has(session.threadId))
+          continue;
+        for (const [turnId, turn] of session.turns) {
+          if (
+            turn.startedAt !== null &&
+            turn.startedAt >= startedAt &&
+            turn.startedAt <= endedAt
+          ) {
+            turns.push({ threadId: session.threadId, turnId });
+          }
+        }
+      }
+      return turns;
+    });
+    this.#pending = update.then(
+      () => {},
+      () => {},
+    );
+    return await update;
+  }
+
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
     if (this.#timer !== null) {
       clearInterval(this.#timer);
@@ -197,23 +256,36 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
-    if (this.#threadId === null) return;
+  async #readSessions(
+    offsets?: ReadonlyMap<string, number>,
+    report = true,
+  ): Promise<void> {
+    if (this.#threadId === null && report) return;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
+    for await (const path of offsets?.keys() ??
+      sessionFiles(join(this.#options.codexHome, "sessions"))) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
         session = createSessionUsage();
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        await readSessionUsage(
+          path,
+          session,
+          this.#options.repository,
+          offsets?.get(path),
+        );
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
       }
+    }
+
+    // Follow-up attribution shares the cursor without reopening settled cost/progress.
+    if (!report) {
+      if (unreadable.length > 0) throw unreadable[0]!.error;
+      return;
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -396,6 +468,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  end = Infinity,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -408,14 +481,14 @@ async function readSessionUsage(
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
+      if (session.offset >= end) return;
       const { bytesRead } = await file.read(
         buffer,
         0,
-        buffer.length,
+        Math.min(buffer.length, end - session.offset),
         session.offset,
       );
       if (bytesRead === 0) return;
-      session.offset += bytesRead;
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
       } catch (error) {
@@ -424,6 +497,7 @@ async function readSessionUsage(
         session.pendingLineBytes = 0;
         throw error;
       }
+      session.offset += bytesRead;
     }
   } finally {
     await file.close();
@@ -464,6 +538,26 @@ function readSessionChunk(
     }
     lineStart = newline + 1;
   }
+}
+
+function rememberTurn(
+  event: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  session: SessionUsage,
+): void {
+  const turnId = payload["turn_id"];
+  if (typeof turnId !== "string") return;
+  const payloadStartedAt = payload["started_at"];
+  const timestamp = event["timestamp"];
+  const startedAt =
+    typeof payloadStartedAt === "number"
+      ? payloadStartedAt * 1_000
+      : typeof timestamp === "string"
+        ? Date.parse(timestamp)
+        : Number.NaN;
+  session.turns.set(turnId, {
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+  });
 }
 
 function readSessionEvent(
@@ -516,10 +610,13 @@ function readSessionEvent(
       if (owned) {
         session.replaying = false;
         session.events?.push(event);
+        rememberTurn(event, payload, session);
       }
     }
     return;
   }
+  if (event["type"] === "event_msg" && payload["type"] === "task_started")
+    rememberTurn(event, payload, session);
   session.events?.push(event);
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
