@@ -3146,7 +3146,7 @@ export async function main(
         return { ...result };
       } catch (error) {
         if (!finishCancellation(error)) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           exitCode = 2;
         }
         return cloudBatch;
@@ -3265,7 +3265,7 @@ export async function main(
           );
         } else {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
         return undefined;
       } finally {
@@ -3275,8 +3275,7 @@ export async function main(
     },
   });
   const cli = Cli.create("codex-security", {
-    description:
-      "Find, review, and fix security issues in your code.",
+    description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3473,7 +3472,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           try {
-            errorOutput.write(`codex-security: ${message}\n`);
+            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           } catch {}
           return fail(message, 2);
         }
@@ -3900,7 +3899,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : errorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4004,7 +4003,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : errorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4133,7 +4132,7 @@ export async function main(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
                 ? "Deduplication canceled. Findings are unchanged."
-                : errorMessage(error)
+                : diagnosticValue(error)
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
@@ -4388,7 +4387,7 @@ export async function main(
               if (dashboard !== null) dashboard.updateComponent(component);
               else
                 errorOutput.write(
-                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
+                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
             },
             onComplete: (result) => {
@@ -4734,7 +4733,7 @@ export async function main(
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${errorMessage(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
@@ -5103,7 +5102,7 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           return undefined;
         }
       },
@@ -5479,7 +5478,7 @@ export async function main(
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           if (!structuredOutput) return;
           patchStructuredError = true;
           const failure = {
@@ -6025,7 +6024,7 @@ async function runScanImport(
       signal === "SIGINT" || signal === "SIGTERM"
         ? "Scan import canceled."
         : errorMessage(error);
-    errorOutput.write(`codex-security: ${message}\n`);
+    errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
     return {
       exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
       error: message,
@@ -9012,7 +9011,7 @@ async function executeScan(
         }
       }
     } catch (error) {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
       scanData = { ...scanData, patches };
       return completedScan(2);
     }

@@ -513,6 +513,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test("keeps receipts and continues after a failed scan without retrying", async () => {
+    const failure = `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`;
     const deps = dependencies();
     const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
       resolve(deps.currentDirectory(), path),
@@ -521,7 +522,7 @@ describe("publish scan to Cloud", () => {
     deps.publishScanToCloud = async (directory) => {
       calls.push(directory);
       if (directory === directories[1]) {
-        throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+        throw new Error(failure);
       }
       return {
         ...receipt,
@@ -554,12 +555,15 @@ describe("publish scan to Cloud", () => {
       failed: [
         {
           scanDir: directories[1],
-          error: `Cloud failed: ${SYNTHETIC_CREDENTIALS}`,
+          error: failure,
         },
       ],
       notAttempted: [],
     });
-    expect(stderr.text()).toContain(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+    expect(stderr.text()).toContain(
+      `Cloud failed: ${SYNTHETIC_CREDENTIALS} [2J continued\n`,
+    );
+    expect(stderr.text()).not.toContain("\u001b");
   });
 
   test.each([false, true])(
@@ -996,7 +1000,9 @@ describe("publish scan to Cloud", () => {
   test("reports original publication failures without claiming success", async () => {
     const deps = dependencies();
     deps.publishScanToCloud = async () => {
-      throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+      throw new Error(
+        `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
+      );
     };
     const stdout = capture();
     const stderr = capture();
@@ -1010,7 +1016,7 @@ describe("publish scan to Cloud", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
-      `codex-security: Cloud failed: ${SYNTHETIC_CREDENTIALS}\n`,
+      `codex-security: Cloud failed: ${SYNTHETIC_CREDENTIALS} [2J continued\n`,
     );
   });
 

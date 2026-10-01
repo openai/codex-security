@@ -307,6 +307,50 @@ describe("multiscan", () => {
     );
   });
 
+  test("CLI escapes bulk failure controls while preserving the saved receipt", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "failure");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const failure = "Bulk failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    expect(
+      await main(
+        [
+          "bulk-scan",
+          paths.input,
+          "--output-dir",
+          paths.output,
+          "--max-attempts",
+          "1",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        {
+          ...deps,
+          createSecurity: (config) => ({
+            ...deps.createSecurity(config),
+            run: async () => {
+              throw new Error(failure);
+            },
+          }),
+        },
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "Bulk failed: token=SYNTHETIC_VALUE [2J continued\n",
+    );
+    expect(stderr.text()).not.toContain("\u001b");
+    expect(await results(JSON.parse(stdout.text()).resultsPath)).toMatchObject([
+      { status: "failed", error: failure },
+    ]);
+  });
+
   test("recovery skips untouched rows and saves an interrupted ledger tail before appending", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "tail");

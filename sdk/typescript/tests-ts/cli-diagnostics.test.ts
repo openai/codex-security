@@ -11,6 +11,83 @@ import {
 
 describe("CLI diagnostics", () => {
   test.each([
+    {
+      command: "policy",
+      args: ["policy", "--json", "--full-output"],
+      structured: true,
+    },
+    {
+      command: "suggest-owners",
+      args: ["suggest-owners", "findings.json"],
+      structured: false,
+    },
+    {
+      command: "classify-severity",
+      args: ["classify-severity", "--scan", "latest"],
+      structured: false,
+    },
+    {
+      command: "dedupe",
+      args: [
+        "dedupe",
+        "--scan",
+        "latest",
+        "--findings-url",
+        "https://example.test/findings",
+      ],
+      structured: false,
+    },
+    {
+      command: "verify-fix",
+      args: ["verify-fix", "Synthetic finding"],
+      structured: false,
+    },
+    {
+      command: "patch",
+      args: ["patch", "Synthetic finding", "--json"],
+      structured: true,
+    },
+    {
+      command: "scan import",
+      args: ["--json", "scan", "import", "--csv", "findings.csv"],
+      structured: false,
+    },
+    {
+      command: "GitHub import",
+      args: ["import", "github", "example/repository"],
+      structured: false,
+    },
+  ])(
+    "escapes terminal controls in $command failures while preserving details",
+    async ({ command, args, structured }) => {
+      const message =
+        "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail";
+      const fail = () => {
+        throw new Error(message);
+      };
+      const deps = dependencies({ onCodex: fail, onRepositoryCommand: fail });
+      deps.classifyScanSeverity = fail;
+      deps.deduplicateScan = fail;
+      deps.importScan = fail;
+      deps.importGitHubAlerts = fail;
+      if (command === "policy" || command === "suggest-owners")
+        deps.currentDirectory = fail;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
+      expect(stderr.text()).toContain(
+        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail\n",
+      );
+      expect(stderr.text()).not.toContain("\u001b");
+      if (structured) {
+        const result = JSON.parse(stdout.text());
+        expect(result.error?.message ?? result.message).toBe(message);
+      }
+    },
+  );
+
+  test.each([
     new CodexSecurityError("token budget exceeded"),
     new CodexSecurityError("basic validation failed"),
     new OutputDirectoryError(

@@ -2253,23 +2253,32 @@ describe("scan and patch workflow", () => {
     },
   );
 
-  test("preserves error details when saved-finding pull request creation fails", async () => {
-    const result = resultWithFindings(["high"]);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr"],
-      {
-        onWorkbench: () => savedScan(result),
-        onRepositoryCommand: () => {
-          throw new Error("GitHub rejected github_pat_SYNTHETIC_SECRET_123");
+  test.each(["patch", "scan"])(
+    "escapes controls in %s pull request failures while preserving error details",
+    async (command) => {
+      const result = resultWithFindings(["high"]);
+      const outcome = await runWorkflow(
+        command === "patch"
+          ? ["patch", "--scan", "scan-1", "--create-pr"]
+          : ["scan", ".", "--patch", "--create-pr"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: () => {
+            throw new Error(
+              "GitHub rejected github_pat_SYNTHETIC_SECRET_123\u001b[2J\ncontinued",
+            );
+          },
         },
-      },
-    );
+      );
 
-    expect(outcome.exitCode).toBe(2);
-    expect(outcome.stderr).toContain(
-      "GitHub rejected github_pat_SYNTHETIC_SECRET_123",
-    );
-  });
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(
+        "GitHub rejected github_pat_SYNTHETIC_SECRET_123 [2J continued\n",
+      );
+      expect(outcome.stderr).not.toContain("\u001b");
+    },
+  );
 
   test("resolves a finding identifier to its saved scan and checkout", async () => {
     const result = resultWithFindings(["high"]);

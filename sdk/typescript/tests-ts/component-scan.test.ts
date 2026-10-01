@@ -552,6 +552,42 @@ test.each([
   },
 );
 
+test("CLI escapes component failure controls while preserving the saved error", async () => {
+  const paths = await fixture();
+  const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      [
+        "scan-components",
+        paths.repository,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({ currentDirectory: paths.root }),
+        createSecurity: client(async () => {
+          throw new Error(failure);
+        }),
+      },
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain(
+    "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
+  );
+  expect(stderr.text()).not.toContain("\u001b");
+  const result = JSON.parse(stdout.text());
+  expect(await json(result.summaryPath)).toMatchObject({
+    components: [expect.objectContaining({ error: failure })],
+  });
+});
+
 test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
   const paths = await fixture();
   const stdout = capture();
