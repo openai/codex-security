@@ -45,6 +45,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -2031,7 +2032,7 @@ export async function main(
     return result;
   };
   const findingFeedback = Cli.create("findings", {
-    description: "Review and manage saved Codex Security findings.",
+    description: "Review saved findings (default: list).",
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
@@ -2106,8 +2107,7 @@ export async function main(
     },
   });
   const scanHistory = Cli.create("scans", {
-    description:
-      "List, inspect, rerun, match, and compare saved Codex Security scans.",
+    description: "Review saved scans (default: list).",
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
@@ -2170,6 +2170,13 @@ export async function main(
           .default(false)
           .describe("Show findings linked across previous scans."),
       }),
+      examples: [
+        { args: {}, description: "Show the latest completed scan." },
+        {
+          args: { scanId: "scan_abc123" },
+          description: "Show a saved scan by ID or unique prefix.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
@@ -2199,6 +2206,13 @@ export async function main(
           .optional()
           .describe("Scan identifier or unique prefix (default: latest)."),
       }),
+      examples: [
+        { args: {}, description: "Show activity from the latest scan." },
+        {
+          args: { scanId: "scan_abc123" },
+          description: "Show activity from a saved scan.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         const scanId =
@@ -2539,7 +2553,12 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish findings from a completed scan or CSV.",
+    description:
+      "Publish findings from a completed scan, or a CSV for internal publication.",
+    hint:
+      "Examples:\n" +
+      "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
+      "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -2583,7 +2602,7 @@ export async function main(
               "Unsupported publication destination. Use --to linear or --to custom.",
           },
         )
-        .describe("Publication destination (linear or custom)."),
+        .describe("Required publication destination: linear or custom."),
       findingsUrl: optionValue("--findings-url")
         .url()
         .optional()
@@ -2596,7 +2615,9 @@ export async function main(
         .describe("Preview the findings without publishing them."),
       csv: optionValue("--csv")
         .optional()
-        .describe("Findings CSV to publish instead of a completed scan."),
+        .describe(
+          "Findings CSV for internal publication; not supported with linear or custom.",
+        ),
       skipExisting: z
         .boolean()
         .default(false)
@@ -3168,9 +3189,10 @@ export async function main(
     },
   });
   const imports = Cli.create("import", {
-    description: "Read upstream findings for local validation or triage.",
+    description: "Read GitHub code scanning alerts.",
   }).command("github", {
-    description: "Import GitHub code scanning alerts without changing GitHub.",
+    description: "Read GitHub code scanning alerts without changing GitHub.",
+    hint: "To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
     mcp: false,
     args: z.object({
@@ -3254,7 +3276,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3264,8 +3286,7 @@ export async function main(
     },
   })
     .command("policy", {
-      description:
-        "Draft SECURITY.md guidance for future scans and owner review.",
+      description: "Draft SECURITY.md guidance for review.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3304,7 +3325,9 @@ export async function main(
         auth: z
           .enum(["auto", "chatgpt", "api-key"])
           .default("auto")
-          .describe("Select ChatGPT, API-key, or automatic authentication."),
+          .describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -3457,8 +3480,14 @@ export async function main(
       },
     })
     .command("scan", {
-      description: "Run a Codex Security scan.",
+      description: "Scan a repository, selected paths, or Git changes.",
       hint:
+        "Examples:\n" +
+        "  codex-security scan .\n" +
+        "  codex-security scan . --path src --path tests\n" +
+        "  codex-security scan . --working-tree\n" +
+        "  codex-security scan . --diff origin/main\n" +
+        "  codex-security scan . --mode deep\n\n" +
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
@@ -3572,7 +3601,9 @@ export async function main(
             .enum(REPORTABLE_SEVERITIES)
             .optional()
             .describe("Patch findings at or above LEVEL; requires --patch."),
-          createPr: CREATE_PR_OPTION,
+          createPr: CREATE_PR_OPTION.describe(
+            "Create a draft pull request or merge request after verified patches; requires --patch.",
+          ),
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
@@ -3612,28 +3643,6 @@ export async function main(
             message: "--mock cannot be combined with --dry-run or --patch.",
           },
         ),
-      examples: [
-        { args: { repository: "." } },
-        {
-          args: { repository: "." },
-          options: { config: "codex-security.yaml" },
-        },
-        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
-        {
-          args: { repository: "." },
-          options: { model: "gpt-5.6-terra", effort: "high" },
-        },
-        { args: { repository: "." }, options: { path: ["src"] } },
-        { args: { repository: "." }, options: { diff: "origin/main" } },
-        {
-          args: { repository: "." },
-          options: {
-            codex: [
-              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-            ],
-          },
-        },
-      ],
       output: scanOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
@@ -3751,8 +3760,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description:
-        "Install an advisory local Git pre-commit check. Require a passing scan in CI.",
+      description: "Install an advisory Git pre-commit check.",
+      hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3827,8 +3836,7 @@ export async function main(
     .command(findingFeedback)
     .command(publication)
     .command("suggest-owners", {
-      description:
-        "Suggest finding owners from committed source and Git history.",
+      description: "Suggest finding owners from source and Git history.",
       destructive: false,
       mcp: false,
       args: z.object({
@@ -3903,8 +3911,8 @@ export async function main(
       },
     })
     .command("classify-severity", {
-      description:
-        "Classify saved findings using an optional rubric and save a separate severity assessment.",
+      description: "Assess severity for saved findings.",
+      hint: "Use --rubric to classify findings with a policy. The assessment is saved separately.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4007,8 +4015,8 @@ export async function main(
       },
     })
     .command("dedupe", {
-      description:
-        "Dedupe a saved scan, or use --records for host-provided reviews over JSON-RPC.",
+      description: "Identify duplicate findings in a saved scan.",
+      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4138,8 +4146,7 @@ export async function main(
     })
     .command(imports)
     .command("scan-components", {
-      description:
-        "Run standard scans for project components and combine the results.",
+      description: "Scan project components and combine results.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -4154,7 +4161,7 @@ export async function main(
         .object({
           config: PROJECT_CONFIG_OPTION,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           component: z
             .array(optionValue("--component"))
@@ -4418,8 +4425,7 @@ export async function main(
       },
     })
     .command("bulk-scan", {
-      description:
-        "Discover repositories and run resumable bulk security scans.",
+      description: "Discover and scan multiple repositories.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -4754,8 +4760,14 @@ export async function main(
       },
     })
     .command("export", {
-      description:
-        "Export findings from a completed scan as CSV, JSON, or SARIF.",
+      description: "Export a completed scan as SARIF, JSON, or CSV.",
+      hint:
+        "Examples:\n" +
+        "  codex-security export\n" +
+        "  codex-security export --export-format json --output -\n" +
+        "  codex-security export ../scan-results --export-format csv\n\n" +
+        "Use --export-format for artifact format. The global --format option controls\n" +
+        "framework output such as --schema; it does not change exported files.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -4835,7 +4847,9 @@ export async function main(
         auth: z
           .enum(SCAN_AUTH_MODES)
           .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
+          .describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
         effort: effortOption(),
         codex: z
           .array(optionValue("--codex"))
@@ -4876,11 +4890,15 @@ export async function main(
         auth: z
           .enum(SCAN_AUTH_MODES)
           .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
+          .describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
-          .describe("Verify open findings from a saved scan."),
+          .describe(
+            "Verify open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -4901,6 +4919,16 @@ export async function main(
           .default([])
           .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
+      examples: [
+        {
+          options: { scan: "latest" },
+          description: "Verify fixes for the latest completed scan.",
+        },
+        {
+          args: { "findings...": "finding.md" },
+          description: "Verify a fix described in a file.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
@@ -5089,13 +5117,15 @@ export async function main(
           .string()
           .min(1, "An issue must not be empty.")
           .optional()
-          .describe("Issue text or a file containing issues."),
+          .describe("Issue text, a file, or a saved finding identifier."),
       }),
       options: z.object({
         auth: z
           .enum(SCAN_AUTH_MODES)
           .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
+          .describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
         effort: effortOption(),
         externalSandbox: z
           .boolean()
@@ -5105,7 +5135,9 @@ export async function main(
           ),
         scan: optionValue("--scan")
           .optional()
-          .describe("Patch open findings from a saved scan."),
+          .describe(
+            "Patch open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -5138,6 +5170,17 @@ export async function main(
           .default([])
           .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
+      examples: [
+        {
+          options: { scan: "latest", severity: "high" },
+          description:
+            "Patch high and critical findings from the latest completed scan.",
+        },
+        {
+          args: { "issues...": "finding.md" },
+          description: "Patch a finding described in a file.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: commandError }) {
         const jsonOutput = format === "json" || format === "jsonl";
@@ -5461,7 +5504,10 @@ export async function main(
       destructive: true,
       mcp: false,
       args: z.object({
-        action: z.enum(["status"]).optional().describe("Show login status."),
+        action: z
+          .enum(["status"])
+          .optional()
+          .describe("Use status to inspect credentials; omit to sign in."),
       }),
       options: z.object({
         deviceAuth: z
@@ -5477,6 +5523,10 @@ export async function main(
           .default(false)
           .describe("Read an access token from stdin."),
       }),
+      examples: [
+        { args: {}, description: "Sign in with ChatGPT." },
+        { args: { action: "status" }, description: "Check authentication." },
+      ],
       async run({ args, options }) {
         const credentialHome =
           dependencies.prepareAuthenticationHome !== undefined
@@ -5592,8 +5642,11 @@ export async function main(
       },
     })
     .command("serve", {
-      description:
-        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
+      description: "Start the local findings HTTP service.",
+      hint:
+        "Environment: HOST=127.0.0.1, PORT=3000.\n" +
+        "CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint\n" +
+        "(default: https://api.openai.com/v1/embeddings).",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -5623,8 +5676,8 @@ export async function main(
       },
     })
     .command("init", {
-      description:
-        "Write a starter project configuration without overwriting an existing file.",
+      description: "Create a starter project configuration.",
+      hint: "Existing files are never overwritten.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5728,8 +5781,7 @@ export async function main(
       },
     })
     .command("info", {
-      description:
-        "Show SDK metadata and resolved configuration without preparing a scan.",
+      description: "Show SDK metadata and resolved configuration.",
       alias: { config: "c" },
       options: z.object({ config: PROJECT_CONFIG_OPTION }),
       mcp: {
@@ -5935,7 +5987,7 @@ export async function main(
         renderedPatch ??
         renderedPublication ??
         renderedHistory ??
-        frameworkOutput,
+        formatCliHelp(frameworkOutput, output.columns),
     );
     return exitCode;
   } catch (error) {

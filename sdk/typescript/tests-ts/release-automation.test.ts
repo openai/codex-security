@@ -4041,6 +4041,12 @@ describe("GitHub release workflow safeguards", () => {
     const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
+    const coverageGate = (job: string) =>
+      workflow.jobs[job]?.steps.find(
+        ({ name }) =>
+          name ===
+          `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
+      );
     for (const [ciMode, validation, upstream, gateFailure] of [
       ["full", "success", "success", false],
       ["full", "success", "skipped", true],
@@ -4064,10 +4070,7 @@ describe("GitHub release workflow safeguards", () => {
       };
       for (const job of ["required-test", "windows"]) {
         expect(
-          evaluateWorkflowCondition(
-            workflow.jobs[job]?.steps[0]?.if ?? "",
-            values,
-          ),
+          evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
           `${job}: ${ciMode}/${validation}/${upstream}`,
         ).toBe(gateFailure);
       }
@@ -4093,7 +4096,7 @@ describe("GitHub release workflow safeguards", () => {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {
           expect(
-            evaluateWorkflowCondition(workflow.jobs[gate]?.steps[0]?.if ?? "", {
+            evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
               "needs.validate-title.result": "success",
               "needs.validate-title.outputs.ci-mode": "full",
               ...Object.fromEntries(
@@ -4107,7 +4110,7 @@ describe("GitHub release workflow safeguards", () => {
           ).toBe(true);
         }
       }
-      expect(workflow.jobs[gate]?.steps[0]?.run).toBe("exit 1");
+      expect(coverageGate(gate)?.run).toBe("exit 1");
     }
 
     const renderName = (template: string, values: Record<string, string>) => {
