@@ -174,6 +174,7 @@ const ordinaryRestorationCases: ReadonlyArray<
     {
       artifact: "threatmodel.md",
       initialContents: "# Saved model\n",
+      threatModel: { summary: "Saved model." },
       mutate: ({ artifactPath }) =>
         writeFile(artifactPath, "# Incorrect replacement\n"),
     },
