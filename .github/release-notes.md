@@ -33,6 +33,7 @@
 - restore GPT-5.6 Sol as the default model ([#1181](https://github.com/openai/codex-security/pull/1181))
 - share model options across commands ([#1143](https://github.com/openai/codex-security/pull/1143))
 - add Invoice Desk fixture and OpenAI PR scans ([#1144](https://github.com/openai/codex-security/pull/1144))
+- prohibit reintroducing CLI secret and log redaction ([#1178](https://github.com/openai/codex-security/pull/1178))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
