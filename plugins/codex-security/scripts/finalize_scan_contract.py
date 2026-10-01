@@ -394,13 +394,22 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
 
 
 def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
-    scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, context)
+    return open_regular_file_descriptor(scan_dir, Path(relative_path), context)
+
+
+def open_regular_file_descriptor(scan_dir: Path, relative_path: Path, context: str) -> int:
+    """Open a regular file without following symlinks below the selected root."""
+    scan_dir = _require_scan_directory(scan_dir)
+    if relative_path.anchor or not relative_path.parts or ".." in relative_path.parts:
+        raise ContractError(f"{context}: expected a relative file path")
     if not _descriptor_relative_reads_available():
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
         try:
-            return _windows_scan_local_files().open_read_fd(scan_dir, relative_path, context)
+            return _windows_scan_local_files().open_read_fd(
+                scan_dir, relative_path.as_posix(), context
+            )
         except OSError as exc:
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
@@ -408,7 +417,7 @@ def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context:
     descriptor: int | None = None
     try:
         root_fd = _open_verified_scan_directory(scan_dir)
-        parts = PurePosixPath(relative_path).parts
+        parts = relative_path.parts
         try:
             parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=False)
             descriptor = os.open(

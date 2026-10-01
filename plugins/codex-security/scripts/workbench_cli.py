@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_remediation as remediation
+from dependency_imports.workbench import add_arguments as add_dependency_import_arguments
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -33,6 +34,7 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
 def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    add_dependency_import_arguments(subparsers)
 
     resolve_scan_root = subparsers.add_parser("resolve-scan-root")
     resolve_scan_root.add_argument("--scan-root")
