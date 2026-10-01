@@ -98,6 +98,8 @@ The workflow installs the CLI outside the checkout and copies only committed
 or substitute files. Unsafe paths, links, and submodules fail extraction instead
 of silently reducing coverage. It does not install dependencies from the PR, execute the
 application or its tests in the inference job, or download PR-produced artifacts.
+After rechecking PR eligibility, it removes both full repository checkouts before
+inference so the scanner cannot read the sample guide or answer key from them.
 The sample documentation, threat model, tests, answer key, and previous reports
 are not scan input. The API key is available only in the scan step; no GitHub
 token is passed to the scanner. Review the source commit before approving an

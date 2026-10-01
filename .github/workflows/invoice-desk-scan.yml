@@ -150,7 +150,10 @@ jobs:
         id: recheck
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node trusted-workflow/.github/scripts/invoice-desk-target.mjs
+        run: |
+          node trusted-workflow/.github/scripts/invoice-desk-target.mjs
+          # The scanner can read outside its target; remove the guide and answer key.
+          rm -rf -- "$GITHUB_WORKSPACE/source" "$GITHUB_WORKSPACE/trusted-workflow"
       - name: Scan with OpenAI inference
         id: scan
         if: steps.recheck.outputs.targets != '[]'
