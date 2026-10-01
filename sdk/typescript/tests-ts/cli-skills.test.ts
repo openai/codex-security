@@ -139,11 +139,9 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain(
           `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
-        expect(help.text()).toContain(
-          "--effort <minimal|low|medium|high|xhigh|max>",
-        );
-        expect(help.text()).toContain("--model <string>");
-        expect(help.text()).toContain("--codex <array>");
+        expect(help.text()).toContain("--effort <effort>");
+        expect(help.text()).toContain("--model <model>");
+        expect(help.text()).toContain("--codex <key=value>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
         expect(help.text()).toContain("analytics.enabled=false");

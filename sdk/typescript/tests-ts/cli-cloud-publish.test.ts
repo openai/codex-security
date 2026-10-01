@@ -67,7 +67,7 @@ describe("publish scan to Cloud", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("--csv <string>");
+    expect(stdout.text()).toContain("--csv <file>");
     expect(stdout.text()).toContain("Findings CSV");
   });
 
