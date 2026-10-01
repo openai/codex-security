@@ -95,6 +95,10 @@ queues eligible revisions through the same dispatch path, whose run title includ
 the PR number and full source SHA. Later fallback events can find those runs and
 avoid rescanning an unchanged revision.
 
+If GitHub suppresses the target event and no behavior workflow completes,
+automatic scanning cannot start. Use the manual PR dispatch above with the current
+head SHA; the same protected workflow and approval checks apply.
+
 The scan checks the PR's base and exact head through GitHub's API before queuing
 and again after environment approval, immediately before inference. Closed,
 retargeted, and superseded PR revisions are skipped. Repeated scans of the same PR
