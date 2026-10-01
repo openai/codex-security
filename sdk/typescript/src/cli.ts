@@ -2250,7 +2250,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -2340,7 +2340,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -3510,7 +3510,7 @@ export async function main(
             .boolean()
             .default(false)
             .describe(
-              "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+              "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
             ),
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
@@ -7080,10 +7080,13 @@ function safePatchText(
   ).replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
 }
 
-function safePatchReport(value: string): string {
+function safePatchReport(
+  value: string,
+  environment: NodeJS.ProcessEnv = {},
+): string {
   return value
     .split(/\r?\n/gu)
-    .map((line) => safePatchText(line))
+    .map((line) => safePatchText(line, environment))
     .join("\n")
     .trim();
 }
@@ -7132,7 +7135,7 @@ async function runPatchRiskAssessment(
   }
   const assessment = parsePatchRiskReport(result.report);
   stderr.write(
-    `Patch risk assessment:\n${safePatchReport(assessment.report)}\n`,
+    `Patch risk assessment:\n${safePatchReport(assessment.report, dependencies.environment)}\n`,
   );
   return assessment;
 }
@@ -8233,6 +8236,8 @@ async function executeScan(
   const verbose =
     arguments_.verbose === true ||
     configuredLogLevel?.toLowerCase() === "debug";
+  const diagnosticMessage = (value: unknown): string =>
+    diagnosticValue(logErrorMessage(value, dependencies.environment));
   const writeAboveProgress = (write: () => void): void => {
     if (progress === null) {
       write();
@@ -8245,13 +8250,17 @@ async function executeScan(
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
     if (!verbose) return;
-    const attributes = Object.entries(fields).flatMap(([name, value]) =>
-      value === undefined
-        ? []
-        : [
-            `${name}=${JSON.stringify(typeof value === "string" ? diagnosticValue(value) : value)}`,
-          ],
-    );
+    const attributes = Object.entries(fields).flatMap(([name, value]) => {
+      if (value === undefined) return [];
+      // Redact free-form messages, preserving structured metadata and paths.
+      const displayed =
+        typeof value !== "string"
+          ? value
+          : name === "message"
+            ? diagnosticMessage(value)
+            : diagnosticValue(value);
+      return [`${name}=${JSON.stringify(displayed)}`];
+    });
     writeAboveProgress(() => {
       errorOutput.write(
         `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
@@ -8702,7 +8711,9 @@ async function executeScan(
         }
         writeAboveProgress(() => {
           diagnostic("scan.warning", { message });
-          errorOutput.write(`codex-security: warning: ${message}\n`);
+          errorOutput.write(
+            `codex-security: warning: ${diagnosticMessage(warning)}\n`,
+          );
         });
       },
       onObserverError: (observer, error) => {
@@ -8710,7 +8721,7 @@ async function executeScan(
           observer,
           classification: classifyConnectionFailure(error),
         });
-        const warning = `${observer} observer failed: ${diagnosticValue(error)}`;
+        const warning = `${observer} observer failed: ${diagnosticMessage(error)}`;
         if (dashboard === null) {
           writeAboveProgress(() => {
             errorOutput.write(`codex-security: warning: ${warning}\n`);
@@ -8769,7 +8780,11 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure, selectedAuthentication);
+        : scanFailureMessage(
+            failure,
+            selectedAuthentication,
+            dependencies.environment,
+          );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -9104,8 +9119,10 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
+  environment: NodeJS.ProcessEnv,
 ): string {
-  // A local failure keeps its own message. Classification matches bare words
+  // A local failure keeps its own diagnostic, subject to log redaction.
+  // Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
   //
@@ -9113,7 +9130,8 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return diagnosticValue(error);
+  if (isLocalScanFailure(error))
+    return diagnosticValue(logErrorMessage(error, environment));
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9154,7 +9172,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return diagnosticValue(error);
+      return diagnosticValue(logErrorMessage(error, environment));
   }
 }
 

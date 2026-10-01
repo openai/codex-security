@@ -3864,7 +3864,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves verbose output paths and observer diagnostics", async () => {
+  test("preserves verbose output paths while redacting observer errors", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -3904,7 +3904,10 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.observer_failed observer="onWorkerStatus"',
     );
-    expect(stderr.text()).toContain("SYNTHETIC");
+    expect(stderr.text()).toContain(
+      "onWorkerStatus observer failed: [redacted]",
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
   });
 
   test("excludes observer failure context from verbose diagnostics", async () => {
@@ -4191,7 +4194,8 @@ describe("CLI", () => {
       message: "[redacted]",
     });
     expect(stdout.text()).not.toContain("SYNTHETIC_KEY_123");
-    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
   });
 
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
@@ -4327,7 +4331,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves underlying network errors", async () => {
+  test("redacts credentials in underlying network errors", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -4349,10 +4353,8 @@ describe("CLI", () => {
       code: "SCAN_FAILED",
       message: "[redacted]",
     });
-    expect(stderr.text()).toContain(
-      `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
-    );
-    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).not.toContain("model service could not be reached");
   });
 
@@ -4376,11 +4378,10 @@ describe("CLI", () => {
     });
 
     expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
-    expect(stderr.text()).toContain("Could not save the Codex Security scan");
-    expect(stderr.text()).toContain("unable to open database file");
+    expect(stderr.text()).toContain("[redacted]");
     expect(stderr.text()).not.toContain("model service could not be reached");
     expect(stderr.text()).not.toContain("Check your network connection");
-    expect(stderr.text()).toContain("SYNTHETIC_DATABASE_SECRET");
+    expect(stderr.text()).not.toContain("SYNTHETIC_DATABASE_SECRET");
   });
 
   test("prints only the completion summary for default scans", async () => {
@@ -4564,7 +4565,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves scan warnings in verbose diagnostics", async () => {
+  test("redacts scan warnings in verbose diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -4589,12 +4590,10 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.warning message="Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123"',
+      'codex-security: debug: scan.warning message="[redacted]"',
     );
-    expect(stderr.text()).toContain(
-      "codex-security: warning: Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
-    );
-    expect(stderr.text()).toContain("SYNTHETIC_WARNING_SECRET");
+    expect(stderr.text()).toContain("codex-security: warning: [redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC_WARNING_SECRET");
   });
 
   test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
@@ -4719,9 +4718,9 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      `codex-security: warning: onWorkerStatus observer failed: status observer failed ${SYNTHETIC_CREDENTIALS}`,
+      "codex-security: warning: onWorkerStatus observer failed: [redacted]",
     );
-    expect(stderr.text()).toContain("SYNTHETIC_OPENAI_VALUE_123");
+    expect(stderr.text()).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
   });
 
   test("maps failed scan stdout writes to the runtime-error exit code", async () => {
@@ -5608,7 +5607,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(`Protected root: ${protectedRoot}`);
   });
 
-  test("preserves caught scan and interruption failures", async () => {
+  test("redacts credentials in caught scan and interruption failures", async () => {
     for (const failure of [
       new CodexSecurityError(`scan failed ${SYNTHETIC_CREDENTIALS}`),
       new ScanInterruptedError(
@@ -5631,9 +5630,7 @@ describe("CLI", () => {
         await main(["scan", "."], stdout.stream, stderr.stream, failing),
       ).toBe(2);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toBe(
-        "[00:00] Preparing scan\n" + `scan failed ${SYNTHETIC_CREDENTIALS}\n`,
-      );
+      expect(stderr.text()).toBe("[00:00] Preparing scan\n[redacted]\n");
     }
   });
 
