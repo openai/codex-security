@@ -137,6 +137,7 @@ export type {
 } from "./deduplication/records.js";
 export type {
   DeduplicationReviewRequest,
+  DeduplicationReviewAttribution,
   DeduplicationReviewRunner,
 } from "./deduplication/review.js";
 export {

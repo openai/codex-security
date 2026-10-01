@@ -29,6 +29,7 @@
 - reuse native builds across package and container checks ([#1130](https://github.com/openai/codex-security/pull/1130))
 - smoke test published npm installs across supported platforms ([#1129](https://github.com/openai/codex-security/pull/1129))
 - require workflow checks and production dependency audits ([#1128](https://github.com/openai/codex-security/pull/1128))
+- attribute records reviews to participating observations ([#1145](https://github.com/openai/codex-security/pull/1145))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
