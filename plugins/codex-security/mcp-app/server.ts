@@ -1186,6 +1186,7 @@ export function createCodexSecurityServer(): McpServer {
                   repoRoot: begun.run.targetPath,
                   scanId: begun.run.scanId,
                   scope: begun.run.scope,
+                  pythonCommand: await resolvePythonCommand(),
                 },
               }),
               pluginRoot: PLUGIN_ROOT,
