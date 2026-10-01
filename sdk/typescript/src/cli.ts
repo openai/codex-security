@@ -2556,7 +2556,7 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish findings from a completed scan or CSV.",
+    description: "Publish findings from a completed scan.",
     hint:
       "Examples:\n" +
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
@@ -4902,7 +4902,9 @@ export async function main(
         effort: effortOption(),
         scan: optionValue("--scan")
           .optional()
-          .describe("Verify open findings from a saved scan ID or latest."),
+          .describe(
+            "Verify open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -5141,7 +5143,9 @@ export async function main(
           ),
         scan: optionValue("--scan")
           .optional()
-          .describe("Patch open findings from a saved scan ID or latest."),
+          .describe(
+            "Patch open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -5179,7 +5183,8 @@ export async function main(
       examples: [
         {
           options: { scan: "latest", severity: "high" },
-          description: "Patch high and critical findings from the latest scan.",
+          description:
+            "Patch high and critical findings from the latest completed scan.",
         },
         {
           args: { "issues...": "finding.md" },

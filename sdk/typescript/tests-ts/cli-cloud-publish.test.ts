@@ -57,7 +57,7 @@ async function savedScansFixture() {
 }
 
 describe("publish scan to Cloud", () => {
-  test("documents the findings CSV option", async () => {
+  test("omits the internal CSV input from public help", async () => {
     const stdout = capture();
     expect(
       await main(
@@ -67,8 +67,8 @@ describe("publish scan to Cloud", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("--csv <file>");
-    expect(stdout.text()).toContain("Findings CSV");
+    expect(stdout.text()).not.toContain("--csv");
+    expect(stdout.text()).not.toContain("CSV");
   });
 
   test("passes --dry-run through when publishing a findings CSV", async () => {

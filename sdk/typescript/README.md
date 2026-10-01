@@ -488,11 +488,10 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 ```
 
-Use `--help` for commands grouped by task, and `<command> --help` (or `-h`)
-for examples and options. For example, `scan --help` groups scope, Deep Scan,
-results, and patching options; `publish scan --help` separates destination
-settings. Help wraps descriptions to the terminal width and keeps example
-commands copyable. `scans` and `findings` default to their `list` subcommands.
+Use `--help` to browse commands by task, or `<command> --help` (or `-h`) for
+options and examples. `scan --help` groups options by scope, Deep Scan, results,
+and patching; `publish scan --help` groups destination settings. `scans` and
+`findings` run `list` when no subcommand is given.
 
 Use `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`

@@ -348,9 +348,21 @@ describe("CLI", () => {
         };
       };
 
-      for (const argument of Object.values(
+      const argumentLabels = help
+        .text()
+        .split("\n\n")
+        .find((section) => section.startsWith("Arguments:\n"))
+        ?.split("\n")
+        .filter((line) => /^ {2}\S/u.test(line))
+        .map((line) => line.trim().split(/\s/u)[0]);
+      for (const [name, argument] of Object.entries(
         definitions.args?.properties ?? {},
       )) {
+        const label = name.replace(
+          /[A-Z]/gu,
+          (letter) => `-${letter.toLowerCase()}`,
+        );
+        expect(argumentLabels).toContain(label);
         expect(typeof argument.description).toBe("string");
         expect(argument.description?.trim().length).toBeGreaterThan(0);
       }
@@ -358,6 +370,8 @@ describe("CLI", () => {
       for (const [name, option] of Object.entries(
         definitions.options?.properties ?? {},
       )) {
+        // CSV publication is internal and intentionally omitted from public help.
+        if (command.join(" ") === "publish scan" && name === "csv") continue;
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
         expect(help.text()).toContain(flag);
         expect(typeof option.description).toBe("string");
