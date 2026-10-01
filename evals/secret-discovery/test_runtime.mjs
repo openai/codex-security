@@ -349,6 +349,7 @@ test(
     assert.deepEqual(preflight.config, exec.config);
     assert.deepEqual(exec.config.features, {
       memories: false,
+      apps: false,
       plugins: false,
       multi_agent: false,
       shell_snapshot: false,
@@ -358,6 +359,7 @@ test(
       ignore_default_excludes: false,
     });
     assert.equal(exec.config.allow_login_shell, false);
+    assert.equal(exec.config.windows.sandbox, "elevated");
     assert.equal(exec.config.approval_policy, "never");
     assert.equal(exec.config.model_reasoning_effort, "xhigh");
     assert.equal(exec.config.web_search, "disabled");

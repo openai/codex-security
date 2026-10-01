@@ -57,9 +57,9 @@ during the run, the eval's existing link does not overwrite that replacement.
 On SIGINT or SIGTERM, the eval waits for the SDK turn to stop before removing
 temporary state. Only runtime, proxy/certificate, and model-authentication
 environment variables reach the Codex process. Shell tools inherit Codex's core
-environment with default credential exclusions; login shells and shell snapshots
-are disabled.
-Authentication data is never printed or placed in the source fixture or reports.
+environment with default credential exclusions. Login shells, shell snapshots,
+plugins, and connected apps are disabled. Authentication data is never printed
+or placed in the source fixture or reports.
 
 Source inspection is offline and read-only. A named, deny-by-default filesystem
 profile allows only the generated repository, staged production references,
@@ -69,6 +69,11 @@ turn, the native preflight verifies the selected profile using the eval's source
 directory, environment, and raw configuration overrides. If the runtime warns
 that it fell back to another profile, the eval cancels the turn and discards its
 result.
+
+On Windows, these read restrictions require Codex's elevated sandbox. Codex
+sets it up for the temporary home through its installed service or the standard
+Windows administrator approval prompt. Setup must succeed before shell commands
+run.
 
 The production prompt is staged unchanged, and its SHA-256 is recorded in the
 report. The eval uses zero subagents and a compact semantic-output schema to

@@ -636,9 +636,11 @@ test("named read-only profile excludes gold and credentials without a legacy san
   assert.equal(settings.codexPathOverride, codexPath);
   assert.equal(config.default_permissions, "discovery_eval");
   assert.equal(config.features.plugins, false);
+  assert.equal(config.features.apps, false);
   assert.equal(config.features.memories, false);
   assert.equal(config.features.shell_snapshot, false);
   assert.equal(config.allow_login_shell, false);
+  assert.equal(config.windows.sandbox, "elevated");
   assert.deepEqual(
     { ...config.shell_environment_policy },
     {
