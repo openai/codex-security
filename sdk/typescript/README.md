@@ -880,8 +880,24 @@ stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
 `validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
-`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
-other runtime overrides.
+`model_reasoning_effort`, `model_provider`, `model_providers`, and
+`analytics.enabled` keys in `--codex`, but no other runtime overrides.
+Use the same provider settings as `scan` when routing a standalone patch
+through a custom inference gateway:
+
+```bash
+npx @openai/codex-security patch "Security issue" \
+  --codex 'model="gateway-model"' \
+  --codex 'model_provider="gateway"' \
+  --codex 'model_providers.gateway.name="Gateway"' \
+  --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
+  --codex 'model_providers.gateway.wire_api="responses"' \
+  --codex 'model_providers.gateway.env_key="GATEWAY_API_KEY"'
+```
+
+Set the selected provider's API-key environment variable before running the
+command. Provider settings also apply to `patch --assess-patch-risk`.
+Sandbox, approval, and plugin settings remain controlled by the command.
 
 Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
 built-in metrics for a command:

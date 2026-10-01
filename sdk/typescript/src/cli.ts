@@ -309,6 +309,8 @@ const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
+const SKILL_CODEX_OVERRIDE_DESCRIPTION =
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
 const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
@@ -4848,9 +4850,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       async run({ options }) {
         try {
@@ -4909,9 +4909,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
@@ -5148,9 +5146,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: commandError }) {
@@ -7389,6 +7385,8 @@ async function runSkill(
       ([key, value]) =>
         key !== "model" &&
         key !== "model_reasoning_effort" &&
+        key !== "model_provider" &&
+        key !== "model_providers" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7397,12 +7395,24 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
+  const provider =
+    options.provider ?? (overrides["model_provider"] as string | undefined);
+  const providerConfiguration =
+    options.providerConfiguration ??
+    (provider === undefined
+      ? undefined
+      : ((
+          overrides["model_providers"] as Record<string, JsonObject> | undefined
+        )?.[provider] ??
+        (isExternalModelProvider(provider)
+          ? EXTERNAL_CODEX_PROVIDERS[provider]
+          : undefined)));
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   for (const input of inputs) {
@@ -7565,24 +7575,24 @@ async function runSkill(
             value.startsWith("analytics.") || value.startsWith("analytics="),
         )
         .flatMap((value) => ["--config", value]),
-      ...(options.provider === undefined
+      ...(provider === undefined
         ? []
-        : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
-      ...(options.provider === undefined ||
-      options.providerConfiguration === undefined
-        ? []
-        : modelProviderConfigOverride(
-            resolveCommandAuthConfig(
-              {
-                model_providers: {
-                  [options.provider]: options.providerConfiguration,
+        : ["--config", `model_provider=${JSON.stringify(provider)}`]),
+      ...modelProviderConfigOverride(
+        resolveCommandAuthConfig(
+          mergeCodexOverrides(
+            overrides,
+            provider === undefined || providerConfiguration === undefined
+              ? {}
+              : {
+                  model_providers: {
+                    [provider]: providerConfiguration,
+                  },
                 },
-              },
-              configuredCodexHome(
-                options.environment ?? dependencies.environment,
-              ),
-            ),
-          ).flatMap((value) => ["--config", value])),
+          ),
+          configuredCodexHome(options.environment ?? dependencies.environment),
+        ),
+      ).flatMap((value) => ["--config", value]),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -7613,8 +7623,8 @@ async function runSkill(
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
       auth: options.auth ?? "auto",
       directory,
-      modelProvider: options.provider,
-      providerConfiguration: options.providerConfiguration,
+      modelProvider: provider,
+      providerConfiguration,
       stdout,
       stderr,
       ...(appServer

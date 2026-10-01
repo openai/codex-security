@@ -758,11 +758,29 @@ describe("scan and patch workflow", () => {
           "--assess-patch-risk",
           "--codex",
           "analytics.enabled=false",
+          "--codex",
+          'model_provider="synthetic.gateway"',
+          "--codex",
+          'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
         ],
         {
           currentDirectory: repository,
           onCodex: async (args, output) => {
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain('model_provider="synthetic.gateway"');
+            expect(output?.modelProvider).toBe("synthetic.gateway");
+            expect(output?.providerConfiguration?.["env_key"]).toBe(
+              "SYNTHETIC_KEY",
+            );
+            expect(
+              parseToml(
+                args.find((arg) => arg.startsWith("model_providers="))!,
+              ),
+            ).toMatchObject({
+              model_providers: {
+                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+              },
+            });
             if (
               output?.appServer?.prompt.includes(
                 "$codex-security:assess-patch-risk",
