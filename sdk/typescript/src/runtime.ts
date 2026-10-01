@@ -41,7 +41,6 @@ import {
   sep,
   win32,
 } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
@@ -739,13 +738,21 @@ export async function streamWindowsCredentialAclDescriptors(
     await Promise.all([
       completion,
       (async () => {
-        const lines = createInterface({
-          input: child.stdout,
-          crlfDelay: Infinity,
-        });
-        for await (const descriptor of lines) {
-          if (descriptor === "") continue;
-          await inspectDescriptor(descriptor);
+        // Consume chunks directly: readline can resume its queued-line
+        // iterator after EOF and throw instead of draining the last lines.
+        child.stdout.setEncoding("utf8");
+        let pending = "";
+        for await (const chunk of child.stdout) {
+          const lines = (pending + chunk).split(/[\r\n]/u);
+          pending = lines.pop()!;
+          for (const descriptor of lines) {
+            if (descriptor === "") continue;
+            await inspectDescriptor(descriptor);
+            descriptors += 1;
+          }
+        }
+        if (pending !== "") {
+          await inspectDescriptor(pending);
           descriptors += 1;
         }
       })(),

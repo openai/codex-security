@@ -1167,127 +1167,165 @@ async function testWorkerRuntimeSettings() {
       );
       const launches = [];
       childProcess.spawn = (command, args, options) => {
-        launches.push({ command, args, environment: options.env });
+        const markerPath = path.join(
+          fixture.root,
+          `invocation-${launches.length}.json`,
+        );
+        const environment = {
+          ...options.env,
+          FAKE_CODEX_MARKER: markerPath,
+          FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+        };
+        launches.push({ command, args, environment, markerPath });
         return originalSpawn(
           command,
           command === process.execPath ||
             command === path.toNamespacedPath(process.execPath)
             ? [fixture.executablePath, ...args]
             : args,
-          options,
+          { ...options, env: environment },
         );
       };
       syncBuiltinESMExports();
-      const executor = new CodexSdkWorkerExecutor({
-        model: "gpt-5.6-sol",
-        reasoningEffort: "xhigh",
-        parentSandbox: trustedParentSandboxWithDenials,
-        artifactContext: {
-          pluginRoot: fixture.root,
-          scanRoot: fixture.root,
-          repoRoot: fixture.root,
-          scanId: "fixture-scan",
-          pythonCommand: helperPython,
-        },
-      });
+      const settings = [
+        { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
+        { model: "gpt-6-astra", reasoningEffort: "ultra" },
+        { model: "gpt-6.1-sol", reasoningEffort: "max" },
+      ];
+      const executors = settings.map(
+        (modelSettings) =>
+          new CodexSdkWorkerExecutor({
+            ...modelSettings,
+            parentSandbox: trustedParentSandboxWithDenials,
+            artifactContext: {
+              pluginRoot: fixture.root,
+              scanRoot: fixture.root,
+              repoRoot: fixture.root,
+              scanId: `fixture-scan-${modelSettings.model}`,
+              pythonCommand: helperPython,
+            },
+          }),
+      );
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"]) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           launches.length = 0;
-          await executor.run({
-            kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
-            resumeThreadId,
-            artifactContext: {
-              root: fixture.root,
-              layout: kind === "dedup" ? "reducer" : "worker",
-              ...(kind === "dedup"
-                ? {
-                    deepReducer: { scanRoot: fixture.root, claimedWorkers: [] },
-                  }
-                : {}),
-            },
-            signal: new AbortController().signal,
-          });
+          await Promise.all(
+            executors.map((executor) =>
+              executor.run({
+                kind,
+                promptPath,
+                workingDirectory: fixture.root,
+                subagents: 0,
+                resumeThreadId,
+                artifactContext: {
+                  root: fixture.root,
+                  layout: kind === "dedup" ? "reducer" : "worker",
+                  ...(kind === "dedup"
+                    ? {
+                        deepReducer: {
+                          scanRoot: fixture.root,
+                          claimedWorkers: [],
+                        },
+                      }
+                    : {}),
+                },
+                signal: new AbortController().signal,
+              }),
+            ),
+          );
           const workerLaunches = launches.filter(
             ({ args }) => args[0] === "exec",
           );
-          assert.equal(workerLaunches.length, 1);
-          const workerLaunch = workerLaunches[0];
-          assert.equal(
-            workerLaunch.command,
-            process.platform === "win32"
-              ? path.toNamespacedPath(process.execPath)
-              : process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment.CODEX_CLI_PATH,
-            process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment.CODEX_HOME,
-            await realpath(codexHome),
-          );
-          assert.equal(
-            workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
-            configPath,
-          );
-          assert.equal(
-            workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-            process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-          );
-          assert.equal(
-            workerPermissionProfileOverride(workerLaunch.args),
-            'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
-          );
-          const invocation = JSON.parse(
-            await readFile(fixture.markerPath, "utf8"),
-          );
-          if (expected === undefined) {
-            assert.equal(
-              invocation.argv.some((arg) =>
-                arg.startsWith("model_reasoning_summary="),
-              ),
-              false,
+          assert.equal(workerLaunches.length, settings.length);
+          for (const { model, reasoningEffort } of settings) {
+            const workerLaunch = workerLaunches.find(
+              ({ args }) => args[args.indexOf("--model") + 1] === model,
             );
-          } else {
+            assert.ok(workerLaunch, `missing worker launch for ${model}`);
+            assert.equal(
+              workerLaunch.command,
+              process.platform === "win32"
+                ? path.toNamespacedPath(process.execPath)
+                : process.execPath,
+            );
+            assert.equal(
+              workerLaunch.environment.CODEX_CLI_PATH,
+              process.execPath,
+            );
+            assert.equal(
+              workerLaunch.environment.CODEX_HOME,
+              await realpath(codexHome),
+            );
+            assert.equal(
+              workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
+              configPath,
+            );
+            assert.equal(
+              workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            );
+            assert.equal(
+              workerPermissionProfileOverride(workerLaunch.args),
+              'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
+            );
+            const invocation = JSON.parse(
+              await readFile(workerLaunch.markerPath, "utf8"),
+            );
+            if (expected === undefined) {
+              assert.equal(
+                invocation.argv.some((arg) =>
+                  arg.startsWith("model_reasoning_summary="),
+                ),
+                false,
+              );
+            } else {
+              assert.equal(
+                invocation.argv.includes(
+                  `model_reasoning_summary=${JSON.stringify(expected)}`,
+                ),
+                true,
+              );
+            }
             assert.equal(
               invocation.argv.includes(
-                `model_reasoning_summary=${JSON.stringify(expected)}`,
+                `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
               ),
               true,
             );
+            assertFlagPair(invocation.argv, "--model", model);
+            assert.equal(
+              invocation.argv.includes("resume"),
+              resumeThreadId !== undefined,
+            );
+            assert.equal(invocation.configPath, configPath);
+            assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
+            for (const [name, value] of Object.entries(gitEnvironment)) {
+              assert.equal(process.env[name], value);
+            }
+            assert.equal(invocation.python, python);
+            assert.equal(
+              invocation.argv.includes(
+                `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(helperPython)}`,
+              ),
+              true,
+            );
+            assert.equal(process.env.PYTHON, python);
+            assert.equal(
+              invocation.deepConfigPath,
+              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            );
+            assertReadOnlyWorkerPolicy(invocation.argv);
+            assertWorkerSubagentPolicy(invocation.argv, 0);
           }
-          assert.equal(
-            invocation.argv.includes('model_reasoning_effort="xhigh"'),
-            true,
-          );
-          assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
-          assert.equal(invocation.configPath, configPath);
-          const preflight = JSON.parse(
-            await readFile(fixture.preflightMarkerPath, "utf8"),
-          );
-          assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
-          assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
-          for (const [name, value] of Object.entries(gitEnvironment)) {
-            assert.equal(process.env[name], value);
+          for (const launch of launches.filter(({ args }) =>
+            args.includes("app-server"),
+          )) {
+            const preflight = JSON.parse(
+              await readFile(launch.markerPath, "utf8"),
+            );
+            assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
           }
-          assert.equal(invocation.python, python);
-          assert.equal(
-            invocation.argv.includes(
-              `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(helperPython)}`,
-            ),
-            true,
-          );
-          assert.equal(process.env.PYTHON, python);
-          assert.equal(
-            invocation.deepConfigPath,
-            process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-          );
-          assertReadOnlyWorkerPolicy(invocation.argv);
-          assertWorkerSubagentPolicy(invocation.argv, 0);
           await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
         }
       }
@@ -2195,7 +2233,7 @@ async function fakeCodexFixture(
       `const preflightProfile = ${JSON.stringify(preflightProfile)};`,
       `const preflightAllowed = ${JSON.stringify(preflightAllowed)};`,
       `const accountResult = ${JSON.stringify(accountResult)};`,
-      `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
+      `const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
       "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
