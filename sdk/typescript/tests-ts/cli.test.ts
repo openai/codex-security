@@ -775,10 +775,16 @@ describe("CLI", () => {
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
-    const architecturePath = resolve(root, "/shared/architecture.pdf");
-    const threatModelsPath = resolve(root, "/shared/threat-models");
+    const architecturePath = join(root, "architecture.md");
+    const threatModelsPath = join(root, "threat-models");
     try {
       await multiscanInventory(root);
+      await writeFile(architecturePath, "Synthetic architecture context.");
+      await mkdir(threatModelsPath);
+      await writeFile(
+        join(threatModelsPath, "model.md"),
+        "Synthetic threat model.",
+      );
       const stdout = capture();
       const stderr = capture();
       let config: CodexSecurityConfig | undefined;

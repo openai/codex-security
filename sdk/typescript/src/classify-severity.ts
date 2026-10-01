@@ -1,10 +1,8 @@
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { z } from "incur";
 import type { CodexSecurityConfig } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { prepareKnowledgeBase } from "./knowledge-base.js";
+import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -239,23 +237,11 @@ async function readDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const prepared = await prepareKnowledgeBase(paths, signal);
-  try {
-    const files = (await readdir(prepared.path)).sort();
-    const contents = await Promise.all(
-      files.map((file) =>
-        readFile(join(prepared.path, file), { encoding: "utf8", signal }),
-      ),
-    );
-    if (contents.every((text) => !text.trim())) {
-      throw new CodexSecurityError(
-        "Classification documents must not be empty.",
-      );
-    }
-    return contents;
-  } finally {
-    await prepared.cleanup();
+  const contents = await readKnowledgeBaseDocuments(paths, signal);
+  if (contents.every((text) => !text.trim())) {
+    throw new CodexSecurityError("Classification documents must not be empty.");
   }
+  return contents;
 }
 
 /** @internal Check parsed assessments against the actual finding evidence. */

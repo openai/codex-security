@@ -1039,8 +1039,12 @@ repository's CSV `prompt` follows the shared instructions.
 `-c FILE` shares config with single scans: CSV mode/scope override file defaults,
 and deep settings apply only to deep rows. `output.directory` can supply the
 results directory. `fail_on_severity` returns exit `1` without retrying completed
-scans, including when resuming saved results. A changed project configuration
-requires a new campaign output directory.
+scans, including when resuming saved results. Changes to project configuration,
+extracted knowledge-base text, staged document filenames, or direct Codex
+overrides require a new campaign output directory. Version 1 campaign
+manifests also require a new output directory because their original knowledge
+inputs and direct Codex overrides cannot be verified. Worker and retry counts
+can change when resuming.
 `--post-scan-prompt-file PATH` runs a follow-up in the same authenticated session,
 even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
