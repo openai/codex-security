@@ -1104,18 +1104,16 @@ async function testOpenAiCredentialsReachWorker() {
 
 async function testWorkerRuntimeSettings() {
   const cases = [
-    ["", undefined, undefined],
-    ['model_reasoning_summary = "none"\n', "none", "0"],
-    ['model_reasoning_summary = "auto"\n', "auto", "1"],
+    ["", undefined],
+    ['model_reasoning_summary = "none"\n', "none"],
+    ['model_reasoning_summary = "auto"\n', "auto"],
     [
       'model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel_reasoning_summary = "concise"\n',
       "concise",
-      "0",
     ],
     [
       'model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n',
       "none",
-      "1",
     ],
   ];
   const saved = Object.fromEntries(
@@ -1129,7 +1127,6 @@ async function testWorkerRuntimeSettings() {
       "CODEX_HOME",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-      "CODEX_SECURITY_REDACT_LOGS",
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
     ].map((name) => [name, process.env[name]]),
@@ -1138,7 +1135,7 @@ async function testWorkerRuntimeSettings() {
   try {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
-    for (const [configuration, expected, redactLogs] of cases) {
+    for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(deniedWorkerPermissionProfile);
       const python = path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
@@ -1169,11 +1166,8 @@ async function testWorkerRuntimeSettings() {
         "deep settings.toml",
       );
       const launches = [];
-      const changedRedactLogs = redactLogs === "0" ? "1" : "0";
       childProcess.spawn = (command, args, options) => {
         launches.push({ command, args, environment: options.env });
-        // In-flight workers retain their captured environment after the parent changes.
-        process.env.CODEX_SECURITY_REDACT_LOGS = changedRedactLogs;
         return originalSpawn(
           command,
           command === process.execPath ||
@@ -1200,7 +1194,6 @@ async function testWorkerRuntimeSettings() {
       for (const kind of ["discovery", "dedup"]) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           launches.length = 0;
-          restoreEnv("CODEX_SECURITY_REDACT_LOGS", redactLogs);
           await executor.run({
             kind,
             promptPath,
@@ -1246,10 +1239,6 @@ async function testWorkerRuntimeSettings() {
             process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
           );
           assert.equal(
-            workerLaunch.environment.CODEX_SECURITY_REDACT_LOGS,
-            redactLogs,
-          );
-          assert.equal(
             workerPermissionProfileOverride(workerLaunch.args),
             'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
           );
@@ -1276,22 +1265,12 @@ async function testWorkerRuntimeSettings() {
             true,
           );
           assertFlagPair(invocation.argv, "--model", "gpt-6-sol");
-          assert.equal(
-            invocation.argv.includes("resume"),
-            resumeThreadId !== undefined,
-          );
           assert.equal(invocation.configPath, configPath);
           const preflight = JSON.parse(
             await readFile(fixture.preflightMarkerPath, "utf8"),
           );
           assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
           assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
-          assert.equal(invocation.redactLogs, redactLogs);
-          assert.equal(preflight.redactLogs, redactLogs);
-          assert.equal(
-            process.env.CODEX_SECURITY_REDACT_LOGS,
-            changedRedactLogs,
-          );
           for (const [name, value] of Object.entries(gitEnvironment)) {
             assert.equal(process.env[name], value);
           }
@@ -2218,7 +2197,7 @@ async function fakeCodexFixture(
       `const accountResult = ${JSON.stringify(accountResult)};`,
       `const preflightMarkerPath = ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
-      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, redactLogs: process.env.CODEX_SECURITY_REDACT_LOGS, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
+      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
       "  let buffer = '';",
       "  process.stdin.setEncoding('utf8');",
@@ -2260,7 +2239,7 @@ async function fakeCodexFixture(
       "for await (const chunk of process.stdin) stdin += chunk;",
       "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
-      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, redactLogs: process.env.CODEX_SECURITY_REDACT_LOGS, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
+      "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
       "if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }",
       "if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }",

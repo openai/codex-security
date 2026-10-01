@@ -998,8 +998,10 @@ The redaction setting does not change credential configuration, SDK error
 sanitization, stored failure summaries, or publication receipts. It cannot recover
 content already replaced with `[redacted]`, including errors sanitized before
 reaching the CLI, and does not control native Codex or OpenTelemetry log and
-trace redaction. Patch-risk report diagnostics honor the opt-out, but the summary
-used in a published pull request keeps its credential redaction.
+trace redaction. Deep Scan workers use native Codex; this setting applies when
+the parent CLI displays their diagnostics. Patch-risk report diagnostics honor
+the opt-out, but the summary used in a published pull request keeps its credential
+redaction.
 
 ### Progress and cost
 
