@@ -30,6 +30,7 @@
 - smoke test published npm installs across supported platforms ([#1129](https://github.com/openai/codex-security/pull/1129))
 - require workflow checks and production dependency audits ([#1128](https://github.com/openai/codex-security/pull/1128))
 - attribute records reviews to participating observations ([#1145](https://github.com/openai/codex-security/pull/1145))
+- restore GPT-5.6 Sol as the default model ([#1181](https://github.com/openai/codex-security/pull/1181))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
