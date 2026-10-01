@@ -9,7 +9,7 @@ export function errorMessage(error: unknown): string {
 export function safeErrorMessage(error: unknown): string {
   const message = errorMessage(error);
   const recognizableCredential =
-    /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|:\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
+    /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_|lin_api_|fw_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|:\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
       message,
     );
   const assignments = message.matchAll(
