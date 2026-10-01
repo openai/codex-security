@@ -308,6 +308,22 @@ async function nativeFixture(t, mode = "complete") {
       locations: [
         { path: expected.path, startLine: expected.line, role: "root_control" },
       ],
+      codeEvidence: [
+        {
+          id: expected.id,
+          label: "Credential declaration",
+          path: expected.path,
+          startLine: expected.line,
+          code: prepared.fixture.secretValues.reduce(
+            (code, value) => code.replaceAll(value, "[REDACTED]"),
+            prepared.fixture.files[expected.path]
+              .split("\n")
+              .slice(expected.line - 1, expected.endLine)
+              .join("\n"),
+          ),
+          explanation: "Credential material is masked.",
+        },
+      ],
     })),
     coverage: {
       completeness: "complete",

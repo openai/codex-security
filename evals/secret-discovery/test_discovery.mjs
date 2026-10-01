@@ -13,6 +13,24 @@ import {
   threadSettings,
 } from "./harness.mjs";
 
+function sourceEvidence(fixture, path, startLine, endLine = startLine) {
+  const source = fixture.files[path]
+    .split("\n")
+    .slice(startLine - 1, endLine)
+    .join("\n");
+  return {
+    id: `${path}:${startLine}`,
+    label: "Source context",
+    path,
+    startLine,
+    code: fixture.secretValues.reduce(
+      (code, value) => code.replaceAll(value, "[REDACTED]"),
+      source,
+    ),
+    explanation: "Credential material is masked.",
+  };
+}
+
 function retainedResult(fixture) {
   return {
     findings: fixture.positives.map((expected) => ({
@@ -21,7 +39,9 @@ function retainedResult(fixture) {
       locations: [
         { path: expected.path, startLine: expected.line, role: "root_control" },
       ],
-      codeEvidence: [{ code: "credential = [REDACTED]" }],
+      codeEvidence: [
+        sourceEvidence(fixture, expected.path, expected.line, expected.endLine),
+      ],
     })),
     coverage: {
       completeness: "complete",
@@ -177,11 +197,69 @@ for (const [name, location] of [
   });
 }
 
+test("correct finding locations cannot hide missing or unrelated code evidence", () => {
+  const fixture = createFixture();
+  for (const evidence of [
+    undefined,
+    [],
+    [sourceEvidence(fixture, "src/client.py", 1)],
+    [sourceEvidence(fixture, "src/runtime_config.py", 3)],
+    [{ ...sourceEvidence(fixture, "src/client.py", 3), code: " \n" }],
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].codeEvidence = evidence;
+    const report = gradeResult(result, fixture);
+    assert.equal(report.recall, 1);
+    assert.equal(report.passed, false);
+    assert.deepEqual(report.errors, ["missing or invalid code evidence"]);
+  }
+});
+
+test("rejects invented and out-of-bounds citations alongside valid evidence", () => {
+  const fixture = createFixture();
+  for (const citation of [
+    { path: "src/absent.py", startLine: 1 },
+    { path: "src/client.py", startLine: 0 },
+    { path: "src/client.py", startLine: 999 },
+    { path: "src/client.py", startLine: 7, code: "first line\nsecond line" },
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].codeEvidence.push({
+      ...sourceEvidence(fixture, "src/client.py", 3),
+      ...citation,
+    });
+    assert.deepEqual(gradeResult(result, fixture).errors, [
+      "missing or invalid code evidence",
+    ]);
+  }
+});
+
+test("accepts multiline exposure and consumer excerpts with supporting context", () => {
+  const fixture = createFixture();
+  for (const [startLine, endLine] of [
+    [1, 3],
+    [4, 7],
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].codeEvidence = [
+      sourceEvidence(fixture, "src/client.py", startLine, endLine),
+      sourceEvidence(fixture, "src/runtime_config.py", 3),
+    ];
+    result.findings[0].codeEvidence[0].code =
+      result.findings[0].codeEvidence[0].code.replaceAll("\n", "\r\n") + "\r\n";
+    assert.equal(gradeResult(result, fixture).passed, true);
+  }
+});
+
 test("multiple expected exposures can share a finding", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);
   const unused = result.findings.splice(1, 1)[0];
   result.findings[0].locations.push(...unused.locations);
+  assert.deepEqual(gradeResult(result, fixture).errors, [
+    "missing or invalid code evidence",
+  ]);
+  result.findings[0].codeEvidence.push(...unused.codeEvidence);
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
@@ -240,6 +318,7 @@ for (const [name, separator] of [
       for (const [index, expected] of fixture.positives.entries()) {
         const path = `${prefix}${expected.path.replaceAll("/", separator)}`;
         result.findings[index].locations[0].path = path;
+        result.findings[index].codeEvidence[0].path = path;
         if (expected.consumerLine !== null) {
           result.findings[index].locations.push({
             path,
@@ -377,15 +456,10 @@ for (const [name, secretIndex] of [
 test("public keys and private-key format headers do not count as secret material", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);
-  const keyHeader = fixture.files["src/signing.mjs"]
-    .split("\n")[2]
-    .slice(0, 22);
-  result.findings[0].codeEvidence[0].code = [
-    "-----BEGIN PRIVATE KEY-----",
-    `${keyHeader}[REDACTED]`,
-    "-----END PRIVATE KEY-----",
-    fixture.files["config/public.pem"],
-  ].join("\n");
+  result.findings[0].codeEvidence.push(
+    sourceEvidence(fixture, "src/signing.mjs", 2, 4),
+    sourceEvidence(fixture, "config/public.pem", 1, 3),
+  );
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 

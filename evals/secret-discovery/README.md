@@ -27,6 +27,12 @@ are allowed. Supporting locations, including the production `expected_control`
 role, may cite benign context but cannot satisfy recall. Known credential-use
 sites may be cited as sinks; they cannot replace the exposed source location.
 
+Each finding must also include nonempty `codeEvidence`. Every snippet must cite
+a fixture file and stay within its line bounds. For each exposure reported in a
+finding, at least one snippet must cover the credential declaration or a known
+use site. Additional snippets may show benign context. The grader checks paths
+and line ranges, not exact snippet text, so credentials can remain masked.
+
 The final result must also omit credential values and fragments of at least 16
 characters. Fixed private-key encoding headers do not count as secret material.
 

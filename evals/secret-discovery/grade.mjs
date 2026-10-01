@@ -103,6 +103,41 @@ function matchesConsumer(location, expected) {
   );
 }
 
+function validEvidence(finding, fixture) {
+  const evidence = (finding.codeEvidence ?? []).map((entry) => ({
+    ...entry,
+    endLine:
+      entry.startLine + (entry.code?.trimEnd().split(/\r?\n/u).length ?? 0) - 1,
+  }));
+  return (
+    evidence.length > 0 &&
+    evidence.every((entry) => {
+      const source = fixture.files[normalizeSourcePath(entry.path)];
+      return (
+        typeof source === "string" &&
+        Boolean(entry.code?.trim()) &&
+        Number.isInteger(entry.startLine) &&
+        entry.startLine > 0 &&
+        entry.endLine <= source.trimEnd().split("\n").length
+      );
+    }) &&
+    fixture.positives
+      .filter((expected) => matches(finding, expected))
+      .every((expected) =>
+        evidence.some(
+          (entry) =>
+            matchesLocation(entry, expected) ||
+            (expected.consumerLine !== null &&
+              matchesLocation(entry, {
+                ...expected,
+                line: expected.consumerLine,
+                endLine: expected.lineCount,
+              })),
+        ),
+      )
+  );
+}
+
 /** Grade retained final findings, never keyword mentions or deferred candidates. */
 export function gradeResult(result, fixture, repo) {
   const errors = [];
@@ -144,6 +179,8 @@ export function gradeResult(result, fixture, repo) {
   if (found !== cases.length) errors.push("missing retained secret findings");
   if (falsePositives.length)
     errors.push("false positives or incorrect taxonomy/locations");
+  if (findings.some((finding) => !validEvidence(finding, fixture)))
+    errors.push("missing or invalid code evidence");
   if (leakedValueCount)
     errors.push("final result reproduces credential material");
   if (
