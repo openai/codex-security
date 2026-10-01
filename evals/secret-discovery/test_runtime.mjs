@@ -293,7 +293,9 @@ async function waitForFile(path) {
 }
 
 async function nativeFixture(t, mode = "complete") {
-  const directory = await mkdtemp(join(tmpdir(), "eval-runtime-test-"));
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "eval-runtime-test-")),
+  );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const prepared = await prepareEval(join(directory, "eval"));
   const home = join(directory, "home[private]");
