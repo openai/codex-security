@@ -44,6 +44,17 @@ child-process boundary. Keep per-scan settings isolated from concurrent scans.
 - Do not invent a restriction and then add tests whose only purpose is to
   enforce that restriction.
 
+## CLI secret and log redaction
+
+- Do not add or reintroduce CLI-layer secret or log redaction, including
+  credential-pattern filtering that masks or replaces diagnostic messages.
+  Keep CLI diagnostics intact for local troubleshooting.
+- This guidance concerns CLI implementation behavior. It does not authorize
+  removing or bypassing upstream SDK or native Codex protections, credential
+  handling safeguards, or controls on persisted or published artifacts.
+- Local output may contain sensitive information. Keep it private and review
+  it before sharing; the public disclosure requirements below still apply.
+
 ## Public CLI changes
 
 Treat commands, arguments, flags, accepted values, public environment
