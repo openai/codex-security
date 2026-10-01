@@ -47,6 +47,19 @@ To validate and republish retained checkpoints for a failed, non-canceled workbe
 
 Recovery can add only checkpoints that pass the stopped-scan source-integrity checks. It is not available for running, completed, or canceled scans. After cancellation, the owning continuation may retry publication only from the source set frozen at cancellation through `preserve-scan-results`; it cannot admit later checkpoints.
 
+### Incomplete Local Terminal Scans
+
+An unregistered local terminal scan is not eligible for workbench recovery. If its manifest has a valid `scan.id`, but `findings.json` or `coverage.json` is missing `scanId`, finalization fails with `findings.scanId: must match manifest scan id` or `coverage.scanId: must match manifest scan id`. The manifest ID alone does not provide the trusted completion binding needed to reconstruct those envelopes.
+
+For this unsealed state, including artifacts produced by plugin `v0.1.22`, the supported operator path is:
+
+1. Preserve the entire original scan directory unchanged as incomplete evidence. Without a successful seal, its findings and coverage are not a completed-scan result, and absence of findings is inconclusive.
+2. Start a fresh scan through the normal scan workflow with a new scan ID and a new output directory. Keep the original directory separate from the new scan's inputs and outputs; do not adopt its artifacts as newly completed results.
+
+There is currently no supported terminal resume/reassembly command or compatible plugin version that adopts this incomplete directory. Upgrading the plugin does not make it eligible for `recover-scan-results`. Do not manually insert IDs, invoke internal completion-binding APIs, register the directory as a workbench scan, or repeatedly run the finalizer to try to repair it. A later continuation does not by itself establish the missing binding.
+
+When authoring a new terminal scan's canonical JSON, supply the same scan identity in `scan-manifest.json`'s `scan.id`, `findings.json`'s `scanId`, and `coverage.json`'s `scanId` before the first finalization attempt. Use the [completed-scan example](../examples/completed-scan/) as a shape reference, with the new scan's own identity and evidence.
+
 ## Target Snapshots
 
 Choose the target kind based on the reviewed content, not the scan invocation:
