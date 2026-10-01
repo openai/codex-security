@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: invoice-desk-scan-${{ github.event_name == 'workflow_dispatch' && (inputs.pr_number && format('pr-{0}-{1}', inputs.pr_number, inputs.source_sha) || 'main') || format('fallback-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 env:
   CODEX_SECURITY_VERSION: "0.1.30"
 
@@ -88,9 +92,6 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
-    concurrency:
-      group: invoice-desk-scan-${{ matrix.target.pr || 'main' }}
-      cancel-in-progress: true
     environment: invoice-desk-inference
     runs-on: ubuntu-24.04
     timeout-minutes: 60

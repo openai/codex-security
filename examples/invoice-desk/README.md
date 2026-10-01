@@ -97,8 +97,9 @@ avoid rescanning an unchanged revision.
 
 The scan checks the PR's base and exact head through GitHub's API before queuing
 and again after environment approval, immediately before inference. Closed,
-retargeted, and superseded PR revisions are skipped. New scans cancel older scans
-for the same PR.
+retargeted, and superseded PR revisions are skipped. Repeated scans of the same PR
+revision cancel older runs of that revision. A scan that has already started
+inference may finish after the PR head changes; its reports identify the source SHA.
 
 The workflow installs the CLI outside the checkout and copies committed `app/`
 blobs into a fresh directory. Archive attributes cannot omit or substitute files;
