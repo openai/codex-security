@@ -61,7 +61,10 @@ describe("knowledge-base PDF cancellation", () => {
       await expect(
         prepareKnowledgeBase([document], controller.signal),
       ).rejects.toBe(reason);
-      expect(checks).toBe(3);
+      // The third check aborts inside PDF extraction. The extraction catch
+      // calls throwIfAborted once more so the original abort reason escapes
+      // instead of being wrapped as a PDF extraction error.
+      expect(checks).toBe(4);
     } finally {
       signalSpy.mockRestore();
     }
