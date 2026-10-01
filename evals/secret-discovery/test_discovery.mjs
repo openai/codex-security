@@ -150,6 +150,34 @@ for (const category of [
   });
 }
 
+test("rejects unrelated categories containing credential-term substrings", () => {
+  const fixture = createFixture();
+  for (const category of ["tokenization-error", "secretary-data"]) {
+    for (const cwe of ["CWE-798", "CWE-200"]) {
+      const result = retainedResult(fixture);
+      result.findings[0].taxonomy = { category, cwe: [cwe] };
+      const report = gradeResult(result, fixture);
+      assert.equal(report.passed, false, `${category}:${cwe}`);
+      assert.equal(report.cases[0].found, false, `${category}:${cwe}`);
+    }
+  }
+});
+
+test("accepts plural and identifier-style credential categories", () => {
+  const fixture = createFixture();
+  for (const category of [
+    "tokens-exposed",
+    "secrets_in_source",
+    "privateKeysInSource",
+    "hardcodedCredentials",
+    "credentialExposure",
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].taxonomy.category = category;
+    assert.equal(gradeResult(result, fixture).passed, true, category);
+  }
+});
+
 test("accepts credential exposure with non-secret context in the category", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);

@@ -1,13 +1,15 @@
 import { posix, win32 } from "node:path";
 
-const explicitSecretCategory =
-  /secret|credential|password|token|(?:api|private)[-_ ]?key|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
-const secretCategory = new RegExp(
-  `${explicitSecretCategory.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposure`,
+const explicitSecretTerms =
+  /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
+const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposures?`;
+const explicitSecretCategory = new RegExp(
+  String.raw`\b(?:${explicitSecretTerms.source})\b`,
   "i",
 );
+const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
 const negatedSecretCategory = new RegExp(
-  String.raw`^(?:not(?:[-_\s]*a)?|non)[-_\s]*(?:${secretCategory.source})s?(?:[-_\s]|$)`,
+  String.raw`^(?:not(?:[-_\s]*a)?|non)[-_\s]*(?:${secretTerms})\b`,
   "i",
 );
 const supportingLocation = (location) =>
@@ -100,9 +102,12 @@ function matchesLocation(location, expected) {
 }
 
 function matches(finding, expected) {
-  const category = finding.taxonomy?.category ?? "";
+  const category = (finding.taxonomy?.category ?? "")
+    .replaceAll("_", " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .trim();
   return (
-    !negatedSecretCategory.test(category.trim()) &&
+    !negatedSecretCategory.test(category) &&
     secretCategory.test(category) &&
     finding.taxonomy?.cwe?.some(
       (cwe) =>
