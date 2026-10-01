@@ -23,6 +23,16 @@ export function safeErrorMessage(error: unknown): string {
   return recognizableCredential || sensitiveField ? "[redacted]" : message;
 }
 
+/** Format CLI diagnostics; persistence continues to use safeErrorMessage. */
+export function logErrorMessage(
+  error: unknown,
+  environment: NodeJS.ProcessEnv,
+): string {
+  return environment["CODEX_SECURITY_REDACT_LOGS"] === "0"
+    ? errorMessage(error)
+    : safeErrorMessage(error);
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
