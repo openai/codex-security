@@ -2773,7 +2773,7 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
-    model_fields = saved_results.threat_model_fields(Path(scan["scan_dir"]))
+    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
     if path := model_fields.get("threatModelPath"):
         artifacts["threatModel"] = path
     occurrence_rows = scan_history.finding_occurrence_rows(

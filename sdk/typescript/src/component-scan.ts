@@ -1,6 +1,6 @@
-import { stat, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import {
   CodexSecurity,
   scanAuthentication,
@@ -19,6 +19,7 @@ import {
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
+import { readThreatModelPath } from "./artifact-export.js";
 import { safeErrorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
@@ -230,13 +231,19 @@ export async function runComponentScans(
             if (result.cost !== null) receipt.cost = result.cost;
             receipt.status =
               receipt.coverage === "complete" ? "completed" : "incomplete";
+            if (result.threatModelPath !== null)
+              receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
             receipt.status = "failed";
             receipt.error = safeErrorMessage(error);
+            if (!options.signal?.aborted) {
+              const path = await readThreatModelPath(receipt.outputDir, {
+                pythonPath: options.config?.pythonPath,
+                signal: options.signal,
+              });
+              if (path !== null) receipt.threatModelPath = path;
+            }
           }
-          const threatModelPath = join(receipt.outputDir, "threatmodel.md");
-          if ((await stat(threatModelPath).catch(() => null))?.isFile())
-            receipt.threatModelPath = threatModelPath;
           notify(() =>
             options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
           );
@@ -479,10 +486,12 @@ function renderReport(
     "",
     "## Components",
     "",
-    ...receipts.map(
-      (receipt) =>
-        `- ${JSON.stringify(receipt.name)}: ${receipt.status}. [Scan files](./${receipt.id}/)${receipt.threatModelPath ? ` · [Threat model](./${receipt.id}/threatmodel.md)` : ""}${receipt.error ? ` — ${receipt.error}` : ""}`,
-    ),
+    ...receipts.map((receipt) => {
+      const modelLink = receipt.threatModelPath
+        ? ` · [Threat model](./${receipt.id}/${relative(receipt.outputDir, receipt.threatModelPath).split(sep).join("/")})`
+        : "";
+      return `- ${JSON.stringify(receipt.name)}: ${receipt.status}. [Scan files](./${receipt.id}/)${modelLink}${receipt.error ? ` — ${receipt.error}` : ""}`;
+    }),
     "",
     "## Findings",
     "",

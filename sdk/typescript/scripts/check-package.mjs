@@ -169,6 +169,7 @@ const allowedRoot = new Set([
 const distFiles = new Set(
   [
     "api",
+    "artifact-export",
     "auth",
     "bulk-scan-discovery",
     "cli",

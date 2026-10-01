@@ -12,7 +12,8 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as artifactExport from "../src/artifact-export.js";
 import {
   inspectSecurityPolicySources,
   readSecurityPolicy,
@@ -895,6 +896,55 @@ describe("security policy generation", () => {
     expect(saved.status).toBe("completed");
     expect(saved.threatModel).toEqual(draft.threatModel);
   });
+
+  for (const outcome of ["cancellation", "write failure"] as const) {
+    const name = `handles ${outcome} during the final policy model save`;
+    test(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const controller = new AbortController();
+      const original = artifactExport.writeThreatModel;
+      let writes = 0;
+      const writer = spyOn(
+        artifactExport,
+        "writeThreatModel",
+      ).mockImplementation(async (...args) => {
+        if (++writes === 1) return original(...args);
+        if (outcome === "cancellation") {
+          controller.abort(new Error("Synthetic final-save cancellation"));
+          throw controller.signal.reason;
+        }
+        return "Synthetic final projection failure";
+      });
+      try {
+        const generation = f.generate({ signal: controller.signal });
+        if (outcome === "cancellation")
+          await expect(generation).rejects.toThrow(
+            "Synthetic final-save cancellation",
+          );
+        else {
+          const draft = await generation;
+          expect(draft.threatModelPath).toBeNull();
+          expect(draft.threatModel.content).toBe(
+            stageResult("threat_model").markdown,
+          );
+        }
+        expect(writes).toBe(2);
+        expect(
+          await readFile(join(f.outputDir, "threatmodel.md"), "utf8"),
+        ).toContain("provisional");
+        const saved = JSON.parse(
+          await readFile(join(f.outputDir, "policy-draft.json"), "utf8"),
+        );
+        expect(saved.threatModel.content).toBe(
+          stageResult("threat_model").markdown,
+        );
+      } finally {
+        writer.mockRestore();
+      }
+    });
+  }
 
   test("retains completed evidence without saving invalid policy documents", async () => {
     for (const markdown of [

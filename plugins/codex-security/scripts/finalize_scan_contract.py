@@ -213,10 +213,21 @@ def _read_saved_threat_model(
         if isinstance(model, dict):
             contents = _render_threat_model(model, provenance)
             path = scan_dir / "threatmodel.md"
+            current_path = None
+            try:
+                descriptor = open_scan_local_file_descriptor(
+                    scan_dir, "threatmodel.md", "Saved threat model"
+                )
+                with os.fdopen(descriptor, "rb") as handle:
+                    if handle.read() == contents:
+                        current_path = str(path)
+            except (ContractError, OSError):
+                # An unavailable projection does not invalidate the canonical model.
+                pass
             return {
                 "threatModel": model,
                 "provenance": provenance,
-                "path": str(path) if path.is_file() and not path.is_symlink() else None,
+                "path": current_path,
             }, contents
     for filename in (
         "threatmodel.md",
@@ -301,6 +312,7 @@ def write_threat_model_projection_if_possible(
                 return None
             contents = _render_threat_model(model, threat_model_provenance(manifest))
         write_scan_local_bytes(scan_dir, "threatmodel.md", contents, owner_read_write=True)
+        return None
     except (ContractError, OSError) as exc:
         warning = (
             f"Automatic threat model save failed: {exc}. "

@@ -918,7 +918,7 @@ export async function runSecurityPolicyStages(options: {
       await rm(temporary, { force: true }).catch(() => undefined);
     }
   };
-  const saveModelDocument = async (): Promise<void> => {
+  const saveModelDocument = async (): Promise<string | null> => {
     let warning: string;
     try {
       warning = await writeThreatModel(outputDir, {
@@ -927,6 +927,7 @@ export async function runSecurityPolicyStages(options: {
         signal,
       });
     } catch (error) {
+      signal.throwIfAborted();
       warning = `Could not save threatmodel.md; the retained threat model remains exportable: ${error instanceof Error ? error.message : String(error)}`;
     }
     if (warning) {
@@ -934,6 +935,8 @@ export async function runSecurityPolicyStages(options: {
         options.onWarning?.(warning);
       } catch {}
     }
+    signal.throwIfAborted();
+    return warning ? null : threatModelPath;
   };
   const threatModel = await run(
     "threat_model",
@@ -992,14 +995,13 @@ export async function runSecurityPolicyStages(options: {
   manifest.status = "completed";
   manifest.reviewNotes = reviewNotes;
   await saveManifest();
-  await saveModelDocument();
-  const modelFile = await stat(threatModelPath).catch(() => null);
+  const savedThreatModelPath = await saveModelDocument();
   return {
     ...target,
     outputDir,
     draftPath,
     specificationPath,
-    threatModelPath: modelFile?.isFile() ? threatModelPath : null,
+    threatModelPath: savedThreatModelPath,
     threatModel: retainedThreatModel,
     content: policy.markdown,
     previousContent,

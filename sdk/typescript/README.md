@@ -1721,12 +1721,12 @@ and requires sealed results. Findings support `--export-format csv|json|sarif`,
 with `sarif` as the default. Use `--source-root PATH` to add SARIF source-line
 fingerprints.
 
-Workflows that produce a threat model retain it in their result directory as
-`threatmodel.md`. Standard, Deep, Diff, and policy generation share the filename;
-component and bulk results keep one scoped document per child run. Scan models
-may be concise structured summaries, while policy models contain full Markdown.
-The document records the modeled scope separately from the scan scope and marks
-provisional or recovered content. A completed or imported scan can have no model.
+Standard, Deep, Diff, and policy workflows save threat models with
+their results. They also write `threatmodel.md`; if that file cannot be written,
+the saved model remains available for export. Component and bulk scans keep a
+separate model for each child run. New documents record the model and scan
+scopes and identify provisional or recovered content. Some results have no
+saved model.
 
 Use `--artifact threat-model` to export the retained model as Markdown. The
 format is `md` and the default destination is `./threatmodel.md`. Explicitly
@@ -1747,12 +1747,16 @@ and CSV stdout cannot be combined with JSON command output. Exporting into a
 repository does not make the document automatic scan input; use the existing
 `--knowledge-base` option when you want to provide it as context.
 
-`ScanResult.threatModel` exposes canonical structured or Markdown content, and
-`threatModelPath` identifies the saved document, including historical filenames. Both are nullable independently:
-a model remains exportable if its convenience file could not be written. They
-also appear in scan JSON and history responses. Policy results expose the same
-fields. The policy model is checkpointed before drafting `SECURITY.md`, so it
-survives a failure in that later stage.
+`ScanResult.threatModel` contains the saved structured model or Markdown.
+`threatModelPath` points to its current document, including supported historical
+filenames. Either can be null. The model remains exportable when the document
+could not be written. Scan JSON, history, and policy results expose these fields.
+Policy generation saves its model before drafting `SECURITY.md`, so a later
+drafting failure does not discard it.
+
+SDK scan methods verify model paths before returning them. A manually
+constructed `ScanResult` uses the `threatModelPath` supplied in its options, or
+`null` if omitted.
 
 The SDK offers the same offline export without an authenticated session:
 

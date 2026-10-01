@@ -134,11 +134,17 @@ describe("ScanResult", () => {
         threatModel,
         threatModelPath: null,
       });
-      await writeFile(join(root, "threatmodel.md"), threatModel.content);
-      expect(result.threatModelPath).toBe(join(root, "threatmodel.md"));
-      expect(result.toJSON()["threatModelPath"]).toBe(
-        join(root, "threatmodel.md"),
-      );
+      const path = join(root, "threatmodel.md");
+      await writeFile(path, "# Earlier model\n");
+      expect(result.threatModelPath).toBeNull();
+      expect(result.toJSON()["threatModelPath"]).toBeNull();
+      await writeFile(path, threatModel.content);
+      const verifiedResult = new ScanResult({
+        ...result,
+        threatModelPath: path,
+      });
+      expect(verifiedResult.threatModelPath).toBe(path);
+      expect(verifiedResult.toJSON()["threatModelPath"]).toBe(path);
       expect(fakeResult([]).threatModel).toBeNull();
       await rm(join(root, "threatmodel.md"));
       await mkdir(join(root, "artifacts", "01_context"), { recursive: true });
@@ -154,7 +160,7 @@ describe("ScanResult", () => {
         turnResult: {},
       });
       expect(legacyResult.threatModel).toBeNull();
-      expect(legacyResult.threatModelPath).toBe(legacy);
+      expect(legacyResult.threatModelPath).toBeNull();
       if (process.platform !== "win32") {
         await symlink(legacy, join(root, "threatmodel.md"));
         expect(result.threatModelPath).toBeNull();

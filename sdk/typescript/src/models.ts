@@ -47,7 +47,6 @@ export interface ScanManifest {
           attackerCapabilities?: string[];
           securityObjectives?: string[];
           assumptions?: string[];
-          format?: "structured";
           /**
            * The modeled source scope, which may differ from the scan scope. Omit when unknown.
            */

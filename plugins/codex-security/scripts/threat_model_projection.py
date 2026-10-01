@@ -9,15 +9,22 @@ import sys
 from typing import Any
 
 
+def _markdown_content(model: dict[str, Any]) -> str | None:
+    content = model.get("content")
+    if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+        return content
+    return None
+
+
 def threat_model_body(model: dict[str, Any], *, heading_level: int = 2) -> str:
     """Keep authored Markdown intact, including summaries from older scans."""
-    if model.get("format") == "markdown":
-        content = model.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("threatModel.content: expected non-empty Markdown")
+    content = _markdown_content(model)
+    if content is not None:
         return content
     summary = model.get("summary")
     if not isinstance(summary, str) or not summary.strip():
+        if model.get("format") == "markdown":
+            raise ValueError("threatModel.content: expected non-empty Markdown")
         raise ValueError("threatModel.summary: expected a non-empty string")
     sections = [summary]
     for heading, key in (
@@ -50,7 +57,7 @@ def _scope_lines(scope: dict[str, Any], label: str) -> list[str]:
 def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None = None) -> bytes:
     """Render a portable document with authored content and recorded provenance."""
     body = threat_model_body(model)
-    if model.get("format") != "markdown":
+    if _markdown_content(model) is None:
         body = "# Threat Model\n\n" + body
     provenance = provenance or {}
     footer = ["---", "", "## Saved Model Context", ""]

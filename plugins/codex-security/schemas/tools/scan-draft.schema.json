@@ -639,9 +639,6 @@
             "assumptions": {
               "$ref": "#/$defs/textList"
             },
-            "format": {
-              "const": "structured"
-            },
             "scope": {
               "type": "object",
               "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
@@ -682,8 +679,7 @@
               "const": "markdown"
             },
             "content": {
-              "type": "string",
-              "minLength": 1
+              "$ref": "#/$defs/text"
             },
             "scope": {
               "type": "object",

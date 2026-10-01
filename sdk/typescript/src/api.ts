@@ -30,6 +30,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { readThreatModelPath } from "./artifact-export.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -594,6 +595,10 @@ export class CodexSecurity {
           ...contract,
           scanDir: state.scanDir,
           ...metadata,
+          threatModelPath: await readThreatModelPath(state.scanDir, {
+            pythonPath: this.config.pythonPath,
+            signal,
+          }),
         });
       }
     }
@@ -1218,6 +1223,7 @@ export class CodexSecurity {
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
+      pythonPath: string;
       model: string;
       threadId: string | null;
     } | null = null;
@@ -1430,6 +1436,7 @@ export class CodexSecurity {
         budgetRecovery = {
           expectation,
           pluginRoot: runtime.plugin.installedRoot,
+          pythonPath: session.python,
           model,
           threadId: null,
         };
@@ -1955,6 +1962,7 @@ export class CodexSecurity {
         signal,
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
+        pythonPath: session.python,
         expectation,
         authentication,
         workbenchValidated: true,
@@ -2191,6 +2199,7 @@ export class CodexSecurity {
             signal,
             scanDir,
             pluginRoot: runtime.plugin.installedRoot,
+            pythonPath: session.python,
             expectation,
             model,
             onReconnect: options.onReconnect,
@@ -2224,6 +2233,7 @@ export class CodexSecurity {
             expectation,
             signal,
             true,
+            session.python,
           );
           notifyObserver(
             "onWarning",
@@ -2338,6 +2348,7 @@ export class CodexSecurity {
               ...(options.signal === undefined ? [] : [options.signal]),
             ]),
             true,
+            budgetRecovery.pythonPath,
           );
           if (result.coverage.completeness !== "partial") {
             throw new IncompleteScanError(
@@ -3294,6 +3305,7 @@ export class CodexSecurity {
         },
         signal,
         true,
+        python,
       );
       // Stable fixture identities are indexed by complete-scan without model matching.
       result.repositoryFindings = (await listRepositoryFindings(
@@ -3658,6 +3670,7 @@ interface ScanEventRunOptions {
   signal: AbortSignal;
   scanDir: string;
   pluginRoot: string;
+  pythonPath?: string;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
   workbenchValidated?: boolean;
@@ -3804,6 +3817,7 @@ export async function runScanEvents(
       options.expectation,
       options.signal,
       options.workbenchValidated,
+      options.pythonPath,
     );
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
@@ -4211,6 +4225,7 @@ async function collectResult(
   expectation: ScanExpectation,
   signal: AbortSignal,
   workbenchValidated = false,
+  pythonPath?: string,
 ): Promise<ScanResult> {
   const required = [
     "scan-manifest.json",
@@ -4257,6 +4272,11 @@ async function collectResult(
     threadId,
     turnResult,
     sarifPath,
+    threatModelPath: await readThreatModelPath(scanDir, {
+      pluginRoot,
+      pythonPath,
+      signal,
+    }),
   });
 }
 

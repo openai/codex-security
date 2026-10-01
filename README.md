@@ -37,8 +37,9 @@ for headless generation, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 
-When a workflow produces a threat model, it saves `threatmodel.md` with the run.
-Export a copy without starting another analysis:
+Scans and policy generation retain their threat model with the run and write
+a `threatmodel.md` copy when possible. Export the saved model without starting
+another analysis:
 
 ```bash
 npx @openai/codex-security export --artifact threat-model

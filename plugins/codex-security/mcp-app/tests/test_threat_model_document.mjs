@@ -66,6 +66,25 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       scanDraftInputSchema.parse(checkpoint).threatModel,
       threatModel,
     );
+    for (const content of ["", " \n\t"]) {
+      assert.equal(
+        scanDraftInputSchema.safeParse({
+          ...checkpoint,
+          threatModel: { format: "markdown", content },
+        }).success,
+        false,
+      );
+    }
+    const legacyModel = {
+      summary: "Existing structured model.",
+      format: "markdown",
+      content: " \n",
+    };
+    assert.deepEqual(
+      scanDraftInputSchema.parse({ ...checkpoint, threatModel: legacyModel })
+        .threatModel,
+      legacyModel,
+    );
     const result = await recordCodexSecurityWorkerScanDraft(
       context,
       checkpoint,

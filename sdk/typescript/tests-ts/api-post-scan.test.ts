@@ -242,7 +242,10 @@ describe("completed scan follow-up instructions", () => {
     "restores completed scan artifacts after failed post-scan instructions: %s",
     async (_name, scenario) => {
       const fixture = await startFailedPostScan(scenario);
-      expect(await fixture.scan).toMatchObject({ scanDir: fixture.scanDir });
+      const result = await fixture.scan;
+      expect(result).toMatchObject({ scanDir: fixture.scanDir });
+      if (scenario.artifact === "threatmodel.md")
+        expect(result.threatModelPath).toBe(fixture.artifactPath);
       expect(fixture.turns).toBe(2);
       expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
       await fixture.client.close();

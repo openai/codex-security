@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { writeThreatModel } from "../src/artifact-export.js";
+import { PYTHON } from "./support/security-policy.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
@@ -137,6 +139,50 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  test("only links current models from failed child runs", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "model-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ncurrent,${source.path},${source.revision}\nstale,${source.path},${source.revision}\n`,
+    );
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_checkout, scanOptions = {}) => {
+          const directory = scanOptions.outputDir!;
+          await mkdir(directory, { recursive: true });
+          const manifest = {
+            documentType: "codex-security.policy-draft",
+            status: "threat_model_ready",
+            threatModel: { format: "markdown", content: "# Earlier model\n" },
+          };
+          await writeFile(
+            join(directory, "policy-draft.json"),
+            JSON.stringify(manifest),
+          );
+          await writeThreatModel(directory, { pythonPath: PYTHON });
+          if (directory.includes("stale")) {
+            manifest.threatModel.content = "# Updated model\n";
+            await writeFile(
+              join(directory, "policy-draft.json"),
+              JSON.stringify(manifest),
+            );
+          }
+          throw new Error("Synthetic child failure after checkpoint");
+        }),
+        { maxAttempts: 1, config: { pythonPath: PYTHON } },
+      ),
+    );
+    const rows = await results(summary.resultsPath);
+    expect(
+      rows.find((row) => row["id"] === "current")?.["threatModelPath"],
+    ).toBeString();
+    expect(
+      rows.find((row) => row["id"] === "stale")?.["threatModelPath"],
+    ).toBeUndefined();
+  });
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");

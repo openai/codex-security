@@ -643,6 +643,39 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
 
 
+@pytest.mark.parametrize("changed_file", ["scan-manifest.json", "findings.json"])
+def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
+    tmp_path: Path, changed_file: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = {"summary": "Original queue boundaries."}
+    manifest_path.write_text(json.dumps(manifest))
+    complete = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert complete["threatModelAvailable"] is True
+    if changed_file == "scan-manifest.json":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["scan"]["threatModel"] = {"summary": "Changed after completion."}
+        manifest_path.write_text(json.dumps(manifest))
+    else:
+        path = scan_dir / changed_file
+        path.write_bytes(path.read_bytes() + b" ")
+    retained = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert retained["progress"]["status"] == "complete"
+    assert retained["threatModelAvailable"] is False
+    assert "threatModel" not in retained
+    assert "threatModel" not in retained["artifacts"]
+
+
 @pytest.mark.parametrize("malformation", ["scan", "target", "assets"])
 def test_malformed_model_keeps_history_available_for_semantic_repair(
     tmp_path: Path, malformation: str

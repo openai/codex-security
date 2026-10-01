@@ -7,8 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
-from unittest import mock
 
 import test_finalize_scan_contract as fixtures
 
@@ -51,7 +51,66 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.assertEqual(description["threatModel"], model)
         self.assertFalse(description["provenance"]["provisional"])
         self.assertEqual(description["provenance"]["snapshotDigest"], snapshot_digest)
-        self.assertEqual(description["path"], str(self.scan_dir / "threatmodel.md"))
+        self.assertIsNone(description["path"])
+
+    def test_rejects_blank_markdown_before_sealing(self) -> None:
+        for content in ("", " \n\t"):
+            with self.subTest(content=content):
+                self.manifest["scan"]["threatModel"] = {"format": "markdown", "content": content}
+                self.write_scan()
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.finalize_scan(self.scan_dir)
+                self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+
+    def test_exports_legacy_structured_model_extensions(self) -> None:
+        for extensions in ({"format": "markdown"}, {"format": "markdown", "content": " \n"}):
+            with self.subTest(extensions=extensions):
+                model = {"summary": "Existing structured model.", **extensions}
+                self.manifest["scan"]["threatModel"] = model
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(self.read_json("scan-manifest.json")["scan"]["threatModel"], model)
+                self.assertIn(
+                    b"Existing structured model.",
+                    FINALIZER.build_threat_model_export(self.scan_dir),
+                )
+                self.assertEqual(
+                    FINALIZER.build_findings_export(self.scan_dir, "json"),
+                    (self.scan_dir / "findings.json").read_bytes(),
+                )
+
+    def test_markdown_content_takes_precedence_over_a_summary_extension(self) -> None:
+        self.manifest["scan"]["threatModel"] = {
+            "format": "markdown",
+            "content": "# Full model\n\nSource-backed detail.\n",
+            "summary": "A shorter summary.",
+        }
+        self.write_scan()
+        FINALIZER.finalize_scan(self.scan_dir)
+        document = FINALIZER.build_threat_model_export(self.scan_dir)
+        self.assertTrue(document.startswith(b"# Full model\n\nSource-backed detail.\n"))
+        self.assertNotIn(b"A shorter summary.", document)
+
+    def test_failed_projection_update_does_not_expose_the_previous_model(self) -> None:
+        self.manifest["scan"]["threatModel"] = {"summary": "Original queue boundaries."}
+        self.write_scan()
+        FINALIZER.write_threat_model_projection_if_possible(self.scan_dir, self.manifest)
+        self.manifest["scan"]["threatModel"] = {"summary": "Updated queue boundaries."}
+        self.write_scan()
+        with (
+            unittest.mock.patch.object(
+                FINALIZER,
+                "write_scan_local_bytes",
+                side_effect=OSError("Synthetic locked document"),
+            ),
+            unittest.mock.patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            self.assertIsNotNone(
+                FINALIZER.write_threat_model_projection_if_possible(self.scan_dir, self.manifest)
+            )
+        self.assertIsNone(FINALIZER.describe_threat_model(self.scan_dir)["path"])
+        self.assertIn("Original queue", (self.scan_dir / "threatmodel.md").read_text())
+        self.assertIn(b"Updated queue", FINALIZER.build_threat_model_export(self.scan_dir))
 
     def test_exports_provisional_model_without_sealing_or_collapsing_summary_markdown(self) -> None:
         body = "A summary.\n\n- First boundary\n- Second boundary\n\n```text\nA -> B\n```"
@@ -81,7 +140,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
             destination = Path(outside) / "keep.md"
             destination.write_text("unchanged")
             (self.scan_dir / "threatmodel.md").symlink_to(destination)
-            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 FINALIZER.finalize_scan(self.scan_dir)
             self.assertIn("automatic threat model save failed", stderr.getvalue().lower())
             self.assertEqual(destination.read_text(), "unchanged")
@@ -170,7 +229,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
             FINALIZER.ContractError, r"threatModel.assets\[0\]: expected a string"
         ):
             FINALIZER.build_threat_model_export(self.scan_dir)
-        with mock.patch("sys.stderr", new_callable=io.StringIO):
+        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO):
             warning = FINALIZER.write_threat_model_projection_if_possible(self.scan_dir)
         self.assertIn("threatModel.assets[0]: expected a string", warning)
         self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), original)

@@ -1,4 +1,4 @@
-import { lstatSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
@@ -43,6 +43,7 @@ export interface ScanResultOptions {
   threadId: string;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
+  threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
 }
 
@@ -55,6 +56,7 @@ export class ScanResult {
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
+  public readonly threatModelPath: string | null;
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
 
   public constructor(options: ScanResultOptions) {
@@ -65,6 +67,7 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
+    this.threatModelPath = options.threatModelPath ?? null;
     this.cost = estimateScanCost(
       options.turnResult.model,
       options.turnResult.usage,
@@ -91,25 +94,6 @@ export class ScanResult {
 
   public get threatModel(): ThreatModel | null {
     return this.manifest.scan.threatModel ?? null;
-  }
-
-  public get threatModelPath(): string | null {
-    for (const name of [
-      "threatmodel.md",
-      ...(this.threatModel === null
-        ? [
-            "THREAT_MODEL.md",
-            "artifacts/01_context/threat_model.md",
-            "threat_model.md",
-          ]
-        : []),
-    ]) {
-      const path = join(this.scanDir, name);
-      try {
-        if (lstatSync(path, { throwIfNoEntry: false })?.isFile()) return path;
-      } catch {}
-    }
-    return null;
   }
 
   public get reportPath(): string {

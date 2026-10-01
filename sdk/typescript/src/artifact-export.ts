@@ -17,7 +17,6 @@ import {
 } from "./runtime.js";
 
 export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
-type Writable = ArtifactOutput;
 
 export const ARTIFACT_EXPORT_FILENAMES = {
   csv: "findings.csv",
@@ -164,6 +163,24 @@ export async function writeThreatModel(
     options,
   );
   return result.stderr.trim();
+}
+
+/** Read the current document path without making an optional projection required. */
+export async function readThreatModelPath(
+  directory: string,
+  options: HelperOptions = {},
+): Promise<string | null> {
+  try {
+    options.signal?.throwIfAborted();
+    const result = await runArtifactHelper(
+      ["--scan-dir", directory, "--describe-threat-model"],
+      options,
+    );
+    return (JSON.parse(result.stdout) as ThreatModelDescription).path;
+  } catch {
+    options.signal?.throwIfAborted();
+    return null;
+  }
 }
 
 export async function runArtifactExport(
@@ -329,7 +346,7 @@ export async function exportArtifact(
 }
 
 export async function writeArtifactOutput(
-  output: Writable,
+  output: ArtifactOutput,
   value: string | Uint8Array | AsyncIterable<Uint8Array>,
 ): Promise<void> {
   const destination = new NodeWritable({

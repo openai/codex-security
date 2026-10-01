@@ -59,10 +59,12 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 )
 
 
-def threat_model_fields(scan_dir: Path) -> dict[str, Any]:
+def threat_model_fields(db: WorkbenchDbContext, scan: sqlite3.Row) -> dict[str, Any]:
+    scan_dir = Path(scan["scan_dir"])
     fields: dict[str, Any] = {"threatModelAvailable": False}
     try:
-        saved_model = _read_saved_threat_model(scan_dir, validate_seal=False)
+        db.require_recorded_manifest_digest(scan, scan_dir)
+        saved_model = _read_saved_threat_model(scan_dir)
         if saved_model is not None:
             description = saved_model[0]
             fields.update(
@@ -72,7 +74,8 @@ def threat_model_fields(scan_dir: Path) -> dict[str, Any]:
             )
             if description["path"] is not None:
                 fields["threatModelPath"] = description["path"]
-    except (ContractError, OSError):
+    except (ContractError, OSError, SystemExit):
+        # Unavailable optional model data must not prevent reading the saved scan.
         pass
     return fields
 
