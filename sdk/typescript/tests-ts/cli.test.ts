@@ -122,9 +122,9 @@ describe("CLI", () => {
     expect(root.text()).toContain("bulk-scan");
     expect(root.text()).toContain("install-hook");
     expect(root.text()).not.toContain("multiscan");
-    expect(root.text()).toContain("Integrations:");
     expect(root.text()).toContain("completions");
-    expect(root.text()).toContain("--llms, --llms-full");
+    expect(root.text()).toContain("--llms");
+    expect(root.text()).toContain("--llms-full");
     expect(stderr.text()).toBe("");
 
     const schema = capture();
@@ -285,23 +285,37 @@ describe("CLI", () => {
 
   test("documents every public command argument and option", async () => {
     const commands = [
+      ["policy"],
       ["scan"],
+      ["scan", "import"],
+      ["scan-components"],
       ["dedupe"],
+      ["classify-severity"],
+      ["suggest-owners"],
       ["bulk-scan"],
       ["export"],
       ["validate"],
+      ["verify-fix"],
       ["patch"],
       ["login"],
       ["logout"],
       ["feedback"],
       ["info"],
       ["install-hook"],
+      ["init"],
+      ["serve"],
+      ["publish", "scan"],
+      ["publish", "check"],
+      ["import", "github"],
       ["scans", "list"],
+      ["scans", "logs"],
+      ["scans", "resume"],
       ["scans", "show"],
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
       ["findings", "false-positive"],
+      ["findings", "list"],
     ] as const;
 
     for (const command of commands) {
@@ -334,9 +348,21 @@ describe("CLI", () => {
         };
       };
 
-      for (const argument of Object.values(
+      const argumentLabels = help
+        .text()
+        .split("\n\n")
+        .find((section) => section.startsWith("Arguments:\n"))
+        ?.split("\n")
+        .filter((line) => /^ {2}\S/u.test(line))
+        .map((line) => line.trim().split(/\s/u)[0]);
+      for (const [name, argument] of Object.entries(
         definitions.args?.properties ?? {},
       )) {
+        const label = name.replace(
+          /[A-Z]/gu,
+          (letter) => `-${letter.toLowerCase()}`,
+        );
+        expect(argumentLabels).toContain(label);
         expect(typeof argument.description).toBe("string");
         expect(argument.description?.trim().length).toBeGreaterThan(0);
       }
@@ -2354,12 +2380,13 @@ describe("CLI", () => {
     expect(
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export [scanDir]");
-    expect(stdout.text()).toContain("--artifact <findings|threat-model>");
-    expect(stdout.text()).toContain("--scan <string>");
-    expect(stdout.text()).toContain("--export-format <csv|json|sarif|md>");
+    expect(stdout.text()).toContain("Usage: codex-security export [scan-dir]");
+    expect(stdout.text()).toContain("--artifact <artifact>");
+    expect(stdout.text()).toContain("--scan <scan-id>");
+    expect(stdout.text()).toContain("--export-format <format>");
     expect(stdout.text()).toContain("threatmodel.md");
-    expect(stdout.text()).toContain("--source-root <string>");
+    expect(stdout.text()).toContain("--source-root <path>");
+    expect(stdout.text()).toContain("sarif");
     expect(stdout.text()).not.toContain("--format {sarif}");
     expect(stderr.text()).toBe("");
   });
@@ -2382,47 +2409,32 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(help.text()).toContain("Usage: codex-security scan [repository]");
-    expect(help.text()).toContain("--verbose");
-    expect(help.text()).toContain("--path <array>");
-    expect(help.text()).toContain("--max-cost <number>");
-    expect(help.text()).toContain("--show-cost");
-    expect(help.text()).toContain("--workers <number>");
-    expect(help.text()).toContain("--subagents <number>");
-    expect(help.text()).toContain("--stop-after-no-new <number>");
-    expect(help.text()).toContain("--max-discovery-runs <number>");
-    expect(help.text()).toContain("--max-time-hours <number>");
-    expect(help.text()).toContain("--headless");
-    expect(help.text()).toContain(
-      "Use plain text progress instead of the interactive dashboard.",
-    );
-    expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
-    );
-    expect(help.text()).toContain(
-      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-    );
-    expect(help.text()).toContain(
-      "--effort <minimal|low|medium|high|xhigh|max>",
-    );
-    expect(help.text()).toContain(
-      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
-    );
-    expect(help.text()).toContain('model_reasoning_effort="high"');
-    expect(help.text()).toContain(
-      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-    );
-    expect(help.text()).toContain("default: Codex Security state");
-    expect(help.text()).toContain(
-      "codex-security scan . --model gpt-5.6-terra",
-    );
-    expect(help.text()).toContain(
-      "codex-security scan . --model gpt-5.6-terra --effort high",
-    );
-    expect(help.text()).not.toContain("openai:gpt");
-    expect(help.text()).not.toContain("codex-security scan . --path src,tests");
-    expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
+    const text = help.text().replace(/\s+/gu, " ");
+    expect(text).toContain("Usage: codex-security scan [repository]");
+    for (const option of [
+      "--verbose",
+      "--path <path>",
+      "--max-cost <usd>",
+      "--show-cost",
+      "--workers <count>",
+      "--subagents <count>",
+      "--stop-after-no-new <count>",
+      "--max-discovery-runs <count>",
+      "--max-time-hours <hours>",
+      "--headless",
+      "--model <model>",
+      "--provider <provider>",
+      "--effort <effort>",
+    ]) {
+      expect(text).toContain(option);
+    }
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.model);
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
+    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("CODEX_SECURITY_STATE_DIR");
+    expect(text).not.toContain("openai:gpt");
+    expect(text).not.toContain("codex-security scan . --path src,tests");
+    expect(stderr.text()).toBe("");
   });
 
   test("documents existing model and reasoning options in bulk-scan help", async () => {
@@ -2437,41 +2449,21 @@ describe("CLI", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain(
-      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-    );
-    expect(help.text()).toContain(
-      "--effort <minimal|low|medium|high|xhigh|max>",
-    );
-    expect(help.text()).toContain(
-      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
-    );
-    expect(help.text()).toContain("--codex <array>");
-    expect(help.text()).toContain('model_reasoning_effort="high"');
-    expect(help.text()).toContain(
-      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-    );
-    expect(help.text()).toContain("Concurrent repository scans.");
-    expect(help.text()).toContain(
-      "Default scan mode for repositories without a CSV mode.",
-    );
-    expect(help.text()).toContain(
-      "Codex Security plugin directory or ZIP (default: bundled plugin).",
-    );
-    expect(help.text()).toContain(
-      "Python interpreter (default: PYTHON or automatic discovery).",
-    );
-    expect(help.text()).toContain(
-      "codex-security bulk-scan repositories.csv " +
-        "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
-    );
-    expect(help.text()).not.toContain("--outputDir");
-    expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
-    );
+    const text = help.text().replace(/\s+/gu, " ");
+    expect(text).toContain("--model <model>");
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.model);
+    expect(text).toContain("--effort <effort>");
+    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
+    expect(text).toContain("--codex <key=value>");
+    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("Concurrent repository scans.");
+    expect(text).toContain("--mode <mode>");
+    expect(text).toContain("bundled plugin");
+    expect(text).toContain("PYTHON");
+    expect(text).toContain("codex-security bulk-scan repositories.csv");
+    expect(text).not.toContain("--outputDir");
+    expect(text).not.toContain("--maxAttempts");
+    expect(text).toContain("--provider <provider>");
     expect(stderr.text()).toBe("");
   });
 
