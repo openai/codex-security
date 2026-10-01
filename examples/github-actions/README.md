@@ -101,10 +101,10 @@ adapts this example to `--provider openai --auth api-key` using an
 `main` run behavior tests without inference credentials. A trusted dispatcher
 handles only PR metadata and starts a separate
 [scan workflow](../../.github/workflows/invoice-desk-scan.yml) on protected `main`.
-It queues each PR's application source, including forks and drafts, and waits for
-the existing environment approval. It shows the PR number,
-source commit, counts, coverage, elapsed time, and package-cache reuse in the
-Actions summary, and saves reports, metrics JSON, and SARIF as artifacts.
+It scans each PR's application source, including forks and drafts, after
+environment approval. The Actions summary shows the PR number, source commit,
+finding counts, coverage, elapsed time, and package-cache reuse. Reports, metrics
+JSON, and SARIF are saved as artifacts.
 Only public CLI package downloads are cached; analysis and authentication state
 are fresh for each scan. Manual baseline scans remain available. The scan does
 not create a PR status check, upload the sample's intentional vulnerabilities to

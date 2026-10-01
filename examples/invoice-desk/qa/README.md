@@ -44,8 +44,8 @@ targets. All state is discarded when the server closes.
 
 The suite also checks ordinary pages, authentication, logout, scoped writes,
 administrator checks, normal imports and approvals, safe settings output,
-escaped customer names, and clean state on restart. Those controls help identify
-incidental regressions that would otherwise muddy the finding count.
+escaped customer names, and clean state on restart. These checks catch unrelated
+regressions that could distort the finding count.
 
 ## Scanner evaluation
 

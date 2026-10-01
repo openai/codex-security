@@ -50,85 +50,90 @@ installing dependencies.
 ## CI and OpenAI scans
 
 The [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml) runs behavior
-tests for pull requests targeting `main`, including drafts and forks, regardless
-of which files changed. A separate job loaded from protected `main` dispatches
-an [OpenAI source scan](../../.github/workflows/invoice-desk-scan.yml) when a PR is
-opened, reopened, updated, or retargeted to `main`. That dispatcher handles only
-the PR number and head SHA: it has no checkout, application commands, or inference
-secret. PR changes cannot disable the dispatcher, and failed behavior tests do
-not suppress scanning. Title and description edits do not request another scan.
+tests on PRs targeting `main`, including drafts and forks, regardless of which
+files changed. A separate [OpenAI scan workflow](../../.github/workflows/invoice-desk-scan.yml)
+scans the entire application at the PR's exact head, subject to protected
+environment approval. Failed behavior tests do not suppress a scan.
+
+### Setup
+
+Both workflows must be on `main` before automatic scans can run. Configure the
+`invoice-desk-inference` environment with required reviewers and a deployment
+branch rule allowing only protected `main`. Store a dedicated service-account
+key in its `OPENAI_API_KEY` environment secret, with access to `gpt-5.6-sol` and
+permission to use the API from the selected runner's network. Creating a service
+account alone does not grant that network access. Do not use a repository or
+organization Actions secret for this workflow. A missing key fails the scan
+with a setup error.
+
+Review the source commit before approving inference. Behavior tests receive no
+inference credentials; GitHub may separately require approval to run them for a
+first-time contributor.
+
+For a manual baseline, select **Actions → Invoice Desk OpenAI scan → Run
+workflow** on `main` and leave both inputs empty. To scan an open PR, provide its
+number and exact current head SHA.
+
+The scan adapts the existing [GitHub Actions example](../github-actions/README.md)
+to OpenAI inference. It uses CLI 0.1.30, standard mode, high effort, Node.js 24,
+and Python 3.12. Each run scans the full application so unchanged cases remain
+in scope. Inference consumes API usage.
+
+### Triggers and source selection
+
+A [default-branch dispatcher](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
+queues scans when a PR is opened, reopened, updated, or retargeted to `main`.
+It handles only the PR number and head SHA, with no checkout or inference secret,
+and starts the scan on protected `main`. PR edits cannot disable that dispatcher.
+Title and description edits do not request another scan.
+
 GitHub can suppress `pull_request_target` for PRs created using `GITHUB_TOKEN`
-and for certain branch names. A `workflow_run` fallback handles completed behavior
-workflows, including failed tests. It resolves the current PR through GitHub's API
-and skips PR/head pairs already dispatched on `main` from the same workflow
-revision. The dispatch run title includes the PR number and full source SHA so
-this check does not rely on who created the PR.
+and for certain branch names. A `workflow_run` fallback handles completed
+behavior workflows, including failed tests. It looks up the current PR and skips
+PR/head pairs already dispatched from the same `main` workflow revision. It
+queues eligible revisions through the same dispatch path, whose run title includes
+the PR number and full source SHA. Later fallback events can find those runs and
+avoid rescanning an unchanged revision.
 
-Both workflows must reach `main` before automatic scanning is active. The
-[dispatcher](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
-loads trusted workflow code from the default branch and invokes the scan with
-`workflow_dispatch` on protected `main`. The scan checks the PR's current base and
-exact head through GitHub's API before queuing and again after environment
-approval, immediately before inference. Closed PRs, PRs targeting other branches,
-and superseded commits are skipped. New scans cancel older scans for the same PR.
+The scan checks the PR's base and exact head through GitHub's API before queuing
+and again after environment approval, immediately before inference. Closed,
+retargeted, and superseded PR revisions are skipped. New scans cancel older scans
+for the same PR.
 
-The original PR test job receives no inference credentials. The scan waits for
-approval of the `invoice-desk-inference` environment; automatic triggering does
-not remove that requirement. GitHub may also require approval before running a
-first-time contributor's behavior tests.
+The workflow installs the CLI outside the checkout and copies committed `app/`
+blobs into a fresh directory. Archive attributes cannot omit or substitute files;
+unsafe paths, links, and submodules fail extraction. The inference job does not
+install PR dependencies, run the application or its tests, or download artifacts
+produced by the PR.
 
-Configure that environment with required reviewers and a deployment branch rule
-allowing only protected `main`. Store a dedicated service-account key as its
-`OPENAI_API_KEY` environment secret, with access to `gpt-5.6-sol`. Do not use a
-repository or organization Actions secret for this workflow. The credential must
-also permit API access from the selected runner's network; creating a service
-account does not establish that permission. Missing credentials fail the scan
-job with a setup error. **Invoice Desk OpenAI scan → Run workflow** on `main`
-remains available for a manual baseline scan with both inputs empty. To scan a
-particular open PR manually, provide its number and exact current head SHA.
+After rechecking eligibility, it removes both full checkouts so the scanner
+cannot read their sample guide, threat model, tests, or answer key. Previous
+reports are also outside the scan input. The API key is available only in the
+scan step, and no GitHub token is passed to the scanner.
 
-This adapts the existing [GitHub Actions example](../github-actions/README.md) to
-OpenAI inference. It pins CLI 0.1.30 and uses standard mode with high effort on
-Node.js 24 and Python 3.12. It scans the entire standalone application on each
-run, not a PR diff, so unchanged seeded cases remain in scope. Inference consumes
-API usage.
+### Results
 
-The workflow installs the CLI outside the checkout and copies only committed
-`app/` blobs into a fresh directory. PR-controlled archive attributes cannot omit
-or substitute files. Unsafe paths, links, and submodules fail extraction instead
-of silently reducing coverage. It does not install dependencies from the PR, execute the
-application or its tests in the inference job, or download PR-produced artifacts.
-After rechecking PR eligibility, it removes both full repository checkouts before
-inference so the scanner cannot read the sample guide or answer key from them.
-The sample documentation, threat model, tests, answer key, and previous reports
-are not scan input. The API key is available only in the scan step; no GitHub
-token is passed to the scanner. Review the source commit before approving an
-inference run.
+Results appear under **Actions → Invoice Desk OpenAI scan**. This separate
+workflow does not create a PR status check or merge gate. Its summary identifies
+the PR and source commit, completion, finding and severity counts, coverage,
+elapsed time, and package-cache reuse. Passing behavior tests alone does not
+mean a source scan completed.
 
-Results appear under **Actions → Invoice Desk OpenAI scan**. Because the scan
-runs as a separate workflow on `main`, its result is not a PR status check or a
-merge gate. The summary identifies the PR number and source commit so its
-results can be matched to the PR revision. A passing behavior check alone does
-not mean a source scan completed.
+Reports are retained for seven days. The artifact includes Markdown, findings
+and coverage JSON, the scan manifest, CLI result JSON, SARIF, and
+`invoice-desk-metrics.json`. Metrics record source and workflow revisions,
+scanner settings, exit code, elapsed time, cache hits, and any token usage or
+cost estimates reported by the CLI. Incomplete scans retain the measurements
+that were emitted; missing measurements and recall remain unknown. Failed scans
+do not count as zero findings. Authentication state and agent transcripts are
+not uploaded. SARIF is downloadable; the workflow does not create Code Scanning
+alerts or post PR comments.
 
-The Actions summary shows completion, total findings, severity counts, coverage,
-scan elapsed time, and whether a package cache from an earlier run was restored.
-A seven-day artifact contains the Markdown report, findings and coverage JSON,
-scan manifest, CLI result JSON, an exported SARIF file, and
-`invoice-desk-metrics.json`. Metrics record source and workflow revisions, CLI and
-model settings, exit code, elapsed time, package cache hits, and token usage and
-cost estimates when the CLI reports them. Missing usage or recall stays unknown;
-failed scans do not count as zero findings. Incomplete results retain any token
-usage, cost estimate, and coverage that the CLI emitted. Authentication state and agent
-transcripts are not uploaded. These reports describe only this
-synthetic application. SARIF is downloadable; this workflow does not populate
-repository Code Scanning alerts or post pull request comments.
-
-Expected vulnerabilities do not fail the job. Scan errors and incomplete scans
-do fail it, with available reports retained. There is no exact-count or recall
-gate yet: compare returned root causes with the QA manifest, and review extras
-and duplicates separately. A successful scan job means the scan completed, not
-that the sample is secure or that all ten scenarios were detected.
+Findings are report-only. Scan errors and incomplete scans fail the job, with
+available reports retained. A successful job means the scan completed; it does
+not establish that the application is secure or that all ten scenarios were
+found. Compare distinct root causes with the QA manifest and review extra
+findings and duplicates separately. There is no exact-count or recall gate yet.
 
 ### Cache persistence
 

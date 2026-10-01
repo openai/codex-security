@@ -33,7 +33,7 @@ jobs:
     # This job reads only trusted helpers and event metadata before caching public packages.
     cache-mode: write
     permissions:
-      actions: read
+      actions: write
       contents: read
       pull-requests: read
     outputs:

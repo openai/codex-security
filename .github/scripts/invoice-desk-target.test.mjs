@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { resolveScanTargets } from "./invoice-desk-target.mjs";
 
 const repository = "example/invoices";
@@ -221,5 +226,71 @@ test("fallback skips only the PR and head already dispatched from the same workf
       },
     ),
     [{ pr: 8, sha: sourceSha }],
+  );
+});
+
+test("fallback CLI dispatches a keyed run once and leaves inference to that run", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "invoice-desk-dispatch-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const statePath = join(root, "dispatches.json");
+  const eventPath = join(root, "event.json");
+  const outputPath = join(root, "output.txt");
+  writeFileSync(statePath, "[]");
+  writeFileSync(eventPath, JSON.stringify(automationContext.event));
+  const scriptUrl = new URL("./invoice-desk-target.mjs", import.meta.url);
+  const script = `
+    import assert from "node:assert/strict";
+    import childProcess from "node:child_process";
+    import { readFileSync, writeFileSync } from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const statePath = ${JSON.stringify(statePath)};
+    const dispatches = JSON.parse(readFileSync(statePath, "utf8"));
+    childProcess.execFileSync = (command, args) => {
+      assert.equal(command, "gh");
+      if (args[0] === "workflow") {
+        assert.deepEqual(args, [
+          "workflow", "run", "invoice-desk-scan.yml", "--repo", ${JSON.stringify(repository)},
+          "--ref", "main", "-f", "pr_number=7", "-f", ${JSON.stringify(`source_sha=${sourceSha}`)}
+        ]);
+        dispatches.push(${JSON.stringify(`Invoice Desk scan — PR #7 @ ${sourceSha}`)});
+        writeFileSync(statePath, JSON.stringify(dispatches));
+        return "";
+      }
+      assert.equal(args[0], "api");
+      const endpoint = args.at(-1);
+      if (endpoint === ${JSON.stringify(`repos/${repository}/pulls/7`)})
+        return JSON.stringify(${JSON.stringify(pullRequest())});
+      if (endpoint === ${JSON.stringify(`repos/${repository}/commits/${sourceSha}/pulls?per_page=100`)})
+        return JSON.stringify([[${JSON.stringify(pullRequest())}]]);
+      assert.equal(endpoint, ${JSON.stringify(`repos/${repository}/actions/workflows/invoice-desk-scan.yml/runs?event=workflow_dispatch&branch=main&head_sha=${mainSha}&per_page=100`)});
+      return JSON.stringify([{ workflow_runs: dispatches.map(display_title => ({ display_title })) }]);
+    };
+    syncBuiltinESMExports();
+    process.argv[1] = ${JSON.stringify(fileURLToPath(scriptUrl))};
+    await import(${JSON.stringify(scriptUrl.href)});
+  `;
+  const run = (eventName) =>
+    execFileSync(process.execPath, ["--input-type=module", "--eval", script], {
+      encoding: "utf8",
+      env: {
+        GITHUB_REPOSITORY: repository,
+        GITHUB_SHA: mainSha,
+        GITHUB_EVENT_NAME: eventName,
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_OUTPUT: outputPath,
+      },
+    });
+  assert.match(run("workflow_run"), /Queued PR #7/);
+  assert.match(run("workflow_run"), /Skipped/);
+  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")), [
+    `Invoice Desk scan — PR #7 @ ${sourceSha}`,
+  ]);
+  assert.equal(readFileSync(outputPath, "utf8"), "targets=[]\ntargets=[]\n");
+
+  writeFileSync(eventPath, JSON.stringify(context.event));
+  run("workflow_dispatch");
+  assert.equal(
+    readFileSync(outputPath, "utf8").trim().split("\n").at(-1),
+    `targets=${JSON.stringify([{ pr: 7, sha: sourceSha }])}`,
   );
 });

@@ -116,16 +116,35 @@ if (
         ),
       ).flatMap((page) => page.workflow_runs.map((run) => run.display_title)),
   );
+  const fallback = process.env.GITHUB_EVENT_NAME === "workflow_run";
+  if (fallback) {
+    for (const { pr, sha } of targets) {
+      execFileSync("gh", [
+        "workflow",
+        "run",
+        "invoice-desk-scan.yml",
+        "--repo",
+        repository,
+        "--ref",
+        "main",
+        "-f",
+        `pr_number=${pr}`,
+        "-f",
+        `source_sha=${sha}`,
+      ]);
+    }
+  }
   appendFileSync(
     process.env.GITHUB_OUTPUT,
-    `targets=${JSON.stringify(targets)}\n`,
+    `targets=${JSON.stringify(fallback ? [] : targets)}\n`,
   );
   const message =
     targets.length === 0
-      ? "Skipped: the PR is closed, targets another branch, or has a newer head."
+      ? "Skipped: no eligible PR revision needs a scan."
       : targets
           .map(
-            ({ pr, sha }) => `${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
+            ({ pr, sha }) =>
+              `${fallback ? "Queued " : ""}${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
           )
           .join("\n");
   console.log(message);
