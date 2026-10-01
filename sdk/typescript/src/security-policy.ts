@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt } from "./codex-prompt.js";
+import type { ScanModelConfiguration } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import type { ThreatModel } from "./models.js";
 import { writeThreatModel } from "./artifact-export.js";
@@ -119,11 +120,10 @@ export async function securityPolicyProtectedRoots(
   return [...new Set([roots.at(-1) ?? target.repository, ...metadata.flat()])];
 }
 
-export interface SecurityPolicyPreflight extends SecurityPolicyTarget {
+export interface SecurityPolicyPreflight
+  extends SecurityPolicyTarget, ScanModelConfiguration {
   outputDir: string | null;
   authentication: ScanAuthentication;
-  model: string;
-  reasoningEffort: string;
   maxCostUsd?: number;
 }
 
