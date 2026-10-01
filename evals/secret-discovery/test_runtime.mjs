@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import childProcess, { spawn } from "node:child_process";
 import {
   access,
   chmod,
@@ -15,7 +15,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { dirname, join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
@@ -175,6 +176,49 @@ test("an eval does not overwrite a later replacement login", async (t) => {
   );
 });
 
+test("the SDK launches long Windows paths with the native namespace prefix", async (t) => {
+  const executable = win32.join(
+    "C:\\synthetic",
+    ...Array(12).fill("nested executable directory"),
+    "bin",
+    "codex.exe",
+  );
+  assert.ok(executable.length > 260);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  let settings;
+  try {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    settings = codexSettings("C:\\synthetic-home", executable, {});
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+  assert.equal(settings.env.CODEX_CLI_PATH, executable);
+
+  const intercepted = new Error("Synthetic launch intercepted");
+  let launched;
+  const spawn = t.mock.method(childProcess, "spawn", (file) => {
+    launched = file;
+    throw intercepted;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      async () => {
+        const { events } = await new Codex(settings)
+          .startThread({ skipGitRepoCheck: true })
+          .runStreamed("Offline synthetic launch check");
+        for await (const event of events) void event;
+      },
+      (error) => error === intercepted,
+    );
+    assert.equal(spawn.mock.callCount(), 1);
+    assert.equal(launched, win32.toNamespacedPath(executable));
+  } finally {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
 async function waitForFile(path) {
   for (let attempt = 0; attempt < 500; attempt++) {
     try {
@@ -192,9 +236,9 @@ async function nativeFixture(t, mode = "complete") {
   const directory = await mkdtemp(join(tmpdir(), "eval-runtime-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const prepared = await prepareEval(join(directory, "eval"));
-  const home = join(directory, "home");
+  const home = join(directory, "home[private]");
   await mkdir(home);
-  const executable = join(directory, "native", "bin", "codex.mjs");
+  const executable = join(directory, "native[local]", "bin", "codex.mjs");
   await mkdir(dirname(executable), { recursive: true });
   const result = {
     findings: prepared.fixture.positives.map((expected) => ({
@@ -319,11 +363,17 @@ test(
     assert.equal(exec.config.web_search, "disabled");
     assert.equal(exec.config.default_permissions, "discovery_eval");
     assert.equal(exec.config.permissions.discovery_eval.network.enabled, false);
-    assert.equal(
+    assert.deepEqual(
       exec.config.permissions.discovery_eval.filesystem[
         settings.env.CODEX_HOME
       ],
-      "deny",
+      { ".": "deny" },
+    );
+    assert.deepEqual(
+      exec.config.permissions.discovery_eval.filesystem[
+        dirname(dirname(settings.env.CODEX_CLI_PATH))
+      ],
+      { ".": "read" },
     );
     assert.equal(exec.args.includes("--sandbox"), false);
     assert.equal(

@@ -6,6 +6,8 @@ import { createFixture, writeFixture } from "./fixtures.mjs";
 import { gradeResult } from "./grade.mjs";
 import {
   deepScanPermissionProfileFallbackError,
+  executablePathForSpawn,
+  inlineToml,
   preflightDeepScanWorkerPermissionProfile,
 } from "./runtime.mjs";
 
@@ -177,7 +179,7 @@ export function codexSettings(
     "OPENAI_API_KEY",
   ]);
   return {
-    codexPathOverride: codexPath,
+    codexPathOverride: executablePathForSpawn(codexPath),
     // Native exec reads CODEX_API_KEY; let the SDK map the OpenAI fallback.
     ...(!hasLogin && !codexApiKey && openAiApiKey
       ? { apiKey: openAiApiKey }
@@ -207,14 +209,7 @@ export function codexSettings(
       'approval_policy="never"',
       'model_reasoning_effort="xhigh"',
       'web_search="disabled"',
-      `permissions.discovery_eval={filesystem={${Object.entries(
-        permissionProfile(home, codexPath).filesystem,
-      )
-        .map(
-          ([path, access]) =>
-            `${JSON.stringify(path)}=${JSON.stringify(access)}`,
-        )
-        .join(",")}},network={enabled=false}}`,
+      `permissions.discovery_eval=${inlineToml(permissionProfile(home, codexPath))}`,
     ],
   };
 }
@@ -224,8 +219,8 @@ function permissionProfile(home, codexPath) {
     filesystem: {
       ":minimal": "read",
       ":workspace_roots": "read",
-      [dirname(dirname(codexPath))]: "read",
-      [resolve(home)]: "deny",
+      [dirname(dirname(codexPath))]: { ".": "read" },
+      [resolve(home)]: { ".": "deny" },
     },
     network: { enabled: false },
   };
@@ -243,7 +238,7 @@ export async function preflightEval(prepared, settings, signal) {
     },
     expectedProfile: permissionProfile(
       settings.env.CODEX_HOME,
-      settings.codexPathOverride,
+      settings.env.CODEX_CLI_PATH,
     ),
     signal,
   });

@@ -4,16 +4,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "../../sdk/typescript/node_modules/esbuild/lib/main.js";
 
-// Reuse the native preflight and warning handling exercised by Deep Scan.
+// Bundle production runtime helpers directly so deterministic checks need no SDK build.
 const bundle = await build({
-  entryPoints: [
-    fileURLToPath(
-      new URL(
-        "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts",
-        import.meta.url,
-      ),
-    ),
-  ],
+  stdin: {
+    contents: [
+      'export { preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";',
+      'export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";',
+      'export { inlineToml } from "../../sdk/typescript/src/config.ts";',
+    ].join("\n"),
+    resolveDir: fileURLToPath(new URL(".", import.meta.url)),
+  },
   bundle: true,
   format: "esm",
   platform: "node",
@@ -22,6 +22,8 @@ const bundle = await build({
 export const {
   preflightDeepScanWorkerPermissionProfile,
   deepScanPermissionProfileFallbackError,
+  executablePathForSpawn,
+  inlineToml,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );

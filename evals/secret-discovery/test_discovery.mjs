@@ -615,8 +615,9 @@ test("stages production prompt unchanged and no labels; grades only the final SD
 });
 
 test("named read-only profile excludes gold and credentials without a legacy sandbox override", () => {
-  const codexPath = "/tmp/native-package/bin/codex";
-  const settings = codexSettings("/tmp/eval-home", codexPath, {
+  const codexPath = "/tmp/native-package[local]/bin/codex";
+  const home = "/tmp/eval-home[private]";
+  const settings = codexSettings(home, codexPath, {
     PATH: "/usr/bin",
     DATABASE_URL: "synthetic-private-dsn",
     CODEX_API_KEY: "synthetic-model-auth",
@@ -628,8 +629,8 @@ test("named read-only profile excludes gold and credentials without a legacy san
   assert.deepEqual(settings.env, {
     PATH: "/usr/bin",
     CODEX_API_KEY: "synthetic-model-auth",
-    CODEX_HOME: "/tmp/eval-home",
-    CODEX_SQLITE_HOME: "/tmp/eval-home",
+    CODEX_HOME: home,
+    CODEX_SQLITE_HOME: home,
     CODEX_CLI_PATH: codexPath,
   });
   assert.equal(settings.codexPathOverride, codexPath);
@@ -646,12 +647,12 @@ test("named read-only profile excludes gold and credentials without a legacy san
     },
   );
   assert.deepEqual(
-    { ...config.permissions.discovery_eval.filesystem },
+    JSON.parse(JSON.stringify(config.permissions.discovery_eval.filesystem)),
     {
       ":minimal": "read",
       ":workspace_roots": "read",
-      [dirname(dirname(codexPath))]: "read",
-      [resolve("/tmp/eval-home")]: "deny",
+      [dirname(dirname(codexPath))]: { ".": "read" },
+      [resolve(home)]: { ".": "deny" },
     },
   );
   assert.deepEqual(
