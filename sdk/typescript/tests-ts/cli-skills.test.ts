@@ -92,7 +92,7 @@ describe("CLI skill commands", () => {
             ? []
             : ["--ephemeral", "--color", "never", "--json"]),
           "--config",
-          'model="gpt-6-sol"',
+          'model="gpt-5.6-sol"',
           "--config",
           'model_reasoning_effort="xhigh"',
           "--config",

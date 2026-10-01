@@ -533,7 +533,7 @@ scan:
   scope:
     paths: [src]
 codex:
-  model: gpt-6-sol
+  model: gpt-5.6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
@@ -843,7 +843,7 @@ configuration:
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
-model = "gpt-6-sol"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
@@ -870,7 +870,7 @@ and `gpt-6-luna`; availability depends on your credentials and inference provide
 For Astra and GPT-6.1 Sol, use `low`, `medium`, `high`, `xhigh`, or `max`, as
 documented in the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
 Omitting these flags preserves each command's defaults: scans, policy generation,
-validation, patching, verification, and owner suggestions use `gpt-6-sol`/`xhigh`;
+validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
 matching and severity classification use Codex's configured model and `medium` effort.
 
 Repeat `--codex KEY=VALUE` for other TOML settings on commands that support it:

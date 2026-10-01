@@ -888,7 +888,7 @@ describe("CodexSecurity orchestration", () => {
         source: "OPENAI_API_KEY",
         verified: false,
       },
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
     });
     await expect(
@@ -998,7 +998,7 @@ describe("CodexSecurity orchestration", () => {
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
-    ).resolves.toMatchObject({ model: "gpt-6-sol", maxCostUsd: 5 });
+    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
       "gpt-6.1-sol",
@@ -4565,7 +4565,7 @@ describe("CodexSecurity orchestration", () => {
     let starts = 0;
     let budgetSignal: AbortSignal | undefined;
     const client = new TestClient(
-      { codexOverrides: { model: "gpt-5.6-sol" } },
+      {},
       {
         environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
@@ -4685,7 +4685,7 @@ describe("CodexSecurity orchestration", () => {
       let reportedLimit: number | undefined;
       let budgetSignal: AbortSignal | undefined;
       const client = new TestClient(
-        { codexOverrides: { model: "gpt-5.6-sol" } },
+        {},
         {
           environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),
@@ -4823,7 +4823,7 @@ describe("CodexSecurity orchestration", () => {
       output_tokens: 30,
     })!;
     const client = new TestClient(
-      { codexOverrides: { model: "gpt-5.6-sol" } },
+      {},
       {
         environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
@@ -4956,7 +4956,7 @@ describe("CodexSecurity orchestration", () => {
       const warnings: string[] = [];
       let turns = 0;
       const client = new TestClient(
-        { codexOverrides: { model: "gpt-5.6-sol" } },
+        {},
         {
           environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),

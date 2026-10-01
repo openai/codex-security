@@ -1188,6 +1188,7 @@ async function testWorkerRuntimeSettings() {
       };
       syncBuiltinESMExports();
       const settings = [
+        { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
       ];
