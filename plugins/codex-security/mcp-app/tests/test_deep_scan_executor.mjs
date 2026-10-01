@@ -1179,7 +1179,7 @@ async function testWorkerRuntimeSettings() {
       };
       syncBuiltinESMExports();
       const executor = new CodexSdkWorkerExecutor({
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
         parentSandbox: trustedParentSandboxWithDenials,
         artifactContext: {
@@ -1264,7 +1264,7 @@ async function testWorkerRuntimeSettings() {
             invocation.argv.includes('model_reasoning_effort="xhigh"'),
             true,
           );
-          assertFlagPair(invocation.argv, "--model", "gpt-6-sol");
+          assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
           assert.equal(invocation.configPath, configPath);
           const preflight = JSON.parse(
             await readFile(fixture.preflightMarkerPath, "utf8"),

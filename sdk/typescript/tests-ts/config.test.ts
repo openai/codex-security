@@ -351,7 +351,7 @@ describe("Codex configuration", () => {
       },
     });
     expect(merged["agents"]).toBeUndefined();
-    expect(merged["model"]).toBe("gpt-6-sol");
+    expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
     expect(merged["model_reasoning_summary"]).toBe("concise");
     expect(merged["show_raw_agent_reasoning"]).toBe(false);
@@ -789,7 +789,7 @@ describe("Codex configuration", () => {
       },
     });
     expect(await mergedCodexConfig({})).toMatchObject({
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
