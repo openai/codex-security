@@ -140,6 +140,7 @@ import {
   PluginPythonUnavailableError,
   errorMessage,
   safeErrorMessage,
+  logErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -310,6 +311,8 @@ const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
+const SKILL_CODEX_OVERRIDE_DESCRIPTION =
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
 const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
@@ -646,7 +649,8 @@ class PublicationProgressPresenter {
       presentation: "publication",
       clock: this.#dependencies,
       color: this.#dependencies.environment["NO_COLOR"] === undefined,
-      sanitize: safeErrorMessage,
+      sanitize: (value) =>
+        logErrorMessage(value, this.#dependencies.environment),
     });
     dashboard.setStage("Connecting to Linear");
     try {
@@ -766,7 +770,9 @@ class PublicationProgressPresenter {
   }
 
   #write(message: string, compact = false): void {
-    const sanitized = diagnosticValue(safeErrorMessage(message));
+    const sanitized = diagnosticValue(
+      logErrorMessage(message, this.#dependencies.environment),
+    );
     if (!compact) {
       this.#stream.write(`${sanitized}\n`);
       return;
@@ -817,7 +823,8 @@ class FindingProgressPresenter {
         presentation: "verification",
         clock: this.#dependencies,
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
+        sanitize: (value) =>
+          logErrorMessage(value, this.#dependencies.environment),
       });
       dashboard.setPublicationProgress(0, this.#total);
       dashboard.setStage(`Verifying findings · 0/${this.#total}`);
@@ -840,7 +847,7 @@ class FindingProgressPresenter {
   public startPatch(finding: Finding, index: number): void {
     try {
       this.#progress.startTimer(
-        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title, this.#dependencies.environment)}`,
       );
     } catch {
       this.stop();
@@ -947,7 +954,9 @@ class FindingProgressPresenter {
   #write(message: string): void {
     try {
       this.#progress.writeAboveTimer(() => {
-        this.#stream.write(`${safePatchText(message)}\n`);
+        this.#stream.write(
+          `${safePatchText(message, this.#dependencies.environment)}\n`,
+        );
       });
     } catch {}
   }
@@ -2256,7 +2265,9 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe(
+            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, options }) {
@@ -2344,7 +2355,9 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe(
+            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -2545,7 +2558,9 @@ export async function main(
           ? "Publication canceled by Ctrl-C."
           : "Publication terminated by SIGTERM.";
       const recovery =
-        error === signal ? "" : ` ${diagnosticValue(safeErrorMessage(error))}`;
+        error === signal
+          ? ""
+          : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
@@ -2676,7 +2691,7 @@ export async function main(
         const recovery =
           error === undefined || error === signal
             ? ""
-            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+            : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -3041,7 +3056,10 @@ export async function main(
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = safeErrorMessage(error);
+                const message = logErrorMessage(
+                  error,
+                  dependencies.environment,
+                );
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),
@@ -3050,7 +3068,7 @@ export async function main(
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(safeErrorMessage(scanId ?? directory))}: ${diagnosticValue(message)}\n`,
+                  `codex-security: ${diagnosticValue(logErrorMessage(scanId ?? directory, dependencies.environment))}: ${diagnosticValue(message)}\n`,
                 );
               }
             }
@@ -3131,7 +3149,7 @@ export async function main(
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
             errorOutput.write(
-              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+              `codex-security: ${diagnosticValue(logErrorMessage(warning, dependencies.environment))}\n`,
             );
           }
         }
@@ -3152,7 +3170,7 @@ export async function main(
       } catch (error) {
         if (!finishCancellation(error)) {
           errorOutput.write(
-            `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
+            `codex-security: ${options.to === "cloud" ? logErrorMessage(error, dependencies.environment) : errorMessage(error)}\n`,
           );
           exitCode = 2;
         }
@@ -3282,7 +3300,8 @@ export async function main(
     },
   });
   const cli = Cli.create("codex-security", {
-    description: "Find, review, and fix security issues in your code.",
+    description:
+      "Find, review, and fix security issues in your code. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3477,7 +3496,7 @@ export async function main(
               ? policyDisplayData(outcome.data)
               : outcome.data;
         } catch (error) {
-          const message = safeErrorMessage(error);
+          const message = logErrorMessage(error, dependencies.environment);
           try {
             errorOutput.write(`codex-security: ${message}\n`);
           } catch {}
@@ -3521,7 +3540,9 @@ export async function main(
           verbose: z
             .boolean()
             .default(false)
-            .describe("Print scan diagnostics to stderr."),
+            .describe(
+              "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
+            ),
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
@@ -3742,7 +3763,10 @@ export async function main(
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           if (format === "json" || format === "jsonl") {
-            const message = safeErrorMessage(outcome.error);
+            const message = logErrorMessage(
+              outcome.error,
+              dependencies.environment,
+            );
             if (!argv.includes("--full-output"))
               return { status: "failed", code: "SCAN_FAILED", message };
             // Incur would wrap returned data in an ok: true envelope.
@@ -3906,7 +3930,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : logErrorMessage(error, dependencies.environment)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4010,7 +4034,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : logErrorMessage(error, dependencies.environment)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4139,7 +4163,7 @@ export async function main(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
                 ? "Deduplication canceled. Findings are unchanged."
-                : safeErrorMessage(error)
+                : logErrorMessage(error, dependencies.environment)
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
@@ -4332,7 +4356,8 @@ export async function main(
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
-              sanitize: safeErrorMessage,
+              sanitize: (value) =>
+                logErrorMessage(value, dependencies.environment),
               input: process.stdin,
               onInterrupt,
             });
@@ -4861,9 +4886,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       async run({ options }) {
         try {
@@ -4926,9 +4949,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       examples: [
         {
@@ -5108,13 +5129,15 @@ export async function main(
           }
           for (const result of results) {
             output.write(
-              `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
+              `${result.status.toUpperCase()} ${safePatchText(result.id, dependencies.environment)}: ${safePatchText(result.evidence, dependencies.environment)}\n`,
             );
           }
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          errorOutput.write(
+            `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
+          );
           return undefined;
         }
       },
@@ -5179,9 +5202,7 @@ export async function main(
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+          .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
       }),
       examples: [
         {
@@ -5491,7 +5512,7 @@ export async function main(
             };
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
-          const message = safeErrorMessage(error);
+          const message = logErrorMessage(error, dependencies.environment);
           errorOutput.write(`codex-security: ${message}\n`);
           if (!structuredOutput) return;
           patchStructuredError = true;
@@ -6037,7 +6058,7 @@ async function runScanImport(
     const message =
       signal === "SIGINT" || signal === "SIGTERM"
         ? "Scan import canceled."
-        : safeErrorMessage(error);
+        : logErrorMessage(error, dependencies.environment);
     errorOutput.write(`codex-security: ${message}\n`);
     return {
       exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
@@ -6890,12 +6911,12 @@ async function publishPatchBranch(
       );
     }
     stderr.write(
-      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url, dependencies.environment)}\n`,
     );
     return { branch, url };
   } catch (error) {
     stderr.write(
-      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
+      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch, dependencies.environment)}\n`,
     );
     throw error;
   }
@@ -7098,15 +7119,24 @@ async function snapshotPatchDirectory(
   return files;
 }
 
-function safePatchText(value: string): string {
-  return stripVTControlCharacters(safeErrorMessage(value)).replaceAll(
-    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
-    " ",
-  );
+function safePatchText(
+  value: string,
+  environment: NodeJS.ProcessEnv = {},
+): string {
+  return stripVTControlCharacters(
+    logErrorMessage(value, environment),
+  ).replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
 }
 
-function safePatchReport(value: string): string {
-  return value.split(/\r?\n/gu).map(safePatchText).join("\n").trim();
+function safePatchReport(
+  value: string,
+  environment: NodeJS.ProcessEnv = {},
+): string {
+  return value
+    .split(/\r?\n/gu)
+    .map((line) => safePatchText(line, environment))
+    .join("\n")
+    .trim();
 }
 
 function parsePatchRiskReport(report: string): PatchRiskAssessment {
@@ -7153,7 +7183,7 @@ async function runPatchRiskAssessment(
   }
   const assessment = parsePatchRiskReport(result.report);
   stderr.write(
-    `Patch risk assessment:\n${safePatchReport(assessment.report)}\n`,
+    `Patch risk assessment:\n${safePatchReport(assessment.report, dependencies.environment)}\n`,
   );
   return assessment;
 }
@@ -7415,9 +7445,9 @@ async function runFindingPatches(
       }
     }
 
-    const title = safePatchText(finding.title);
+    const title = safePatchText(finding.title, dependencies.environment);
     stderr.write(
-      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
+      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason, dependencies.environment)}`}\n`,
     );
     patches.push(patch);
   }
@@ -7440,6 +7470,8 @@ async function runSkill(
       ([key, value]) =>
         key !== "model" &&
         key !== "model_reasoning_effort" &&
+        key !== "model_provider" &&
+        key !== "model_providers" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7448,12 +7480,24 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
+  const provider =
+    options.provider ?? (overrides["model_provider"] as string | undefined);
+  const providerConfiguration =
+    options.providerConfiguration ??
+    (provider === undefined
+      ? undefined
+      : ((
+          overrides["model_providers"] as Record<string, JsonObject> | undefined
+        )?.[provider] ??
+        (isExternalModelProvider(provider)
+          ? EXTERNAL_CODEX_PROVIDERS[provider]
+          : undefined)));
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   for (const input of inputs) {
@@ -7616,24 +7660,24 @@ async function runSkill(
             value.startsWith("analytics.") || value.startsWith("analytics="),
         )
         .flatMap((value) => ["--config", value]),
-      ...(options.provider === undefined
+      ...(provider === undefined
         ? []
-        : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
-      ...(options.provider === undefined ||
-      options.providerConfiguration === undefined
-        ? []
-        : modelProviderConfigOverride(
-            resolveCommandAuthConfig(
-              {
-                model_providers: {
-                  [options.provider]: options.providerConfiguration,
+        : ["--config", `model_provider=${JSON.stringify(provider)}`]),
+      ...modelProviderConfigOverride(
+        resolveCommandAuthConfig(
+          mergeCodexOverrides(
+            overrides,
+            provider === undefined || providerConfiguration === undefined
+              ? {}
+              : {
+                  model_providers: {
+                    [provider]: providerConfiguration,
+                  },
                 },
-              },
-              configuredCodexHome(
-                options.environment ?? dependencies.environment,
-              ),
-            ),
-          ).flatMap((value) => ["--config", value])),
+          ),
+          configuredCodexHome(options.environment ?? dependencies.environment),
+        ),
+      ).flatMap((value) => ["--config", value]),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -7664,8 +7708,8 @@ async function runSkill(
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
       auth: options.auth ?? "auto",
       directory,
-      modelProvider: options.provider,
-      providerConfiguration: options.providerConfiguration,
+      modelProvider: provider,
+      providerConfiguration,
       stdout,
       stderr,
       ...(appServer
@@ -8254,6 +8298,8 @@ async function executeScan(
   const verbose =
     arguments_.verbose === true ||
     configuredLogLevel?.toLowerCase() === "debug";
+  const diagnosticMessage = (value: unknown): string =>
+    diagnosticValue(logErrorMessage(value, dependencies.environment));
   const writeAboveProgress = (write: () => void): void => {
     if (progress === null) {
       write();
@@ -8266,13 +8312,17 @@ async function executeScan(
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
     if (!verbose) return;
-    const attributes = Object.entries(fields).flatMap(([name, value]) =>
-      value === undefined
-        ? []
-        : [
-            `${name}=${JSON.stringify(typeof value === "string" ? diagnosticValue(value) : value)}`,
-          ],
-    );
+    const attributes = Object.entries(fields).flatMap(([name, value]) => {
+      if (value === undefined) return [];
+      // Redact free-form messages, preserving structured metadata and paths.
+      const displayed =
+        typeof value !== "string"
+          ? value
+          : name === "message"
+            ? diagnosticMessage(value)
+            : diagnosticValue(value);
+      return [`${name}=${JSON.stringify(displayed)}`];
+    });
     writeAboveProgress(() => {
       errorOutput.write(
         `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
@@ -8446,7 +8496,7 @@ async function executeScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
+        sanitize: (value) => logErrorMessage(value, dependencies.environment),
         input: scanInput,
         onInterrupt,
       });
@@ -8723,7 +8773,9 @@ async function executeScan(
         }
         writeAboveProgress(() => {
           diagnostic("scan.warning", { message });
-          errorOutput.write(`codex-security: warning: ${message}\n`);
+          errorOutput.write(
+            `codex-security: warning: ${diagnosticMessage(warning)}\n`,
+          );
         });
       },
       onObserverError: (observer, error) => {
@@ -8731,7 +8783,7 @@ async function executeScan(
           observer,
           classification: classifyConnectionFailure(error),
         });
-        const warning = `${observer} observer failed: ${diagnosticValue(error)}`;
+        const warning = `${observer} observer failed: ${diagnosticMessage(error)}`;
         if (dashboard === null) {
           writeAboveProgress(() => {
             errorOutput.write(`codex-security: warning: ${warning}\n`);
@@ -8790,7 +8842,11 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure, selectedAuthentication);
+        : scanFailureMessage(
+            failure,
+            selectedAuthentication,
+            dependencies.environment,
+          );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -9013,7 +9069,9 @@ async function executeScan(
         }
       }
     } catch (error) {
-      errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+      errorOutput.write(
+        `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
+      );
       scanData = { ...scanData, patches };
       return completedScan(2);
     }
@@ -9123,8 +9181,10 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
+  environment: NodeJS.ProcessEnv,
 ): string {
-  // A local failure keeps its own message. Classification matches bare words
+  // A local failure keeps its own diagnostic, subject to log redaction.
+  // Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
   //
@@ -9132,7 +9192,8 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return diagnosticValue(error);
+  if (isLocalScanFailure(error))
+    return diagnosticValue(logErrorMessage(error, environment));
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9173,7 +9234,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return diagnosticValue(error);
+      return diagnosticValue(logErrorMessage(error, environment));
   }
 }
 
