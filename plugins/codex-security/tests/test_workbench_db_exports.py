@@ -732,6 +732,49 @@ def test_malformed_model_keeps_history_available_for_semantic_repair(
     assert "Stored messages" in (scan_dir / "threatmodel.md").read_text()
 
 
+@pytest.mark.parametrize(("artifact", "format"), [("findings", "json"), ("threat-model", "md")])
+def test_export_validation_checks_binding_without_writing_or_pinning_legacy_artifacts(
+    tmp_path: Path, artifact: str, format: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
+    args = [
+        "export-findings",
+        "--scan-id",
+        scan_id,
+        "--artifact",
+        artifact,
+        "--format",
+        format,
+        "--validate-only",
+    ]
+    assert run_workbench(state_dir, *args) == {
+        "scan": {"scanId": scan_id, "scanDir": str(scan_dir)}
+    }
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone() == (None,)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["id"] = "unrelated-scan"
+    manifest_path.write_text(json.dumps(manifest))
+    rejected = run_workbench(state_dir, *args, check=False)
+    assert "scan.id must match the workbench scan ID" in rejected["stderr"]
+
+
 def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

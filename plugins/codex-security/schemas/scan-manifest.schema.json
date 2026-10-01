@@ -218,35 +218,6 @@
                     "type": "string",
                     "minLength": 1
                   }
-                },
-                "scope": {
-                  "type": "object",
-                  "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
-                  "properties": {
-                    "includePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
-                    },
-                    "excludePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
-                    },
-                    "summary": {
-                      "type": "string",
-                      "minLength": 1
-                    }
-                  },
-                  "required": ["includePaths"],
-                  "additionalProperties": true
-                },
-                "origin": {
-                  "enum": ["generated", "provided", "reconciled", "recovered"]
                 }
               }
             },

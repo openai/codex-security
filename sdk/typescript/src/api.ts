@@ -1956,7 +1956,7 @@ export class CodexSecurity {
       });
       checkOpen();
 
-      const result = await runScanEvents({
+      let result = await runScanEvents({
         thread,
         events,
         signal,
@@ -2193,7 +2193,7 @@ export class CodexSecurity {
             workbenchOptions,
             scanDir,
           );
-          await runScanEvents({
+          const followUpResult = await runScanEvents({
             thread,
             events: (await followUp()).events,
             signal,
@@ -2207,6 +2207,10 @@ export class CodexSecurity {
             onObserverError: options.onObserverError,
           });
           checkOpen();
+          result = new ScanResult({
+            ...result,
+            threatModelPath: followUpResult.threatModelPath,
+          });
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
           if (artifactRestorer !== null) {

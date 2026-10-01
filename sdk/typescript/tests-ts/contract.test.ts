@@ -352,6 +352,24 @@ describe("canonical scan contract", () => {
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
+  test("loads structured models with historical metadata extensions unchanged", async () => {
+    const scanDir = await copyExample();
+    const path = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(path);
+    for (const extensions of [
+      { scope: "Repository-wide", origin: "legacy-import" },
+      { scope: { includePaths: 42 }, origin: { tool: "legacy" } },
+    ]) {
+      const model = { summary: "Existing structured model.", ...extensions };
+      manifest["scan"]["threatModel"] = model;
+      await writeJson(path, manifest);
+      const original = await readFile(path, "utf8");
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.threatModel).toEqual(model);
+      expect(await readFile(path, "utf8")).toBe(original);
+    }
+  });
+
   test("preserves schema-valid sealed finding details", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");

@@ -369,12 +369,24 @@ def export_findings(
     if artifact == "threat-model":
         if args.format != "md":
             raise SystemExit("Threat models can only be exported as Markdown (md).")
-        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        if scan["seal_manifest_digest"]:
-            db.require_recorded_manifest_digest(scan, scan_dir)
-        manifest_path = scan_dir / db.ARTIFACTS["manifest"]
-        if manifest_path.exists():
-            db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    else:
+        if args.format == "md":
+            raise SystemExit("Markdown export requires --artifact threat-model.")
+        if scan["status"] != "complete" and not (
+            scan["status"] == "failed" and scan["seal_manifest_digest"]
+        ):
+            raise SystemExit(
+                "Findings can be exported after the scan completes or preserves stopped results."
+            )
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    manifest_path = scan_dir / db.ARTIFACTS["manifest"]
+    if artifact == "findings" or manifest_path.exists():
+        db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    if getattr(args, "validate_only", False):
+        # SDK/CLI exports use their requested destination without modifying saved artifacts.
+        return {"scan": {"scanId": scan["id"], "scanDir": str(scan_dir)}}
+    if artifact == "threat-model":
         path = scan_dir / "exports" / "threatmodel.md"
         try:
             contents = build_threat_model_export(scan_dir)
@@ -386,17 +398,6 @@ def export_findings(
             "scan": db.scan_result(connection, scan),
             "workspace": db.workspace_state(connection, scan["workspace_id"]),
         }
-    if args.format == "md":
-        raise SystemExit("Markdown export requires --artifact threat-model.")
-    if scan["status"] != "complete" and not (
-        scan["status"] == "failed" and scan["seal_manifest_digest"]
-    ):
-        raise SystemExit(
-            "Findings can be exported after the scan completes or preserves stopped results."
-        )
-    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    db.require_recorded_manifest_digest(scan, scan_dir)
-    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
     try:
         manifest, _, _ = finalize_scan(
             scan_dir,

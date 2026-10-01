@@ -277,10 +277,39 @@ export async function resolveArtifactExportOutput(
   return { ...arguments_, scanDir: canonicalScan, output: outputPath };
 }
 
+/** Resolve saved artifacts after the workbench validates their recorded identity. */
+export async function resolveSavedArtifactDirectory(
+  scanId: string,
+  artifact: ExportArtifactKind,
+  format: ExportFormat,
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+): Promise<string> {
+  // Reuse the workbench's recorded digest and scan binding checks without
+  // requiring a writable saved-scan directory for stdout or external exports.
+  const context = await workbench([
+    "export-findings",
+    "--scan-id",
+    scanId,
+    "--artifact",
+    artifact,
+    "--format",
+    format,
+    "--validate-only",
+  ]);
+  const scan = context["scan"] as JsonObject | undefined;
+  if (typeof scan?.["scanDir"] !== "string")
+    throw new CodexSecurityError(
+      `Artifacts for scan ${scanId} are unavailable.`,
+    );
+  return resolve(expandHome(scan["scanDir"]));
+}
+
 /** Export saved artifacts without authenticating or starting Codex. */
 export async function exportArtifact(
   options: ExportArtifactOptions,
 ): Promise<ArtifactExportResult> {
+  const artifact = options.artifact ?? "findings";
+  const format = resolveArtifactFormat(artifact, options.format);
   const environment = {
     ...exportEnvironment(),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -294,25 +323,24 @@ export async function exportArtifact(
       environment,
       signal: options.signal,
     });
-    const context = await runWorkbench(
-      {
-        python,
-        pluginRoot: await bundledPluginRoot(),
-        environment,
-        signal: options.signal,
-        failureMessage: "Could not read Codex Security scan history",
-      },
-      ["get-scan", "--scan-id", options.source.scanId],
+    const pluginRoot = await bundledPluginRoot();
+    directory = await resolveSavedArtifactDirectory(
+      options.source.scanId,
+      artifact,
+      format,
+      (args) =>
+        runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment,
+            signal: options.signal,
+            failureMessage: "Could not export Codex Security scan artifacts",
+          },
+          args,
+        ),
     );
-    const scan = context["scan"] as JsonObject | undefined;
-    if (typeof scan?.["scanDir"] !== "string")
-      throw new CodexSecurityError(
-        `Artifacts for scan ${options.source.scanId} are unavailable.`,
-      );
-    directory = resolve(expandHome(scan["scanDir"]));
   }
-  const artifact = options.artifact ?? "findings";
-  const format = resolveArtifactFormat(artifact, options.format);
   const arguments_ = await resolveArtifactExportOutput(
     {
       scanDir: directory,

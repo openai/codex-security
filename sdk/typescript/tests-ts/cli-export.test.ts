@@ -15,8 +15,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
+import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
   type CoverageDocument,
@@ -88,7 +90,10 @@ describe("CLI", () => {
   test("exports the latest completed scan when no directory is provided", async () => {
     const scanDir = join(tmpdir(), "codex-security-latest-scan");
     const deps = dependencies({
-      onWorkbench: () => ({ scans: [{ scanId: "latest-scan", scanDir }] }),
+      onWorkbench: (args): JsonObject =>
+        args[0] === "list-scans"
+          ? { scans: [{ scanId: "latest-scan", scanDir }] }
+          : { scan: { scanId: "latest-scan", scanDir } },
     });
     let exportedScanDir = "";
     deps.exportFindings = async (arguments_) => {
@@ -107,7 +112,7 @@ describe("CLI", () => {
     expect(exportedScanDir).toBe(scanDir);
   });
 
-  test("uses --python for saved-scan selection and export when PYTHON is unavailable", async () => {
+  test("exports saved models with the selected Python and rejects changed recorded manifests", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-export-python-")),
     );
@@ -158,6 +163,12 @@ describe("CLI", () => {
         await writeFile(path, JSON.stringify(document));
       }
       await workbench(["complete-scan", "--scan-id", scanId]);
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const sealedManifest = await readFile(manifestPath);
+      if (process.platform !== "win32") {
+        await chmod(scanDir, 0o500);
+        await chmod(join(scanDir, "exports"), 0o500);
+      }
 
       for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
         const result = await runCommand(
@@ -179,7 +190,69 @@ describe("CLI", () => {
         expect(result.status).toBe(0);
         expect(result.stdout).toStartWith(content);
       }
+      const sdkOptions = {
+        source: { scanId },
+        artifact: "threat-model",
+        output: join(root, "exported-model.md"),
+        pythonPath: python,
+      };
+      const exportWithSdk = () =>
+        runCommand(
+          process.execPath,
+          [
+            "-e",
+            `import { exportArtifact } from ${JSON.stringify(pathToFileURL(join(import.meta.dir, "../src/index.ts")).href)}; await exportArtifact(JSON.parse(process.argv[1]));`,
+            JSON.stringify(sdkOptions),
+          ],
+          { cwd: repository, env: environment, timeout: 30_000 },
+        );
+      const sdkExport = await exportWithSdk();
+      expect(sdkExport.status, sdkExport.stderr).toBe(0);
+      expect(sdkExport.stdout).toBe("");
+      const exportedModel = await readFile(sdkOptions.output, "utf8");
+      expect(exportedModel).toStartWith(content);
+      expect(await readFile(manifestPath)).toEqual(sealedManifest);
+      await expect(
+        lstat(join(scanDir, "exports", "threatmodel.md")),
+      ).rejects.toHaveProperty("code", "ENOENT");
+      if (process.platform !== "win32") {
+        await chmod(scanDir, 0o700);
+        await chmod(join(scanDir, "exports"), 0o700);
+      }
+
+      const changed = JSON.parse(await readFile(manifestPath, "utf8"));
+      changed.scan.threatModel.content = "# Changed after completion\n";
+      await writeFile(manifestPath, JSON.stringify(changed));
+      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
+        const rejected = await runCommand(
+          process.execPath,
+          [
+            join(import.meta.dir, "../src/cli.ts"),
+            "export",
+            ...selector,
+            "--artifact",
+            "threat-model",
+            "--output",
+            "-",
+            "--python",
+            python,
+          ],
+          { cwd: repository, env: environment, timeout: 30_000 },
+        );
+        expect(rejected.status).toBe(2);
+        expect(rejected.stdout).toBe("");
+        expect(rejected.stderr).toContain("manifest changed after completion");
+      }
+      const rejectedSdk = await exportWithSdk();
+      expect(rejectedSdk.status).not.toBe(0);
+      expect(rejectedSdk.stdout).toBe("");
+      expect(rejectedSdk.stderr).toContain("manifest changed after completion");
+      expect(await readFile(sdkOptions.output, "utf8")).toBe(exportedModel);
     } finally {
+      if (process.platform !== "win32") {
+        await chmod(join(root, "scan"), 0o700).catch(() => {});
+        await chmod(join(root, "scan", "exports"), 0o700).catch(() => {});
+      }
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -232,7 +305,18 @@ describe("CLI", () => {
         format: "md",
         output: "-",
       });
-      expect(calls).toEqual([["get-scan", "--scan-id", "scan-prov"]]);
+      expect(calls).toEqual([
+        [
+          "export-findings",
+          "--scan-id",
+          "scan-prov",
+          "--artifact",
+          "threat-model",
+          "--format",
+          "md",
+          "--validate-only",
+        ],
+      ]);
       expect(stdout.text()).toBe("# Retained model\n");
       expect(stderr.text()).toBe("");
     } finally {

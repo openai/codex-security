@@ -63,7 +63,13 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
     def test_exports_legacy_structured_model_extensions(self) -> None:
-        for extensions in ({"format": "markdown"}, {"format": "markdown", "content": " \n"}):
+        for extensions in (
+            {"format": "markdown"},
+            {"format": "markdown", "content": " \n"},
+            {"scope": "Repository-wide", "origin": "legacy-import"},
+            {"scope": {"includePaths": 42}, "origin": {"tool": "legacy"}},
+            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        ):
             with self.subTest(extensions=extensions):
                 model = {"summary": "Existing structured model.", **extensions}
                 self.manifest["scan"]["threatModel"] = model

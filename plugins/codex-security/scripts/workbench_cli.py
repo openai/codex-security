@@ -362,6 +362,7 @@ def parse_args(description: str) -> argparse.Namespace:
         "--artifact", choices=("findings", "threat-model"), default="findings"
     )
     export_findings.add_argument("--format", choices=(*EXPORT_FORMATS, "md"))
+    export_findings.add_argument("--validate-only", action="store_true")
 
     for command in (
         "inspect-linear-publication",

@@ -50,6 +50,7 @@ import {
   exportEnvironment,
   resolveArtifactFormat,
   resolveArtifactExportOutput,
+  resolveSavedArtifactDirectory,
   runArtifactExport,
   writeArtifactOutput as writeCliOutput,
   type ArtifactExportArguments,
@@ -94,7 +95,6 @@ import {
 } from "./classify-scan-severity.js";
 import {
   resolveCompletedScan,
-  resolveSavedScan,
   resolveWorkflowScan,
   type SavedScan,
 } from "./saved-scan.js";
@@ -4730,23 +4730,25 @@ export async function main(
             options.artifact,
             options.exportFormat,
           );
-          const scanDir =
-            args.scanDir ??
-            (options.scan === undefined
-              ? (await latestScans(1, "complete", options.python))?.[0]?.scanDir
-              : (
-                  await resolveSavedScan(options.scan, {
-                    currentDirectory: dependencies.currentDirectory,
-                    runWorkbench: (args, input) =>
-                      dependencies.runWorkbench(
-                        args,
-                        input,
-                        undefined,
-                        options.python,
-                      ),
-                  })
-                ).scanDir);
-          if (scanDir === undefined) return;
+          let scanDir = args.scanDir;
+          if (scanDir === undefined) {
+            const scanId =
+              options.scan ??
+              (await latestScans(1, "complete", options.python))?.[0]?.scanId;
+            if (scanId === undefined) return;
+            scanDir = await resolveSavedArtifactDirectory(
+              scanId,
+              options.artifact,
+              format,
+              (args) =>
+                dependencies.runWorkbench(
+                  args,
+                  undefined,
+                  undefined,
+                  options.python,
+                ),
+            );
+          }
           exitCode = await runExport(
             {
               scanDir: resolveCliPath(currentDirectory, scanDir),

@@ -47,16 +47,6 @@ export interface ScanManifest {
           attackerCapabilities?: string[];
           securityObjectives?: string[];
           assumptions?: string[];
-          /**
-           * The modeled source scope, which may differ from the scan scope. Omit when unknown.
-           */
-          scope?: {
-            includePaths: string[];
-            excludePaths?: string[];
-            summary?: string;
-            [k: string]: unknown;
-          };
-          origin?: "generated" | "provided" | "reconciled" | "recovered";
           [k: string]: unknown;
         }
       | {

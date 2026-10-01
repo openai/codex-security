@@ -45,12 +45,18 @@ def threat_model_body(model: dict[str, Any], *, heading_level: int = 2) -> str:
     return "\n\n".join(sections)
 
 
-def _scope_lines(scope: dict[str, Any], label: str) -> list[str]:
-    lines = [f"- {label}: {', '.join(scope.get('includePaths', [])) or 'none'}"]
-    if scope.get("excludePaths"):
-        lines.append(f"- {label} exclusions: {', '.join(scope['excludePaths'])}")
-    if scope.get("summary"):
-        lines.append(f"- {label} description: {scope['summary']}")
+def _scope_lines(scope: Any, label: str) -> list[str]:
+    # Older structured models may use these extension names for unrelated data.
+    included = scope.get("includePaths") if isinstance(scope, dict) else None
+    if not isinstance(included, list) or not all(isinstance(path, str) for path in included):
+        return [f"- {label}: not recorded"]
+    lines = [f"- {label}: {', '.join(included) or 'none'}"]
+    excluded = scope.get("excludePaths")
+    if isinstance(excluded, list) and excluded and all(isinstance(path, str) for path in excluded):
+        lines.append(f"- {label} exclusions: {', '.join(excluded)}")
+    summary = scope.get("summary")
+    if isinstance(summary, str) and summary:
+        lines.append(f"- {label} description: {summary}")
     return lines
 
 
@@ -72,12 +78,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
         if provenance.get(key):
             footer.append(f"- {label}: {provenance[key]}")
     footer.append(f"- Model origin: {model.get('origin', 'not recorded')}")
-    model_scope = model.get("scope")
-    footer.extend(
-        _scope_lines(model_scope, "Model scope")
-        if isinstance(model_scope, dict)
-        else ["- Model scope: not recorded"]
-    )
+    footer.extend(_scope_lines(model.get("scope"), "Model scope"))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):
         footer.extend(_scope_lines(scan_scope, "Scan scope"))
