@@ -1,7 +1,10 @@
 name: Invoice Desk OpenAI scan
-run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0}', inputs.pr_number) || 'main baseline' }}"
+run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0}', inputs.pr_number) || (github.event_name == 'workflow_run' && 'automation PR' || 'main baseline') }}"
 
 on:
+  workflow_run:
+    workflows: ["Invoice Desk sample"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -22,8 +25,14 @@ env:
 jobs:
   target:
     # Only a workflow on protected main can request the inference environment.
-    if: github.ref == 'refs/heads/main' && github.ref_protected
+    if: >-
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.actor.login == 'github-actions[bot]'))
     runs-on: ubuntu-24.04
+    # This job reads only trusted helpers and event metadata before caching public packages.
+    cache-mode: write
     permissions:
       contents: read
       pull-requests: read
@@ -198,18 +207,27 @@ jobs:
           root = Path(os.environ["RUNNER_TEMP"])
           completed = os.environ["SCAN_EXIT_CODE"] == "0"
           counts, coverage, total, usage, cost_range = {}, None, None, None, None
-          if completed:
-              findings = json.loads((root / "invoice-desk-scan/findings.json").read_text())["findings"]
-              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())["completeness"]
-              result = json.loads((root / "invoice-desk-result.json").read_text())
-              counts = Counter(finding["severity"]["level"] for finding in findings)
-              total = len(findings)
-              raw_usage = result.get("turn", {}).get("usage") or {}
+          result = {}
+          result_path = root / "invoice-desk-result.json"
+          if result_path.is_file() and result_path.stat().st_size:
+              try:
+                  result = json.loads(result_path.read_text())
+              except json.JSONDecodeError:
+                  if completed:
+                      raise
+          raw_usage = (result.get("turn") or {}).get("usage")
+          if raw_usage is not None:
               usage = {key: raw_usage.get(key) for key in (
                   "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
                   "cache_write_input_tokens_reported", "output_tokens"
               )}
-              cost_range = (result.get("cost") or {}).get("estimatedUsdRange")
+          cost_range = (result.get("cost") or {}).get("estimatedUsdRange")
+          coverage = (result.get("coverage") or {}).get("completeness")
+          if completed:
+              findings = json.loads((root / "invoice-desk-scan/findings.json").read_text())["findings"]
+              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())["completeness"]
+              counts = Counter(finding["severity"]["level"] for finding in findings)
+              total = len(findings)
           metrics = {
               "schemaVersion": 1,
               "sourceSha": os.environ["SOURCE_SHA"],

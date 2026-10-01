@@ -95,3 +95,92 @@ test("ignores unexpected events without querying GitHub", async () => {
     [],
   );
 });
+
+const automationContext = {
+  ...context,
+  eventName: "workflow_run",
+  event: {
+    workflow_run: {
+      event: "pull_request",
+      actor: { login: "github-actions[bot]" },
+      conclusion: "success",
+      head_sha: sourceSha,
+      pull_requests: [{ number: 7 }],
+    },
+  },
+};
+
+test("falls back to completed behavior runs for GITHUB_TOKEN-created PRs", async () => {
+  for (const conclusion of ["success", "failure"]) {
+    const run = structuredClone(automationContext);
+    run.event.workflow_run.conclusion = conclusion;
+    assert.deepEqual(
+      await resolveScanTargets(
+        run,
+        () => assert.fail("unexpected direct lookup"),
+        async (sha) => {
+          assert.equal(sha, sourceSha);
+          return [
+            pullRequest(),
+            pullRequest({ number: 8 }),
+            pullRequest({ state: "closed" }),
+          ];
+        },
+      ),
+      [{ pr: 7, sha: sourceSha }],
+    );
+  }
+});
+
+test("fallback rechecks current heads and handles empty association metadata", async () => {
+  const run = structuredClone(automationContext);
+  run.event.workflow_run.pull_requests = [];
+  const lookup = async () => [
+    pullRequest(),
+    pullRequest({ head: { sha: mainSha } }),
+  ];
+  assert.deepEqual(await resolveScanTargets(run, null, lookup), [
+    { pr: 7, sha: sourceSha },
+  ]);
+  assert.deepEqual(
+    await resolveScanTargets(run, null, async () => [
+      pullRequest({ state: "closed" }),
+    ]),
+    [],
+  );
+});
+
+test("ordinary PR runs, target events, and cancelled runs do not dispatch duplicate scans", async () => {
+  for (const changed of [
+    { actor: { login: "contributor" } },
+    { event: "pull_request_target" },
+    { conclusion: "cancelled" },
+  ]) {
+    const run = structuredClone(automationContext);
+    Object.assign(run.event.workflow_run, changed);
+    assert.deepEqual(
+      await resolveScanTargets(run, null, () =>
+        assert.fail("unexpected association lookup"),
+      ),
+      [],
+    );
+  }
+});
+
+test("approval recheck stays bound to its matrix PR even when another PR shares the commit", async () => {
+  const run = { ...automationContext, target: { pr: 7, sha: sourceSha } };
+  assert.deepEqual(
+    await resolveScanTargets(
+      run,
+      async (number) => {
+        assert.equal(number, "7");
+        return pullRequest({ state: "closed" });
+      },
+      () => assert.fail("must not select another associated PR"),
+    ),
+    [],
+  );
+  assert.deepEqual(await resolveScanTargets(run, async () => pullRequest()), [
+    { pr: 7, sha: sourceSha },
+  ]);
+});

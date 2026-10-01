@@ -57,6 +57,10 @@ opened, reopened, updated, or retargeted to `main`. That dispatcher handles only
 the PR number and head SHA: it has no checkout, application commands, or inference
 secret. PR changes cannot disable the dispatcher, and failed behavior tests do
 not suppress scanning. Title and description edits do not request another scan.
+For PRs created using `GITHUB_TOKEN`, GitHub suppresses `pull_request_target`;
+a `workflow_run` fallback queues their scan after the behavior workflow completes,
+including failed tests. It resolves the current PR through GitHub's API and runs
+only for the Actions bot so ordinary PRs do not receive duplicate scans.
 
 Both workflows must reach `main` before automatic scanning is active. The
 [dispatcher](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
@@ -110,7 +114,8 @@ scan manifest, CLI result JSON, an exported SARIF file, and
 `invoice-desk-metrics.json`. Metrics record source and workflow revisions, CLI and
 model settings, exit code, elapsed time, package cache hits, and token usage and
 cost estimates when the CLI reports them. Missing usage or recall stays unknown;
-failed scans do not count as zero findings. Authentication state and agent
+failed scans do not count as zero findings. Incomplete results retain any token
+usage, cost estimate, and coverage that the CLI emitted. Authentication state and agent
 transcripts are not uploaded. These reports describe only this
 synthetic application. SARIF is downloadable; this workflow does not populate
 repository Code Scanning alerts or post pull request comments.
