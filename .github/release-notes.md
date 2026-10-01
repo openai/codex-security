@@ -24,6 +24,7 @@
 - bump Codex SDK and CLI to 0.159.3 ([#1170](https://github.com/openai/codex-security/pull/1170))
 - bump MCP SDK to 1.30.1 in MCP app and evals ([#1171](https://github.com/openai/codex-security/pull/1171))
 - support custom inference providers in patch commands ([#1131](https://github.com/openai/codex-security/pull/1131))
+- allow opting out of log redaction ([#1176](https://github.com/openai/codex-security/pull/1176))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
