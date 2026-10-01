@@ -209,8 +209,12 @@ def _read_saved_threat_model(
             scan = manifest["scan"]
         provenance = threat_model_provenance(manifest)
         saved_provenance = provenance
-        model = scan.get("threatModel")
-        if isinstance(model, dict):
+        if "threatModel" in scan:
+            model = _require_dict(
+                scan,
+                "threatModel",
+                "manifest.scan" if filename == "scan-manifest.json" else "policy draft",
+            )
             contents = _render_threat_model(model, provenance)
             path = scan_dir / "threatmodel.md"
             current_path = None

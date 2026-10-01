@@ -953,7 +953,8 @@ describe("compact diff scan", () => {
         "utf8",
       );
       expect(terminalReport).toContain(markdownFact);
-      expect(terminalReport).toContain(markdownModel);
+      expect(terminalReport).toContain("Existing threat model");
+      expect(terminalReport).not.toContain("\n# Existing threat model\n");
       expect(
         readFileSync(join(terminalDir, "threatmodel.md"), "utf8"),
       ).toContain(markdownModel);

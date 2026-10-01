@@ -297,6 +297,41 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 self.assertEqual(path.read_text(), body)
                 self.assertEqual(FINALIZER.describe_threat_model(source)["path"], str(path))
 
+    def test_malformed_canonical_model_does_not_export_a_stale_legacy_document(self) -> None:
+        body = "# Earlier model\n\nEarlier service boundaries.\n"
+        for filename in ("scan-manifest.json", "policy-draft.json"):
+            for model in (None, "invalid model", []):
+                with (
+                    self.subTest(filename=filename, model=model),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    source = Path(directory).resolve()
+                    scan = {"threatModel": model}
+                    manifest = (
+                        {"scan": scan}
+                        if filename == "scan-manifest.json"
+                        else {"documentType": "codex-security.policy-draft", **scan}
+                    )
+                    path = source / filename
+                    original = json.dumps(manifest)
+                    path.write_text(original)
+                    legacy = source / "threatmodel.md"
+                    legacy.write_text(body)
+                    for read_model in (
+                        FINALIZER.describe_threat_model,
+                        FINALIZER.build_threat_model_export,
+                    ):
+                        with self.assertRaisesRegex(
+                            FINALIZER.ContractError, "threatModel: expected an object"
+                        ):
+                            read_model(source)
+                    self.assertEqual(path.read_text(), original)
+                    self.assertEqual(legacy.read_text(), body)
+                    current = manifest["scan"] if filename == "scan-manifest.json" else manifest
+                    del current["threatModel"]
+                    path.write_text(json.dumps(manifest))
+                    self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
+
     def test_policy_models_share_projection_and_offline_export(self) -> None:
         manifest = {
             "documentType": "codex-security.policy-draft",
