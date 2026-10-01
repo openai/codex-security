@@ -1160,7 +1160,7 @@ describe("CLI", () => {
       cliVersion: VERSION,
       codexVersion: CODEX_EXECUTABLE_VERSION,
       codexSdkVersion: CODEX_SDK_VERSION,
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
     });
@@ -1566,7 +1566,7 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual({
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
     });
@@ -2465,6 +2465,14 @@ describe("CLI", () => {
   test("selects scan models and reasoning without TOML quoting", async () => {
     for (const [options, expected] of [
       [["--model", "gpt-5.6-terra"], { model: "gpt-5.6-terra" }],
+      [
+        ["--model", "gpt-6-astra", "--effort", "max"],
+        { model: "gpt-6-astra", model_reasoning_effort: "max" },
+      ],
+      [
+        ["--model=gpt-6.1-sol", "--effort=max"],
+        { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+      ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
@@ -3507,7 +3515,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual({ dryRun: true, ...preflight });
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.preflight.completed model="gpt-6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
+      'codex-security: debug: scan.preflight.completed model="gpt-5.6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
     );
     expect(stderr.text()).not.toContain("codex-security: debug: scan.started");
     expect(stderr.text()).not.toContain("SYNTHETIC_DRY_RUN_SECRET");

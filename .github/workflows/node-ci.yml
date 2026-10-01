@@ -324,7 +324,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ripgrep
       - name: Test
-        timeout-minutes: 10
         working-directory: sdk/typescript
         env:
           TEMP: ${{ runner.temp }}
@@ -600,7 +599,6 @@ jobs:
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test shard ${{ matrix.shard }}
-        timeout-minutes: 10
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}

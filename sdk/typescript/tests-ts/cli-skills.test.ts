@@ -92,7 +92,7 @@ describe("CLI skill commands", () => {
             ? []
             : ["--ephemeral", "--color", "never", "--json"]),
           "--config",
-          'model="gpt-6-sol"',
+          'model="gpt-5.6-sol"',
           "--config",
           'model_reasoning_effort="xhigh"',
           "--config",
@@ -140,6 +140,7 @@ describe("CLI skill commands", () => {
           `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
         expect(help.text()).toContain("--effort <effort>");
+        expect(help.text()).toContain("--model <model>");
         expect(help.text()).toContain("--codex <key=value>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
@@ -843,9 +844,18 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "passes custom inference settings and authentication to %s",
-    async (command) => {
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) => [
+      [command, ["--codex", 'model="synthetic-model"'], "xhigh"] as const,
+      [
+        command,
+        ["--model", "synthetic-model", "--effort", "high"],
+        "high",
+      ] as const,
+    ]),
+  )(
+    "passes custom inference settings and authentication to %s with %j (%s effort)",
+    async (command, selection, effort) => {
       const providerConfiguration = {
         name: "Synthetic gateway",
         base_url: "https://gateway.example.test/v1",
@@ -853,7 +863,6 @@ describe("CLI skill commands", () => {
         env_key: "SYNTHETIC_GATEWAY_KEY",
       };
       const overrides = [
-        'model="synthetic-model"',
         'model_provider="synthetic"',
         ...Object.entries(providerConfiguration).map(
           ([key, value]) =>
@@ -867,6 +876,7 @@ describe("CLI skill commands", () => {
           [
             command,
             "Synthetic finding",
+            ...selection,
             ...overrides.flatMap((override) => ["--codex", override]),
           ],
           capture().stream,
@@ -902,6 +912,7 @@ describe("CLI skill commands", () => {
         stderr.text(),
       ).toBe(0);
       expect(invocation).toContain('model="synthetic-model"');
+      expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
       expect(invocation).toContain('model_provider="synthetic"');
       expect(
         parseToml(
@@ -999,36 +1010,50 @@ describe("CLI skill commands", () => {
     },
   );
 
-  test("selects reasoning effort directly for validation and patching", async () => {
-    for (const command of ["validate", "patch"] as const) {
-      let invocation: readonly string[] = [];
-      const stderr = capture();
-
-      expect(
-        await main(
-          [
-            command,
-            "a candidate finding",
-            "--effort",
-            "max",
-            "--codex",
-            'model="gpt-5.6-terra"',
-          ],
-          capture().stream,
-          stderr.stream,
-          dependencies({
-            onCodex: (args) => {
-              invocation = args;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(0);
-      expect(invocation).toContain('model="gpt-5.6-terra"');
-      expect(invocation).toContain('model_reasoning_effort="max"');
-      expect(stderr.text()).toBe(
-        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
-      );
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "selects the model and reasoning effort directly for %s",
+    async (command) => {
+      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+        let invocation: readonly string[] = [];
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "a candidate finding",
+              ...(model === "gpt-6-astra"
+                ? ["--model", model]
+                : [`--model=${model}`]),
+              "--effort",
+              "max",
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: (args, output) => {
+                invocation = args;
+                if (command === "verify-fix") {
+                  output?.stdout.write(
+                    JSON.stringify({
+                      results: [
+                        {
+                          id: "finding-1",
+                          status: "fixed",
+                          evidence: "The fix is present.",
+                        },
+                      ],
+                    }),
+                  );
+                }
+                return 0;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(invocation).toContain(`model="${model}"`);
+        expect(invocation).toContain('model_reasoning_effort="max"');
+      }
 
       for (const [options, message] of [
         [
@@ -1039,10 +1064,15 @@ describe("CLI skill commands", () => {
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
           "--effort conflicts with --codex model_reasoning_effort",
         ],
+        [
+          ["--model", "gpt-6.1-sol", "--codex", 'model="gpt-6-astra"'],
+          "--model conflicts with --codex model",
+        ],
+        [["--model", "  "], "model must be a nonempty string"],
+        [["--model"], "Missing value for flag: --model"],
       ] as const) {
         let started = false;
         const invalidStderr = capture();
-
         expect(
           await main(
             [command, "a candidate finding", ...options],
@@ -1059,8 +1089,8 @@ describe("CLI skill commands", () => {
         expect(invalidStderr.text()).toContain(message);
         expect(started).toBe(false);
       }
-    }
-  });
+    },
+  );
 
   test("rejects empty and non-file skill inputs before launching Codex", async () => {
     const directory = await mkdtemp(
