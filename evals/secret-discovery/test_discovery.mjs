@@ -133,6 +133,12 @@ for (const category of [
   "NON SECRET",
   "not-a-secret-exposure",
   "non-credential-finding",
+  "not-a-private-key",
+  "non-hardcoded-credential",
+  "non-sensitive-data-exposure",
+  "not-a-password-exposure",
+  "non-token-exposure",
+  "non-api-key-exposure",
 ]) {
   test(`rejects negated category ${category}`, () => {
     const fixture = createFixture();
@@ -160,6 +166,19 @@ test("accepts a secret's valid source range and sensitive-data category", () => 
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
+for (const category of [
+  "password-in-configuration",
+  "token-exposure",
+  "api-key-exposure",
+]) {
+  test(`accepts credential category ${category}`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    result.findings[0].taxonomy.category = category;
+    assert.equal(gradeResult(result, fixture).passed, true);
+  });
+}
+
 test("accepts CWE-260 for the password in the database configuration", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);
@@ -167,6 +186,8 @@ test("accepts CWE-260 for the password in the database configuration", () => {
     (entry) => entry.id === "dotenv-url",
   );
   result.findings[databaseIndex].taxonomy.cwe = ["CWE-260"];
+  result.findings[databaseIndex].taxonomy.category =
+    "password-in-configuration";
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
@@ -668,6 +689,8 @@ for (const repo of [
       `${slashRepo}/src/client.py`,
       `${slashRepo}/src/client.py`.replaceAll("/", "\\"),
       `${slashRepo}/**/*.py`,
+      `${slashRepo}/SRC/**/*.PY`,
+      "SRC/**/*.PY",
       `${slashRepo}/config/`,
       String.raw`src\client.py`,
     ]) {
@@ -695,6 +718,16 @@ for (const repo of [
     assert.equal(gradeResult(external, fixture, repo).passed, true);
   });
 }
+
+test("POSIX exclusion globs remain case-sensitive", () => {
+  const fixture = createFixture();
+  const result = retainedResult(fixture);
+  result.coverage.explicitExclusions.push({
+    pattern: "SRC/**/*.PY",
+    reason: "Outside fixture",
+  });
+  assert.equal(gradeResult(result, fixture, "/tmp/repository").passed, true);
+});
 
 test("Windows drive casing does not hide an in-scope exclusion", () => {
   const fixture = createFixture();

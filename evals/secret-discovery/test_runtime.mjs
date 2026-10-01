@@ -227,7 +227,7 @@ test("the SDK executable override preserves bundled tools at the child boundary"
   await mkdir(tools);
   const inherited = {
     Path: [tools, join(directory, "other tools"), tools].join(delimiter),
-    PATH: join(directory, "unused alias"),
+    PATH: [tools, join(directory, "unix tools"), tools].join(delimiter),
   };
   const original = { ...inherited };
   const intercepted = new Error("Synthetic launch intercepted");
@@ -264,7 +264,12 @@ test("the SDK executable override preserves bundled tools at the child boundary"
       ),
       [
         { PATH: tools },
-        { Path: [tools, join(directory, "other tools")].join(delimiter) },
+        process.platform === "win32"
+          ? { Path: [tools, join(directory, "other tools")].join(delimiter) }
+          : {
+              ...inherited,
+              PATH: [tools, join(directory, "unix tools")].join(delimiter),
+            },
       ],
     );
     assert.deepEqual(inherited, original);
@@ -337,6 +342,7 @@ async function nativeFixture(t, mode = "complete") {
   });
   const settings = codexSettings(home, executable, {
     PATH: dirname(process.execPath),
+    Path: join(directory, "unrelated alias"),
     HOME: home,
     OPENAI_API_KEY: "synthetic-env-key",
     DATABASE_URL: "synthetic-unrelated-secret",

@@ -1,11 +1,15 @@
 import { posix, win32 } from "node:path";
 
 const explicitSecretCategory =
-  /secret|credential|private[-_ ]?key|hard[-_ ]?cod/i;
-const secretCategory =
-  /secret|credential|private[-_ ]?key|hard[-_ ]?cod|sensitive[-_ ]?(?:data|information)[-_ ]?exposure/i;
-const negatedSecretCategory =
-  /^(?:not(?:[-_\s]*a)?|non)[-_\s]*(?:secret|credential)s?(?:[-_\s]|$)/i;
+  /secret|credential|password|token|(?:api|private)[-_ ]?key|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
+const secretCategory = new RegExp(
+  `${explicitSecretCategory.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposure`,
+  "i",
+);
+const negatedSecretCategory = new RegExp(
+  String.raw`^(?:not(?:[-_\s]*a)?|non)[-_\s]*(?:${secretCategory.source})s?(?:[-_\s]|$)`,
+  "i",
+);
 const supportingLocation = (location) =>
   /^(?:supporting|support|context|consumer|expected_control)$/.test(
     location.role ?? "",
@@ -37,6 +41,10 @@ function matchesExclusion(path, pattern, repo) {
     } else {
       entry = paths.join(repo, path);
     }
+  }
+  if (paths === win32) {
+    entry = entry.toLowerCase();
+    normalized = normalized.toLowerCase();
   }
   // A directory exclusion also excludes the fixture files beneath it.
   while (true) {

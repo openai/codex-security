@@ -13,8 +13,10 @@ export function bundledCodexSdkEnvironment(
     return environment;
   }
   const result = { ...environment };
-  const pathKeys = Object.keys(result).filter(
-    (key) => key.toLowerCase() === "path",
+  const pathKeys = Object.keys(result).filter((key) =>
+    process.platform === "win32"
+      ? key.toLowerCase() === "path"
+      : key === "PATH",
   );
   const pathKey = pathKeys.includes("Path")
     ? "Path"
