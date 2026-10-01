@@ -918,6 +918,7 @@ restrictions.
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
+| `CODEX_SECURITY_REDACT_LOGS`                                                | CLI-only; `0` disables output redaction. Unset or any other value keeps it enabled.                       |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
@@ -938,6 +939,44 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
+
+### Troubleshooting redacted output
+
+Some CLI diagnostics and displayed values are checked for recognizable
+credentials and sensitive field assignments. A match replaces the whole message
+or value with `[redacted]`. For example, `token=example` triggers redaction even
+if the value is synthetic. This can hide the rest of an otherwise useful error.
+`--verbose` and
+`CODEX_SECURITY_LOG_LEVEL=debug` add diagnostics but keep redaction enabled.
+
+For local troubleshooting, set `CODEX_SECURITY_REDACT_LOGS=0` for the command:
+
+```bash
+CODEX_SECURITY_REDACT_LOGS=0 npx @openai/codex-security scan . --verbose
+```
+
+In PowerShell, set it in the current shell and remove it afterward:
+
+```powershell
+$env:CODEX_SECURITY_REDACT_LOGS = "0"
+npx @openai/codex-security scan . --verbose
+Remove-Item Env:CODEX_SECURITY_REDACT_LOGS
+```
+
+Only the exact value `0` disables redaction; an unset variable or any other
+value retains the default behavior. This setting applies to CLI diagnostics,
+JSON error output, and progress and dashboard displays. Deep Scan discovery
+and reducer worker displays, including resumed workers, use the environment
+of the current CLI invocation. The setting is not saved in scan recipes; set
+it again when running `scans resume` or `scans rerun` if needed.
+
+Unredacted output can expose credentials, source code, and other sensitive
+information. Keep it private and review it before sharing or uploading logs.
+The setting does not change credential configuration, SDK error sanitization,
+stored failure summaries, or publication receipts. Raw session log capture is
+unchanged and can contain unredacted data. It cannot recover content already
+replaced with `[redacted]`, including errors sanitized before reaching the CLI,
+and does not control native Codex or OpenTelemetry log and trace redaction.
 
 ### Progress and cost
 

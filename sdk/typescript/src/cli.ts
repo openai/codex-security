@@ -139,6 +139,7 @@ import {
   PluginPythonUnavailableError,
   errorMessage,
   safeErrorMessage,
+  logErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -645,7 +646,8 @@ class PublicationProgressPresenter {
       presentation: "publication",
       clock: this.#dependencies,
       color: this.#dependencies.environment["NO_COLOR"] === undefined,
-      sanitize: safeErrorMessage,
+      sanitize: (value) =>
+        logErrorMessage(value, this.#dependencies.environment),
     });
     dashboard.setStage("Connecting to Linear");
     try {
@@ -765,7 +767,9 @@ class PublicationProgressPresenter {
   }
 
   #write(message: string, compact = false): void {
-    const sanitized = diagnosticValue(safeErrorMessage(message));
+    const sanitized = diagnosticValue(
+      logErrorMessage(message, this.#dependencies.environment),
+    );
     if (!compact) {
       this.#stream.write(`${sanitized}\n`);
       return;
@@ -816,7 +820,8 @@ class FindingProgressPresenter {
         presentation: "verification",
         clock: this.#dependencies,
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
+        sanitize: (value) =>
+          logErrorMessage(value, this.#dependencies.environment),
       });
       dashboard.setPublicationProgress(0, this.#total);
       dashboard.setStage(`Verifying findings · 0/${this.#total}`);
@@ -839,7 +844,7 @@ class FindingProgressPresenter {
   public startPatch(finding: Finding, index: number): void {
     try {
       this.#progress.startTimer(
-        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title, this.#dependencies.environment)}`,
       );
     } catch {
       this.stop();
@@ -946,7 +951,9 @@ class FindingProgressPresenter {
   #write(message: string): void {
     try {
       this.#progress.writeAboveTimer(() => {
-        this.#stream.write(`${safePatchText(message)}\n`);
+        this.#stream.write(
+          `${safePatchText(message, this.#dependencies.environment)}\n`,
+        );
       });
     } catch {}
   }
@@ -2242,7 +2249,9 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe(
+            "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, options }) {
@@ -2330,7 +2339,9 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe(
+            "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -2531,7 +2542,9 @@ export async function main(
           ? "Publication canceled by Ctrl-C."
           : "Publication terminated by SIGTERM.";
       const recovery =
-        error === signal ? "" : ` ${diagnosticValue(safeErrorMessage(error))}`;
+        error === signal
+          ? ""
+          : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
@@ -2655,7 +2668,7 @@ export async function main(
         const recovery =
           error === undefined || error === signal
             ? ""
-            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+            : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -3020,7 +3033,10 @@ export async function main(
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = safeErrorMessage(error);
+                const message = logErrorMessage(
+                  error,
+                  dependencies.environment,
+                );
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),
@@ -3029,7 +3045,7 @@ export async function main(
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(safeErrorMessage(scanId ?? directory))}: ${diagnosticValue(message)}\n`,
+                  `codex-security: ${diagnosticValue(logErrorMessage(scanId ?? directory, dependencies.environment))}: ${diagnosticValue(message)}\n`,
                 );
               }
             }
@@ -3110,7 +3126,7 @@ export async function main(
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
             errorOutput.write(
-              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+              `codex-security: ${diagnosticValue(logErrorMessage(warning, dependencies.environment))}\n`,
             );
           }
         }
@@ -3131,7 +3147,7 @@ export async function main(
       } catch (error) {
         if (!finishCancellation(error)) {
           errorOutput.write(
-            `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
+            `codex-security: ${options.to === "cloud" ? logErrorMessage(error, dependencies.environment) : errorMessage(error)}\n`,
           );
           exitCode = 2;
         }
@@ -3261,7 +3277,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3455,7 +3471,7 @@ export async function main(
               ? policyDisplayData(outcome.data)
               : outcome.data;
         } catch (error) {
-          const message = safeErrorMessage(error);
+          const message = logErrorMessage(error, dependencies.environment);
           try {
             errorOutput.write(`codex-security: ${message}\n`);
           } catch {}
@@ -3493,7 +3509,9 @@ export async function main(
           verbose: z
             .boolean()
             .default(false)
-            .describe("Print scan diagnostics to stderr."),
+            .describe(
+              "Print scan diagnostics to stderr. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+            ),
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
@@ -3734,7 +3752,10 @@ export async function main(
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           if (format === "json" || format === "jsonl") {
-            const message = safeErrorMessage(outcome.error);
+            const message = logErrorMessage(
+              outcome.error,
+              dependencies.environment,
+            );
             if (!argv.includes("--full-output"))
               return { status: "failed", code: "SCAN_FAILED", message };
             // Incur would wrap returned data in an ok: true envelope.
@@ -3899,7 +3920,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : logErrorMessage(error, dependencies.environment)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4003,7 +4024,7 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : logErrorMessage(error, dependencies.environment)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
@@ -4132,7 +4153,7 @@ export async function main(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
                 ? "Deduplication canceled. Findings are unchanged."
-                : safeErrorMessage(error)
+                : logErrorMessage(error, dependencies.environment)
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
@@ -4326,7 +4347,8 @@ export async function main(
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
-              sanitize: safeErrorMessage,
+              sanitize: (value) =>
+                logErrorMessage(value, dependencies.environment),
               input: process.stdin,
               onInterrupt,
             });
@@ -5081,13 +5103,15 @@ export async function main(
           }
           for (const result of results) {
             output.write(
-              `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
+              `${result.status.toUpperCase()} ${safePatchText(result.id, dependencies.environment)}: ${safePatchText(result.evidence, dependencies.environment)}\n`,
             );
           }
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          errorOutput.write(
+            `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
+          );
           return undefined;
         }
       },
@@ -5449,7 +5473,7 @@ export async function main(
             };
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
-          const message = safeErrorMessage(error);
+          const message = logErrorMessage(error, dependencies.environment);
           errorOutput.write(`codex-security: ${message}\n`);
           if (!structuredOutput) return;
           patchStructuredError = true;
@@ -5986,7 +6010,7 @@ async function runScanImport(
     const message =
       signal === "SIGINT" || signal === "SIGTERM"
         ? "Scan import canceled."
-        : safeErrorMessage(error);
+        : logErrorMessage(error, dependencies.environment);
     errorOutput.write(`codex-security: ${message}\n`);
     return {
       exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
@@ -6839,12 +6863,12 @@ async function publishPatchBranch(
       );
     }
     stderr.write(
-      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url, dependencies.environment)}\n`,
     );
     return { branch, url };
   } catch (error) {
     stderr.write(
-      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
+      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch, dependencies.environment)}\n`,
     );
     throw error;
   }
@@ -7047,15 +7071,21 @@ async function snapshotPatchDirectory(
   return files;
 }
 
-function safePatchText(value: string): string {
-  return stripVTControlCharacters(safeErrorMessage(value)).replaceAll(
-    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
-    " ",
-  );
+function safePatchText(
+  value: string,
+  environment: NodeJS.ProcessEnv = {},
+): string {
+  return stripVTControlCharacters(
+    logErrorMessage(value, environment),
+  ).replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
 }
 
 function safePatchReport(value: string): string {
-  return value.split(/\r?\n/gu).map(safePatchText).join("\n").trim();
+  return value
+    .split(/\r?\n/gu)
+    .map((line) => safePatchText(line))
+    .join("\n")
+    .trim();
 }
 
 function parsePatchRiskReport(report: string): PatchRiskAssessment {
@@ -7364,9 +7394,9 @@ async function runFindingPatches(
       }
     }
 
-    const title = safePatchText(finding.title);
+    const title = safePatchText(finding.title, dependencies.environment);
     stderr.write(
-      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
+      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason, dependencies.environment)}`}\n`,
     );
     patches.push(patch);
   }
@@ -8395,7 +8425,7 @@ async function executeScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
+        sanitize: (value) => logErrorMessage(value, dependencies.environment),
         input: scanInput,
         onInterrupt,
       });
@@ -8962,7 +8992,9 @@ async function executeScan(
         }
       }
     } catch (error) {
-      errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+      errorOutput.write(
+        `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
+      );
       scanData = { ...scanData, patches };
       return completedScan(2);
     }
