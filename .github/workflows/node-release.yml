@@ -153,7 +153,6 @@ jobs:
           sudo apt-get install --yes ripgrep
 
       - name: Audit production dependencies
-        continue-on-error: true
         run: sfw pnpm --dir sdk/typescript run audit:prod
 
       - name: Verify
