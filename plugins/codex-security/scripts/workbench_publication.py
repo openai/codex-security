@@ -381,8 +381,7 @@ def export_findings(
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     manifest_path = scan_dir / db.ARTIFACTS["manifest"]
-    if artifact == "findings" or manifest_path.exists():
-        db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
     if getattr(args, "validate_only", False):
         # SDK/CLI exports use their requested destination without modifying saved artifacts.
         return {"scan": {"scanId": scan["id"], "scanDir": str(scan_dir)}}

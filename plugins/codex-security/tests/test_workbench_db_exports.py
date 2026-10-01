@@ -780,6 +780,23 @@ def test_export_validation_checks_binding_without_writing_or_pinning_legacy_arti
     rejected = run_workbench(state_dir, *args, check=False)
     assert "scan.id must match the workbench scan ID" in rejected["stderr"]
 
+    manifest_path.unlink()
+    (scan_dir / "threatmodel.md").write_text("# Earlier model\n")
+    (scan_dir / "policy-draft.json").write_text(
+        json.dumps(
+            {
+                "documentType": "codex-security.policy-draft",
+                "threatModel": {"summary": "A separate policy model."},
+            }
+        )
+    )
+    remaining = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+    for export_args in (args, args[:-1]):
+        rejected = run_workbench(state_dir, *export_args, check=False)
+        assert rejected["returncode"] != 0
+        assert "scan-manifest.json" in rejected["stderr"]
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == remaining
+
 
 def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
