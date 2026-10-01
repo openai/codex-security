@@ -587,8 +587,9 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
-For machine-readable scan output (`--format json` or `--format jsonl`), a scan
-execution failure writes one structured object to stdout:
+For machine-readable output (`--json`, `--format json`, or `--format jsonl`),
+`scan`, `scans rerun`, and `scans resume` write one structured object to stdout
+when scan execution fails:
 
 ```json
 {
@@ -601,10 +602,16 @@ execution failure writes one structured object to stdout:
 With `--full-output`, the same code and message are reported under `error` in
 an `ok: false` envelope instead.
 
+Saved-scan setup failures use the same output shape with
+`SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
+available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
+scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
+stderr-only failures, including when `--full-output` is selected.
+
 The command still exits with `2` for runtime, export, invalid-input, or
 incomplete-scan failures, and human-readable diagnostics remain on stderr.
-Use `scan --schema --format json` to discover this failure variant alongside
-the successful scan output. Cancellation and termination retain their `130`
+Use the command's `--schema --format json` output to discover its failure codes
+alongside the successful scan output. Cancellation and termination retain their `130`
 and `143` exit codes.
 
 ### Import findings as a saved scan

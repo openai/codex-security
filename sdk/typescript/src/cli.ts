@@ -1006,16 +1006,18 @@ interface ScanOutcome {
   error?: string;
 }
 
-const scanOutputSchema = z
-  .union([
-    z.record(z.string(), z.unknown()),
-    z.object({
-      status: z.literal("failed"),
-      code: z.literal("SCAN_FAILED"),
-      message: z.string(),
-    }),
-  ])
-  .optional();
+function scanOutputSchema(...codes: [string, ...string[]]) {
+  return z
+    .union([
+      z.record(z.string(), z.unknown()),
+      z.object({
+        status: z.literal("failed"),
+        code: z.literal(codes),
+        message: z.string(),
+      }),
+    ])
+    .optional();
+}
 
 interface ExportArguments {
   scanDir: string;
@@ -1860,6 +1862,28 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  const finishScan = (
+    outcome: ScanOutcome,
+    format: string,
+    incurError: (error: {
+      code: string;
+      message: string;
+      exitCode: number;
+    }) => never,
+    code = "SCAN_FAILED",
+  ): Record<string, unknown> | undefined => {
+    exitCode = outcome.exitCode;
+    if (outcome.error === undefined) return outcome.data;
+    if (format === "json" || format === "jsonl") {
+      const message = safeErrorMessage(outcome.error);
+      if (!argv.includes("--full-output"))
+        return { status: "failed", code, message };
+      // Incur would wrap returned data in an ok: true envelope.
+      scanStructuredError = true;
+      return incurError({ code, message, exitCode });
+    }
+    return incurError({ code, message: outcome.error, exitCode });
+  };
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -2244,8 +2268,8 @@ export async function main(
           .default(false)
           .describe("Print scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench([
@@ -2285,23 +2309,15 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          exitCode = 2;
-          return incurError({
-            code: "SCAN_RESUME_UNAVAILABLE",
-            message,
-            exitCode,
-          });
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_RESUME_UNAVAILABLE",
+          );
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("rerun", {
@@ -2332,7 +2348,11 @@ export async function main(
           .default(false)
           .describe("Print scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
+      output: scanOutputSchema(
+        "SCAN_FAILED",
+        "SCAN_REPLAY_UNAVAILABLE",
+        "SCAN_IMPORT_FAILED",
+      ),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -2341,7 +2361,19 @@ export async function main(
           exitCode = 2;
           return;
         }
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        let scanId: string | undefined;
+        try {
+          scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        } catch (error) {
+          const message = errorMessage(error);
+          if (exitCode === 0) errorOutput.write(`codex-security: ${message}\n`);
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_REPLAY_UNAVAILABLE",
+          );
+        }
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
@@ -2370,11 +2402,11 @@ export async function main(
             }
             const imported = recipe["import"];
             const sourcePath = imported["sourcePath"];
-            const format = imported["format"];
+            const importFormat = imported["format"];
             if (
               typeof sourcePath !== "string" ||
               sourcePath.length === 0 ||
-              (format !== "csv" && format !== "json")
+              (importFormat !== "csv" && importFormat !== "json")
             ) {
               throw new CodexSecurityError(
                 "The saved scan recipe contains invalid import settings.",
@@ -2382,18 +2414,15 @@ export async function main(
             }
             const outcome = await runImport({
               sourcePath,
-              format,
+              format: importFormat,
               parentScanId: scanId,
             });
-            exitCode = outcome.exitCode;
-            if (outcome.error !== undefined) {
-              return incurError({
-                code: "SCAN_IMPORT_FAILED",
-                message: outcome.error,
-                exitCode,
-              });
-            }
-            return outcome.data;
+            return finishScan(
+              outcome,
+              format,
+              incurError,
+              "SCAN_IMPORT_FAILED",
+            );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
@@ -2421,12 +2450,12 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          exitCode = 2;
-          return incurError({
-            code: "SCAN_REPLAY_UNAVAILABLE",
-            message,
-            exitCode,
-          });
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_REPLAY_UNAVAILABLE",
+          );
         }
         const outcome = await runScan(
           scanArguments,
@@ -2434,15 +2463,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("match", {
@@ -3641,7 +3662,7 @@ export async function main(
           },
         },
       ],
-      output: scanOutputSchema,
+      output: scanOutputSchema("SCAN_FAILED"),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3731,30 +3752,16 @@ export async function main(
           errorOutput.write(`${message}\n`);
           outcome = { exitCode: 2, error: message };
         }
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          if (format === "json" || format === "jsonl") {
-            const message = safeErrorMessage(outcome.error);
-            if (!argv.includes("--full-output"))
-              return { status: "failed", code: "SCAN_FAILED", message };
-            // Incur would wrap returned data in an ok: true envelope.
-            scanStructuredError = true;
-            return incurError({ code: "SCAN_FAILED", message, exitCode });
-          }
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
         if (
+          outcome.error === undefined &&
           !options.dryRun &&
           format === "toon" &&
           !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
+          exitCode = outcome.exitCode;
           return;
         }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("install-hook", {
