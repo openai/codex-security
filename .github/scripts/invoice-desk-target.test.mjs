@@ -126,6 +126,10 @@ test("falls back to completed behavior runs for GITHUB_TOKEN-created PRs", async
             pullRequest({ state: "closed" }),
           ];
         },
+        async (sha) => {
+          assert.equal(sha, mainSha);
+          return [];
+        },
       ),
       [{ pr: 7, sha: sourceSha }],
     );
@@ -139,9 +143,10 @@ test("fallback rechecks current heads and handles empty association metadata", a
     pullRequest(),
     pullRequest({ head: { sha: mainSha } }),
   ];
-  assert.deepEqual(await resolveScanTargets(run, null, lookup), [
-    { pr: 7, sha: sourceSha },
-  ]);
+  assert.deepEqual(
+    await resolveScanTargets(run, null, lookup, async () => []),
+    [{ pr: 7, sha: sourceSha }],
+  );
   assert.deepEqual(
     await resolveScanTargets(run, null, async () => [
       pullRequest({ state: "closed" }),
@@ -150,9 +155,8 @@ test("fallback rechecks current heads and handles empty association metadata", a
   );
 });
 
-test("ordinary PR runs, target events, and cancelled runs do not dispatch duplicate scans", async () => {
+test("target events and cancelled runs do not queue fallback scans", async () => {
   for (const changed of [
-    { actor: { login: "contributor" } },
     { event: "pull_request_target" },
     { conclusion: "cancelled" },
   ]) {
@@ -183,4 +187,39 @@ test("approval recheck stays bound to its matrix PR even when another PR shares 
   assert.deepEqual(await resolveScanTargets(run, async () => pullRequest()), [
     { pr: 7, sha: sourceSha },
   ]);
+});
+
+test("fallback covers human PRs when GitHub suppresses a target event", async () => {
+  const run = structuredClone(automationContext);
+  run.event.workflow_run.actor.login = "contributor";
+  run.event.workflow_run.head_branch = sourceSha;
+  assert.deepEqual(
+    await resolveScanTargets(
+      run,
+      null,
+      async () => [pullRequest()],
+      async () => [],
+    ),
+    [{ pr: 7, sha: sourceSha }],
+  );
+});
+
+test("fallback skips only the PR and head already dispatched from the same workflow revision", async () => {
+  const run = structuredClone(automationContext);
+  run.event.workflow_run.pull_requests = [];
+  assert.deepEqual(
+    await resolveScanTargets(
+      run,
+      null,
+      async () => [pullRequest(), pullRequest({ number: 8 })],
+      async (sha) => {
+        assert.equal(sha, mainSha);
+        return [
+          `Invoice Desk scan — PR #7 @ ${sourceSha}`,
+          `Invoice Desk scan — PR #8 @ ${mainSha}`,
+        ];
+      },
+    ),
+    [{ pr: 8, sha: sourceSha }],
+  );
 });

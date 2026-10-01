@@ -1,5 +1,5 @@
 name: Invoice Desk OpenAI scan
-run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0}', inputs.pr_number) || (github.event_name == 'workflow_run' && 'automation PR' || 'main baseline') }}"
+run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || (github.event_name == 'workflow_run' && 'PR fallback' || 'main baseline') }}"
 
 on:
   workflow_run:
@@ -28,12 +28,12 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main' && github.ref_protected &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.event == 'pull_request' &&
-        github.event.workflow_run.actor.login == 'github-actions[bot]'))
+       github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-24.04
     # This job reads only trusted helpers and event metadata before caching public packages.
     cache-mode: write
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:

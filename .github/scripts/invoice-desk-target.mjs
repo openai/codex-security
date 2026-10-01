@@ -15,6 +15,7 @@ export async function resolveScanTargets(
   context,
   getPullRequest,
   pullRequestsForCommit,
+  dispatchedScanTitles,
 ) {
   const { eventName, event, repository, sha, target } = context;
   // After approval, recheck this matrix entry rather than other PRs on the same commit.
@@ -27,20 +28,24 @@ export async function resolveScanTargets(
   }
   if (eventName === "workflow_run") {
     const run = event.workflow_run;
-    if (
-      run.event !== "pull_request" ||
-      run.actor.login !== "github-actions[bot]" ||
-      run.conclusion === "cancelled"
-    )
+    if (run.event !== "pull_request" || run.conclusion === "cancelled")
       return [];
-    // GITHUB_TOKEN-created PRs do not emit pull_request_target events.
+    // GitHub can suppress target events for automated PRs and some branch names.
     const requests = await pullRequestsForCommit(run.head_sha);
     const numbers = new Set(run.pull_requests.map((pr) => pr.number));
-    return requests
+    const candidates = requests.filter(
+      (pr) =>
+        eligible(pr, repository, run.head_sha) &&
+        (numbers.size === 0 || numbers.has(pr.number)),
+    );
+    if (candidates.length === 0) return [];
+    const dispatched = new Set(await dispatchedScanTitles(sha));
+    return candidates
       .filter(
         (pr) =>
-          eligible(pr, repository, run.head_sha) &&
-          (numbers.size === 0 || numbers.has(pr.number)),
+          !dispatched.has(
+            `Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`,
+          ),
       )
       .map((pr) => ({ pr: pr.number, sha: pr.head.sha }));
   }
@@ -97,6 +102,19 @@ if (
           { encoding: "utf8" },
         ),
       ).flat(),
+    (sha) =>
+      JSON.parse(
+        execFileSync(
+          "gh",
+          [
+            "api",
+            "--paginate",
+            "--slurp",
+            `repos/${repository}/actions/workflows/invoice-desk-scan.yml/runs?event=workflow_dispatch&branch=main&head_sha=${sha}&per_page=100`,
+          ],
+          { encoding: "utf8", maxBuffer: Infinity },
+        ),
+      ).flatMap((page) => page.workflow_runs.map((run) => run.display_title)),
   );
   appendFileSync(
     process.env.GITHUB_OUTPUT,

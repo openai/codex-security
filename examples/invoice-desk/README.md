@@ -57,10 +57,12 @@ opened, reopened, updated, or retargeted to `main`. That dispatcher handles only
 the PR number and head SHA: it has no checkout, application commands, or inference
 secret. PR changes cannot disable the dispatcher, and failed behavior tests do
 not suppress scanning. Title and description edits do not request another scan.
-For PRs created using `GITHUB_TOKEN`, GitHub suppresses `pull_request_target`;
-a `workflow_run` fallback queues their scan after the behavior workflow completes,
-including failed tests. It resolves the current PR through GitHub's API and runs
-only for the Actions bot so ordinary PRs do not receive duplicate scans.
+GitHub can suppress `pull_request_target` for PRs created using `GITHUB_TOKEN`
+and for certain branch names. A `workflow_run` fallback handles completed behavior
+workflows, including failed tests. It resolves the current PR through GitHub's API
+and skips PR/head pairs already dispatched on `main` from the same workflow
+revision. The dispatch run title includes the PR number and full source SHA so
+this check does not rely on who created the PR.
 
 Both workflows must reach `main` before automatic scanning is active. The
 [dispatcher](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
