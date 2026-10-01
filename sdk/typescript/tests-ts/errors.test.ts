@@ -90,6 +90,7 @@ describe("error messages", () => {
       "sig_value=SYNTHETIC_SIGNATURE",
       "sigHeader=SYNTHETIC_SIGNATURE",
       "proxy https://user:SYNTHETIC_PASSWORD@example.test",
+      "Linear failed for lin_api_SYNTHETIC_SECRET",
       "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY",
       "-----BEGIN PGP PRIVATE KEY BLOCK-----\nSYNTHETIC_PRIVATE_KEY",
     ]) {

@@ -770,6 +770,37 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test("rejects reversed finding line ranges", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    expect(findings["findings"][0]["locations"][0]["startLine"]).toBe(41);
+    findings["findings"][0]["locations"][0]["endLine"] = 40;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(
+      "findings.findings[0].locations[0].endLine: expected an integer >= startLine.",
+    );
+  });
+
+  test("accepts a valid multi-line finding line range", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const location = findings["findings"][0]["locations"][0];
+    expect(location["endLine"]).toBeGreaterThan(location["startLine"]);
+    location["endLine"] = location["startLine"];
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+  });
+
   test("rejects trailing-dot aliases for sealed artifacts", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");

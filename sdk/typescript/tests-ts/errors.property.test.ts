@@ -37,6 +37,7 @@ describe("error-message invariants", () => {
             `sk-${secret}`,
             `sk-proj-${secret}`,
             `github_pat_${secret}`,
+            `lin_api_${secret}`,
             ...["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "npm_"].map(
               (prefix) => `${prefix}${secret}`,
             ),
