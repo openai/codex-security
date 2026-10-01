@@ -370,8 +370,6 @@ describe("CLI", () => {
       for (const [name, option] of Object.entries(
         definitions.options?.properties ?? {},
       )) {
-        // CSV publication is internal and intentionally omitted from public help.
-        if (command.join(" ") === "publish scan" && name === "csv") continue;
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
         expect(help.text()).toContain(flag);
         expect(typeof option.description).toBe("string");

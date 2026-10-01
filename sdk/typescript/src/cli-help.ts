@@ -48,7 +48,7 @@ const SCAN_GROUPS: readonly Group[] = [
 ];
 
 const PUBLISH_GROUPS: readonly Group[] = [
-  ["Input", ["scan", "scan-dir", "finding-id", "workflow-id"]],
+  ["Input", ["scan", "scan-dir", "csv", "finding-id", "workflow-id"]],
   ["Destination", ["to", "findings-url"]],
   [
     "Linear",
@@ -292,9 +292,7 @@ export function formatCliHelp(text: string, columns = 80): string {
           : [renderRows("Commands", rows, width)]),
       );
     } else if (title === "Options:") {
-      const rows = parseRows(lines)
-        .filter((row) => command !== "publish scan" || rowName(row) !== "csv")
-        .map((row) => optionRow(row, command));
+      const rows = parseRows(lines).map((row) => optionRow(row, command));
       sections.push(
         ...(command === "scan"
           ? groupedRows(rows, SCAN_GROUPS, "Advanced", width)

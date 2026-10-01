@@ -2556,7 +2556,8 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish findings from a completed scan.",
+    description:
+      "Publish findings from a completed scan, or a CSV for internal publication.",
     hint:
       "Examples:\n" +
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
@@ -2617,7 +2618,9 @@ export async function main(
         .describe("Preview the findings without publishing them."),
       csv: optionValue("--csv")
         .optional()
-        .describe("Findings CSV to publish instead of a completed scan."),
+        .describe(
+          "Findings CSV for internal publication; not supported with linear or custom.",
+        ),
       skipExisting: z
         .boolean()
         .default(false)
