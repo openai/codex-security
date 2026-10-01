@@ -487,8 +487,17 @@ try {
     "npm must create the published codex-security executable shim.",
   );
 
+  const launchEnvironment = {
+    ...process.env,
+    NODE_OPTIONS: "--preserve-symlinks-main --no-experimental-detect-module",
+    NODE_USE_ENV_PROXY: undefined,
+  };
   function runInstalledCli(argument) {
-    const options = { cwd: consumer, capture: true };
+    const options = {
+      cwd: consumer,
+      capture: true,
+      env: launchEnvironment,
+    };
     if (process.platform === "win32") {
       return run(
         process.env.ComSpec ?? "cmd.exe",
@@ -502,6 +511,41 @@ try {
 
   const version = runInstalledCli("--version");
   assert.equal(version.trim(), packageManifest.version);
+
+  const preload = join(consumer, "unavailable-cwd.mjs");
+  await writeFile(
+    preload,
+    [
+      "const originalCwd = process.cwd;",
+      'Object.defineProperty(process, "cwd", {',
+      "  value() {",
+      '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
+      '      throw new Error("working directory is unavailable");',
+      "    }",
+      "    return originalCwd.call(process);",
+      "  },",
+      "});\n",
+    ].join("\n"),
+  );
+  const failed = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(preload).href,
+      process.platform === "win32" ? launcher : shim,
+      "scan",
+    ],
+    {
+      cwd: consumer,
+      env: launchEnvironment,
+      encoding: "utf8",
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(failed.status, 2, failed.stderr);
+  assert.equal(failed.stdout, "");
+  assert.equal(failed.stderr, "working directory is unavailable\n");
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);

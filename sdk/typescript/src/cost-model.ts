@@ -53,7 +53,9 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
   "gpt-5.5": [5_000, 500, 5_000, 30_000],
   "gpt-5.5-2026-04-23": [5_000, 500, 5_000, 30_000],
+  "gpt-6.1-sol": [2_000, 100, 2_500, 10_000],
   "gpt-6-astra": [10_000, 1_000, 12_500, 50_000],
+  "gpt-6-luna": [100, 10, 125, 500],
   "gpt-5.6": [4_000, 400, 5_000, 20_000],
   "gpt-5.6-sol": [4_000, 400, 5_000, 20_000],
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
@@ -72,7 +74,9 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
   {
     "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
     "gpt-5.5-2026-04-23": [10_000, 1_000, 10_000, 45_000],
+    "gpt-6.1-sol": [4_000, 200, 5_000, 15_000],
     "gpt-6-astra": [20_000, 2_000, 25_000, 75_000],
+    "gpt-6-luna": [200, 20, 250, 750],
     "gpt-5.6": [8_000, 800, 10_000, 30_000],
     "gpt-5.6-sol": [8_000, 800, 10_000, 30_000],
     "gpt-5.6-terra": [4_000, 400, 5_000, 18_000],
@@ -196,7 +200,10 @@ export function estimateScanCost(
       source: pricingModel.startsWith("gpt-5.5")
         ? "https://developers.openai.com/api/docs/models/gpt-5.5"
         : "https://developers.openai.com/api/docs/pricing",
-      asOf: "2026-09-14",
+      asOf:
+        pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+          ? "2026-09-30"
+          : "2026-09-14",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: usdPerMillionTokens(pricing),

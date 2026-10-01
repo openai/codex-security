@@ -326,7 +326,18 @@ describe("read-only finding verification", () => {
 
     expect(
       await main(
-        ["verify-fix", "--scan", "scan-1", "--severity", "high", "--json"],
+        [
+          "verify-fix",
+          "--scan",
+          "scan-1",
+          "--severity",
+          "high",
+          "--model",
+          "gpt-6-astra",
+          "--effort",
+          "max",
+          "--json",
+        ],
         stdout.stream,
         capture().stream,
         dependencies({
@@ -340,7 +351,9 @@ describe("read-only finding verification", () => {
               },
             };
           },
-          onCodex: (_args, output) => {
+          onCodex: (args, output) => {
+            expect(args).toContain('model="gpt-6-astra"');
+            expect(args).toContain('model_reasoning_effort="max"');
             expect(output?.appServer?.directory).toBe("/saved/repository");
             expect(output?.appServer?.sandbox).toBe("read-only");
             const findings = JSON.parse(

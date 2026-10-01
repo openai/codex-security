@@ -31,6 +31,8 @@
 - require workflow checks and production dependency audits ([#1128](https://github.com/openai/codex-security/pull/1128))
 - attribute records reviews to participating observations ([#1145](https://github.com/openai/codex-security/pull/1145))
 - restore GPT-5.6 Sol as the default model ([#1181](https://github.com/openai/codex-security/pull/1181))
+- share model options across commands ([#1143](https://github.com/openai/codex-security/pull/1143))
+- add Invoice Desk fixture and OpenAI PR scans ([#1144](https://github.com/openai/codex-security/pull/1144))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

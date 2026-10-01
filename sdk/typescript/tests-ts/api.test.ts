@@ -999,6 +999,28 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
     ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    for (const model of [
+      "gpt-6-astra",
+      "gpt-6.1-sol",
+      "gpt-6-luna",
+      "openai.gpt-6.1-sol",
+      "openai.gpt-6-luna",
+    ]) {
+      const configured = new TestClient(
+        { codexOverrides: { model } },
+        {
+          environment: {},
+          prepareRuntime: async () => {
+            runtimeStarted = true;
+            throw new Error("runtime should not initialize");
+          },
+        },
+      );
+      await expect(
+        configured.preflight(repository, { maxCostUsd: 5 }),
+      ).resolves.toMatchObject({ model, maxCostUsd: 5 });
+      await configured.close();
+    }
     for (const maxCostUsd of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       await expect(
         client.preflight(repository, { maxCostUsd }),
