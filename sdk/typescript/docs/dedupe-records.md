@@ -121,15 +121,14 @@ and beneficiaries are nonempty. Candidate-only observations never become
 beneficiaries, even when selected as the final representative. An incoming
 observation participating in several reviews appears in each review's metadata.
 
-This is additive metadata: JSON-RPC remains 2.0 and input/result versions remain
-
-1. Older hosts may ignore it; hosts that require attribution must validate it
-   and reject missing or unknown identities before executing a review. Persist the
-   request UUID and attribution before provisioning remote execution. The host owns
-   accounting and any partitioning of invocation anchors by origin scan; the CLI
-   preserves the supplied batch and does not assign costs or infer scan ownership.
-   The `model` field remains the configured review model. A new invocation produces
-   new request UUIDs; this metadata does not introduce cross-invocation replay.
+This is additive metadata: JSON-RPC remains 2.0 and input/result versions remain 1.
+Older hosts may ignore it; hosts that require attribution must validate it
+and reject missing or unknown identities before executing a review. Persist the
+request UUID and attribution before provisioning remote execution. The host owns
+accounting and any partitioning of invocation anchors by origin scan; the CLI
+preserves the supplied batch and does not assign costs or infer scan ownership.
+The `model` field remains the configured review model. A new invocation produces
+new request UUIDs; this metadata does not introduce cross-invocation replay.
 
 `stage` is `screening` or `pair-review`. Screening uses `gpt-5.6-luna`/`xhigh`;
 independent pair validation uses `gpt-5.6-sol`/`high`. Execute each request in a
