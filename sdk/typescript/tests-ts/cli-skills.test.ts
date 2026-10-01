@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, spyOn, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import {
   main,
   readSkillCommandOutput,
@@ -845,6 +846,79 @@ describe("CLI skill commands", () => {
   });
 
   test.each(["validate", "patch", "verify-fix"] as const)(
+    "passes custom inference settings and authentication to %s",
+    async (command) => {
+      const providerConfiguration = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        env_key: "SYNTHETIC_GATEWAY_KEY",
+      };
+      const overrides = [
+        'model="synthetic-model"',
+        'model_provider="synthetic"',
+        ...Object.entries(providerConfiguration).map(
+          ([key, value]) =>
+            `model_providers.synthetic.${key}=${JSON.stringify(value)}`,
+        ),
+      ];
+      const stderr = capture();
+      let invocation: readonly string[] = [];
+      expect(
+        await main(
+          [
+            command,
+            "Synthetic finding",
+            ...overrides.flatMap((override) => ["--codex", override]),
+          ],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            environment: { SYNTHETIC_GATEWAY_KEY: "SYNTHETIC_VALUE" },
+            onCodex: (args, output, environment) => {
+              invocation = args;
+              expect(output?.modelProvider).toBe("synthetic");
+              expect(output?.providerConfiguration).toEqual(
+                providerConfiguration,
+              );
+              expect(environment?.["SYNTHETIC_GATEWAY_KEY"]).toBe(
+                "SYNTHETIC_VALUE",
+              );
+              if (command === "verify-fix") {
+                output?.stdout.write(
+                  JSON.stringify({
+                    results: [
+                      {
+                        id: "finding-1",
+                        status: "fixed",
+                        evidence: "Synthetic verification",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          }),
+        ),
+        stderr.text(),
+      ).toBe(0);
+      expect(invocation).toContain('model="synthetic-model"');
+      expect(invocation).toContain('model_provider="synthetic"');
+      expect(
+        parseToml(
+          invocation.find((arg) => arg.startsWith("model_providers="))!,
+        ),
+      ).toEqual({ model_providers: { synthetic: providerConfiguration } });
+      expect(invocation).toContain(
+        command === "verify-fix"
+          ? 'approval_policy="on-request"'
+          : 'approval_policy="never"',
+      );
+    },
+  );
+
+  test.each(["validate", "patch", "verify-fix"] as const)(
     "passes explicit analytics settings to %s",
     async (command) => {
       for (const override of [
@@ -893,7 +967,7 @@ describe("CLI skill commands", () => {
       }
 
       for (const override of [
-        'model_provider="synthetic"',
+        'sandbox_mode="danger-full-access"',
         "features.goals=false",
         "analytics.unrelated=false",
         "analytics.enabled=false",
