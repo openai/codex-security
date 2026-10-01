@@ -163,8 +163,8 @@ describe("scan import", () => {
         deps,
       ),
     ).toBe(0);
-    expect(help.text()).toContain("--csv <string>");
-    expect(help.text()).toContain("--json <string>");
+    expect(help.text()).toContain("--csv <file>");
+    expect(help.text()).toContain("--json <file>");
     expect(help.text()).toContain("--format json");
     const schema = capture();
     expect(
