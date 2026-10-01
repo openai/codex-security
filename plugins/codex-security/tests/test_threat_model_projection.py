@@ -192,6 +192,31 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.assertIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
         self.assertIn(b"Queue ownership", FINALIZER.build_threat_model_export(self.scan_dir))
 
+    def test_dangling_scan_manifest_does_not_select_an_unrelated_policy_model(self) -> None:
+        manifest = self.scan_dir / "scan-manifest.json"
+        manifest.symlink_to("missing-manifest.json")
+        self.write_json(
+            "policy-draft.json",
+            {
+                "documentType": "codex-security.policy-draft",
+                "threatModel": {"summary": "A separate policy model."},
+            },
+        )
+        legacy = self.scan_dir / "threatmodel.md"
+        legacy.write_text("# Earlier model\n")
+        for read_model in (
+            FINALIZER.describe_threat_model,
+            FINALIZER.build_threat_model_export,
+        ):
+            with self.assertRaisesRegex(FINALIZER.ContractError, r"scan-manifest\.json"):
+                read_model(self.scan_dir)
+        self.assertTrue(manifest.is_symlink())
+        self.assertEqual(legacy.read_text(), "# Earlier model\n")
+        manifest.unlink()
+        self.assertIn(
+            b"A separate policy model.", FINALIZER.build_threat_model_export(self.scan_dir)
+        )
+
     @unittest.skipIf(os.name == "nt", "POSIX permission modes")
     def test_model_files_remain_private_and_editable_under_restrictive_umask(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Queue ownership and boundaries."}

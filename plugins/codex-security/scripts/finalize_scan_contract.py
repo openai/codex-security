@@ -190,10 +190,14 @@ def _read_saved_threat_model(
     """Read canonical content first; old documents are a read-only compatibility path."""
     scan_dir = _require_scan_directory(scan_dir)
     saved_provenance: dict[str, Any] | None = None
+    scan_manifest_path = scan_dir / "scan-manifest.json"
     filename = (
-        "scan-manifest.json" if (scan_dir / "scan-manifest.json").exists() else "policy-draft.json"
+        "scan-manifest.json"
+        if scan_manifest_path.exists() or scan_manifest_path.is_symlink()
+        else "policy-draft.json"
     )
-    if (scan_dir / filename).exists():
+    manifest_path = scan_dir / filename
+    if manifest_path.exists() or manifest_path.is_symlink():
         manifest = _read_scan_local_json(scan_dir, filename, filename)
         scan = (
             _require_dict(manifest, "scan", "manifest")
