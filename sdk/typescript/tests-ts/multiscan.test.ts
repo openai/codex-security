@@ -1943,24 +1943,8 @@ describe("multiscan", () => {
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
-    const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
+    const failure = "temporary failure: token=SYNTHETIC_MULTISCAN_TOKEN";
     const knowledgeBasePaths = ["architecture.md"];
-    const proxyUrl =
-      "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
-    const queryUrl =
-      "https://proxy.test/v1/responses?api_key=SYNTHETIC_MULTISCAN_QUERY_123&safe=1";
-    const shortAuthorization = "Bearer abc123";
-    const suffixedSecret = "SYNTHETIC_SUFFIXED_CLIENT_SECRET_123";
-    const suffixedToken = "SYNTHETIC_SUFFIXED_ACCESS_TOKEN_123";
-    const suffixedQuery = "SYNTHETIC_SUFFIXED_QUERY_SECRET_123";
-    const quotedSecret = "SYNTHETIC correct horse battery staple";
-    const opaqueAuthorization = "SYNTHETIC opaque authorization secret";
-    const npmAuthorization = "SYNTHETIC_NPM_AUTH_VALUE_123";
-    const customAuthorization = "SYNTHETIC_CUSTOM_AUTHORIZATION_123";
-    const suffixedAuthorization = "SYNTHETIC_SUFFIXED_AUTHORIZATION_123";
-    const paddedAuthorization = "SYNTHETIC_PADDED_AUTHORIZATION_TOKEN==";
-    const keyedAuthorization = "SYNTHETIC_KEYED_AUTHORIZATION_SECRET_123";
-    const camelCaseSecret = "SYNTHETIC_CAMEL_CASE_CLIENT_SECRET_123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -1974,9 +1958,7 @@ describe("multiscan", () => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
           if (attempts === 1) {
-            throw new Error(
-              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} Authorization: Custom key=${keyedAuthorization} clientSecretValue=${camelCaseSecret} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
-            );
+            throw new Error(failure);
           }
           return await completedScan(scanOptions.outputDir!);
         }),
@@ -1987,12 +1969,9 @@ describe("multiscan", () => {
     expect(attempts).toBe(2);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "retry", status: "failed", attempt: 1 },
+      { id: "retry", status: "failed", attempt: 1, error: failure },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
-    const ledger = await readFile(summary.resultsPath, "utf8");
-    expect(ledger).toContain('"error":"[redacted]"');
-    expect(ledger).not.toContain("SYNTHETIC");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {

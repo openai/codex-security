@@ -1022,7 +1022,7 @@ describe("CLI authentication", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({
         status: "failed",
         code: "SCAN_FAILED",
-        message: message.includes("access token") ? "[redacted]" : message,
+        message,
       });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");

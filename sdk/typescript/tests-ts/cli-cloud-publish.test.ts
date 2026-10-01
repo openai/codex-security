@@ -551,11 +551,15 @@ describe("publish scan to Cloud", () => {
         { scanDir: directories[0], ...receipt },
         { scanDir: directories[2], ...receipt, scanId: "scan-3" },
       ],
-      failed: [{ scanDir: directories[1], error: "[redacted]" }],
+      failed: [
+        {
+          scanDir: directories[1],
+          error: `Cloud failed: ${SYNTHETIC_CREDENTIALS}`,
+        },
+      ],
       notAttempted: [],
     });
-    expect(stderr.text()).toContain("[redacted]");
-    expect(stderr.text()).not.toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
   });
 
   test.each([false, true])(
@@ -989,7 +993,7 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("reports publication failures without leaking credentials or claiming success", async () => {
+  test("reports original publication failures without claiming success", async () => {
     const deps = dependencies();
     deps.publishScanToCloud = async () => {
       throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
@@ -1005,7 +1009,9 @@ describe("publish scan to Cloud", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("codex-security: [redacted]\n");
+    expect(stderr.text()).toBe(
+      `codex-security: Cloud failed: ${SYNTHETIC_CREDENTIALS}\n`,
+    );
   });
 
   test("preserves a confirmed single-scan receipt when cancellation follows the response", async () => {

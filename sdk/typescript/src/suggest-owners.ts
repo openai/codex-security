@@ -7,7 +7,7 @@ import {
   type OwnerIdentity,
 } from "./owner-evidence.js";
 import { mergedCodexConfig, scanModelConfiguration } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
@@ -175,7 +175,7 @@ export async function suggestOwnersInternal(
     } catch (error) {
       options.signal?.throwIfAborted();
       result.status = "error";
-      result.reason = safeErrorMessage(error);
+      result.reason = errorMessage(error);
     }
   }
   options.signal?.throwIfAborted();
