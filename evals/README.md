@@ -8,9 +8,9 @@ being embedded in its source tree or shipped npm runtime.
 - [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC
   size-limit recovery, pagination, and finding retention. It reuses the MCP
   test helpers and dependencies.
-- [Secret discovery](secret-discovery/README.md): optional current-source
-  discovery and final-retention eval using the production core audit and local
-  synthetic credentials, with deterministic grading and harness checks.
+- [Secret discovery](secret-discovery/README.md): checks whether the production
+  core audit finds synthetic credentials in source and keeps them in its final
+  findings, with deterministic grading and harness checks.
 
 Model runs are opt-in. CI runs the deterministic triage and secret-discovery
 helper checks and the real-IPC reducer regression through the normal MCP test
