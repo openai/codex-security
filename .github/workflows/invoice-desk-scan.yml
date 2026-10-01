@@ -134,7 +134,6 @@ jobs:
             --ignore-scripts --no-audit --no-fund \
             --registry=https://registry.npmjs.org/ \
             "@openai/codex-security@$CODEX_SECURITY_VERSION"
-          echo "$RUNNER_TEMP/codex-security-cli/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Check out the exact source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,7 +171,7 @@ jobs:
           fi
           started_at=$SECONDS
           scan_status=0
-          codex-security scan . \
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" scan . \
             --provider openai --auth api-key \
             --model gpt-5.6-sol --effort high --mode standard \
             --headless --format json \
@@ -188,7 +187,7 @@ jobs:
         env:
           CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
         run: |
-          codex-security export "$RUNNER_TEMP/invoice-desk-scan" \
+          "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" export "$RUNNER_TEMP/invoice-desk-scan" \
             --export-format sarif \
             --source-root "$RUNNER_TEMP/invoice-desk" \
             --output "$RUNNER_TEMP/invoice-desk.sarif"

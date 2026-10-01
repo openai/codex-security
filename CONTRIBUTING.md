@@ -71,9 +71,9 @@ SHELLCHECK_OPTS=--severity=warning actionlint
 zizmor --offline --strict-collection --min-severity medium --config .github/zizmor.yml .github
 ```
 
-The actionlint configuration preserves GitHub's supported release queue syntax
-until the linter supports it. The zizmor configuration records the two existing
-privileged triggers and why they do not execute pull request code. Review these
+The actionlint configuration preserves GitHub's supported release queue and
+job-level cache syntax until the linter supports them. The zizmor configuration
+records reviewed privileged triggers and their trust boundaries. Review these
 exceptions when changing the affected workflows.
 
 CI package builds and npm release validation require the production dependency
