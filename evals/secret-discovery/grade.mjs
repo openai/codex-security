@@ -115,16 +115,13 @@ function matches(finding, expected) {
 }
 
 function matchesConsumer(location, expected) {
-  const end = location.endLine ?? location.startLine;
   return (
-    location.role === "sink" &&
-    normalizeSourcePath(location.path) === expected.path &&
     expected.consumerLine !== null &&
-    Number.isInteger(location.startLine) &&
-    Number.isInteger(end) &&
-    location.startLine >= expected.consumerLine &&
-    end >= location.startLine &&
-    end <= expected.lineCount
+    matchesLocation(location, {
+      ...expected,
+      line: expected.consumerLine,
+      endLine: expected.consumerLine,
+    })
   );
 }
 
@@ -146,12 +143,7 @@ function validEvidence(finding, fixture) {
         evidence.some(
           (entry) =>
             matchesLocation(entry, expected) ||
-            (expected.consumerLine !== null &&
-              matchesLocation(entry, {
-                ...expected,
-                line: expected.consumerLine,
-                endLine: expected.lineCount,
-              })),
+            matchesConsumer(entry, expected),
         ),
       )
   );
@@ -175,7 +167,8 @@ export function gradeResult(result, fixture, repo) {
             !fixture.positives.some(
               (expected) =>
                 matchesLocation(location, expected) ||
-                matchesConsumer(location, expected),
+                (location.role === "sink" &&
+                  matchesConsumer(location, expected)),
             )),
       )
       .map((location) => location.path);

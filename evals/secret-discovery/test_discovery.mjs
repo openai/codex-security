@@ -344,6 +344,65 @@ test("accepts multiline exposure and consumer excerpts with supporting context",
   }
 });
 
+test("consumer evidence and sinks must cover credential use, not function framing", () => {
+  const fixture = createFixture();
+  for (const [id, line] of [
+    ["active-source", 5],
+    ["active-source", 6],
+    ["integration-source", 5],
+    ["integration-source", 6],
+    ["private-key", 5],
+    ["private-key", 7],
+  ]) {
+    const index = fixture.positives.findIndex((expected) => expected.id === id);
+    const expected = fixture.positives[index];
+    const result = retainedResult(fixture);
+    result.findings[index].codeEvidence = [
+      sourceEvidence(fixture, expected.path, line),
+    ];
+    assert.deepEqual(
+      gradeResult(result, fixture).errors,
+      ["missing or invalid code evidence"],
+      `${id}:${line}`,
+    );
+
+    const invalidSink = retainedResult(fixture);
+    invalidSink.findings[index].locations.push({
+      path: expected.path,
+      startLine: line,
+      role: "sink",
+    });
+    assert.equal(
+      gradeResult(invalidSink, fixture).falsePositiveCount,
+      1,
+      `${id}:${line}`,
+    );
+  }
+});
+
+test("accepts actual credential-use lines and excerpts containing them", () => {
+  const fixture = createFixture();
+  for (const [index, expected] of fixture.positives.entries()) {
+    if (expected.consumerLine === null) continue;
+    for (const [startLine, endLine] of [
+      [expected.consumerLine, expected.consumerLine],
+      [5, expected.lineCount],
+    ]) {
+      const result = retainedResult(fixture);
+      result.findings[index].codeEvidence = [
+        sourceEvidence(fixture, expected.path, startLine, endLine),
+      ];
+      result.findings[index].locations.push({
+        path: expected.path,
+        startLine,
+        endLine,
+        role: "sink",
+      });
+      assert.equal(gradeResult(result, fixture).passed, true, expected.id);
+    }
+  }
+});
+
 test("multiple expected exposures can share a finding", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);

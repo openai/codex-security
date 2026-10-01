@@ -124,7 +124,7 @@ export function createFixture() {
         "src/client.py",
         "SERVICE_TOKEN =",
         ["CWE-798", "CWE-522"],
-        "def delivery_request",
+        '"Authorization": "Bearer " + SERVICE_TOKEN',
       ),
       positive("unused-source", "src/retired.py", "LEGACY_SERVICE_TOKEN =", [
         "CWE-798",
@@ -135,7 +135,7 @@ export function createFixture() {
         "tests/test_delivery.py",
         "INTEGRATION_TOKEN =",
         ["CWE-798", "CWE-522"],
-        "def integration_request",
+        '"Authorization": "Bearer " + INTEGRATION_TOKEN',
       ),
       positive("dotenv-url", "config/.env", "DATABASE_URL=", [
         "CWE-798",
@@ -154,7 +154,7 @@ export function createFixture() {
         "src/signing.mjs",
         "const signingKey",
         ["CWE-321", "CWE-798", "CWE-312"],
-        "export function signMessage",
+        "return sign(",
         privateKey.trim().split("\n").at(-2),
       ),
     ],
