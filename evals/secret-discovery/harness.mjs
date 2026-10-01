@@ -151,6 +151,8 @@ export function codexSettings(
   environment = process.env,
   hasLogin = false,
 ) {
+  const codexApiKey = environment.CODEX_API_KEY?.trim();
+  const openAiApiKey = environment.OPENAI_API_KEY?.trim();
   // Keep unrelated service credentials out of the eval process entirely.
   const inherited = new Set([
     "PATH",
@@ -177,8 +179,8 @@ export function codexSettings(
   return {
     codexPathOverride: codexPath,
     // Native exec reads CODEX_API_KEY; let the SDK map the OpenAI fallback.
-    ...(!hasLogin && !environment.CODEX_API_KEY && environment.OPENAI_API_KEY
-      ? { apiKey: environment.OPENAI_API_KEY }
+    ...(!hasLogin && !codexApiKey && openAiApiKey
+      ? { apiKey: openAiApiKey }
       : {}),
     env: {
       ...Object.fromEntries(

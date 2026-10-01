@@ -209,6 +209,33 @@ test(
   },
 );
 
+for (const [name, codexApiKey, hasLogin, expectedKey] of [
+  ["blank Codex key", " \t ", false, "synthetic-env-key"],
+  ["explicit Codex key", "synthetic-codex-key", false, "synthetic-codex-key"],
+  ["file login", undefined, true, undefined],
+]) {
+  test(`native auth precedence with ${name}`, unixOnly, async (t) => {
+    const { directory, prepared, settings: original } = await nativeFixture(t);
+    const settings = codexSettings(
+      original.env.CODEX_HOME,
+      original.codexPathOverride,
+      {
+        ...original.env,
+        CODEX_API_KEY: codexApiKey,
+        OPENAI_API_KEY: " synthetic-env-key \n ",
+      },
+      hasLogin,
+    );
+    await preflightEval(prepared, settings, new AbortController().signal);
+    const { report } = await runPreparedEval(prepared, new Codex(settings));
+    assert.equal(report.passed, true);
+    for (const processName of ["preflight", "exec"]) {
+      const { env } = await readJson(join(directory, `${processName}.json`));
+      assert.equal(env.CODEX_API_KEY, expectedKey);
+    }
+  });
+}
+
 test(
   "managed profile rejection prevents starting the SDK exec turn",
   unixOnly,
