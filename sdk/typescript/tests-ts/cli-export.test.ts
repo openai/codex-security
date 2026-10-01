@@ -112,6 +112,34 @@ describe("CLI", () => {
     expect(exportedScanDir).toBe(scanDir);
   });
 
+  test("reports default-source history failures once without running the exporter", async () => {
+    for (const lookupFails of [false, true]) {
+      const deps = dependencies({
+        onWorkbench: () => {
+          if (lookupFails) throw new Error("Synthetic history failure.");
+          return { scans: [] };
+        },
+      });
+      let exports = 0;
+      deps.exportFindings = async () => {
+        exports += 1;
+        return undefined;
+      };
+      const stdout = capture();
+      const stderr = capture();
+      expect(await main(["export"], stdout.stream, stderr.stream, deps)).toBe(
+        2,
+      );
+      expect(stderr.text()).toBe(
+        lookupFails
+          ? "codex-security: Synthetic history failure.\n"
+          : "codex-security: No completed scans found for the current repository.\n",
+      );
+      expect(stdout.text()).toBe("");
+      expect(exports).toBe(0);
+    }
+  });
+
   test("exports saved models with the selected Python and rejects changed recorded manifests", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-export-python-")),

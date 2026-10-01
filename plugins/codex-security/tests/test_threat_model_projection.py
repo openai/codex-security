@@ -139,6 +139,45 @@ class ThreatModelProjectionTest(unittest.TestCase):
         with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
             FINALIZER.build_threat_model_export(self.scan_dir)
 
+    def test_blank_legacy_summary_keeps_assets_and_remains_exportable(self) -> None:
+        self.manifest["scan"]["threatModel"] = {
+            "summary": " \n\t",
+            "assets": ["Stored records"],
+        }
+        self.write_scan()
+        FINALIZER.finalize_scan(self.scan_dir)
+        FINALIZER.finalize_scan(self.scan_dir)
+        for document in (
+            (self.scan_dir / "report.md").read_text(),
+            FINALIZER.build_threat_model_export(self.scan_dir).decode(),
+        ):
+            self.assertIn("No explicit canonical threat-model summary was recorded.", document)
+            self.assertIn("- Stored records", document)
+        self.assertEqual(
+            FINALIZER.build_findings_export(self.scan_dir, "json"),
+            (self.scan_dir / "findings.json").read_bytes(),
+        )
+
+    def test_scan_manifest_does_not_fall_back_to_an_unrelated_policy_model(self) -> None:
+        self.write_scan()
+        self.write_json(
+            "policy-draft.json",
+            {
+                "documentType": "codex-security.policy-draft",
+                "threatModel": {"summary": "A separate policy model."},
+            },
+        )
+        FINALIZER.finalize_scan(self.scan_dir)
+        self.assertFalse((self.scan_dir / "threatmodel.md").exists())
+        with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
+            FINALIZER.describe_threat_model(self.scan_dir)
+        with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
+            FINALIZER.build_threat_model_export(self.scan_dir)
+        (self.scan_dir / "scan-manifest.json").unlink()
+        self.assertIn(
+            b"A separate policy model.", FINALIZER.build_threat_model_export(self.scan_dir)
+        )
+
     def test_threat_model_write_failure_preserves_canonical_content(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Queue ownership and boundaries."}
         self.write_scan()

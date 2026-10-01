@@ -4786,8 +4786,10 @@ export async function main(
             dependencies,
           );
         } catch (error) {
+          if (exitCode !== 2) {
+            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          }
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         }
       },
     })

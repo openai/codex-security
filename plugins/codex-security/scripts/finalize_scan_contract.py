@@ -190,9 +190,10 @@ def _read_saved_threat_model(
     """Read canonical content first; old documents are a read-only compatibility path."""
     scan_dir = _require_scan_directory(scan_dir)
     saved_provenance: dict[str, Any] | None = None
-    for filename in ("scan-manifest.json", "policy-draft.json"):
-        if not (scan_dir / filename).exists():
-            continue
+    filename = (
+        "scan-manifest.json" if (scan_dir / "scan-manifest.json").exists() else "policy-draft.json"
+    )
+    if (scan_dir / filename).exists():
         manifest = _read_scan_local_json(scan_dir, filename, filename)
         scan = (
             _require_dict(manifest, "scan", "manifest")
@@ -207,8 +208,7 @@ def _read_saved_threat_model(
             manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
             scan = manifest["scan"]
         provenance = threat_model_provenance(manifest)
-        if saved_provenance is None:
-            saved_provenance = provenance
+        saved_provenance = provenance
         model = scan.get("threatModel")
         if isinstance(model, dict):
             contents = _render_threat_model(model, provenance)

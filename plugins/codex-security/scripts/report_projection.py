@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import re
 from collections import Counter
-from pathlib import Path
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -871,18 +869,30 @@ def build_report_markdown(
             "",
         ]
     )
-    if threat_model:
-        script = Path(__file__).resolve().with_name("threat_model_projection.py")
-        spec = importlib.util.spec_from_file_location(
-            "codex_security_threat_model_projection", script
-        )
-        if spec is None or spec.loader is None:
-            raise ReportProjectionError(f"could not load threat model projection helper: {script}")
-        renderer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(renderer)
-        lines.append(renderer.threat_model_body(threat_model, heading_level=3))
+    content = threat_model.get("content")
+    if threat_model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+        lines.append(content)
     else:
-        lines.append("No explicit canonical threat-model summary was recorded.")
+        lines.append(
+            _text(
+                threat_model.get("summary"),
+                "No explicit canonical threat-model summary was recorded.",
+            )
+        )
+        for heading, key, fallback in (
+            ("Assets", "assets", "No assets were recorded."),
+            ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
+            (
+                "Attacker Capabilities",
+                "attackerCapabilities",
+                "No attacker capabilities were recorded.",
+            ),
+            ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
+            ("Assumptions", "assumptions", "No assumptions were recorded."),
+        ):
+            values = _strings(threat_model.get(key))
+            if values:
+                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:

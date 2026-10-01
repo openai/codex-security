@@ -16,17 +16,19 @@ def _markdown_content(model: dict[str, Any]) -> str | None:
     return None
 
 
-def threat_model_body(model: dict[str, Any], *, heading_level: int = 2) -> str:
+def threat_model_body(model: dict[str, Any]) -> str:
     """Keep authored Markdown intact, including summaries from older scans."""
     content = _markdown_content(model)
     if content is not None:
         return content
     summary = model.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
+    if not isinstance(summary, str) or not summary:
         if model.get("format") == "markdown":
             raise ValueError("threatModel.content: expected non-empty Markdown")
         raise ValueError("threatModel.summary: expected a non-empty string")
-    sections = [summary]
+    sections = [
+        summary if summary.strip() else "No explicit canonical threat-model summary was recorded."
+    ]
     for heading, key in (
         ("Assets", "assets"),
         ("Trust Boundaries", "trustBoundaries"),
@@ -40,7 +42,7 @@ def threat_model_body(model: dict[str, Any], *, heading_level: int = 2) -> str:
         for index, value in enumerate(values):
             if not isinstance(value, str):
                 raise ValueError(f"threatModel.{key}[{index}]: expected a string")
-        sections.append(f"{'#' * heading_level} {heading}")
+        sections.append(f"## {heading}")
         sections.append("\n".join("- " + value.replace("\n", "\n  ") for value in values))
     return "\n\n".join(sections)
 
