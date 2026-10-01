@@ -18,7 +18,8 @@ function event(overrides: Record<string, unknown> = {}) {
     item: {
       id: "preflight-1",
       type: "command_execution",
-      command: "python3 /plugin/scripts/config_preflight.py --profile security_scan",
+      command:
+        "python3 /plugin/scripts/config_preflight.py --profile security_scan",
       aggregated_output: output(),
       status: "completed",
       exit_code: 0,
