@@ -1,4 +1,5 @@
 :root {
+  --muted: #5d6653;
   color-scheme: light;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #262924;
@@ -95,13 +96,13 @@ button:disabled {
 }
 small {
   display: block;
-  color: #797f75;
+  color: var(--muted);
   line-height: 1.7;
   font-size: 12px;
 }
 .nav-label,
 .eyebrow {
-  color: #7b846f;
+  color: var(--muted);
   font-size: 10px;
   letter-spacing: 1.8px;
   font-weight: 700;
@@ -120,7 +121,7 @@ nav a {
   gap: 13px;
   padding: 12px;
   border-radius: 7px;
-  color: #737b6e;
+  color: var(--muted);
   font-size: 13px;
   font-weight: 500;
 }
@@ -174,7 +175,7 @@ main {
   justify-content: space-between;
   border-bottom: 1px solid #e4e7df;
   padding: 0 44px;
-  color: #737b6e;
+  color: var(--muted);
   font-size: 12px;
 }
 .slash {
@@ -227,7 +228,7 @@ p {
   line-height: 1.6;
 }
 .muted {
-  color: #7a8173;
+  color: var(--muted);
   font-size: 13px;
   margin: 8px 0;
 }
@@ -275,7 +276,7 @@ p {
 .stat > span {
   display: block;
   font-size: 12px;
-  color: #7b8373;
+  color: var(--muted);
 }
 .stat > strong {
   display: block;
@@ -303,7 +304,7 @@ p {
 .count {
   display: inline-block;
   background: #f1f4eb;
-  color: #768268;
+  color: var(--muted);
   font-size: 11px;
   padding: 3px 7px;
   margin-left: 6px;
@@ -322,7 +323,7 @@ th {
   text-align: left;
   font-size: 10px;
   letter-spacing: 0.5px;
-  color: #858d7c;
+  color: var(--muted);
   background: #fafbf8;
   font-weight: 500;
   padding: 12px 24px;
@@ -364,7 +365,7 @@ td small {
   display: inline-block;
   padding: 5px 8px;
   background: #f3efdf;
-  color: #978145;
+  color: #79622f;
   border-radius: 5px;
   font-size: 10px;
   font-weight: 500;
@@ -374,11 +375,11 @@ td small {
 }
 .badge.approved {
   background: #eaf1e4;
-  color: #618347;
+  color: #4b6a33;
 }
 .badge.sent {
   background: #eaf0f6;
-  color: #5c7a99;
+  color: #456585;
 }
 .bottom-note {
   display: flex;
@@ -389,7 +390,7 @@ td small {
 }
 .bottom-note p {
   font-size: 11px;
-  color: #919987;
+  color: var(--muted);
   margin: 0;
 }
 .bottom-note strong {
@@ -492,7 +493,7 @@ hr {
   display: inline-block;
   margin-bottom: 20px;
   font-size: 12px;
-  color: #758467;
+  color: var(--muted);
 }
 .policy-value {
   font-size: 32px;
@@ -536,7 +537,7 @@ hr {
   text-align: center;
   padding: 34px 0 18px;
   font-size: 12px;
-  color: #8b9381;
+  color: var(--muted);
 }
 details {
   margin-top: 18px;
@@ -612,7 +613,7 @@ dialog::backdrop {
 }
 .login-intro p {
   max-width: 310px;
-  color: #7c896f;
+  color: var(--muted);
   font-size: 14px;
 }
 .login-decoration {
@@ -668,7 +669,7 @@ dialog::backdrop {
 .fine-print {
   text-align: center;
   font-size: 10px;
-  color: #9ba18f;
+  color: var(--muted);
   margin-top: 25px;
 }
 @media (max-width: 1000px) {
