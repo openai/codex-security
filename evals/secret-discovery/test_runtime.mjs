@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  realpath,
+  rename,
   rm,
+  stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +25,7 @@ import {
   prepareEval,
   runPreparedEval,
 } from "./harness.mjs";
+import { createEvalHome, withEvalState } from "./runtime.mjs";
 
 const unixOnly = { skip: process.platform === "win32", timeout: 15000 };
 const sdkUrl = new URL(
@@ -35,6 +42,138 @@ const runtimeUrl = new URL("./runtime.mjs", import.meta.url).href;
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
+
+const createHome = (root = tmpdir()) => mkdtemp(join(root, "eval-home-test-"));
+
+test("saved login refresh survives cleanup without importing config or changing permissions", async (t) => {
+  const ambient = await mkdtemp(join(tmpdir(), "eval-login-test-"));
+  t.after(() => rm(ambient, { recursive: true, force: true }));
+  const auth = join(ambient, "auth.json");
+  await writeFile(auth, '{"tokens":{"refresh_token":"synthetic-original"}}');
+  if (process.platform !== "win32") await chmod(auth, 0o640);
+  const originalMode = (await stat(auth)).mode;
+  await writeFile(
+    join(ambient, "config.toml"),
+    '[mcp_servers.unrelated]\ncommand="unused"\n',
+  );
+  let home;
+  await withEvalState(
+    () => createEvalHome(createHome, ambient),
+    async (state) => {
+      home = state.home;
+      assert.equal(state.hasLogin, true);
+      assert.equal(dirname(home), await realpath(ambient));
+      assert.deepEqual(await readdir(home), ["auth.json"]);
+      assert.equal(
+        (await stat(join(home, "auth.json"))).ino,
+        (await stat(auth)).ino,
+      );
+      assert.equal((await stat(auth)).mode, originalMode);
+      const env = { OPENAI_API_KEY: "synthetic-env-key" };
+      assert.equal(
+        codexSettings(home, "/tmp/bin/codex", env, state.hasLogin).apiKey,
+        undefined,
+      );
+      const explicit = codexSettings(
+        home,
+        "/tmp/bin/codex",
+        {
+          ...env,
+          CODEX_API_KEY: "synthetic-explicit-key",
+        },
+        state.hasLogin,
+      );
+      assert.equal(explicit.env.CODEX_API_KEY, "synthetic-explicit-key");
+      // The pinned native file store truncates and writes the existing auth file.
+      await writeFile(
+        join(home, "auth.json"),
+        '{"tokens":{"refresh_token":"synthetic-refreshed"}}',
+      );
+    },
+  );
+  assert.equal(
+    (await readJson(auth)).tokens.refresh_token,
+    "synthetic-refreshed",
+  );
+  assert.equal((await stat(auth)).mode, originalMode);
+  await assert.rejects(access(home), { code: "ENOENT" });
+  assert.equal(
+    await readFile(join(ambient, "config.toml"), "utf8"),
+    '[mcp_servers.unrelated]\ncommand="unused"\n',
+  );
+});
+
+test("missing file login keeps the temporary-home API-key fallback", async (t) => {
+  const ambient = await mkdtemp(join(tmpdir(), "eval-login-test-"));
+  t.after(() => rm(ambient, { recursive: true, force: true }));
+  await withEvalState(
+    () => createEvalHome(createHome, ambient),
+    async ({ home, hasLogin }) => {
+      assert.equal(hasLogin, false);
+      assert.deepEqual(await readdir(home), []);
+      assert.equal(
+        codexSettings(
+          home,
+          "/tmp/bin/codex",
+          {
+            OPENAI_API_KEY: "synthetic-env-key",
+          },
+          hasLogin,
+        ).apiKey,
+        "synthetic-env-key",
+      );
+    },
+  );
+});
+
+test(
+  "symlink-backed login creates its private home beside the canonical file",
+  unixOnly,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "eval-login-test-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const ambient = join(directory, "ambient");
+    const store = join(directory, "store");
+    await mkdir(ambient);
+    await mkdir(store);
+    const auth = join(store, "saved.json");
+    await writeFile(auth, '{"OPENAI_API_KEY":"synthetic-file-key"}');
+    await symlink(auth, join(ambient, "auth.json"));
+    await withEvalState(
+      () => createEvalHome(createHome, ambient),
+      async ({ home }) => {
+        assert.equal(dirname(home), await realpath(store));
+        assert.equal(
+          (await stat(join(home, "auth.json"))).ino,
+          (await stat(auth)).ino,
+        );
+      },
+    );
+    await access(auth);
+  },
+);
+
+test("an eval does not overwrite a later replacement login", async (t) => {
+  const ambient = await mkdtemp(join(tmpdir(), "eval-login-test-"));
+  t.after(() => rm(ambient, { recursive: true, force: true }));
+  const auth = join(ambient, "auth.json");
+  await writeFile(auth, '{"OPENAI_API_KEY":"synthetic-original-key"}');
+  await withEvalState(
+    () => createEvalHome(createHome, ambient),
+    async ({ home }) => {
+      await rename(auth, join(ambient, "old-auth.json"));
+      await writeFile(auth, '{"OPENAI_API_KEY":"synthetic-replacement-key"}');
+      await writeFile(
+        join(home, "auth.json"),
+        '{"OPENAI_API_KEY":"synthetic-refreshed-key"}',
+      );
+    },
+  );
+  assert.equal(
+    (await readJson(auth)).OPENAI_API_KEY,
+    "synthetic-replacement-key",
+  );
+});
 
 async function waitForFile(path) {
   for (let attempt = 0; attempt < 500; attempt++) {
@@ -132,7 +271,10 @@ if (kind === "preflight") {
   process.stdin.on("data", (chunk) => { prompt += chunk; });
   process.stdin.on("end", () => {
     record("ready", { prompt });
-    if (scenario.mode === "block") { setInterval(() => {}, 1000); return; }
+    if (scenario.mode === "block") {
+      writeFileSync(join(process.env.CODEX_HOME, "auth.json"), '{"tokens":{"refresh_token":"synthetic-refreshed"}}');
+      setInterval(() => {}, 1000); return;
+    }
     send({ type: "item.completed", item: { id: "final", type: "agent_message", text: JSON.stringify(scenario.result) } });
     if (scenario.mode.startsWith("fallback-")) {
       const message = "Configured value for \x60permission_profile\x60 is disallowed by requirements; falling back from \x60discovery_eval\x60 to required value \x60:read-only\x60.";
@@ -276,10 +418,16 @@ for (const [signal, exitCode] of [
   ["SIGTERM", 143],
 ]) {
   test(
-    `${signal} awaits the SDK child before removing source and auth`,
+    `${signal} awaits the SDK child before cleanup and preserves refreshed login`,
     unixOnly,
     async (t) => {
       const { directory, executable } = await nativeFixture(t, "block");
+      const ambient = join(directory, "ambient");
+      await mkdir(ambient);
+      await writeFile(
+        join(ambient, "auth.json"),
+        '{"tokens":{"refresh_token":"synthetic-original"}}',
+      );
       const driver = join(directory, "driver.mjs");
       await writeFile(
         driver,
@@ -288,15 +436,14 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Codex } from ${JSON.stringify(sdkUrl)};
 import { codexSettings, preflightEval, prepareEval, runPreparedEval } from ${JSON.stringify(harnessUrl)};
-import { withEvalState } from ${JSON.stringify(runtimeUrl)};
-await withEvalState(async () => {
-  const home = await mkdtemp(join(${JSON.stringify(directory)}, "signal-home-"));
-  await writeFile(join(home, "auth.json"), '{"OPENAI_API_KEY":"synthetic-signal-key"}');
-  return home;
-}, async ({ root, home, signal }) => {
+import { createEvalHome, withEvalState } from ${JSON.stringify(runtimeUrl)};
+await withEvalState(() => createEvalHome(
+  (base) => mkdtemp(join(base, "signal-home-")),
+  ${JSON.stringify(ambient)},
+), async ({ root, home, hasLogin, signal }) => {
   await writeFile(join(${JSON.stringify(directory)}, "state.json"), JSON.stringify({ root, home }));
   const prepared = await prepareEval(root);
-  const settings = codexSettings(home, ${JSON.stringify(executable)}, { PATH: ${JSON.stringify(dirname(process.execPath))}, HOME: home }, true);
+  const settings = codexSettings(home, ${JSON.stringify(executable)}, { PATH: ${JSON.stringify(dirname(process.execPath))}, HOME: home }, hasLogin);
   await preflightEval(prepared, settings, signal);
   await runPreparedEval(prepared, new Codex(settings), { signal });
 });
@@ -335,6 +482,10 @@ await withEvalState(async () => {
       for (const path of [state.root, state.home]) {
         await assert.rejects(access(path), { code: "ENOENT" });
       }
+      assert.equal(
+        (await readJson(join(ambient, "auth.json"))).tokens.refresh_token,
+        "synthetic-refreshed",
+      );
     },
   );
 }

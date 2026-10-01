@@ -3,8 +3,8 @@
 This eval checks whether the production `references/core-scan.md` workflow
 finds credentials in source and keeps them in its final findings, including
 credentials in unused code. It scans a generated repository without giving the
-model finding hints, locations, or expected labels. Every credential and key is
-generated locally, grants no access to a service, and is never used to contact
+model finding hints, locations, or expected labels. Every fixture credential and
+key is generated locally, grants no access to a service, and is never used to contact
 or authenticate to one.
 
 The six positive cases cover active source, an unused source constant,
@@ -33,9 +33,9 @@ characters. Fixed private-key encoding headers do not count as secret material.
 ## Run
 
 Install dependencies and build the TypeScript SDK using the repository's normal
-setup. The eval reuses the pinned Codex SDK, CLI, esbuild, and isolated
-authentication-home helper. It bundles the MCP app's existing permission-profile
-preflight helper locally with esbuild and adds no dependencies.
+setup. The eval reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
+creating private homes. It bundles the MCP app's permission-profile preflight
+locally with esbuild and adds no dependencies.
 
 ```sh
 node evals/secret-discovery/run.mjs
@@ -46,12 +46,19 @@ its default. The report cannot name that model because the SDK's turn result
 does not expose it. Runs consume model usage and use the caller's existing
 file-based Codex login or authentication environment.
 
-The eval copies login state into a temporary private Codex home using the SDK's
-authentication helper. It removes that home after the run. On SIGINT or SIGTERM,
-it waits for the SDK turn to stop before removing temporary state. Only runtime,
-proxy/certificate, and model-authentication environment variables reach the
-Codex process. Shell tools inherit Codex's core environment with default
-credential exclusions; login shells and shell snapshots are disabled.
+The eval creates a temporary private Codex home without importing the caller's
+configuration. For a saved file login, it creates the home beside the canonical
+auth file and hard-links only `auth.json`, preserving the file's permissions.
+The pinned CLI writes token refreshes through that link, so updated credentials
+remain available after the eval. Cleanup removes the temporary home and link;
+it leaves the saved login in place. If another login replaces the original file
+during the run, the eval's existing link does not overwrite that replacement.
+
+On SIGINT or SIGTERM, the eval waits for the SDK turn to stop before removing
+temporary state. Only runtime, proxy/certificate, and model-authentication
+environment variables reach the Codex process. Shell tools inherit Codex's core
+environment with default credential exclusions; login shells and shell snapshots
+are disabled.
 Authentication data is never printed or placed in the source fixture or reports.
 
 Source inspection is offline and read-only. A named, deny-by-default filesystem

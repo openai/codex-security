@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import {
   createIsolatedHome,
-  importAmbientAuth,
+  expandHome,
   resolveCodexCommand,
 } from "../../sdk/typescript/dist/runtime.js";
 import {
@@ -14,34 +14,37 @@ import {
   prepareEval,
   runPreparedEval,
 } from "./harness.mjs";
-import { withEvalState } from "./runtime.mjs";
+import { createEvalHome, withEvalState } from "./runtime.mjs";
 
 const reports = fileURLToPath(new URL("./reports/", import.meta.url));
 await mkdir(reports, { recursive: true });
 const reportDirectory = await mkdtemp(join(reports, "run-"));
 console.log(`Eval artifacts: ${reportDirectory}`);
-await withEvalState(createIsolatedHome, async ({ root, home, signal }) => {
-  const hasLogin = await importAmbientAuth(
-    process.env.CODEX_HOME || join(homedir(), ".codex"),
-    home,
-  );
-  const prepared = await prepareEval(root);
-  const codexPath = await realpath(resolveCodexCommand({}).command);
-  const settings = codexSettings(home, codexPath, process.env, hasLogin);
-  await preflightEval(prepared, settings, signal);
-  const codex = new Codex(settings);
-  const { report, semanticResult } = await runPreparedEval(prepared, codex, {
-    model: process.argv[2],
-    signal,
-  });
-  await writeFile(
-    join(reportDirectory, "result.json"),
-    JSON.stringify(semanticResult, null, 2) + "\n",
-  );
-  await writeFile(
-    join(reportDirectory, "report.json"),
-    JSON.stringify(report, null, 2) + "\n",
-  );
-  console.log(JSON.stringify(report, null, 2));
-  process.exitCode = report.passed ? 0 : 1;
-});
+await withEvalState(
+  () =>
+    createEvalHome(
+      createIsolatedHome,
+      expandHome(process.env.CODEX_HOME || join(homedir(), ".codex")),
+    ),
+  async ({ root, home, hasLogin, signal }) => {
+    const prepared = await prepareEval(root);
+    const codexPath = await realpath(resolveCodexCommand({}).command);
+    const settings = codexSettings(home, codexPath, process.env, hasLogin);
+    await preflightEval(prepared, settings, signal);
+    const codex = new Codex(settings);
+    const { report, semanticResult } = await runPreparedEval(prepared, codex, {
+      model: process.argv[2],
+      signal,
+    });
+    await writeFile(
+      join(reportDirectory, "result.json"),
+      JSON.stringify(semanticResult, null, 2) + "\n",
+    );
+    await writeFile(
+      join(reportDirectory, "report.json"),
+      JSON.stringify(report, null, 2) + "\n",
+    );
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.passed ? 0 : 1;
+  },
+);

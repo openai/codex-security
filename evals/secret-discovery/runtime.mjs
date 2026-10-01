@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { link, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "../../sdk/typescript/node_modules/esbuild/lib/main.js";
 
@@ -26,7 +26,27 @@ export const {
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 
-/** Keep temporary source and authentication alive until cancelled work stops. */
+/** Share saved login updates without importing the caller's configuration. */
+export async function createEvalHome(createHome, ambientHome) {
+  let auth;
+  try {
+    const path = await realpath(join(ambientHome, "auth.json"));
+    if ((await stat(path)).isFile()) auth = path;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  // A hard link must stay on the saved login's filesystem, including symlinks.
+  const home = await createHome(auth ? dirname(auth) : undefined);
+  try {
+    if (auth) await link(auth, join(home, "auth.json"));
+    return { home, hasLogin: Boolean(auth) };
+  } catch (error) {
+    await rm(home, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** Keep temporary source and the login link alive until cancelled work stops. */
 export async function withEvalState(createHome, run) {
   const controller = new AbortController();
   let interrupted;
@@ -42,12 +62,12 @@ export async function withEvalState(createHome, run) {
     return [signal, handler];
   });
   let root;
-  let home;
+  let state;
   try {
     root = await mkdtemp(join(tmpdir(), "source-audit-"));
-    home = await createHome();
+    state = await createHome();
     controller.signal.throwIfAborted();
-    const result = await run({ root, home, signal: controller.signal });
+    const result = await run({ root, ...state, signal: controller.signal });
     controller.signal.throwIfAborted();
     return result;
   } catch (error) {
@@ -56,7 +76,7 @@ export async function withEvalState(createHome, run) {
   } finally {
     try {
       await Promise.all(
-        [root, home]
+        [root, state?.home]
           .filter(Boolean)
           .map((path) => rm(path, { recursive: true, force: true })),
       );
