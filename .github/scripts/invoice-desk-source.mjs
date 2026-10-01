@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export function extractApplication(repository, sha, destination) {
-  const git = (args) => execFileSync("git", args, { cwd: repository });
+  const git = (args) =>
+    execFileSync("git", args, { cwd: repository, maxBuffer: Infinity });
   // Read committed blobs directly: export-ignore and export-subst must not alter scan input.
-  const entries = git(["ls-tree", "-rz", `${sha}:examples/invoice-desk/app`])
-    .toString("utf8")
+  const entries = new TextDecoder("utf-8", { fatal: true })
+    .decode(git(["ls-tree", "-rz", `${sha}:examples/invoice-desk/app`]))
     .split("\0")
     .filter(Boolean)
     .map((entry) => {
@@ -29,7 +30,15 @@ export function extractApplication(repository, sha, destination) {
   mkdirSync(destination);
   for (const { oid, output } of entries) {
     mkdirSync(dirname(output), { recursive: true });
-    writeFileSync(output, git(["cat-file", "blob", oid]));
+    const descriptor = openSync(output, "w");
+    try {
+      execFileSync("git", ["cat-file", "blob", oid], {
+        cwd: repository,
+        stdio: ["ignore", descriptor, "pipe"],
+      });
+    } finally {
+      closeSync(descriptor);
+    }
   }
   return entries.length;
 }

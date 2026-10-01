@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   request-scan:
     # The default-branch dispatcher handles only event metadata, never PR code.
@@ -23,6 +19,9 @@ jobs:
       github.ref == 'refs/heads/main' && github.ref_protected &&
       (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-24.04
+    concurrency:
+      group: invoice-desk-request-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       actions: write
     steps:
@@ -38,6 +37,9 @@ jobs:
   behavior:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    concurrency:
+      group: invoice-desk-behavior-${{ github.event.pull_request.number }}-${{ matrix.node }}
+      cancel-in-progress: true
     strategy:
       matrix:
         node: ["22.13.0", "24"]

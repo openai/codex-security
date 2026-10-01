@@ -75,3 +75,36 @@ test("missing application source is an error, not an empty clean scan", (t) => {
   );
   assert.equal(existsSync(destination), false);
 });
+
+test("streams application assets larger than the child-process buffer", (t) => {
+  const { repository, app, git, destination } = fixture(t);
+  const bytes = Buffer.alloc(2 * 1024 * 1024, 0xa5);
+  writeFileSync(join(app, "asset.bin"), bytes);
+  git("add", ".");
+  assert.equal(
+    extractApplication(repository, git("write-tree"), destination),
+    3,
+  );
+  assert.deepEqual(readFileSync(join(destination, "asset.bin")), bytes);
+});
+
+test("rejects lossy filename decoding before any source files can collide", (t) => {
+  const { repository, git, destination } = fixture(t);
+  const oid = git("rev-parse", ":examples/invoice-desk/app/server.mjs");
+  const prefix = `100644 ${oid}\texamples/invoice-desk/app/`;
+  const index = Buffer.concat([
+    Buffer.from(`${prefix}�.mjs\0`),
+    Buffer.from(prefix),
+    Buffer.from([0xff]),
+    Buffer.from(".mjs\0"),
+  ]);
+  execFileSync("git", ["update-index", "-z", "--index-info"], {
+    cwd: repository,
+    input: index,
+  });
+  assert.throws(
+    () => extractApplication(repository, git("write-tree"), destination),
+    /encoded data/,
+  );
+  assert.equal(existsSync(destination), false);
+});
