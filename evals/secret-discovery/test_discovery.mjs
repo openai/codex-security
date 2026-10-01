@@ -124,6 +124,24 @@ for (const [name, mutate] of [
   });
 }
 
+for (const category of [
+  "not-a-secret",
+  "noncredential",
+  "NOT_A_SECRET",
+  "non_credentials",
+  "not a credential",
+  "NON SECRET",
+]) {
+  test(`rejects negated category ${category}`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    result.findings[0].taxonomy.category = category;
+    const report = gradeResult(result, fixture);
+    assert.equal(report.passed, false);
+    assert.equal(report.cases[0].found, false);
+  });
+}
+
 test("accepts a secret's valid source range and sensitive-data category", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);

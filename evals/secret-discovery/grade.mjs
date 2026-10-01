@@ -4,6 +4,7 @@ const explicitSecretCategory =
   /secret|credential|private[-_ ]?key|hard[-_ ]?cod/i;
 const secretCategory =
   /secret|credential|private[-_ ]?key|hard[-_ ]?cod|sensitive[-_ ]?(?:data|information)[-_ ]?exposure/i;
+const negatedSecretCategory = /^(?:not(?:a)?|non)(?:secret|credential)s?$/i;
 const supportingLocation = (location) =>
   /^(?:supporting|support|context|consumer|expected_control)$/.test(
     location.role ?? "",
@@ -90,13 +91,15 @@ function matchesLocation(location, expected) {
 }
 
 function matches(finding, expected) {
+  const category = finding.taxonomy?.category ?? "";
   return (
-    secretCategory.test(finding.taxonomy?.category ?? "") &&
+    !negatedSecretCategory.test(category.replace(/[-_\s]/g, "")) &&
+    secretCategory.test(category) &&
     finding.taxonomy?.cwe?.some(
       (cwe) =>
         expected.cwes.includes(cwe) ||
         (["CWE-200", "CWE-540"].includes(cwe) &&
-          explicitSecretCategory.test(finding.taxonomy.category)),
+          explicitSecretCategory.test(category)),
     ) &&
     finding.locations?.some((location) => matchesLocation(location, expected))
   );
