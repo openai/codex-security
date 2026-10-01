@@ -207,16 +207,51 @@ for (const category of [
   });
 }
 
-test("accepts CWE-260 for the password in the database configuration", () => {
+for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
+  test(`accepts ${cwe} for the password in the database configuration`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    const databaseIndex = fixture.positives.findIndex(
+      (entry) => entry.id === "dotenv-url",
+    );
+    result.findings[databaseIndex].taxonomy.cwe = [cwe];
+    result.findings[databaseIndex].taxonomy.category =
+      "password-in-configuration";
+    assert.equal(gradeResult(result, fixture).passed, true);
+  });
+}
+
+for (const cwe of ["CWE-312", "CWE-313"]) {
+  test(`accepts ${cwe} for credentials stored in source and configuration files`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    for (const finding of result.findings) finding.taxonomy.cwe = [cwe];
+    assert.equal(gradeResult(result, fixture).passed, true);
+
+    result.findings[0].taxonomy.category = "sql-injection";
+    const report = gradeResult(result, fixture);
+    assert.equal(report.passed, false);
+    assert.equal(report.cases[0].found, false);
+  });
+}
+
+test("keeps password and cryptographic-key CWEs specific to those exposures", () => {
   const fixture = createFixture();
-  const result = retainedResult(fixture);
-  const databaseIndex = fixture.positives.findIndex(
-    (entry) => entry.id === "dotenv-url",
-  );
-  result.findings[databaseIndex].taxonomy.cwe = ["CWE-260"];
-  result.findings[databaseIndex].taxonomy.category =
-    "password-in-configuration";
-  assert.equal(gradeResult(result, fixture).passed, true);
+  for (const [index, expected] of fixture.positives.entries()) {
+    for (const [cwe, applicableId] of [
+      ["CWE-256", "dotenv-url"],
+      ["CWE-259", "dotenv-url"],
+      ["CWE-260", "dotenv-url"],
+      ["CWE-321", "private-key"],
+    ]) {
+      if (expected.id === applicableId) continue;
+      const result = retainedResult(fixture);
+      result.findings[index].taxonomy.cwe = [cwe];
+      const report = gradeResult(result, fixture);
+      assert.equal(report.passed, false, `${expected.id}:${cwe}`);
+      assert.equal(report.cases[index].found, false, `${expected.id}:${cwe}`);
+    }
+  }
 });
 
 for (const cwe of ["CWE-200", "CWE-540"]) {
