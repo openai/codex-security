@@ -54,7 +54,6 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
-    finding_candidate_id,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
@@ -1341,66 +1340,10 @@ def budget_exhausted_draft(
             "deferred": [],
         }
 
-    findings_by_candidate = {
-        candidate_id
-        for finding in findings["findings"]
-        if isinstance(finding, dict)
-        and isinstance(candidate_id := finding_candidate_id(finding), str)
-    }
-    existing_deferred = {
-        item.get("candidateId", item.get("id"))
-        for item in coverage["deferred"]
-        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
-    }
-    existing_surfaces = {
-        item.get("id")
-        for item in coverage["surfaces"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
-            continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
-        surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
-        if surface_id not in existing_surfaces:
-            coverage["surfaces"].append(
-                {
-                    "id": surface_id,
-                    "label": candidate["summary"],
-                    "disposition": disposition,
-                    "notes": candidate["evidence"],
-                    "receiptRefs": [],
-                }
-            )
-            existing_surfaces.add(surface_id)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": candidate_id,
-                "candidateId": candidate_id,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface_id],
-            }
-        )
+    valid_findings = saved_results.recoverable_findings(
+        scan_dir, scan["id"], {"targetId": scan["target_id"]}, findings["findings"]
+    )
+    saved_results.preserve_budget_candidates(coverage, valid_findings, candidates)
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)
@@ -2803,7 +2746,10 @@ def scan_result(
         else None
     )
     progress_result = {
-        "candidates": {"reportable": progress["reportable_findings_count"]},
+        "candidates": {
+            "reportable": progress["reportable_findings_count"],
+            "unresolved": scan_history.saved_unresolved_candidate_count(scan),
+        },
         "coverage": {
             "closedRows": progress["review_items_completed"],
             "filesTotal": progress["scope_file_count"],

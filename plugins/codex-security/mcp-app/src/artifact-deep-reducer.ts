@@ -24,6 +24,7 @@ import {
   type DeepScanArtifacts,
 } from "./deep-scan/artifacts.js";
 import {
+  discoveryReductionInput,
   parseDeepReduction,
   reconcileDeepReduction,
   type DeepReductionInput,
@@ -84,8 +85,10 @@ export async function getCodexSecurityDeepReducerInputs(
             sourceFindingIds: [`${worker.id}:${index}`],
           },
         }));
-        const { coverage: _coverage, ...reduction } = result;
-        return { workerId: worker.id, result: reduction };
+        return {
+          workerId: worker.id,
+          result: discoveryReductionInput(result, worker.id),
+        };
       }),
     );
     const previous = await readPreviousReduction(bound);

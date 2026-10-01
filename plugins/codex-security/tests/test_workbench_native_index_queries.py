@@ -257,3 +257,136 @@ def test_scan_list_probes_requested_repository_once(
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
         ("remote", "get-url", "origin"),
     ]
+
+
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        {},
+        {"deferred": [{"reason": "General review work remains."}]},
+        {
+            "deferred": [{"candidateId": "candidate-1", "reason": "Review remains."}],
+            "explicitExclusions": [{"candidateId": "candidate-1", "disposition": "not_applicable"}],
+        },
+    ],
+    ids=["no-candidates", "general-review-work", "resolved-in-coverage"],
+)
+def test_scan_detail_skips_findings_artifacts_without_unresolved_candidates(
+    workbench_api, indexed_collections, monkeypatch, coverage
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    reads = []
+
+    def read_artifact(scan_dir, name, label):
+        reads.append((scan_dir.name, name))
+        return coverage if name == "coverage.json" else {"findings": []}
+
+    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
+
+    assert history.saved_unresolved_candidate_count(scan) == 0
+    assert reads == [(SCAN_IDS[0], "coverage.json")]
+
+
+def test_scan_detail_reads_findings_to_resolve_saved_candidates(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    reads = []
+    coverage = {
+        "deferred": [
+            {"candidateId": "candidate-confirmed", "reason": "Validation is pending."},
+            {"candidateId": "candidate-pending", "reason": "Validation is pending."},
+        ]
+    }
+    findings = {"findings": [{"provenance": {"candidateId": "candidate-confirmed"}}]}
+
+    def read_artifact(scan_dir, name, label):
+        reads.append((scan_dir.name, name))
+        return coverage if name == "coverage.json" else findings
+
+    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
+
+    assert history.saved_unresolved_candidate_count(scan) == 1
+    assert reads == [(SCAN_IDS[0], "coverage.json"), (SCAN_IDS[0], "findings.json")]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_ids"),
+    [
+        (None, SCAN_IDS),
+        ({"limit": None}, SCAN_IDS),
+        ({"limit": 1}, SCAN_IDS[:1]),
+        ({"limit": 1, "offset": 1}, SCAN_IDS[1:2]),
+        ({"query": "missing"}, []),
+    ],
+)
+def test_scan_list_does_not_read_candidate_artifacts(
+    workbench_api, indexed_collections, monkeypatch, arguments, expected_ids
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+
+    def reject_artifact_read(*arguments):
+        raise AssertionError("Listing scans must not load candidate artifacts.")
+
+    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
+    result = history.list_scans(connection, query_args(**arguments) if arguments else None)
+
+    assert [scan["scanId"] for scan in result["scans"]] == expected_ids
+    assert all("unresolved" not in scan["progress"]["candidates"] for scan in result["scans"])
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_ids", "next_offset"),
+    [
+        (None, SCAN_IDS[::-1], None),
+        ({"limit": 1}, [SCAN_IDS[2]], 1),
+        ({"limit": 1, "offset": 1}, [SCAN_IDS[1]], 2),
+        ({"limit": 1, "query": "needle"}, [SCAN_IDS[1]], 1),
+        ({"query": "missing"}, [], None),
+        ({"status": "not_scanned"}, [], None),
+    ],
+)
+def test_repository_list_does_not_read_candidate_artifacts(
+    workbench_api, indexed_collections, monkeypatch, tmp_path, arguments, expected_ids, next_offset
+):
+    connection, _ = indexed_collections
+    for index, scan_id in enumerate(SCAN_IDS):
+        history_id = f"20000000-0000-4000-8000-{index:012d}"
+        connection.execute(
+            """
+            INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision,
+                scope, mode, scan_dir, status, phase, started_at, created_at, updated_at)
+            SELECT ?, workspace_id, target_id, target_path, target_revision,
+                scope, mode, ?, 'running', 'discovery', ?, created_at, updated_at
+            FROM scans WHERE id = ?
+            """,
+            (history_id, str(tmp_path / history_id), "2026-07-01T00:00:00Z", scan_id),
+        )
+        connection.execute(
+            "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+            (history_id, "2026-08-02T00:00:00Z"),
+        )
+    history = workbench_api["scan_history"]
+
+    def reject_artifact_read(*arguments):
+        raise AssertionError("Listing repositories must not load candidate artifacts.")
+
+    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
+    result = workbench_api["native_indexes"].list_repositories(
+        connection, query_args(**arguments) if arguments is not None else None
+    )
+
+    assert [repository["latestScan"]["scanId"] for repository in result["repositories"]] == (
+        expected_ids
+    )
+    assert all(repository["scanCount"] == 2 for repository in result["repositories"])
+    assert all(
+        "unresolved" not in repository["latestScan"]["progress"]["candidates"]
+        for repository in result["repositories"]
+    )
+    assert result.get("nextOffset") == next_offset

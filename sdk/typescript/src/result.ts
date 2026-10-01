@@ -2,12 +2,14 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  DeferredCoverage,
   Finding,
   FindingsDocument,
   ScanManifest,
   SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
+import { unresolvedCandidates } from "./candidates.js";
 import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
@@ -112,6 +114,15 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
+  /** Saved unresolved candidates, distinct within each logical worker. */
+  public get unresolvedCandidates(): readonly DeferredCoverage[] {
+    return unresolvedCandidates(this.coverage, this.findings.findings);
+  }
+
+  public get unresolvedCandidateCount(): number {
+    return this.unresolvedCandidates.length;
+  }
+
   public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
     severityThresholdRank(threshold);
     return this.findings.findings.some((finding) =>
@@ -120,11 +131,14 @@ export class ScanResult {
   }
 
   public toJSON(): Record<string, unknown> {
+    const unresolvedCandidates = this.unresolvedCandidates;
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
+      unresolvedCandidateCount: unresolvedCandidates.length,
+      unresolvedCandidates,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

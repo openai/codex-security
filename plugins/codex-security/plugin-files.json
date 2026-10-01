@@ -57,6 +57,7 @@
     "schemas/tools/review-items.schema.json",
     "schemas/tools/scan-draft.schema.json",
     "schemas/tools/worker-threat-model.schema.json",
+    "scripts/candidate_identity.py",
     "scripts/config_preflight.py",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",

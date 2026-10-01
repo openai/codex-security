@@ -109,6 +109,16 @@
           "notes": {
             "type": "string",
             "minLength": 1
+          },
+          "candidateId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable identity of a saved candidate; omitted for general coverage work."
+          },
+          "sourceWorkerId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Logical Deep worker owning this candidate identity, preserved across resumed attempts."
           }
         }
       }
@@ -163,6 +173,20 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "candidateId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable identity of a saved candidate; omitted for general coverage work."
+          },
+          "sourceWorkerId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Logical Deep worker owning this candidate identity, preserved across resumed attempts."
+          },
+          "candidate": {
+            "type": "object",
+            "description": "Saved candidate details and evidence awaiting a final decision."
           }
         }
       }

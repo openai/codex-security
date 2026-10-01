@@ -253,6 +253,8 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["completeness"] == "partial"
     assert coverage["deferred"][0]["id"] == "candidate-1"
     assert coverage["deferred"][0]["paths"] == ["app.py"]
+    assert coverage["deferred"][0]["candidate"] == json.loads(original_ledger)
+    assert coverage["surfaces"][0]["candidateId"] == "candidate-1"
     assert "cost limit" in coverage["deferred"][0]["reason"]
     assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
@@ -262,7 +264,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
-    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -270,6 +272,9 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         relative_path="app.py",
         coverage_mode="deep_repository",
     )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage["deferred"] = [{"id": "candidate-1", "reason": "Authored review gap."}]
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
@@ -278,7 +283,14 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
-    assert coverage["deferred"][0]["id"] == "candidate-1"
+    assert coverage["deferred"][0] == {
+        "id": "candidate-1",
+        "reason": "Authored review gap.",
+    }
+    pending = next(item for item in coverage["deferred"] if item.get("candidateId"))
+    assert pending["id"] != "candidate-1"
+    assert pending["candidateId"] == "candidate-1"
+    assert pending["candidate"] == json.loads(ledger.read_text())
 
 
 @pytest.mark.parametrize(
@@ -324,7 +336,9 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
         assert coverage["deferred"][0]["id"] == "scan-cost-limit"
 
 
-def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -> None:
+def test_budget_exhaustion_preserves_generic_terminal_surface_id_collision(
+    tmp_path: Path,
+) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     candidate = json.loads(ledger.read_text())
     candidate["validation"] = {"disposition": "suppressed"}
@@ -353,8 +367,12 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     assert completed["findingCount"] == 1
     preserved = json.loads(coverage_path.read_text())
     assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
-    assert preserved["surfaces"][1]["disposition"] == "rejected"
-    assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
+    assert preserved["surfaces"][1] == coverage["surfaces"][1]
+    decision = next(row for row in preserved["surfaces"] if row.get("candidateId"))
+    assert decision["id"] != "candidate-candidate-1"
+    assert decision["candidateId"] == "candidate-1"
+    assert decision["disposition"] == "rejected"
+    assert not any(row.get("candidateId") == "candidate-1" for row in preserved["deferred"])
 
 
 @pytest.mark.parametrize(
@@ -925,7 +943,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
         "filesTotal": 0,
         "worklistRows": 31,
     }
-    assert updated["scan"]["progress"]["candidates"] == {"reportable": 1}
+    assert updated["scan"]["progress"]["candidates"] == {"reportable": 1, "unresolved": 0}
 
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(

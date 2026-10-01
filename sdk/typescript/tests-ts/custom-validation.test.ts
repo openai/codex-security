@@ -16,6 +16,7 @@ import {
 } from "../src/custom-validation-prompt.js";
 import {
   DiffTarget,
+  ScanResult,
   type CoverageDocument,
   type FindingsDocument,
   type ScanManifest,
@@ -39,6 +40,18 @@ afterEach(cleanup);
 
 async function json<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+async function loadResult(scanDir: string): Promise<ScanResult> {
+  return new ScanResult({
+    manifest: await json<ScanManifest>(join(scanDir, "scan-manifest.json")),
+    findings: await json<FindingsDocument>(join(scanDir, "findings.json")),
+    coverage: await json<CoverageDocument>(join(scanDir, "coverage.json")),
+    scanDir,
+    threadId: "synthetic-custom-validation",
+    turnResult: {},
+    sarifPath: null,
+  });
 }
 
 async function save(path: string, value: unknown) {
@@ -202,6 +215,225 @@ async function* responseEvents(
 }
 
 describe("custom validation", () => {
+  test.each(["provenance", "candidateId", "reportId", "ledgerRowId"])(
+    "keeps deferred candidates distinct from confirmed findings using %s identity",
+    async (field) => {
+      const f = await fixture(2);
+      for (const [index, finding] of f.findings.findings.entries()) {
+        const source =
+          field === "provenance" ? finding.provenance : finding.extensions!;
+        source[field === "provenance" ? "candidateId" : field] =
+          `candidate-${2 - index}`;
+        if (field === "provenance")
+          finding.extensions!.candidateId = `candidate-${index + 1}`;
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result("reportable", "deferred")),
+      });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.unresolvedCandidateCount).toBe(1);
+      expect(saved.unresolvedCandidates[0]).toMatchObject({
+        candidateId: "candidate-1",
+        candidate: f.findings.findings[1],
+      });
+    },
+  );
+
+  test.each([undefined, "worker-current"])(
+    "replaces superseded candidate rows while preserving other owners (%s)",
+    async (sourceWorkerId) => {
+      const f = await fixture();
+      const finding = f.findings.findings[0]!;
+      finding.provenance["candidateId"] = "candidate-shared";
+      if (sourceWorkerId !== undefined)
+        finding.provenance["sourceWorkerId"] = sourceWorkerId;
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      const old = {
+        id: "previous-candidate",
+        candidateId: "candidate-shared",
+        ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+        reason: "Obsolete checkpoint proof gap.",
+        candidate: { title: "Older candidate payload" },
+      };
+      const unrelated = [
+        { id: "general-review", reason: "Unrelated review remains." },
+        {
+          id: "other-worker",
+          candidateId: "candidate-shared",
+          sourceWorkerId: "worker-other",
+          reason: "Independent worker review remains.",
+        },
+      ];
+      coverage.completeness = "partial";
+      coverage.deferred = [
+        old,
+        { ...old, id: "duplicate-checkpoint" },
+        ...unrelated,
+      ];
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result("deferred")),
+      });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.unresolvedCandidateCount).toBe(2);
+      expect(saved.coverage.deferred).toEqual([
+        ...unrelated,
+        {
+          ...old,
+          candidate: finding,
+          reason: "The required service was unavailable.",
+          paths: finding.locations.map((location) => location.path),
+          surfaceIds: ["surface-0"],
+        },
+      ]);
+      expect(saved.unresolvedCandidates).toContainEqual(
+        saved.coverage.deferred[2]!,
+      );
+    },
+  );
+
+  test.each([
+    { disposition: "suppressed", shared: false },
+    { disposition: "not_applicable", shared: false },
+    { disposition: "suppressed", shared: true },
+    { disposition: "not_applicable", shared: true },
+  ] as const)(
+    "retains terminal candidate evidence for $disposition (shared surface: $shared)",
+    async ({ disposition, shared }) => {
+      const f = await fixture(shared ? 2 : 1);
+      const finding = f.findings.findings[0]!;
+      finding.provenance["candidateId"] = "source-terminal";
+      finding.provenance["sourceWorkerId"] = "worker-current";
+      if (shared) {
+        const reported = f.findings.findings[1]!;
+        reported.provenance["candidateId"] = "source-reported";
+        reported.extensions!["customValidationSurfaceIds"] = ["surface-0"];
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      coverage.surfaces = [coverage.surfaces[0]!];
+      const previous = {
+        id: "previous-candidate",
+        candidateId: "source-terminal",
+        sourceWorkerId: "worker-current",
+        candidate: {
+          summary: "Saved candidate",
+          evidence: "Saved source evidence.",
+        },
+        reason: "Obsolete checkpoint proof gap.",
+        surfaceIds: ["surface-0"],
+      };
+      const unrelated = {
+        ...previous,
+        id: "other-owner",
+        sourceWorkerId: "worker-other",
+      };
+      coverage.completeness = "partial";
+      coverage.deferred = [previous, unrelated];
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () =>
+          JSON.stringify(
+            shared ? result(disposition, "reportable") : result(disposition),
+          ),
+      });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.findings.findings).toHaveLength(shared ? 1 : 0);
+      expect(saved.coverage.deferred).toEqual([unrelated]);
+      expect(saved.unresolvedCandidateCount).toBe(1);
+      const terminal = saved.coverage.surfaces.find(
+        (surface) =>
+          surface.candidateId === previous.candidateId &&
+          surface.sourceWorkerId === previous.sourceWorkerId,
+      );
+      expect(terminal).toMatchObject({
+        candidateId: previous.candidateId,
+        sourceWorkerId: previous.sourceWorkerId,
+        candidate: previous.candidate,
+        finding,
+        disposition:
+          disposition === "suppressed" ? "rejected" : "not_applicable",
+        notes: "The test returned the observed result.",
+        receiptRefs: [resultName],
+      });
+      expect(terminal!.id).not.toBe("surface-0");
+      expect(saved.coverage.surfaces[0]!.disposition).toBe(
+        shared ? "reported" : terminal!.disposition,
+      );
+      expect(saved.coverage.surfaces[0]).not.toHaveProperty("candidateId");
+    },
+  );
+
+  test("retains a deferred candidate when another finding reports their shared surface", async () => {
+    const f = await fixture(2);
+    for (const [index, finding] of f.findings.findings.entries()) {
+      finding.provenance["candidateId"] = `source-${index}`;
+      finding.extensions!["customValidationSurfaceIds"] = ["surface-0"];
+    }
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    coverage.surfaces = [{ ...coverage.surfaces[0]!, candidateId: "source-0" }];
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () => JSON.stringify(result("deferred", "reportable")),
+    });
+    const saved = await loadResult(f.scanDir);
+    expect(saved.findings.findings).toHaveLength(1);
+    expect(saved.coverage.surfaces[0]!.disposition).toBe("reported");
+    expect(saved.unresolvedCandidateCount).toBe(1);
+    expect(saved.unresolvedCandidates[0]).toMatchObject({
+      candidateId: "source-0",
+      candidate: f.findings.findings[0],
+    });
+  });
+
+  test("allocates fallback identities outside existing finding and coverage IDs", async () => {
+    const f = await fixture(4);
+    f.findings.findings[0]!.provenance["candidateId"] =
+      "custom-validation-candidate-4";
+    f.findings.findings[1]!.extensions!.reportId =
+      "custom-validation-candidate-4-2";
+    f.findings.findings[2]!.extensions!.ledgerRowId =
+      "custom-validation-candidate-4-3";
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    coverage.completeness = "partial";
+    coverage.deferred.push({
+      id: "custom-validation-candidate-4-4",
+      reason: "Unrelated source review remains unfinished.",
+    });
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () =>
+        JSON.stringify(
+          result("reportable", "reportable", "reportable", "deferred"),
+        ),
+    });
+    const saved = await loadResult(f.scanDir);
+    expect(saved.unresolvedCandidateCount).toBe(1);
+    expect(saved.unresolvedCandidates[0]).toMatchObject({
+      id: "custom-validation-candidate-4-5",
+      candidateId: "custom-validation-candidate-4-5",
+      candidate: f.findings.findings[3],
+    });
+    expect(saved.coverage.deferred).toHaveLength(2);
+  });
+
   test("applies dispositions and assessments without changing source identity", async () => {
     const f = await fixture(4);
     const output = result(
@@ -278,6 +510,11 @@ describe("custom validation", () => {
       "artifacts/custom-validation/proof.txt",
     );
     expect(coverage.deferred).toHaveLength(1);
+    expect(coverage.deferred[0]).toMatchObject({
+      id: "custom-validation-candidate-4",
+      candidateId: "custom-validation-candidate-4",
+      candidate: f.findings.findings[3],
+    });
     expect(await json(join(f.scanDir, resultName))).toMatchObject({
       scanId: f.scanId,
       ...output,
@@ -474,11 +711,58 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  test.each(["standard", "diff", "empty", "incomplete", "dismissed"])(
-    "SDK owns real workbench completion: %s",
-    async (scenario) => {
+  const completionScenarios: Array<{
+    scenario: string;
+    dispositions: Parameters<typeof result>;
+    siblings?: boolean;
+    staleDeferred?: boolean;
+  }> = [
+    { scenario: "standard", dispositions: ["reportable"] },
+    { scenario: "diff", dispositions: ["reportable"] },
+    { scenario: "empty", dispositions: [] },
+    { scenario: "incomplete", dispositions: ["reportable"] },
+    { scenario: "dismissed", dispositions: ["suppressed"] },
+    {
+      scenario: "existing-deferred",
+      dispositions: ["deferred"],
+      staleDeferred: true,
+    },
+    {
+      scenario: "existing-suppressed",
+      dispositions: ["suppressed"],
+      staleDeferred: true,
+    },
+    {
+      scenario: "existing-not-applicable",
+      dispositions: ["not_applicable"],
+      staleDeferred: true,
+    },
+    {
+      scenario: "siblings-mixed",
+      dispositions: ["reportable", "deferred"],
+      siblings: true,
+      staleDeferred: true,
+    },
+    {
+      scenario: "siblings-deferred",
+      dispositions: ["deferred", "deferred"],
+      siblings: true,
+      staleDeferred: true,
+    },
+  ];
+  test.each(completionScenarios)(
+    "SDK owns real workbench completion: $scenario",
+    async ({
+      scenario,
+      dispositions,
+      siblings = false,
+      staleDeferred = false,
+    }) => {
       const diff = scenario === "diff";
-      const count = scenario === "empty" ? 0 : 1;
+      const count = dispositions.length;
+      const expectedReported = dispositions.filter(
+        (value) => value === "reportable",
+      ).length;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -576,7 +860,46 @@ describe("custom validation", () => {
                       );
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
-                      await draft(scanDir, scanId, count, diff);
+                      const provisional = await draft(
+                        scanDir,
+                        scanId,
+                        count,
+                        diff,
+                      );
+                      if (siblings) {
+                        for (const [
+                          index,
+                          finding,
+                        ] of provisional.findings.entries()) {
+                          finding.identity = {
+                            anchor: "shared-candidate",
+                            instance: `report-${index + 1}`,
+                          };
+                          finding.extensions = {
+                            ...finding.extensions,
+                            candidateId: "candidate-shared",
+                            reportId: `report-${index + 1}`,
+                          };
+                        }
+                        await save(join(scanDir, "findings.json"), provisional);
+                      }
+                      if (staleDeferred) {
+                        for (const finding of provisional.findings)
+                          finding.provenance["candidateId"] =
+                            "candidate-shared";
+                        await save(join(scanDir, "findings.json"), provisional);
+                        const coverage = await json<CoverageDocument>(
+                          join(scanDir, "coverage.json"),
+                        );
+                        coverage.completeness = "partial";
+                        coverage.deferred.push({
+                          id: "previous-candidate",
+                          candidateId: "candidate-shared",
+                          candidate: { title: "Older candidate payload" },
+                          reason: "Obsolete checkpoint proof gap.",
+                        });
+                        await save(join(scanDir, "coverage.json"), coverage);
+                      }
                       await publishDraft(scanDir, scanId, workbench);
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
@@ -607,9 +930,7 @@ describe("custom validation", () => {
                         ),
                       ).toMatchObject({ falsePositives: [falsePositive] });
                     }
-                    const output = result(
-                      scenario === "dismissed" ? "suppressed" : "reportable",
-                    );
+                    const output = result(...dispositions);
                     if (scenario === "incomplete") {
                       output.status = "incomplete";
                       output.reason =
@@ -739,15 +1060,76 @@ describe("custom validation", () => {
         expect(commands.indexOf("prepare-scan-completion")).toBeLessThan(
           commands.indexOf("complete-scan"),
         );
-        expect(completed.findings.findings).toHaveLength(
-          scenario === "dismissed" ? 0 : count,
-        );
+        expect(completed.findings.findings).toHaveLength(expectedReported);
+        if (staleDeferred) {
+          const expectedPending = dispositions.filter(
+            (value) => value === "deferred",
+          ).length;
+          expect(completed.unresolvedCandidateCount).toBe(expectedPending);
+          expect(completed.coverage.deferred).toHaveLength(expectedPending);
+          expect(
+            completed.unresolvedCandidates.every(
+              (candidate) =>
+                candidate.reason === "The required service was unavailable.",
+            ),
+          ).toBe(true);
+          const report = await readFile(completed.reportPath, "utf8");
+          expect(report).not.toContain("Obsolete checkpoint proof gap.");
+          expect(report).not.toContain("Older candidate payload");
+          if (expectedPending > 0)
+            expect(report).toContain("The required service was unavailable.");
+          else
+            expect(completed.coverage.surfaces).toContainEqual(
+              expect.objectContaining({
+                candidateId: "candidate-shared",
+                candidate: { title: "Older candidate payload" },
+                finding: expect.objectContaining({ title: "Fixture 0" }),
+                disposition:
+                  dispositions[0] === "suppressed"
+                    ? "rejected"
+                    : "not_applicable",
+              }),
+            );
+          for (const [index, disposition] of dispositions.entries()) {
+            if (disposition === "deferred")
+              expect(report).toContain(`Fixture ${index}`);
+          }
+        }
+        if (siblings) {
+          const expectedPending = count - expectedReported;
+          expect(completed.unresolvedCandidateCount).toBe(expectedPending);
+          expect(completed.coverage.deferred).toHaveLength(expectedPending);
+          expect(completed.coverage.completeness).toBe("partial");
+          expect(
+            new Set(
+              completed.unresolvedCandidates.map((item) => item.candidateId),
+            ).size,
+          ).toBe(expectedPending);
+          for (const [index, disposition] of dispositions.entries()) {
+            if (disposition !== "deferred") continue;
+            expect(completed.unresolvedCandidates).toContainEqual(
+              expect.objectContaining({
+                candidateId: `custom-validation-candidate-${index + 1}`,
+                candidate: expect.objectContaining({
+                  identity: {
+                    anchor: "shared-candidate",
+                    instance: `report-${index + 1}`,
+                  },
+                  extensions: expect.objectContaining({
+                    candidateId: "candidate-shared",
+                    reportId: `report-${index + 1}`,
+                  }),
+                }),
+              }),
+            );
+          }
+        }
         const receipt = await json<CustomValidationResult>(
           join(scanDir, resultName),
         );
         expect(receipt.status).toBe("complete");
         expect(receipt.validations).toHaveLength(count);
-        if (count > 0 && scenario !== "dismissed")
+        if (expectedReported > 0)
           expect(completed.findings.findings[0]?.validation?.disposition).toBe(
             "reportable",
           );

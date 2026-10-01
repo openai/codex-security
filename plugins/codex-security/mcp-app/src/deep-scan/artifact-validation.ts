@@ -1,5 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+  coverageCandidateKey,
+  findingCandidateId,
+  findingCandidateOwner,
+  resolvedCandidateKeys,
+} from "../artifact-candidates.js";
+import {
   parsePersistedScanDraft,
   parseScanDraft,
   preserveFindingDetails,
@@ -14,7 +20,14 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export interface UnresolvedCandidate extends Record<string, unknown> {
+  candidateId: string;
+  sourceWorkerId: string;
+}
+
+export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
+  unresolvedCandidates?: UnresolvedCandidate[];
+};
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -28,25 +41,88 @@ export interface ReducerArtifactValidation {
 
 /**
  * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
+ * Reuse its coverage validator for saved candidate state, then remove coverage.
  */
 export function parseDeepReduction(
   input: Record<string, unknown>,
   persisted = false,
 ): DeepReductionInput {
+  const { unresolvedCandidates, ...semantic } = input;
   const standard = {
-    ...input,
+    ...semantic,
     coverage: {
-      completeness: "complete",
+      completeness: persisted && unresolvedCandidates ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: [],
+      deferred: persisted ? (unresolvedCandidates ?? []) : [],
     },
   };
-  const { coverage: _coverage, ...parsed } = persisted
+  const { coverage, ...parsed } = persisted
     ? parsePersistedScanDraft(standard)
     : parseScanDraft(standard as unknown as ScanDraftInput);
-  return parsed;
+  return {
+    ...parsed,
+    ...((coverage.deferred as unknown[]).length > 0
+      ? { unresolvedCandidates: coverage.deferred as UnresolvedCandidate[] }
+      : {}),
+  };
+}
+
+/** Retain candidate state without importing worker-local coverage observations. */
+export function discoveryReductionInput(
+  input: ScanDraftInput,
+  workerId: string,
+): DeepReductionInput {
+  const { coverage, ...result } = input;
+  const resolved = resolvedCandidateKeys(input, workerId);
+  const unresolvedCandidates = (coverage.deferred as Record<string, unknown>[])
+    .filter(
+      (item) =>
+        typeof item.candidateId === "string" &&
+        !resolved.has(coverageCandidateKey(item, workerId)!),
+    )
+    .map((item) => ({
+      ...structuredClone(item),
+      candidateId: item.candidateId as string,
+      sourceWorkerId: workerId,
+    }));
+  return {
+    ...result,
+    findings: result.findings.map((finding) => {
+      if (findingCandidateId(finding) === undefined) return finding;
+      const normalized = structuredClone(finding);
+      normalized.provenance = {
+        ...(normalized.provenance as Record<string, unknown>),
+        sourceWorkerId: workerId,
+      };
+      const previousOwner = findingCandidateOwner(finding);
+      const previousSource = (
+        finding.provenance as Record<string, unknown> | undefined
+      )?.sourceWorkerId;
+      if (
+        (previousOwner !== undefined && previousOwner !== workerId) ||
+        (previousSource !== undefined && previousSource !== workerId)
+      )
+        preserveFindingDetails(normalized, finding);
+      return normalized;
+    }),
+    ...(unresolvedCandidates.length > 0 ? { unresolvedCandidates } : {}),
+  };
+}
+
+export function deepReductionScanDraft(
+  input: DeepReductionInput,
+): ScanDraftInput {
+  const { unresolvedCandidates = [], ...result } = structuredClone(input);
+  return {
+    ...result,
+    coverage: {
+      completeness: unresolvedCandidates.length > 0 ? "partial" : "complete",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: unresolvedCandidates,
+    },
+  };
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -159,6 +235,23 @@ export function reconcileDeepReduction(
         "Deep reduction source is only a checkpoint, not a complete result.",
       );
   }
+  const currentWorkers = new Set(discoveries.map((source) => source.workerId));
+  const pending = new Map<string, UnresolvedCandidate>();
+  for (const candidate of [
+    ...(previous?.unresolvedCandidates ?? []).filter(
+      (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
+    ),
+    ...discoveries.flatMap(
+      (source) => source.result.unresolvedCandidates ?? [],
+    ),
+  ]) {
+    pending.set(
+      JSON.stringify([candidate.sourceWorkerId, candidate.candidateId]),
+      structuredClone(candidate),
+    );
+  }
+  delete result.unresolvedCandidates;
+  if (pending.size > 0) result.unresolvedCandidates = [...pending.values()];
   validateRetainedFindings(
     result,
     discoveries.map((discovery) => discovery.result),

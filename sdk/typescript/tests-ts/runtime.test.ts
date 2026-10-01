@@ -333,11 +333,22 @@ describe("plugin runtime preparation", () => {
 
   test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
     const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
+    const source = [
+      "candidateOwner",
+      "candidateKey",
+      "surfaceReferenceKey",
+      "normalizeCoverageEntries",
+      "buildCoverage",
+    ]
+      .map((name) => {
+        const implementation = new RegExp(
+          `function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`,
+          "u",
+        ).exec(runtime)?.[0];
+        expect(implementation).toBeDefined();
+        return implementation;
+      })
+      .join("\n");
 
     type Surface = {
       id?: string;

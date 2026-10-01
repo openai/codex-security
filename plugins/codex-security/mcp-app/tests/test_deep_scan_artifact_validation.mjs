@@ -22,7 +22,14 @@ const bundle = await build({
   platform: "node",
   write: false,
 });
-const { validateDiscoveryArtifacts, validateReducerArtifacts } = await import(
+const {
+  deepReductionScanDraft,
+  discoveryReductionInput,
+  parseDeepReduction,
+  reconcileDeepReduction,
+  validateDiscoveryArtifacts,
+  validateReducerArtifacts,
+} = await import(
   "data:text/javascript;base64," +
     Buffer.from(bundle.outputFiles[0].contents).toString("base64")
 );
@@ -36,11 +43,167 @@ try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
+  await testUnresolvedCandidates(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testUnresolvedCandidates(root) {
+  const candidate = {
+    candidateId: "candidate-review",
+    reason: "Validation remains pending.",
+    paths: ["src/handler.ts"],
+    candidate: { evidence: "The handler still requires review." },
+  };
+  const confirmed = {
+    ...finding("confirmed", "src/other.ts"),
+    provenance: { source: "local_plugin", candidateId: "confirmed" },
+  };
+  const worker = draft([confirmed], {
+    coverage: {
+      completeness: "partial",
+      surfaces: [
+        {
+          label: "Shared review surface",
+          candidateId: "candidate-review",
+          disposition: "reported",
+        },
+        {
+          label: "Reviewed candidate",
+          candidateId: "rejected",
+          disposition: "rejected",
+        },
+      ],
+      explicitExclusions: [],
+      deferred: [
+        { reason: "General review work remains." },
+        candidate,
+        { candidateId: "confirmed", reason: "Old checkpoint." },
+        { candidateId: "rejected", reason: "Old checkpoint." },
+      ],
+    },
+  });
+  assert.deepEqual(
+    discoveryReductionInput(worker, "worker-1").unresolvedCandidates,
+    [{ ...candidate, sourceWorkerId: "worker-1" }],
+  );
+  const importedFinding = {
+    ...finding("imported-owner", "src/imported.ts"),
+    provenance: {
+      source: "local_plugin",
+      candidateId: candidate.candidateId,
+      sourceWorkerId: "worker-2",
+    },
+  };
+  const importedWorker = draft([importedFinding], {
+    coverage: { ...worker.coverage, deferred: [candidate] },
+  });
+  const normalizedWorker = discoveryReductionInput(importedWorker, "worker-1");
+  assert.equal(normalizedWorker.unresolvedCandidates, undefined);
+  assert.equal(
+    normalizedWorker.findings[0].provenance.sourceWorkerId,
+    "worker-1",
+  );
+  assert.equal(importedFinding.provenance.sourceWorkerId, "worker-2");
+  assert.equal(
+    normalizedWorker.findings[0].provenance.previousFindings[0].provenance
+      .sourceWorkerId,
+    "worker-2",
+  );
+  const otherWorker = discoveryReductionInput(
+    draft([], {
+      coverage: { ...worker.coverage, deferred: [candidate] },
+    }),
+    "worker-2",
+  );
+  const normalizedFinding = structuredClone(normalizedWorker.findings[0]);
+  normalizedFinding.provenance.sourceFindingIds = ["worker-1:0"];
+  const ownerSafeResult = deepReductionScanDraft(
+    reconcileDeepReduction(
+      { scanId, findings: [normalizedFinding] },
+      [
+        { workerId: "worker-1", result: normalizedWorker },
+        { workerId: "worker-2", result: otherWorker },
+      ],
+      null,
+    ),
+  );
+  assert.equal(
+    ownerSafeResult.findings[0].provenance.sourceWorkerId,
+    "worker-1",
+  );
+  assert.equal(ownerSafeResult.coverage.deferred[0].sourceWorkerId, "worker-2");
+  assert.equal(
+    ownerSafeResult.coverage.deferred[0].candidateId,
+    candidate.candidateId,
+  );
+  const pendingWorker = draft([], {
+    coverage: { ...worker.coverage, deferred: [candidate, candidate] },
+  });
+  const first = discoveryReductionInput(pendingWorker, "worker-1");
+  const second = discoveryReductionInput(pendingWorker, "worker-2");
+  const aggregate = reconcileDeepReduction(
+    { scanId, findings: [] },
+    [
+      { workerId: "worker-1", result: first },
+      { workerId: "worker-2", result: second },
+    ],
+    null,
+  );
+  assert.deepEqual(
+    aggregate.unresolvedCandidates,
+    [
+      { ...candidate, sourceWorkerId: "worker-1" },
+      { ...candidate, sourceWorkerId: "worker-2" },
+    ],
+    "independent workers may use the same candidate ID",
+  );
+
+  const resumed = reconcileDeepReduction(
+    { scanId, findings: [] },
+    [{ workerId: "worker-1", result: first }],
+    parseDeepReduction(aggregate, true),
+  );
+  assert.equal(
+    resumed.unresolvedCandidates.length,
+    2,
+    "replaying one logical worker does not increase the count",
+  );
+  const resolved = reconcileDeepReduction(
+    { scanId, findings: [] },
+    [
+      {
+        workerId: "worker-1",
+        result: discoveryReductionInput(draft([]), "worker-1"),
+      },
+    ],
+    resumed,
+  );
+  assert.deepEqual(resolved.unresolvedCandidates, [
+    { ...candidate, sourceWorkerId: "worker-2" },
+  ]);
+  const published = deepReductionScanDraft(resolved);
+  assert.equal(published.coverage.completeness, "partial");
+  assert.deepEqual(published.coverage.deferred, resolved.unresolvedCandidates);
+  assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
+
+  const artifacts = await createLayout(path.join(root, "pending-candidates"));
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
+  await mkdir(artifactDir, { recursive: true });
+  const resultPath = path.join(artifactDir, "result.json");
+  await writeResult(resultPath, resolved);
+  const restored = await validateReducerArtifacts(
+    { artifacts, artifactDir, resultPath, reducerId: "recovered-reducer" },
+    scanId,
+  );
+  assert.deepEqual(
+    restored.result.unresolvedCandidates,
+    resolved.unresolvedCandidates,
+    "coordinator recovery restores candidate state from the persisted aggregate",
+  );
+}
 
 async function testDiscoveryValidation(root) {
   const artifacts = await createLayout(path.join(root, "discovery"));

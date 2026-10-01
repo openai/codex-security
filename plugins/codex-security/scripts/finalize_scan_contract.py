@@ -24,6 +24,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import finding_candidate_id
+
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
@@ -2469,27 +2472,6 @@ def csv_cell(value: Any) -> Any:
     ):
         return f"'{value}"
     return value
-
-
-def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if (
-        isinstance(provenance, dict)
-        and isinstance(value := provenance.get("candidateId"), str)
-        and value.strip()
-    ):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
-    return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if isinstance(value := extensions.get(field), str) and value.strip()
-        ),
-        None,
-    )
 
 
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:

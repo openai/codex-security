@@ -1026,6 +1026,28 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
+The final `FINDINGS` line appends `+ N candidates` when saved candidates remain
+unresolved, keeping the existing findings count and breakdown:
+
+```text
+FINDINGS  2 (1 high, 1 medium) + 3 candidates
+```
+
+The suffix is omitted when there are no unresolved candidates. Candidates are
+potential security issues that the scan has not confirmed or ruled out. They do
+not contribute to the findings count, severity totals, or finding-based exit
+thresholds. JSON results and the SDK expose `unresolvedCandidateCount` and
+`unresolvedCandidates`; the report lists their saved details and reasons for
+follow-up. Detailed saved-scan context includes the unresolved count; scan and
+repository listings stay lightweight and do not load candidate artifacts.
+
+Candidates are counted once by `candidateId` within each logical Deep worker,
+including resumed workers. Rejected and not-applicable candidates, generic
+unfinished review work, and superseded checkpoints are excluded. Different
+workers may save candidates for the same underlying issue, so this is a candidate
+count, not a count of unique vulnerabilities. Older artifacts without candidate
+identities remain available as follow-up work but are not included in this count.
+
 The token summary shows uncached input, cache reads, cache writes, output,
 and total tokens. Total tokens include all input plus output; cache reads and
 writes are subsets of input, not extra tokens. When cache-write usage is missing,

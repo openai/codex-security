@@ -3505,6 +3505,11 @@ async function testResumedManifestPreservesCompletedReducer(
     maxDiscoveryRuns: 3,
   });
   const store = new FakeStore({ ...fixture.run, phase: "setup" });
+  const pendingCandidate = {
+    candidateId: "pending-review",
+    reason: "Candidate validation remains pending.",
+    candidate: { evidence: "The fixture handler needs review." },
+  };
   store.blockDedupCommitResponse = true;
   const original = new DeepScanCoordinator({
     run: store.run,
@@ -3512,6 +3517,10 @@ async function testResumedManifestPreservesCompletedReducer(
     executor: new FakeExecutor({
       dedupNewFindings: [0],
       blockDiscoveryAfterCalls: 2,
+      discoveryDeferred: [
+        pendingCandidate,
+        { reason: "General follow-up work." },
+      ],
     }),
     pluginRoot: fixture.pluginRoot,
     clock: immediateClock,
@@ -3570,12 +3579,14 @@ async function testResumedManifestPreservesCompletedReducer(
       })),
     ),
   };
+  const publishedDrafts = [];
   const replacement = new DeepScanCoordinator({
     run: store.run,
     store,
     executor: new FakeExecutor(),
     pluginRoot: fixture.pluginRoot,
     clock: immediateClock,
+    onComplete: async (draft) => publishedDrafts.push(structuredClone(draft)),
   });
   replacement.start();
 
@@ -3585,6 +3596,20 @@ async function testResumedManifestPreservesCompletedReducer(
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
   assert.equal(store.dedupCommits.length, 1);
   assert.equal(store.dedupClaims.length, 1);
+  assert.deepEqual(
+    publishedDrafts.map((draft) => draft.coverage),
+    [
+      {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: store.dedupClaims[0].workerIds.map((sourceWorkerId) => ({
+          ...pendingCandidate,
+          sourceWorkerId,
+        })),
+      },
+    ],
+  );
   assert.equal(
     store.run.persistedWorkers.some(
       (worker) => worker.id === unstartedReducer?.id,
@@ -4304,6 +4329,7 @@ class FakeExecutor {
               : undefined),
           request.workingDirectory,
           request.artifactContext,
+          this.options.discoveryDeferred,
         );
         if (malformedResult) {
           await writeFile(
@@ -4416,6 +4442,7 @@ async function writeDiscoveryArtifacts(
   candidateId,
   output,
   artifactContext,
+  deferred,
 ) {
   const context = await promptContext(promptPath);
   assert.equal(artifactContext?.layout, "worker");
@@ -4426,6 +4453,10 @@ async function writeDiscoveryArtifacts(
     candidateId,
     context.workerLabel,
   );
+  if (deferred?.length) {
+    draft.coverage.completeness = "partial";
+    draft.coverage.deferred = structuredClone(deferred);
+  }
   await writeFile(
     path.join(artifactContext.root, "result.json"),
     JSON.stringify(draft),

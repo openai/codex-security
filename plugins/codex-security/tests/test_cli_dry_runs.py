@@ -20,6 +20,8 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
 
 def test_all_scripts_support_help() -> None:
     for script in sorted(SCRIPT_DIR.glob("*.py")):
+        if script.name == "candidate_identity.py":  # Shared library, not a CLI entry point.
+            continue
         result = run_script(script.name, "--help")
         assert result.returncode == 0, f"{script.name}: {result.stderr}"
         assert "usage:" in result.stdout.lower(), script.name

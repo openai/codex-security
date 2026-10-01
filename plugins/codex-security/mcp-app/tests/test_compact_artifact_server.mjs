@@ -192,6 +192,15 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
             summary: "The changed handler may rely on the removed guard.",
             evidence: "The selected change removes a neighboring guard.",
           },
+          {
+            cwe_ids: [],
+            locations: [
+              { path: "src/handler.py", start_line: 1, role: "evidence" },
+            ],
+            summary: "A synthetic handler condition needs further review.",
+            evidence: "Synthetic evidence retained for follow-up.",
+            instance: "pending-review",
+          },
         ],
       }),
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
@@ -200,12 +209,16 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
       await call("list_codex_security_candidates", { scanId }),
       `${runtimeLabel}: read compact diff candidates`,
     );
+    const pending = candidates.rows.find(
+      (row) => row.instance === "pending-review",
+    );
     requireSuccessfulTool(
       await call("record_codex_security_candidate_validations", {
         scanId,
         validations: [
           {
-            candidateId: candidates.rows[0].candidate_id,
+            candidateId: candidates.rows.find((row) => !row.instance)
+              .candidate_id,
             validation: {
               disposition: "suppressed",
               method: "Static review of the changed handler.",
@@ -221,6 +234,20 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
               remaining_uncertainty: "",
             },
           },
+          {
+            candidateId: pending.candidate_id,
+            validation: {
+              disposition: "deferred",
+              method: "Static review of a synthetic condition.",
+              confidence: "low",
+              confidence_rationale:
+                "The synthetic condition remains unverified.",
+              rubric: ["The condition requires further review."],
+              evidence: [pending.evidence],
+              counterevidence_or_proof_gap: "The condition remains unverified.",
+              remaining_uncertainty: "The condition needs follow-up.",
+            },
+          },
         ],
       }),
       `${runtimeLabel}: record the compact diff validation`,
@@ -228,9 +255,25 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     requireSuccessfulTool(
       await call("record_candidate_attack_paths", {
         scanId,
-        attackPaths: [],
+        attackPaths: [
+          {
+            candidateId: pending.candidate_id,
+            attackPath: {
+              decision: "deferred",
+              severity: "unknown",
+              dataflow: "Synthetic condition pending review.",
+              reachability: "Unknown.",
+              counterevidence: "No final determination is available.",
+              impact: "unknown",
+              likelihood: "unknown",
+              severity_rationale: "The condition remains unverified.",
+              change_conditions: "Finish the synthetic review.",
+              proof_gap: "The condition needs follow-up.",
+            },
+          },
+        ],
       }),
-      `${runtimeLabel}: close the empty compact diff attack-path phase`,
+      `${runtimeLabel}: retain the deferred compact diff decision`,
     );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", {
@@ -270,6 +313,23 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     );
     assert.equal(completed.coverage.inventoryStrategy, "diff");
     assert.equal(completed.findings.findings.length, 0);
+    assert.equal(completed.coverage.completeness, "partial");
+    assert.equal(completed.coverage.deferred.length, 1);
+    assert.ok(
+      completed.coverage.surfaces.some(
+        (surface) =>
+          surface.candidateId === pending.candidate_id &&
+          surface.disposition === "needs_follow_up",
+      ),
+    );
+    assert.equal(
+      completed.coverage.deferred[0].candidateId,
+      pending.candidate_id,
+    );
+    assert.equal(
+      completed.coverage.deferred[0].candidate.evidence,
+      pending.evidence,
+    );
   } finally {
     await client.close();
   }

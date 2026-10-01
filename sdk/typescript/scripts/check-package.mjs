@@ -171,6 +171,7 @@ const distFiles = new Set(
     "api",
     "auth",
     "bulk-scan-discovery",
+    "candidates",
     "cli",
     "cli-scan-logs-json",
     "classify-severity",
@@ -338,7 +339,13 @@ assertExpectedGitHead(
 const internalMarker =
   /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
 
-const payloads = [archiveBytes.toString("utf8")];
+const payloads = [...files];
+// Decode compressed files below before scanning them for text markers.
+for (const [file, contents] of archiveFiles) {
+  if (!/\.br(?:\.part-[0-9]+)?$/iu.test(file)) {
+    payloads.push(contents.toString("utf8"));
+  }
+}
 const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {

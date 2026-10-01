@@ -1,7 +1,57 @@
 import json
 from pathlib import Path
 
+import pytest
 from workbench_test_support import create_saved_workspace, run_workbench, start_delivered_scan
+
+
+@pytest.mark.parametrize("null_collections", [False, True])
+def test_unresolved_count_preserves_progress_with_incomplete_canonical_drafts(
+    tmp_path: Path, null_collections: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(started["results"]["scanDir"])
+    coverage = {
+        "surfaces": None if null_collections else [None, "unfinished surface"],
+        "explicitExclusions": None,
+        "deferred": [
+            None,
+            "unfinished candidate",
+            {
+                "candidateId": "pending-parser-review",
+                "reason": "The parser route needs validation.",
+            },
+        ],
+    }
+    findings = {
+        "findings": None
+        if null_collections
+        else [None, "unfinished finding", {"provenance": None, "extensions": "unfinished"}]
+    }
+    coverage_path = scan_dir / "coverage.json"
+    findings_path = scan_dir / "findings.json"
+    coverage_path.write_text(json.dumps(coverage))
+    findings_path.write_text(json.dumps(findings))
+
+    current = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    updated = run_workbench(
+        state_dir, "update-progress", "--scan-id", scan_id, "--phase", "discovery"
+    )["scan"]
+    history = run_workbench(state_dir, "list-scans")["scans"][0]
+
+    for scan in (current, updated):
+        assert scan["progress"]["status"] == "running"
+        assert scan["progress"]["candidates"]["unresolved"] == 1
+    assert history["progress"]["status"] == "running"
+    assert "unresolved" not in history["progress"]["candidates"]
+    assert updated["progress"]["phase"] == "discovery"
+    assert json.loads(coverage_path.read_text()) == coverage
+    assert json.loads(findings_path.read_text()) == findings
 
 
 def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
@@ -22,7 +72,7 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
         "--reportable-findings-count",
         "8",
     )
-    assert discovery["scan"]["progress"]["candidates"] == {"reportable": 8}
+    assert discovery["scan"]["progress"]["candidates"] == {"reportable": 8, "unresolved": 0}
 
     validation = run_workbench(
         state_dir,
@@ -32,7 +82,7 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
         "--phase",
         "validation",
     )
-    assert validation["scan"]["progress"]["candidates"] == {"reportable": 0}
+    assert validation["scan"]["progress"]["candidates"] == {"reportable": 0, "unresolved": 0}
 
 
 def test_phase_progress_tracks_and_resets_phase_specific_receipts(tmp_path: Path) -> None:

@@ -708,6 +708,12 @@
         },
         "notes": {
           "$ref": "#/$defs/text"
+        },
+        "candidateId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+        },
+        "sourceWorkerId": {
+          "$ref": "#/$defs/text"
         }
       },
       "required": [
@@ -779,6 +785,13 @@
               },
               "surfaceIds": {
                 "$ref": "#/$defs/textList"
+              },
+              "sourceWorkerId": {
+                "$ref": "#/$defs/text"
+              },
+              "candidate": {
+                "type": "object",
+                "additionalProperties": true
               }
             },
             "required": [

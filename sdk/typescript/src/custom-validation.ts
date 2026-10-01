@@ -11,7 +11,16 @@ import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { normalizePersistedFindings, requireScanFile } from "./contract.js";
 import { IncompleteScanError, safeErrorMessage } from "./errors.js";
-import type { CoverageDocument, FindingsDocument } from "./models.js";
+import {
+  candidateIdentity,
+  findingCandidateIds,
+  findingCandidateOwner,
+} from "./candidates.js";
+import type {
+  CoverageDocument,
+  DeferredCoverage,
+  FindingsDocument,
+} from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
 
@@ -25,6 +34,7 @@ type Finding = Pick<
   | "validation"
   | "attackPath"
   | "extensions"
+  | "provenance"
 > &
   Record<string, unknown>;
 type Disposition = "reportable" | "suppressed" | "not_applicable" | "deferred";
@@ -58,6 +68,7 @@ const DOCUMENTS = [
   "findings.json",
   "coverage.json",
 ] as const;
+
 interface Schema {
   $id?: string;
   $defs?: Record<string, Schema>;
@@ -373,9 +384,49 @@ export async function runCustomValidation(options: {
   );
   const decisions = new Map<string, CustomValidationResult["validations"]>();
   const reported: Finding[] = [];
+  const candidateIdentityCounts = new Map<string, number>();
+  for (const finding of findings) {
+    const candidateId = findingCandidateIds(finding)[0];
+    if (candidateId === undefined) continue;
+    const key = candidateIdentity(candidateId, findingCandidateOwner(finding));
+    candidateIdentityCounts.set(
+      key,
+      (candidateIdentityCounts.get(key) ?? 0) + 1,
+    );
+  }
+  const reservedIds = new Set([
+    ...findings.flatMap(findingCandidateIds),
+    ...[
+      ...coverage.deferred,
+      ...coverage.surfaces,
+      ...coverage.explicitExclusions,
+    ].flatMap((item) =>
+      [item["id"], item["candidateId"]].filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ),
+  ]);
+  const previousDeferred = new Map<string, DeferredCoverage>();
+  coverage.deferred = coverage.deferred.filter((item) => {
+    if (item.candidateId === undefined) return true;
+    const key = candidateIdentity(item.candidateId, item.sourceWorkerId);
+    if (!candidateIdentityCounts.has(key)) return true;
+    if (!previousDeferred.has(key)) previousDeferred.set(key, item);
+    return false;
+  });
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
+    const candidateId = findingCandidateIds(candidate.finding)[0];
+    const sourceWorkerId = findingCandidateOwner(candidate.finding);
+    const key =
+      candidateId === undefined
+        ? undefined
+        : candidateIdentity(candidateId, sourceWorkerId);
+    const reason =
+      validation.counterevidence_or_proof_gap ||
+      validation.remaining_uncertainty ||
+      validation.evidence.join("\n");
     for (const id of candidate.surfaceIds) {
       const values = decisions.get(id) ?? [];
       values.push(update);
@@ -383,15 +434,54 @@ export async function runCustomValidation(options: {
     }
     if (validation.disposition === "deferred") {
       coverage.completeness = "partial";
+      const uniqueIdentity =
+        key !== undefined && candidateIdentityCounts.get(key) === 1;
+      const previous = uniqueIdentity ? previousDeferred.get(key) : undefined;
+      const baseId = `custom-validation-${candidate.candidateId}`;
+      let deferredId = previous?.id ?? baseId;
+      let suffix = 2;
+      if (previous === undefined) {
+        while (reservedIds.has(deferredId))
+          deferredId = `${baseId}-${suffix++}`;
+      }
+      reservedIds.add(deferredId);
       coverage.deferred.push({
-        id: `custom-validation-${candidate.candidateId}`,
-        reason:
-          validation.counterevidence_or_proof_gap ||
-          validation.remaining_uncertainty ||
-          validation.evidence.join("\n"),
+        ...previous,
+        id: deferredId,
+        candidateId: uniqueIdentity ? candidateId : deferredId,
+        ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
+        candidate: candidate.finding,
+        reason,
         paths: candidate.finding.locations.map((location) => location.path),
         surfaceIds: candidate.surfaceIds,
       });
+    }
+    if (
+      validation.disposition === "suppressed" ||
+      validation.disposition === "not_applicable"
+    ) {
+      const previous =
+        key === undefined ? undefined : previousDeferred.get(key);
+      if (previous !== undefined) {
+        const baseId = `custom-validation-${candidate.candidateId}`;
+        let id = baseId;
+        let suffix = 2;
+        while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+        reservedIds.add(id);
+        coverage.surfaces.push({
+          ...previous,
+          id,
+          label: candidate.finding.title,
+          disposition:
+            validation.disposition === "suppressed"
+              ? "rejected"
+              : "not_applicable",
+          reason,
+          notes: reason,
+          finding: candidate.finding,
+          receiptRefs: [RESULTS, ...validation.artifact_paths],
+        });
+      }
     }
     if (validation.disposition !== "reportable") continue;
     const finding = candidate.finding;

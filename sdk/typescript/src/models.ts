@@ -298,6 +298,14 @@ export interface CoverageDocument {
     receiptRefs: string[];
     riskArea?: string;
     notes?: string;
+    /**
+     * Stable identity of a saved candidate; omitted for general coverage work.
+     */
+    candidateId?: string;
+    /**
+     * Logical Deep worker owning this candidate identity, preserved across resumed attempts.
+     */
+    sourceWorkerId?: string;
     [k: string]: unknown;
   }[];
   explicitExclusions: {
@@ -310,6 +318,20 @@ export interface CoverageDocument {
     reason: string;
     paths?: string[];
     surfaceIds?: string[];
+    /**
+     * Stable identity of a saved candidate; omitted for general coverage work.
+     */
+    candidateId?: string;
+    /**
+     * Logical Deep worker owning this candidate identity, preserved across resumed attempts.
+     */
+    sourceWorkerId?: string;
+    /**
+     * Saved candidate details and evidence awaiting a final decision.
+     */
+    candidate?: {
+      [k: string]: unknown;
+    };
     [k: string]: unknown;
   }[];
   openQuestions?: {

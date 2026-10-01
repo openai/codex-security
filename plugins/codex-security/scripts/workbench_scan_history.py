@@ -14,13 +14,28 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
+from candidate_identity import unresolved_candidates
+from finalize_scan_contract import ContractError, _prepare_scan_finalization, _read_scan_local_json
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
+
+
+def saved_unresolved_candidate_count(scan: sqlite3.Row) -> int:
+    """Read candidate counts from saved artifacts without requiring a completed scan."""
+    scan_dir = Path(scan["scan_dir"])
+    try:
+        coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved coverage")
+        if not unresolved_candidates(coverage):
+            return 0
+        findings = _read_scan_local_json(scan_dir, "findings.json", "Saved findings")
+    except (ContractError, OSError, ValueError):
+        # Running and removed scans may have no readable canonical artifacts yet.
+        return 0
+    return len(unresolved_candidates(coverage, findings.get("findings", [])))
 
 
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
@@ -198,6 +213,46 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "completedAt": row["completed_at"],
+        "continuationThreadId": row["continuation_thread_id"],
+        **stored_scan_cost_fields(row["cost_json"]),
+        "findingCount": row["finding_count"],
+        "handoffStatus": row["handoff_status"],
+        "mode": row["mode"],
+        "model": row["model"],
+        "parentScanId": row["parent_scan_id"],
+        "progress": {
+            "candidates": {"reportable": row["reportable_findings_count"]},
+            "coverage": {
+                "closedRows": row["review_items_completed"],
+                "filesTotal": row["scope_file_count"],
+                "worklistRows": row["review_items_total"],
+            },
+            "phase": row["phase"],
+            "status": "canceled" if row["canceled_at"] else row["status"],
+            "updatedAt": row["progress_updated_at"],
+        },
+        "recipeAvailable": row["recipe_json"] is not None,
+        "reasoningEffort": row["reasoning_effort"],
+        "scanDir": row["scan_dir"],
+        "scanId": row["id"],
+        "scope": row["scope"],
+        "startedAt": row["started_at"],
+        "targetId": row["target_id"],
+        "targetPath": row["target_path"],
+        "targetRevision": row["target_revision"],
+        "targetSummary": row["target_summary"],
+        "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+        **(
+            {"warnings": json.loads(row["completion_warnings_json"])}
+            if row["completion_warnings_json"] != "[]"
+            else {}
+        ),
+    }
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
@@ -299,48 +354,7 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {
-        "scans": [
-            {
-                "completedAt": row["completed_at"],
-                "continuationThreadId": row["continuation_thread_id"],
-                **stored_scan_cost_fields(row["cost_json"]),
-                "findingCount": row["finding_count"],
-                "handoffStatus": row["handoff_status"],
-                "mode": row["mode"],
-                "model": row["model"],
-                "parentScanId": row["parent_scan_id"],
-                "progress": {
-                    "candidates": {"reportable": row["reportable_findings_count"]},
-                    "coverage": {
-                        "closedRows": row["review_items_completed"],
-                        "filesTotal": row["scope_file_count"],
-                        "worklistRows": row["review_items_total"],
-                    },
-                    "phase": row["phase"],
-                    "status": "canceled" if row["canceled_at"] else row["status"],
-                    "updatedAt": row["progress_updated_at"],
-                },
-                "recipeAvailable": row["recipe_json"] is not None,
-                "reasoningEffort": row["reasoning_effort"],
-                "scanDir": row["scan_dir"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "startedAt": row["started_at"],
-                "targetId": row["target_id"],
-                "targetPath": row["target_path"],
-                "targetRevision": row["target_revision"],
-                "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
-                **(
-                    {"warnings": json.loads(row["completion_warnings_json"])}
-                    if row["completion_warnings_json"] != "[]"
-                    else {}
-                ),
-            }
-            for row in rows[:limit]
-        ]
-    }
+    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
     if limit is not None:
         result.update(
             {

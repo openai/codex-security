@@ -825,6 +825,7 @@ describe("deep scan workbench ownership", () => {
         deferred: Array<{
           id: string;
           candidateId?: string;
+          candidate?: (typeof candidates)[number];
           reason: string;
           paths?: string[];
         }>;
@@ -840,12 +841,14 @@ describe("deep scan workbench ownership", () => {
           {
             id: "candidate-001",
             candidateId: "candidate-001",
+            candidate: candidates[0],
             reason: "Existing candidate validation dependency was unavailable.",
             paths: ["src/source.py"],
           },
           {
             id: "candidate-deferred",
             candidateId: "candidate-deferred",
+            candidate: candidates[4],
             reason: "Existing runtime policy could not be inspected.",
             paths: ["src/source.py"],
           },
@@ -859,6 +862,8 @@ describe("deep scan workbench ownership", () => {
         expect(coverage.deferred).toEqual([
           expect.objectContaining({
             id: "candidate-001",
+            candidateId: "candidate-001",
+            candidate: candidates[0],
             reason: expect.stringContaining("Possible missing authorization"),
             paths: scoped
               ? ["src/source.py", "shared/support.py"]
@@ -866,6 +871,8 @@ describe("deep scan workbench ownership", () => {
           }),
           expect.objectContaining({
             id: "candidate-deferred",
+            candidateId: "candidate-deferred",
+            candidate: candidates[4],
             reason: expect.stringContaining(
               "Authorization proof needs runtime evidence",
             ),
