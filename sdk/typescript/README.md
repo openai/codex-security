@@ -1755,9 +1755,10 @@ repository does not make the document automatic scan input; use the existing
 `ScanResult.threatModel` contains the saved structured model or Markdown.
 `threatModelPath` points to its current document, including supported historical
 filenames. Either can be null. The model remains exportable when the document
-could not be written. Scan JSON, history, and policy results expose these fields.
-Policy generation saves its model before drafting `SECURITY.md`, so a later
-drafting failure does not discard it.
+could not be written. Scan JSON and policy results expose these fields. History
+reports model availability, provenance, and the document path without including
+the model body. Policy generation saves its model before drafting `SECURITY.md`,
+so a later drafting failure does not discard it.
 
 SDK scan methods verify model paths before returning them. A manually
 constructed `ScanResult` uses the `threatModelPath` supplied in its options, or
