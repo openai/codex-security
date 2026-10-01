@@ -539,6 +539,66 @@ test("Windows drive casing does not hide an in-scope exclusion", () => {
   assert.deepEqual(report.errors, ["incomplete coverage"]);
 });
 
+for (const [repo, prefix, ancestor] of [
+  ["/tmp/repository[fixture]", "/tmp/repository[fixture]", "/"],
+  [
+    String.raw`C:\Temp\repository[fixture]`,
+    "c:/Temp/repository[fixture]",
+    "c:/",
+  ],
+  [
+    String.raw`\\server\share\repository[fixture]`,
+    "//server/share/repository[fixture]",
+    "//server/share/",
+  ],
+  [
+    "/tmp/user[fixture]/repository",
+    "/tmp/user[fixture]/repository",
+    "/tmp/user[fixture]",
+  ],
+  [
+    String.raw`C:\Temp\user[fixture]\repository`,
+    "c:/Temp/user[fixture]/repository",
+    "c:/Temp/user[fixture]",
+  ],
+  [
+    String.raw`\\server\share\user[fixture]\repository`,
+    "//server/share/user[fixture]/repository",
+    "//server/share/user[fixture]",
+  ],
+]) {
+  test(`absolute exclusions treat the repository prefix literally for ${repo}`, () => {
+    const fixture = createFixture();
+    for (const pattern of [
+      `${prefix}/src/client.py`,
+      `${prefix}/**/*.py`,
+      `${prefix}/config/`,
+      prefix,
+      ancestor,
+    ]) {
+      const result = retainedResult(fixture);
+      result.coverage.explicitExclusions.push({
+        pattern,
+        reason: "Not reviewed",
+      });
+      const report = gradeResult(result, fixture, repo);
+      assert.equal(report.passed, false, pattern);
+      assert.deepEqual(report.errors, ["incomplete coverage"]);
+    }
+    for (const pattern of [
+      `${prefix}-external/src/client.py`,
+      `${prefix.replace("[fixture]", "fixture")}/**/*.py`,
+    ]) {
+      const result = retainedResult(fixture);
+      result.coverage.explicitExclusions.push({
+        pattern,
+        reason: "Different repository",
+      });
+      assert.equal(gradeResult(result, fixture, repo).passed, true, pattern);
+    }
+  });
+}
+
 test("stages production prompt unchanged and no labels; grades only the final SDK response", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "source-audit-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));

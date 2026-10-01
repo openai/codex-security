@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createFixture, writeFixture } from "./fixtures.mjs";
 import { gradeResult } from "./grade.mjs";
 import {
+  bundledCodexSdkEnvironment,
   deepScanPermissionProfileFallbackError,
   executablePathForSpawn,
   inlineToml,
@@ -184,7 +185,7 @@ export function codexSettings(
     ...(!hasLogin && !codexApiKey && openAiApiKey
       ? { apiKey: openAiApiKey }
       : {}),
-    env: {
+    env: bundledCodexSdkEnvironment(codexPath, {
       ...Object.fromEntries(
         Object.entries(environment).filter(
           ([name, value]) =>
@@ -194,7 +195,7 @@ export function codexSettings(
       CODEX_HOME: home,
       CODEX_SQLITE_HOME: home,
       CODEX_CLI_PATH: codexPath,
-    },
+    }),
     // Raw TOML preserves literal filesystem keys that SDK object flattening loses.
     // Everything outside the source, references, and minimal runtime is unreadable.
     configOverrides: [

@@ -11,6 +11,7 @@ const bundle = await build({
       'export { preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";',
       'export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";',
       'export { inlineToml } from "../../sdk/typescript/src/config.ts";',
+      'export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-environment.ts";',
     ].join("\n"),
     resolveDir: fileURLToPath(new URL(".", import.meta.url)),
   },
@@ -24,6 +25,7 @@ export const {
   deepScanPermissionProfileFallbackError,
   executablePathForSpawn,
   inlineToml,
+  bundledCodexSdkEnvironment,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );

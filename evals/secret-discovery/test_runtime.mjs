@@ -16,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
-import { dirname, join, win32 } from "node:path";
+import { delimiter, dirname, join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
@@ -219,6 +219,61 @@ test("the SDK launches long Windows paths with the native namespace prefix", asy
   }
 });
 
+test("the SDK executable override preserves bundled tools at the child boundary", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "eval-tools-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = join(directory, "bin", "codex");
+  const tools = join(directory, "codex-path");
+  await mkdir(tools);
+  const inherited = {
+    Path: [tools, join(directory, "other tools"), tools].join(delimiter),
+    PATH: join(directory, "unused alias"),
+  };
+  const original = { ...inherited };
+  const intercepted = new Error("Synthetic launch intercepted");
+  const environments = [];
+  const spawn = t.mock.method(
+    childProcess,
+    "spawn",
+    (_file, _args, options) => {
+      environments.push(options.env);
+      throw intercepted;
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    for (const environment of [{}, inherited]) {
+      await assert.rejects(
+        async () => {
+          const settings = codexSettings(directory, executable, environment);
+          const { events } = await new Codex(settings)
+            .startThread({ skipGitRepoCheck: true })
+            .runStreamed("Offline synthetic launch check");
+          for await (const event of events) void event;
+        },
+        (error) => error === intercepted,
+      );
+    }
+    assert.deepEqual(
+      environments.map((environment) =>
+        Object.fromEntries(
+          Object.entries(environment).filter(
+            ([key]) => key.toLowerCase() === "path",
+          ),
+        ),
+      ),
+      [
+        { PATH: tools },
+        { Path: [tools, join(directory, "other tools")].join(delimiter) },
+      ],
+    );
+    assert.deepEqual(inherited, original);
+  } finally {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
 async function waitForFile(path) {
   for (let attempt = 0; attempt < 500; attempt++) {
     try {
@@ -240,6 +295,13 @@ async function nativeFixture(t, mode = "complete") {
   await mkdir(home);
   const executable = join(directory, "native[local]", "bin", "codex.mjs");
   await mkdir(dirname(executable), { recursive: true });
+  const tools = join(dirname(dirname(executable)), "codex-path");
+  await mkdir(tools);
+  await writeFile(
+    join(tools, "rg"),
+    `#!${process.execPath}\nconsole.log("synthetic rg");\n`,
+    { mode: 0o755 },
+  );
   const result = {
     findings: prepared.fixture.positives.map((expected) => ({
       taxonomy: { category: "hardcoded-credentials", cwe: [expected.cwes[0]] },
@@ -270,6 +332,7 @@ async function nativeFixture(t, mode = "complete") {
 function fakeNativeSource(scenario) {
   return `#!${process.execPath}
 import { existsSync, writeFileSync, appendFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { parse } from ${JSON.stringify(tomlUrl)};
@@ -285,7 +348,8 @@ const overrides = new Map(args.flatMap((arg, index) => {
 }));
 const config = parse([...overrides.values()].join("\\n"));
 const record = (name, value) => writeFileSync(join(scenario.directory, name + ".json"), JSON.stringify(value));
-record(kind, { args, cwd: process.cwd(), effectiveCwd: cwd, config, env: process.env, pid: process.pid });
+const bundledTool = execFileSync("rg", ["--version"], { encoding: "utf8" }).trim();
+record(kind, { args, cwd: process.cwd(), effectiveCwd: cwd, config, env: process.env, pid: process.pid, bundledTool });
 process.on("SIGTERM", () => {
   record(kind + "-stopping", { sourceExists: existsSync(cwd), homeExists: existsSync(process.env.CODEX_HOME) });
   setTimeout(() => {
@@ -383,6 +447,7 @@ test(
       prepared.runtime,
     );
     for (const entry of [preflight, exec]) {
+      assert.equal(entry.bundledTool, "synthetic rg");
       assert.equal(entry.env.CODEX_API_KEY, "synthetic-env-key");
       assert.equal(entry.env.CODEX_HOME, settings.env.CODEX_HOME);
       assert.equal(entry.env.CODEX_SQLITE_HOME, settings.env.CODEX_HOME);

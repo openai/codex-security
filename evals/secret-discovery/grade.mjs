@@ -22,10 +22,27 @@ function matchesExclusion(path, pattern, repo) {
   ) {
     normalized = normalized.slice(0, -1);
   }
-  let entry = paths.isAbsolute(pattern) && repo ? paths.join(repo, path) : path;
+  let entry = path;
+  if (paths.isAbsolute(pattern) && repo) {
+    const relative = paths.relative(repo, normalized);
+    if (
+      !paths.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${paths.sep}`)
+    ) {
+      // The repository prefix is a literal path, not part of the exclusion glob.
+      normalized = relative || ".";
+    } else {
+      entry = paths.join(repo, path);
+    }
+  }
   // A directory exclusion also excludes the fixture files beneath it.
   while (true) {
-    if (paths.matchesGlob(entry, normalized)) return true;
+    if (
+      paths.relative(entry, normalized) === "" ||
+      paths.matchesGlob(entry, normalized)
+    )
+      return true;
     const parent = paths.dirname(entry);
     if (parent === entry) return false;
     entry = parent;

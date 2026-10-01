@@ -1,11 +1,10 @@
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
+import { configuredCodexHome } from "../../sdk/typescript/dist/auth.js";
 import {
   createIsolatedHome,
-  expandHome,
   resolveCodexCommand,
 } from "../../sdk/typescript/dist/runtime.js";
 import {
@@ -21,11 +20,7 @@ await mkdir(reports, { recursive: true });
 const reportDirectory = await mkdtemp(join(reports, "run-"));
 console.log(`Eval artifacts: ${reportDirectory}`);
 await withEvalState(
-  () =>
-    createEvalHome(
-      createIsolatedHome,
-      expandHome(process.env.CODEX_HOME || join(homedir(), ".codex")),
-    ),
+  () => createEvalHome(createIsolatedHome, configuredCodexHome(process.env)),
   async ({ root, home, hasLogin, signal }) => {
     const prepared = await prepareEval(root);
     const codexPath = await realpath(resolveCodexCommand({}).command);
