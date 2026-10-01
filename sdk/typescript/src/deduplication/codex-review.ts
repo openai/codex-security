@@ -50,6 +50,8 @@ export interface CodexReview<T> extends Pick<
   DeduplicationReviewRequest,
   "stage" | "model" | "effort" | "prompt" | "schema"
 > {
+  /** Exact comparison participants, supplied by the structured reviewer. */
+  findingIds?: readonly string[];
   validate(value: unknown): T;
 }
 
