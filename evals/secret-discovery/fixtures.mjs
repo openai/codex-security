@@ -154,7 +154,7 @@ export function createFixture() {
         "const signingKey",
         ["CWE-321", "CWE-798", "CWE-312"],
         "export function signMessage",
-        "-----END PRIVATE KEY-----",
+        privateKey.trim().split("\n").at(-2),
       ),
     ],
     negatives: [

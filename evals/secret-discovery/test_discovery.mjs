@@ -131,6 +131,8 @@ for (const category of [
   "non_credentials",
   "not a credential",
   "NON SECRET",
+  "not-a-secret-exposure",
+  "non-credential-finding",
 ]) {
   test(`rejects negated category ${category}`, () => {
     const fixture = createFixture();
@@ -141,6 +143,14 @@ for (const category of [
     assert.equal(report.cases[0].found, false);
   });
 }
+
+test("accepts credential exposure with non-secret context in the category", () => {
+  const fixture = createFixture();
+  const result = retainedResult(fixture);
+  result.findings[0].taxonomy.category =
+    "credential exposure with non-secret context";
+  assert.equal(gradeResult(result, fixture).passed, true);
+});
 
 test("accepts a secret's valid source range and sensitive-data category", () => {
   const fixture = createFixture();
@@ -417,6 +427,29 @@ test("accepts the private-key body and rejects reversed source ranges", () => {
     fixture.positives[keyIndex].line;
   assert.equal(gradeResult(result, fixture).passed, false);
 });
+
+for (const footerLocation of [true, false]) {
+  test(`rejects footer-only private-key evidence with ${footerLocation ? "footer" : "declaration"} location`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    const keyIndex = fixture.positives.findIndex(
+      (entry) => entry.id === "private-key",
+    );
+    const path = fixture.positives[keyIndex].path;
+    const footerLine =
+      fixture.files[path]
+        .split("\n")
+        .findIndex((line) => line.includes("-----END PRIVATE KEY-----")) + 1;
+    const finding = result.findings[keyIndex];
+    if (footerLocation) finding.locations[0].startLine = footerLine;
+    finding.codeEvidence = [sourceEvidence(fixture, path, footerLine)];
+    const report = gradeResult(result, fixture);
+    assert.equal(report.passed, false);
+    assert.equal(report.cases[keyIndex].found, !footerLocation);
+    if (!footerLocation)
+      assert.deepEqual(report.errors, ["missing or invalid code evidence"]);
+  });
+}
 
 test("OpenAI environment auth is a fallback for missing file login and Codex key", () => {
   const env = { OPENAI_API_KEY: "synthetic-openai-key" };
