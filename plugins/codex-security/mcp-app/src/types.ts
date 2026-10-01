@@ -42,7 +42,6 @@ export interface ScanResults {
   targetRevision?: string;
   targetSummary?: string | null;
   threatModelAvailable: boolean;
-  threatModel?: JsonObject;
   threatModelPath?: string;
   threatModelProvenance?: JsonObject;
   updatedAt?: string;

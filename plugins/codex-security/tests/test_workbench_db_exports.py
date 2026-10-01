@@ -612,8 +612,12 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(draft))
     active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert active["progress"]["phase"] == "threat_model"
+    workspace = run_workbench(state_dir, "get-workspace", "--workspace-id", str(saved["id"]))
+    assert "threatModel" not in workspace["results"]
+    assert workspace["results"]["threatModelAvailable"] is True
     assert active["threatModelAvailable"] is True
-    assert active["threatModel"] == model
+    assert "threatModel" not in active
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert active["threatModelProvenance"]["provisional"] is True
     assert active["artifacts"]["threatModel"] == str(scan_dir / "threatmodel.md")
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
@@ -637,7 +641,8 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     extra = ("--message", "Stopped after saving the model.") if termination == "fail-scan" else ()
     run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert stopped["threatModel"] == model
+    assert "threatModel" not in stopped
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert stopped["threatModelProvenance"]["provisional"] is True
     assert stopped["findingCount"] == 0
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
@@ -728,7 +733,8 @@ def test_malformed_model_keeps_history_available_for_semantic_repair(
     assert repaired["status"] == "draft_written"
     active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert active["threatModelAvailable"] is True
-    assert active["threatModel"] == model
+    assert "threatModel" not in active
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert "Stored messages" in (scan_dir / "threatmodel.md").read_text()
 
 

@@ -81,7 +81,8 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
 
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id[:12])["scan"]
     assert stopped["progress"]["status"] == ("canceled" if termination == "canceled" else "failed")
-    assert stopped["threatModel"] == {
+    assert "threatModel" not in stopped
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == {
         **checkpoint["threatModel"],
         "origin": "recovered",
     }

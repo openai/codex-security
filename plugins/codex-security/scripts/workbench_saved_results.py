@@ -69,7 +69,6 @@ def threat_model_fields(db: WorkbenchDbContext, scan: sqlite3.Row) -> dict[str, 
             description = saved_model[0]
             fields.update(
                 threatModelAvailable=True,
-                threatModel=description["threatModel"],
                 threatModelProvenance=description["provenance"],
             )
             if description["path"] is not None:
