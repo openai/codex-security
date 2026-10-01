@@ -729,6 +729,81 @@ describe("scan and patch workflow", () => {
     }
   });
 
+  test.each([undefined, "0", "1"])(
+    "applies redaction setting %p to patch-risk display while protecting publication summaries",
+    async (value) => {
+      const result = resultWithFindings(["high"]);
+      const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
+      const report = patchRiskAssessment().report.replace(
+        patchRiskSummary(),
+        `${patchRiskSummary()}\n\n${detail}`,
+      );
+      const repositoryCommands: Array<{
+        command: string;
+        args: readonly string[];
+      }> = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          environment: { CODEX_SECURITY_REDACT_LOGS: value },
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command, args) => {
+            repositoryCommands.push({ command, args });
+            if (command === "git") {
+              if (args[0] === "remote") {
+                return "https://github.example.test/example/repository.git";
+              }
+              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            }
+            return args[1] === "create"
+              ? "https://github.example.test/example/repository/pull/15"
+              : "";
+          },
+        },
+        {
+          configure: (current) => {
+            Object.assign(current, {
+              assessPatchRisk: async () => ({ report }),
+            });
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(outcome.stderr).toContain("Patch risk assessment:");
+      expect(outcome.stderr).toContain(patchRiskSummary());
+      expect(outcome.stderr).toContain(value === "0" ? detail : "[redacted]");
+      expect(outcome.stderr.includes("SYNTHETIC_RISK_VALUE")).toBe(
+        value === "0",
+      );
+      // The report is result data; only its CLI display follows the log setting.
+      expect(JSON.parse(outcome.stdout).patchRisk.report).toContain(detail);
+      const published = repositoryCommands.find(
+        ({ command, args }) => command === "gh" && args[1] === "create",
+      )?.args;
+      const persisted = repositoryCommands.find(
+        ({ command, args }) =>
+          command === "git" &&
+          args[0] === "config" &&
+          args[2]?.endsWith(".codexSecurityPatchPullRequestBody"),
+      )?.args;
+      expect(published).toBeDefined();
+      expect(persisted).toBeDefined();
+      for (const body of [published?.at(-1), persisted?.at(-1)]) {
+        expect(body).toContain(patchRiskSummary());
+        expect(body).toContain("[redacted]");
+        expect(body).not.toContain("SYNTHETIC_RISK_VALUE");
+      }
+    },
+  );
+
   test("assesses only changes made during a literal patch run", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "codex-security-patch-risk-"),
@@ -758,11 +833,29 @@ describe("scan and patch workflow", () => {
           "--assess-patch-risk",
           "--codex",
           "analytics.enabled=false",
+          "--codex",
+          'model_provider="synthetic.gateway"',
+          "--codex",
+          'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
         ],
         {
           currentDirectory: repository,
           onCodex: async (args, output) => {
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain('model_provider="synthetic.gateway"');
+            expect(output?.modelProvider).toBe("synthetic.gateway");
+            expect(output?.providerConfiguration?.["env_key"]).toBe(
+              "SYNTHETIC_KEY",
+            );
+            expect(
+              parseToml(
+                args.find((arg) => arg.startsWith("model_providers="))!,
+              ),
+            ).toMatchObject({
+              model_providers: {
+                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+              },
+            });
             if (
               output?.appServer?.prompt.includes(
                 "$codex-security:assess-patch-risk",

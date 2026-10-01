@@ -880,8 +880,24 @@ stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
 `validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
-`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
-other runtime overrides.
+`model_reasoning_effort`, `model_provider`, `model_providers`, and
+`analytics.enabled` keys in `--codex`, but no other runtime overrides.
+Use the same provider settings as `scan` when routing a standalone patch
+through a custom inference gateway:
+
+```bash
+npx @openai/codex-security patch "Security issue" \
+  --codex 'model="gateway-model"' \
+  --codex 'model_provider="gateway"' \
+  --codex 'model_providers.gateway.name="Gateway"' \
+  --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
+  --codex 'model_providers.gateway.wire_api="responses"' \
+  --codex 'model_providers.gateway.env_key="GATEWAY_API_KEY"'
+```
+
+Set the selected provider's API-key environment variable before running the
+command. Provider settings also apply to `patch --assess-patch-risk`.
+Sandbox, approval, and plugin settings remain controlled by the command.
 
 Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
 built-in metrics for a command:
@@ -918,7 +934,8 @@ restrictions.
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
+| `CODEX_SECURITY_REDACT_LOGS`                                                | CLI-only; `0` disables diagnostic redaction. Unset or any other value keeps it enabled.                   |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                      |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
 | `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
@@ -938,6 +955,69 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
+
+### Troubleshooting redacted output
+
+Verbosity and redaction are independent controls. By default, scans show progress,
+state transitions, warnings, and summaries. Add `--verbose` or set
+`CODEX_SECURITY_LOG_LEVEL=debug` to include lifecycle, configuration, retry,
+and worker diagnostics on stderr. `LOG_LEVEL=debug` is the fallback when
+`CODEX_SECURITY_LOG_LEVEL` is unset or blank. Verbosity does not disable redaction.
+
+Only the exact value `CODEX_SECURITY_REDACT_LOGS=0` disables CLI diagnostic
+redaction. An unset variable or any other value retains the default redaction
+behavior. Disabling redaction does not enable verbose diagnostics.
+
+| Verbose diagnostics | CLI redaction | Behavior                                             |
+| ------------------- | ------------- | ---------------------------------------------------- |
+| Off (default)       | On (default)  | Normal progress and summaries with redaction.        |
+| On                  | On            | Additional diagnostics on stderr with redaction.     |
+| Off                 | Off           | Normal output detail with diagnostic redaction off.  |
+| On                  | Off           | Additional diagnostics on stderr with redaction off. |
+
+Scan errors and warnings use the same checks in plain stderr, verbose message
+fields, and JSON errors. Progress/dashboard redaction also honors the setting.
+The checks detect recognizable credentials and sensitive field assignments.
+A match replaces the whole message or value
+with `[redacted]`. For example, `token=example` triggers redaction even if the
+value is synthetic. Diagnostic event names, error classifications, counters,
+and fixed metadata remain available when a message is redacted. Dedicated path
+fields keep their paths, and observer warnings keep the observer's name while
+redacting the error detail.
+
+For local troubleshooting with verbose diagnostics and redaction disabled:
+
+```bash
+CODEX_SECURITY_REDACT_LOGS=0 npx @openai/codex-security scan . --verbose
+```
+
+In PowerShell, set it in the current shell and remove it afterward:
+
+```powershell
+$env:CODEX_SECURITY_REDACT_LOGS = "0"
+npx @openai/codex-security scan . --verbose
+Remove-Item Env:CODEX_SECURITY_REDACT_LOGS
+```
+
+Deep Scan discovery and reducer worker displays, including resumed workers,
+follow the current CLI invocation's diagnostic settings. These settings are not
+saved in scan recipes; select them again when running `scans resume` or
+`scans rerun` if needed.
+
+Neither control enables additional raw session capture or uploads logs. Raw
+session log capture and the original model output and results remain unchanged;
+paths are not generally redacted. Output can still contain source code,
+credentials, and other sensitive information, especially with redaction disabled.
+Keep it private and review it before sharing or uploading it.
+
+The redaction setting does not change credential configuration, SDK error
+sanitization, stored failure summaries, or publication receipts. It cannot recover
+content already replaced with `[redacted]`, including errors sanitized before
+reaching the CLI, and does not control native Codex or OpenTelemetry log and
+trace redaction. Deep Scan workers use native Codex; this setting applies when
+the parent CLI displays their diagnostics. Patch-risk report diagnostics honor
+the opt-out, but the summary used in a published pull request keeps its credential
+redaction.
 
 ### Progress and cost
 

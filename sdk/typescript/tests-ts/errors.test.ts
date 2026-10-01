@@ -5,6 +5,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
   errorMessage,
+  logErrorMessage,
   safeErrorMessage,
 } from "../src/errors.js";
 
@@ -69,6 +70,29 @@ describe("error messages", () => {
   test("formats non-error values without parsing them", () => {
     expect(errorMessage(42)).toBe("42");
     expect(errorMessage(null)).toBe("null");
+  });
+
+  test.each([undefined, "1", "", "false", "unexpected"])(
+    "keeps log redaction enabled with environment value %p",
+    (value) => {
+      const environment = { CODEX_SECURITY_REDACT_LOGS: value };
+      expect(
+        logErrorMessage(new Error("token=SYNTHETIC_TOKEN"), environment),
+      ).toBe("[redacted]");
+      expect(logErrorMessage("service unavailable", environment)).toBe(
+        "service unavailable",
+      );
+    },
+  );
+
+  test("opts out of log redaction without changing persistence redaction", () => {
+    const message = "request failed: token=SYNTHETIC_TOKEN";
+    const error = new Error(message);
+    const environment = { CODEX_SECURITY_REDACT_LOGS: "0" };
+    expect(logErrorMessage(error, environment)).toBe(message);
+    expect(logErrorMessage(message, environment)).toBe(message);
+    expect(logErrorMessage(null, environment)).toBe("null");
+    expect(safeErrorMessage(error)).toBe("[redacted]");
   });
 
   test("omits credential-bearing messages at output boundaries", () => {
