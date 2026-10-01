@@ -160,6 +160,16 @@ test("accepts a secret's valid source range and sensitive-data category", () => 
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
+test("accepts CWE-260 for the password in the database configuration", () => {
+  const fixture = createFixture();
+  const result = retainedResult(fixture);
+  const databaseIndex = fixture.positives.findIndex(
+    (entry) => entry.id === "dotenv-url",
+  );
+  result.findings[databaseIndex].taxonomy.cwe = ["CWE-260"];
+  assert.equal(gradeResult(result, fixture).passed, true);
+});
+
 for (const cwe of ["CWE-200", "CWE-540"]) {
   test(`accepts ${cwe} for specifically categorized credential exposure`, () => {
     const fixture = createFixture();

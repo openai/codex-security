@@ -140,6 +140,7 @@ export function createFixture() {
       positive("dotenv-url", "config/.env", "DATABASE_URL=", [
         "CWE-798",
         "CWE-259",
+        "CWE-260",
         "CWE-312",
         "CWE-522",
       ]),
