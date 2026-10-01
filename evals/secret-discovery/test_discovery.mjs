@@ -229,31 +229,41 @@ test("accepts real credential-use sinks without treating them as separate exposu
   }
 });
 
-test("accepts relative prefixes on exposed source and credential-use locations", () => {
-  const fixture = createFixture();
-  for (const prefix of ["./", "././"]) {
-    const result = retainedResult(fixture);
-    for (const [index, expected] of fixture.positives.entries()) {
-      result.findings[index].locations[0].path = `${prefix}${expected.path}`;
-      if (expected.consumerLine !== null) {
-        result.findings[index].locations.push({
-          path: `${prefix}${expected.path}`,
-          startLine: expected.consumerLine,
-          endLine: expected.lineCount,
-          role: "sink",
-        });
+for (const [name, separator] of [
+  ["POSIX", "/"],
+  ["Windows", "\\"],
+]) {
+  test(`accepts ${name} source and credential-use paths with relative prefixes`, () => {
+    const fixture = createFixture();
+    for (const prefix of ["", "./", "././", ".\\", ".\\./", "./.\\"]) {
+      const result = retainedResult(fixture);
+      for (const [index, expected] of fixture.positives.entries()) {
+        const path = `${prefix}${expected.path.replaceAll("/", separator)}`;
+        result.findings[index].locations[0].path = path;
+        if (expected.consumerLine !== null) {
+          result.findings[index].locations.push({
+            path,
+            startLine: expected.consumerLine,
+            endLine: expected.lineCount,
+            role: "sink",
+          });
+        }
       }
+      assert.equal(gradeResult(result, fixture).passed, true, prefix);
     }
-    assert.equal(gradeResult(result, fixture).passed, true, prefix);
-  }
-});
+  });
+}
 
-test("relative prefixes do not make unrelated or unsafe source locations valid", () => {
+test("path normalization does not make unrelated or unsafe source locations valid", () => {
   const fixture = createFixture();
   for (const path of [
     "./src/absent.py",
     "./src/../src/client.py",
     "/src/client.py",
+    ".\\src\\absent.py",
+    ".\\src\\..\\src\\client.py",
+    "\\src\\client.py",
+    "C:\\src\\client.py",
   ]) {
     const result = retainedResult(fixture);
     result.findings[0].locations[0].path = path;

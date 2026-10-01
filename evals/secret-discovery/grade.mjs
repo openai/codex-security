@@ -40,10 +40,14 @@ function strings(value) {
   return [];
 }
 
+function normalizeSourcePath(path) {
+  return path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
+}
+
 function matchesLocation(location, expected) {
   const end = location.endLine ?? location.startLine;
   return (
-    location.path?.replace(/^(?:\.\/)+/u, "") === expected.path &&
+    normalizeSourcePath(location.path) === expected.path &&
     !supportingLocation(location) &&
     Number.isInteger(location.startLine) &&
     Number.isInteger(end) &&
@@ -72,7 +76,7 @@ function matchesConsumer(location, expected) {
   const end = location.endLine ?? location.startLine;
   return (
     location.role === "sink" &&
-    location.path?.replace(/^(?:\.\/)+/u, "") === expected.path &&
+    normalizeSourcePath(location.path) === expected.path &&
     expected.consumerLine !== null &&
     Number.isInteger(location.startLine) &&
     Number.isInteger(end) &&
