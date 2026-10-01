@@ -25,6 +25,10 @@
 - bump MCP SDK to 1.30.1 in MCP app and evals ([#1171](https://github.com/openai/codex-security/pull/1171))
 - support custom inference providers in patch commands ([#1131](https://github.com/openai/codex-security/pull/1131))
 - allow opting out of log redaction ([#1176](https://github.com/openai/codex-security/pull/1176))
+- organize and clarify command help ([#1142](https://github.com/openai/codex-security/pull/1142))
+- reuse native builds across package and container checks ([#1130](https://github.com/openai/codex-security/pull/1130))
+- smoke test published npm installs across supported platforms ([#1129](https://github.com/openai/codex-security/pull/1129))
+- require workflow checks and production dependency audits ([#1128](https://github.com/openai/codex-security/pull/1128))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
