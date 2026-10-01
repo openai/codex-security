@@ -2,27 +2,27 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-export async function resolveScanTargets(context, pullRequestsForCommit) {
+export async function resolveScanTargets(context, getPullRequest) {
   const { eventName, event, repository, sha } = context;
-  if (eventName === "workflow_dispatch") return [{ pr: 0, sha }];
-  if (eventName !== "workflow_run") return [];
+  if (eventName !== "workflow_dispatch") return [];
+  const { pr_number: number = "", source_sha: sourceSha = "" } =
+    event.inputs ?? {};
+  if (!number && !sourceSha) return [{ pr: 0, sha }];
+  if (!/^[1-9][0-9]*$/.test(number) || !/^[a-f0-9]{40}$/.test(sourceSha)) {
+    throw new Error(
+      "PR scans require both a positive pr_number and a full source_sha.",
+    );
+  }
 
-  const run = event.workflow_run;
-  if (run.event !== "pull_request" || run.conclusion === "cancelled") return [];
-
-  // Fork runs can have an empty pull_requests list; resolve it through GitHub.
-  const pullRequests = await pullRequestsForCommit(run.head_sha);
-  const triggeringNumbers = new Set(run.pull_requests.map((pr) => pr.number));
-  return pullRequests
-    .filter(
-      (pr) =>
-        pr.state === "open" &&
-        pr.base.repo.full_name === repository &&
-        pr.base.ref === "main" &&
-        pr.head.sha === run.head_sha &&
-        (triggeringNumbers.size === 0 || triggeringNumbers.has(pr.number)),
-    )
-    .map((pr) => ({ pr: pr.number, sha: pr.head.sha }));
+  const pr = await getPullRequest(number);
+  if (
+    pr.state !== "open" ||
+    pr.base.repo.full_name !== repository ||
+    pr.base.ref !== "main" ||
+    pr.head.sha !== sourceSha
+  )
+    return [];
+  return [{ pr: pr.number, sha: sourceSha }];
 }
 
 if (
@@ -37,31 +37,27 @@ if (
       repository,
       sha: process.env.GITHUB_SHA,
     },
-    (sha) =>
+    (number) =>
       JSON.parse(
-        execFileSync(
-          "gh",
-          [
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${repository}/commits/${sha}/pulls?per_page=100`,
-          ],
-          { encoding: "utf8" },
-        ),
-      ).flat(),
+        execFileSync("gh", ["api", `repos/${repository}/pulls/${number}`], {
+          encoding: "utf8",
+        }),
+      ),
   );
   appendFileSync(
     process.env.GITHUB_OUTPUT,
     `targets=${JSON.stringify(targets)}\n`,
   );
-  console.log(
+  const message =
     targets.length === 0
-      ? "No current pull request targeting main needs this scan."
+      ? "Skipped: the PR is closed, targets another branch, or has a newer head."
       : targets
           .map(
             ({ pr, sha }) => `${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
           )
-          .join("\n"),
-  );
+          .join("\n");
+  console.log(message);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, message + "\n");
+  }
 }

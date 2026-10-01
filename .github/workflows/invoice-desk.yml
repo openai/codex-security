@@ -4,16 +4,39 @@ on:
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize, edited]
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  request-scan:
+    # The default-branch dispatcher handles only event metadata, never PR code.
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Queue the protected scan workflow on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh workflow run invoice-desk-scan.yml --repo "$GITHUB_REPOSITORY" \
+            --ref main -f "pr_number=$PR_NUMBER" -f "source_sha=$SOURCE_SHA"
+
   behavior:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -25,5 +48,5 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      - name: Check application behavior and scan targeting
-        run: node --test examples/invoice-desk/qa/app.test.mjs .github/scripts/invoice-desk-target.test.mjs
+      - name: Check application behavior and scan orchestration
+        run: node --test examples/invoice-desk/qa/app.test.mjs .github/scripts/invoice-desk-*.test.mjs

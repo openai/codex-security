@@ -6,19 +6,11 @@ const repository = "example/invoices";
 const sourceSha = "1".repeat(40);
 const mainSha = "2".repeat(40);
 const context = {
-  eventName: "workflow_run",
+  eventName: "workflow_dispatch",
   repository,
   sha: mainSha,
-  event: {
-    workflow_run: {
-      event: "pull_request",
-      conclusion: "success",
-      head_sha: sourceSha,
-      pull_requests: [{ number: 7 }],
-    },
-  },
+  event: { inputs: { pr_number: "7", source_sha: sourceSha } },
 };
-
 function pullRequest(overrides = {}) {
   return {
     number: 7,
@@ -30,85 +22,76 @@ function pullRequest(overrides = {}) {
   };
 }
 
-test("selects the PR head rather than the downstream workflow's main commit", async () => {
-  const targets = await resolveScanTargets(context, async (sha) => {
-    assert.equal(sha, sourceSha);
-    return [pullRequest()];
-  });
-  assert.deepEqual(targets, [{ pr: 7, sha: sourceSha }]);
-});
-
-test("finds fork and draft PRs when the workflow payload omits associations", async () => {
-  const forkContext = structuredClone(context);
-  forkContext.event.workflow_run.pull_requests = [];
-  const targets = await resolveScanTargets(forkContext, async () => [
-    pullRequest({
-      draft: true,
-      head: { sha: sourceSha, repo: { full_name: "contributor/invoices" } },
-    }),
-  ]);
-  assert.deepEqual(targets, [{ pr: 7, sha: sourceSha }]);
-});
-
-test("excludes closed, retargeted, superseded, and unrelated PRs", async () => {
-  const targets = await resolveScanTargets(context, async () => [
-    pullRequest({ state: "closed" }),
-    pullRequest({ base: { ref: "release", repo: { full_name: repository } } }),
-    pullRequest({ head: { sha: "3".repeat(40) } }),
-    pullRequest({
-      base: { ref: "main", repo: { full_name: "other/invoices" } },
-    }),
-    pullRequest({ number: 8 }),
-  ]);
-  assert.deepEqual(targets, []);
-});
-
-test("a failed behavior check still queues the source scan", async () => {
-  const failedContext = structuredClone(context);
-  failedContext.event.workflow_run.conclusion = "failure";
+test("selects the requested PR head rather than the trusted workflow commit", async () => {
   assert.deepEqual(
-    await resolveScanTargets(failedContext, async () => [pullRequest()]),
+    await resolveScanTargets(context, async (number) => {
+      assert.equal(number, "7");
+      return pullRequest();
+    }),
     [{ pr: 7, sha: sourceSha }],
   );
 });
 
-test("ignores cancelled runs and non-PR events without querying associations", async () => {
-  const cancelled = structuredClone(context);
-  cancelled.event.workflow_run.conclusion = "cancelled";
-  const pushed = structuredClone(context);
-  pushed.event.workflow_run.event = "push";
-  const unexpected = { ...context, eventName: "push" };
-  for (const skipped of [cancelled, pushed, unexpected]) {
+test("includes fork and draft PRs without depending on a PR workflow run", async () => {
+  assert.deepEqual(
+    await resolveScanTargets(context, async () =>
+      pullRequest({
+        draft: true,
+        head: { sha: sourceSha, repo: { full_name: "contributor/invoices" } },
+      }),
+    ),
+    [{ pr: 7, sha: sourceSha }],
+  );
+});
+
+test("rechecking after approval excludes closed, retargeted, and superseded PRs", async () => {
+  assert.deepEqual(
+    await resolveScanTargets(context, async () => pullRequest()),
+    [{ pr: 7, sha: sourceSha }],
+  );
+  for (const changed of [
+    { state: "closed" },
+    { base: { ref: "release", repo: { full_name: repository } } },
+    { base: { ref: "main", repo: { full_name: "other/invoices" } } },
+    { head: { sha: "3".repeat(40) } },
+  ]) {
     assert.deepEqual(
-      await resolveScanTargets(skipped, () =>
-        assert.fail("unexpected API call"),
-      ),
+      await resolveScanTargets(context, async () => pullRequest(changed)),
       [],
     );
   }
 });
 
-test("manual baseline scans use the protected workflow commit", async () => {
+test("manual baseline scans use the trusted workflow commit", async () => {
   assert.deepEqual(
-    await resolveScanTargets(
-      { ...context, eventName: "workflow_dispatch" },
-      () => assert.fail("unexpected API call"),
+    await resolveScanTargets({ ...context, event: { inputs: {} } }, () =>
+      assert.fail("unexpected API call"),
     ),
     [{ pr: 0, sha: mainSha }],
   );
 });
 
-test("retains each matching PR when a fork run has no association metadata", async () => {
-  const forkContext = structuredClone(context);
-  forkContext.event.workflow_run.pull_requests = [];
+test("incomplete or invalid PR inputs fail instead of falling back to a baseline", async () => {
+  for (const inputs of [
+    { pr_number: "7" },
+    { source_sha: sourceSha },
+    { pr_number: "-1", source_sha: sourceSha },
+    { pr_number: "7", source_sha: "main" },
+  ]) {
+    await assert.rejects(
+      resolveScanTargets({ ...context, event: { inputs } }, () =>
+        assert.fail("unexpected API call"),
+      ),
+      /require both/,
+    );
+  }
+});
+
+test("ignores unexpected events without querying GitHub", async () => {
   assert.deepEqual(
-    await resolveScanTargets(forkContext, async () => [
-      pullRequest(),
-      pullRequest({ number: 8 }),
-    ]),
-    [
-      { pr: 7, sha: sourceSha },
-      { pr: 8, sha: sourceSha },
-    ],
+    await resolveScanTargets({ ...context, eventName: "pull_request" }, () =>
+      assert.fail("unexpected API call"),
+    ),
+    [],
   );
 });

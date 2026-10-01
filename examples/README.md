@@ -28,7 +28,8 @@ Examples and templates for using Codex Security:
   expected findings stay outside the application directory used for scanning.
   Its [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs behavior tests
   on PRs to `main` and automatically queues OpenAI scans of their application
-  source, with environment approval, finding counts, and downloadable reports.
+  source, with environment approval, finding metrics, cached CLI downloads, and
+  downloadable reports.
 
 - [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
   manual full or committed-diff scans against Azure Repos, with OIDC credentials,
