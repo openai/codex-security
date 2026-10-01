@@ -190,6 +190,7 @@ def _read_saved_threat_model(
     """Read canonical content first; old documents are a read-only compatibility path."""
     scan_dir = _require_scan_directory(scan_dir)
     saved_provenance: dict[str, Any] | None = None
+    sealed_artifact_paths: set[str] | None = None
     scan_manifest_path = scan_dir / "scan-manifest.json"
     filename = (
         "scan-manifest.json"
@@ -211,6 +212,10 @@ def _read_saved_threat_model(
         ):
             manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
             scan = manifest["scan"]
+            sealed_artifact_paths = {
+                _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                for artifact in scan["artifacts"]
+            }
         provenance = threat_model_provenance(manifest)
         saved_provenance = provenance
         if "threatModel" in scan:
@@ -243,6 +248,8 @@ def _read_saved_threat_model(
         "artifacts/01_context/threat_model.md",
         "threat_model.md",
     ):
+        if sealed_artifact_paths is not None and filename not in sealed_artifact_paths:
+            continue
         path = scan_dir / filename
         if not path.exists() and not path.is_symlink():
             continue

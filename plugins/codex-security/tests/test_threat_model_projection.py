@@ -431,13 +431,27 @@ class ThreatModelProjectionTest(unittest.TestCase):
         legacy_path = self.scan_dir / "artifacts" / "01_context" / "threat_model.md"
         legacy_path.parent.mkdir(parents=True)
         legacy_path.write_text(body)
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["artifacts"].append(
+            FINALIZER._artifact_record(
+                self.scan_dir, "./artifacts/01_context/threat_model.md", "text/markdown"
+            )
+        )
+        self.write_json("scan-manifest.json", manifest)
+        unrecorded_path = self.scan_dir / "threatmodel.md"
+        unrecorded_path.write_text("# Unrecorded convenience document\n")
         description = FINALIZER.describe_threat_model(self.scan_dir)
         self.assertEqual(description["provenance"]["source"], "scan")
         self.assertEqual(description["provenance"]["scanId"], self.manifest["scan"]["id"])
         self.assertEqual(description["provenance"]["scanScope"], self.manifest["scan"]["scope"])
         self.assertFalse(description["provenance"]["provisional"])
         self.assertNotIn("scope", description["threatModel"])
+        self.assertEqual(description["path"], str(legacy_path))
         self.assertEqual(FINALIZER.build_threat_model_export(self.scan_dir), body.encode())
+        legacy_path.write_text(body + "\nChanged since sealing.\n")
+        for read_model in (FINALIZER.describe_threat_model, FINALIZER.build_threat_model_export):
+            with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
+                read_model(self.scan_dir)
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory).resolve()
@@ -457,6 +471,31 @@ class ThreatModelProjectionTest(unittest.TestCase):
             self.assertEqual(description["provenance"]["revision"], "abc123")
             self.assertFalse(description["provenance"]["provisional"])
             self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
+
+    def test_sealed_scan_does_not_expose_unrecorded_legacy_models(self) -> None:
+        self.write_scan()
+        FINALIZER.finalize_scan(self.scan_dir)
+        manifest_bytes = (self.scan_dir / "scan-manifest.json").read_bytes()
+        body = b"# Unrecorded model\n"
+        for filename in (
+            "threatmodel.md",
+            "THREAT_MODEL.md",
+            "artifacts/01_context/threat_model.md",
+            "threat_model.md",
+        ):
+            with self.subTest(filename=filename):
+                path = self.scan_dir / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
+                for read_model in (
+                    FINALIZER.describe_threat_model,
+                    FINALIZER.build_threat_model_export,
+                ):
+                    with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
+                        read_model(self.scan_dir)
+                self.assertEqual(path.read_bytes(), body)
+                path.unlink()
+        self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest_bytes)
 
     def test_threat_model_export_rejects_canonical_overwrite(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Queue boundaries."}

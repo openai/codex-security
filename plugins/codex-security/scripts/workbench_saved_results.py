@@ -64,6 +64,9 @@ def threat_model_fields(db: WorkbenchDbContext, scan: sqlite3.Row) -> dict[str, 
     fields: dict[str, Any] = {"threatModelAvailable": False}
     try:
         db.require_recorded_manifest_digest(scan, scan_dir)
+        db.verify_manifest_binding(
+            scan, _read_scan_local_json(scan_dir, db.ARTIFACTS["manifest"], "scan manifest")
+        )
         saved_model = _read_saved_threat_model(scan_dir)
         if saved_model is not None:
             description = saved_model[0]

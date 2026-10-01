@@ -1768,8 +1768,9 @@ Use `--artifact threat-model` to export the retained model as Markdown. The
 format is `md` and the default destination is `./threatmodel.md`. Explicitly
 selected results can expose a saved model before scan completion or after a
 later failure. Policy result directories and historical saved Markdown models
-are also supported. A missing model returns an error; export does not substitute
-an older run or generate a new model.
+are also supported. A historical document in a sealed scan must be listed in
+the manifest with a matching digest. A missing model returns an error; export
+does not substitute an older run or generate a new model.
 
 ```bash
 codex-security export --artifact threat-model

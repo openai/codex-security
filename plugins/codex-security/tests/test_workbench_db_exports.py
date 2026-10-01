@@ -681,8 +681,8 @@ def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
     assert "threatModel" not in retained["artifacts"]
 
 
-@pytest.mark.parametrize("malformation", ["scan", "target", "assets"])
-def test_malformed_model_keeps_history_available_for_semantic_repair(
+@pytest.mark.parametrize("malformation", ["scan", "target", "assets", "id", "target-id", "missing"])
+def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     tmp_path: Path, malformation: str
 ) -> None:
     state_dir = tmp_path / "state"
@@ -713,9 +713,17 @@ def test_malformed_model_keeps_history_available_for_semantic_repair(
         malformed["scan"] = None
     elif malformation == "target":
         malformed["scan"]["target"] = None
-    else:
+    elif malformation == "assets":
         malformed["scan"]["threatModel"]["assets"] = [{}]
+    elif malformation == "id":
+        malformed["scan"]["id"] = str(uuid.uuid4())
+    elif malformation == "target-id":
+        malformed["scan"]["target"]["targetId"] = "other-target"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(malformed))
+    if malformation == "missing":
+        (scan_dir / "scan-manifest.json").unlink()
+        (scan_dir / "threatmodel.md").write_text("# Earlier model\n")
+    stored = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
 
     active = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert active["progress"]["status"] == "running"
@@ -723,6 +731,11 @@ def test_malformed_model_keeps_history_available_for_semantic_repair(
     reopened = run_workbench(state_dir, "get-workspace", "--workspace-id", str(saved["id"]))
     assert reopened["results"]["scanId"] == scan_id
     assert reopened["results"]["threatModelAvailable"] is False
+    for result in (active, reopened["results"]):
+        assert "threatModelProvenance" not in result
+        assert "threatModelPath" not in result
+        assert "threatModel" not in result["artifacts"]
+    assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == stored
 
     draft = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     draft.parent.mkdir()
