@@ -1161,7 +1161,7 @@ describe("CLI", () => {
       cliVersion: VERSION,
       codexVersion: CODEX_EXECUTABLE_VERSION,
       codexSdkVersion: CODEX_SDK_VERSION,
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
     });
@@ -1567,7 +1567,7 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual({
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
     });
@@ -3512,7 +3512,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual({ dryRun: true, ...preflight });
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.preflight.completed model="gpt-6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
+      'codex-security: debug: scan.preflight.completed model="gpt-5.6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
     );
     expect(stderr.text()).not.toContain("codex-security: debug: scan.started");
     expect(stderr.text()).not.toContain("SYNTHETIC_DRY_RUN_SECRET");
