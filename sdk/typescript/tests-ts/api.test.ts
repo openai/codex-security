@@ -1854,50 +1854,58 @@ describe("CodexSecurity orchestration", () => {
               startThread: () => ({
                 id: null,
                 async runStreamed() {
-                  if (++started === scenarios.length) release();
-                  await allStarted;
-                  const mcpEnvironment = Object.fromEntries(
-                    Object.entries(options.env ?? {}).filter(([name]) =>
-                      manifest.mcpServers["codex-security"]!.env_vars.includes(
-                        name,
-                      ),
-                    ),
-                  );
-                  const configPath =
-                    mcpEnvironment["CODEX_SECURITY_CONFIG_PATH"];
-                  expect(typeof configPath).toBe("string");
-                  configPaths.add(configPath!);
-                  const deepConfigPath =
-                    mcpEnvironment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                  deepConfigPaths.add(deepConfigPath);
-                  expect(
-                    parseToml(await readFile(deepConfigPath, "utf8"))[
-                      "deep_scan"
-                    ],
-                  ).toMatchObject({
-                    workers: index + 1,
-                    subagents: index,
-                    stop_after_consecutive_errors: index + 2,
-                  });
-                  const config = parseToml(
-                    await readFile(configPath!, "utf8"),
-                  ) as JsonObject;
-                  expect(resolveCodexProfile(config)).toMatchObject({
-                    model_reasoning_summary: expected,
-                    model_reasoning_effort: "xhigh",
-                    model_provider: "amazon-bedrock",
-                  });
-                  expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
-                    "synthetic-bedrock-key",
-                  );
-                  const shared = parseToml(
-                    await readFile(
-                      join(options.env!["CODEX_HOME"]!, "config.toml"),
-                      "utf8",
-                    ),
-                  );
-                  expect(shared["model_reasoning_summary"]).toBeUndefined();
-                  throw new Error("worker context captured");
+                  return {
+                    events: (async function* () {
+                      const mcpEnvironment = Object.fromEntries(
+                        Object.entries(options.env ?? {}).filter(([name]) =>
+                          manifest.mcpServers[
+                            "codex-security"
+                          ]!.env_vars.includes(name),
+                        ),
+                      );
+                      const configPath =
+                        mcpEnvironment["CODEX_SECURITY_CONFIG_PATH"];
+                      expect(typeof configPath).toBe("string");
+                      configPaths.add(configPath!);
+                      const deepConfigPath =
+                        mcpEnvironment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                      deepConfigPaths.add(deepConfigPath);
+                      expect(
+                        parseToml(await readFile(deepConfigPath, "utf8"))[
+                          "deep_scan"
+                        ],
+                      ).toMatchObject({
+                        workers: index + 1,
+                        subagents: index,
+                        stop_after_consecutive_errors: index + 2,
+                      });
+                      const config = parseToml(
+                        await readFile(configPath!, "utf8"),
+                      ) as JsonObject;
+                      expect(resolveCodexProfile(config)).toMatchObject({
+                        model_reasoning_summary: expected,
+                        model_reasoning_effort: "xhigh",
+                        model_provider: "amazon-bedrock",
+                      });
+                      expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
+                        "synthetic-bedrock-key",
+                      );
+                      const shared = parseToml(
+                        await readFile(
+                          join(options.env!["CODEX_HOME"]!, "config.toml"),
+                          "utf8",
+                        ),
+                      );
+                      expect(shared["model_reasoning_summary"]).toBe(expected);
+                      if (++started === scenarios.length) release();
+                      yield {
+                        type: "thread.started",
+                        thread_id: `synthetic-${index}`,
+                      };
+                      await allStarted;
+                      throw new Error("worker context captured");
+                    })(),
+                  };
                 },
               }),
             }),
@@ -5811,7 +5819,7 @@ describe("CodexSecurity orchestration", () => {
       );
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
-      expect(persistentConfig["model"]).toBeUndefined();
+      expect(persistentConfig["model"]).toBe(model);
       if (provider !== undefined) {
         expect(persistentConfig).toMatchObject({
           model_provider: provider,
@@ -5882,9 +5890,17 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    if (++scansStarted === 2) releaseScans();
-                    await concurrentScans;
-                    throw new Error("parallel API-key scan reached");
+                    return {
+                      events: (async function* () {
+                        if (++scansStarted === 2) releaseScans();
+                        yield {
+                          type: "thread.started",
+                          thread_id: `synthetic-${index}`,
+                        };
+                        await concurrentScans;
+                        throw new Error("parallel API-key scan reached");
+                      })(),
+                    };
                   },
                 }),
               };

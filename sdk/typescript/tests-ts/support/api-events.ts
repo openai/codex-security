@@ -129,3 +129,29 @@ export function runEvents(
     },
   });
 }
+
+export async function copyPluginVariant(
+  directory: string,
+  marker: string,
+): Promise<string> {
+  const root = join(directory, marker);
+  await cp(PLUGIN_ROOT, root, { recursive: true });
+  await writeFile(
+    join(root, ".codex-plugin", "plugin.json"),
+    JSON.stringify({
+      name: "codex-security",
+      version: "0.1.0",
+      skills: "./skills/",
+      mcpServers: "./.mcp.json",
+    }),
+  );
+  await writeFile(
+    join(root, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        "synthetic-plugin": { command: process.execPath, args: [marker] },
+      },
+    }),
+  );
+  return root;
+}

@@ -12,7 +12,10 @@ import {
   type PreparedExecution,
 } from "../src/execution-preparation.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
-import { executablePathForSpawn } from "../src/runtime.js";
+import {
+  acquireCodexSecurityCredentialHomeLock,
+  executablePathForSpawn,
+} from "../src/runtime.js";
 import {
   createApiTestFixtures,
   preparedRuntime,
@@ -39,7 +42,7 @@ test.each([
       ] as const) {
         const root = await temporaryDirectory();
         const home = join(root, "home");
-        await mkdir(home);
+        await mkdir(home, { mode: 0o700 });
         const executable = join(root, "synthetic-codex.exe");
         const script = join(root, "synthetic-codex.cjs");
         const capture = join(root, "observations.jsonl");
@@ -50,11 +53,13 @@ test.each([
           const fs = require("node:fs");
           const {parse} = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
           const args = process.argv.slice(2);
-          const config = {};
+          const configPath = require("node:path").join(process.env.CODEX_HOME,"config.toml");
+          const homeConfig = fs.existsSync(configPath) ? parse(fs.readFileSync(configPath,"utf8")) : {};
+          const config = structuredClone(homeConfig);
           const merge = (target,value) => { for (const [key,child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {},child) : child; return target; };
           for (let i = 0; i < args.length; i++) if (["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
           const record = value => fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify(value)+"\\n");
-          record({kind: args.includes("app-server") ? "preflight" : "exec",args,config,context:process.env.SYNTHETIC_CONTEXT,apiKey:process.env.CODEX_API_KEY,openAiKey:process.env.OPENAI_API_KEY});
+          record({kind: args.includes("app-server") ? "preflight" : "exec",args,config,homeConfig,context:process.env.SYNTHETIC_CONTEXT,apiKey:process.env.CODEX_API_KEY,openAiKey:process.env.OPENAI_API_KEY});
           if (args.includes("app-server")) {
             require("node:readline").createInterface({input:process.stdin}).on("line",line => {
               const request=JSON.parse(line); if (!request.id) return;
@@ -80,6 +85,7 @@ test.each([
         };
         const config = {
           model: "synthetic-model",
+          projects: { [root]: { trust_level: "trusted" } },
           mcp_servers: {
             synthetic: {
               command: "synthetic-mcp",
@@ -97,6 +103,10 @@ test.each([
           filesystem: { [join(root, "private")]: "deny" },
           network: { enabled: false },
         };
+        const releaseCredentialHome =
+          scenario === "accepted"
+            ? await acquireCodexSecurityCredentialHomeLock(home)
+            : null;
         const session: PreparedExecution = {
           policy: "ordinary",
           source,
@@ -110,10 +120,11 @@ test.each([
             home,
             inheritedPermissions,
           ),
+          ...(releaseCredentialHome === null ? {} : { runtimeConfig: {} }),
           authentication: source.authentication,
           approvalPolicy: "on-request",
           python: process.execPath,
-          releaseCredentialHome: null,
+          releaseCredentialHome,
         };
         environment.SYNTHETIC_CONTEXT = "later";
         environment.OPENAI_API_KEY = "synthetic-later";
@@ -163,6 +174,12 @@ test.each([
             scenario === "rejected" || scenario === "transport" ? 0 : 1,
           );
           for (const record of records) {
+            if (releaseCredentialHome !== null) {
+              expect(record.homeConfig.projects).toEqual(config.projects);
+              expect(
+                record.args.some((arg: string) => arg.startsWith("projects")),
+              ).toBe(false);
+            }
             expect(record.context).toBe("selected");
             expect(record.apiKey).toBe(
               preserveProviderEnvironment ? undefined : "synthetic-selected",
@@ -207,6 +224,7 @@ test.each([
             while (child.exitCode === null && child.signalCode === null)
               await new Promise<void>((resolve) => setImmediate(resolve));
           spawning.mockRestore();
+          await releaseCredentialHome?.();
         }
       }
     }
