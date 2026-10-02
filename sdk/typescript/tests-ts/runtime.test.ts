@@ -783,109 +783,78 @@ describe("plugin runtime preparation", () => {
 
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const sourcePlugin = await bundledPluginRoot();
-      const projector = new URL(
-        "../scripts/project-plugin.mjs",
-        import.meta.url,
-      );
-      const publicManifest = new URL(
-        "../public-repo/sdk/typescript/plugin.public.json",
-        import.meta.url,
-      );
-      let bundledPlugin = sourcePlugin;
-      if (existsSync(projector) && existsSync(publicManifest)) {
-        const packageRoot = join(root, "package");
-        const isolatedProjector = join(
-          packageRoot,
-          "scripts",
-          "project-plugin.mjs",
+      const bundledPlugin = await bundledPluginRoot();
+      const normalizer = join(bundledPlugin, "mcp", "helpers.mjs");
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const locations: { path: string }[] = [];
+      const input = join(root, "candidate-input.jsonl");
+      const output = join(root, "candidate-output.jsonl");
+      for (const item of cases) {
+        await writeFile(
+          input,
+          JSON.stringify({
+            cwe_ids: ["CWE-89"],
+            locations: [{ path: item.path, start_line: 1, role: "entrypoint" }],
+            summary: "Test finding",
+            evidence: "Test evidence",
+          }) + "\n",
         );
-        const isolatedManifest = join(
-          packageRoot,
-          "public-repo",
-          "sdk",
-          "typescript",
-          "plugin.public.json",
-        );
-        await Promise.all([
-          mkdir(dirname(isolatedProjector), { recursive: true }),
-          mkdir(dirname(isolatedManifest), { recursive: true }),
+        const normalized = Bun.spawnSync([
+          node!,
+          normalizer,
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          root,
+          "--in-scope-files",
+          scopePath,
         ]);
-        await Promise.all([
-          copyFile(projector, isolatedProjector),
-          copyFile(publicManifest, isolatedManifest),
-        ]);
-        const projection = Bun.spawnSync(
-          [process.execPath, isolatedProjector],
-          {
-            cwd: packageRoot,
-            env: {
-              ...process.env,
-              CODEX_SECURITY_PLUGIN_ROOT: sourcePlugin,
-            },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(new TextDecoder().decode(projection.stderr)).toBe("");
-        expect(projection.exitCode).toBe(0);
-        bundledPlugin = join(packageRoot, "_bundled_plugin");
+        const safe =
+          item.path.trim().length > 0 &&
+          !item.path.includes(":") &&
+          !item.path.includes("\\");
+        expect(normalized.exitCode).toBe(safe ? 0 : 2);
+        if (safe) {
+          const row = JSON.parse(await readFile(output, "utf8")) as {
+            locations: typeof locations;
+          };
+          const location = row.locations[0]!;
+          expect(location.path).toBe(item.path);
+          expect(await readFile(join(root, location.path), "utf8")).toBe(
+            item.contents,
+          );
+          locations.push(location);
+        }
       }
-      const normalizer = join(
-        bundledPlugin,
-        "scripts",
-        "normalize_candidates.py",
-      );
-      expect(await readFile(normalizer, "utf8")).toBe(
-        await readFile(
-          join(sourcePlugin, "scripts", "normalize_candidates.py"),
-          "utf8",
-        ),
-      );
       const result = Bun.spawnSync([
         python!,
         "-I",
         "-B",
         "-c",
         [
-          "import json, pathlib, runpy, sys",
-          "module = runpy.run_path(sys.argv[1])",
-          "root = pathlib.Path(sys.argv[2])",
-          "scope = module['read_scope'](pathlib.Path(sys.argv[3]), root)",
-          "finalizer = runpy.run_path(sys.argv[5])",
+          "import json, runpy, sys",
+          "finalizer = runpy.run_path(sys.argv[1])",
           "results = []",
-          "for value in json.loads(sys.argv[4]):",
-          "    path, source = module['relative_file'](value, root)",
-          "    candidate = {'cwe_ids': ['CWE-89'], 'locations': [{'path': value, 'start_line': 1, 'role': 'entrypoint'}], 'summary': 'Test finding', 'evidence': 'Test evidence'}",
+          "for location in json.loads(sys.argv[2]):",
           "    try:",
-          "        normalized = module['normalize_candidate'](candidate, root, scope, {})",
-          "        location = normalized['locations'][0]",
           "        finalizer['_validate_location']({'path': location['path'], 'startLine': location['start_line'], 'endLine': location['end_line'], 'role': location['role']}, 'candidate.locations[0]')",
           "    except ValueError:",
-          "        contract_valid = False",
+          "        results.append(False)",
           "    else:",
-          "        contract_valid = True",
-          "    results.append({'path': path, 'contents': source.read_text(encoding='utf-8'), 'inScope': path in scope, 'contractValid': contract_valid})",
+          "        results.append(True)",
           "print(json.dumps(results))",
         ].join("\n"),
-        normalizer,
-        root,
-        scopePath,
-        JSON.stringify(cases.map((item) => item.path)),
         join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+        JSON.stringify(locations),
       ]);
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual(
-        cases.map((item) => ({
-          ...item,
-          inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !/^[A-Za-z]:/.test(item.path) &&
-            !item.path.includes("\\") &&
-            !/[\u0000-\u001f]/u.test(item.path),
-        })),
+        locations.map((item) => !/[\u0000-\u001f]/u.test(item.path)),
       );
     },
   );

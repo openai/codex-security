@@ -17,10 +17,6 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
-import {
-  missingPythonHelperMessage,
-  resolvePythonCommand,
-} from "./python_command.js";
 
 const execFileAsync = promisify(execFile);
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
@@ -144,7 +140,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
     "candidate_ledger.jsonl",
   ];
 
-  // Verify the inventory is a context-bound regular file before passing it to Python.
+  // Verify the inventory is a context-bound regular file before normalization.
   await readArtifactText(
     context,
     inventoryComponents,
@@ -167,23 +163,21 @@ export async function recordCodexSecurityDiscoveryCandidates(
 
   try {
     await fs.chmod(temporaryDirectory, 0o700);
-    const content =
-      candidates.length === 0
-        ? ""
-        : `${candidates.map((candidate) => JSON.stringify(candidate)).join("\n")}\n`;
+    const content = candidates
+      .map((candidate) => `${JSON.stringify(candidate)}\n`)
+      .join("");
     await fs.writeFile(temporaryInput, content, {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600,
     });
 
-    const pythonCommand =
-      context.pythonCommand ?? (await resolvePythonCommand());
     try {
       await execFileAsync(
-        pythonCommand,
+        process.execPath,
         [
-          join(pluginRoot, "scripts", "normalize_candidates.py"),
+          join(pluginRoot, "mcp", "helpers.mjs"),
+          "normalize-candidates",
           "--input",
           temporaryInput,
           "--out",
@@ -201,7 +195,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
         },
       );
     } catch (error) {
-      throw discoveryNormalizationError(error, pythonCommand, [
+      throw discoveryNormalizationError(error, [
         [temporaryInput, "candidate input"],
         [temporaryDirectory, "private candidate input"],
         [inventoryPath, "the assigned review inventory"],
@@ -245,14 +239,8 @@ export async function listCodexSecurityCandidates(
 
 function discoveryNormalizationError(
   error: unknown,
-  pythonCommand: string,
   privateValues: Array<readonly [string, string]>,
 ): Error {
-  const pythonMessage = missingPythonHelperMessage(error, pythonCommand);
-  if (pythonMessage) {
-    return new Error(`${discoveryLabel}: ${pythonMessage}`, { cause: error });
-  }
-
   const stderr =
     error && typeof error === "object" && "stderr" in error
       ? error.stderr
