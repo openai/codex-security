@@ -647,9 +647,12 @@ export class CodexSecurity {
       );
       throwIfAborted(signal, outputDir);
       // Like CLI validation, load the skill directly without scan tools.
-      session.sessionConfig["features"] = {
-        ...(session.sessionConfig["features"] as JsonObject),
-        plugins: false,
+      const validationConfig = {
+        ...session.sessionConfig,
+        features: {
+          ...(session.sessionConfig["features"] as JsonObject),
+          plugins: false,
+        },
       };
       const { codex } = this.#createSessionCodex(
         session,
@@ -659,6 +662,8 @@ export class CodexSecurity {
           CODEX_SECURITY_SURFACE: this.#surface,
         },
         options.auth,
+        undefined,
+        validationConfig,
       );
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
@@ -1925,6 +1930,7 @@ export class CodexSecurity {
                   matcherConfig,
                   definedEnvironment(environment),
                   { signal, workingDirectory: repo },
+                  configOverrides,
                 );
               } finally {
                 await release?.();
