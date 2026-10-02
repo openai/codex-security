@@ -126,23 +126,27 @@ export async function registerScan(options: {
       scanId !== scanOptions.resumeScanId ||
       !isRecord(savedRecipe) ||
       savedRecipe["repository"] !== repo ||
-      typeof resumeThreadId !== "string" ||
-      !resumeThreadId ||
+      (resumeThreadId !== null && typeof resumeThreadId !== "string") ||
       JSON.stringify(savedRecipe["target"]) !== JSON.stringify(recipe["target"])
     ) {
       throw new CodexSecurityError(
         "The workbench returned mismatched scan resume context.",
       );
     }
-    const savedSession = await findScanSession(codexHome, resumeThreadId);
-    if (savedSession === null || savedSession.workingDirectory !== scanDir) {
-      throw new CodexSecurityError(
-        `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-      );
+    if (typeof registration["sealedProducerVersion"] !== "string") {
+      const savedSession =
+        typeof resumeThreadId === "string"
+          ? await findScanSession(codexHome, resumeThreadId)
+          : null;
+      if (savedSession === null || savedSession.workingDirectory !== scanDir) {
+        throw new CodexSecurityError(
+          `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+        );
+      }
     }
-    if (typeof registration["sealedProducerVersion"] === "string") {
-      expectation.pluginVersion = registration["sealedProducerVersion"];
-    }
+  }
+  if (typeof registration["sealedProducerVersion"] === "string") {
+    expectation.pluginVersion = registration["sealedProducerVersion"];
   }
   const targetId = registration["targetId"];
   const contract = registration["contract"];

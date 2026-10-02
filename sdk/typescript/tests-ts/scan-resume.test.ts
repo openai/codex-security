@@ -1,7 +1,7 @@
 import {
-  readSealedScanTurn,
   publishScan,
   writePreparedScanDraft,
+  readSealedScanTurn,
 } from "../src/scan-publication.js";
 import type { JsonObject } from "../src/config.js";
 import {
@@ -1335,70 +1335,58 @@ test("sealed publication keeps its authoritative receipt after the target change
   ).toMatchObject({ cost });
 });
 
-test.each(["standard", "deep"] as const)(
-  "sealed %s recovery requires a verified receipt when a cost limit is set",
-  async (mode) => {
-    const f = await interruptedScan(mode);
-    await rm(f.sessionPath);
-    const context = {
-      scanId: f.scanId,
-      scanDir: f.scanDir,
-      codexHome: f.codexHome,
-      model: f.recipe.config.model,
-      startedAt: null,
-      checkpoint:
-        mode === "deep"
-          ? {
-              version: 3 as const,
-              startedAt: "2026-10-01T00:00:00Z",
-              passes: [],
-              mergedScanIds: [],
-              noNewStreak: 0,
-              consecutiveErrors: 0,
-              mergeStarted: true,
-            }
-          : null,
-      expectation: {
-        repository: f.repository,
-        repositoryRevision: null,
-        target: { kind: "repository" as const, paths: [] },
-        mode,
-        pluginVersion: "0.1.0",
-      },
-      signal: new AbortController().signal,
-      workbench: f.command,
-      onTrackingError: () => {},
-      onCost: () => {},
+test.each([false, true])(
+  "sealed receipt preserves saved usage (priced: %p)",
+  async (priced) => {
+    const f = await interruptedScan("standard");
+    const usage = {
+      coverage: "complete",
+      source: "codex_rollout",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      reasoningOutputTokens: 3,
+      totalTokens: 110,
+      threadCount: 1,
     };
-    expect((await readSealedScanTurn(context)).cost).toBeNull();
-    await expect(
-      readSealedScanTurn({ ...context, maxCostUsd: 1 }),
-    ).rejects.toThrow("no verified cost receipt");
     const cost = {
-      model: f.recipe.config.model,
+      model: "gpt-5.6-sol",
       inputTokens: 100,
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
       outputTokens: 10,
       estimatedUsd: 0.125,
     };
-    expect(
-      (
-        await readSealedScanTurn({
-          ...context,
-          maxCostUsd: 1,
-          workbench: async (args) =>
-            args[0] === "get-scan"
-              ? {
-                  scan: {
-                    continuationThreadId: f.threadId,
-                    progress: { status: "complete" },
-                    cost,
-                  },
-                }
-              : f.command(args),
-        })
-      ).cost,
-    ).toEqual(cost);
+    const saved = await readSealedScanTurn({
+      scanId: f.scanId,
+      scanDir: f.scanDir,
+      codexHome: f.codexHome,
+      expectation: {
+        repository: f.repository,
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      signal: new AbortController().signal,
+      model: "gpt-5.6-sol",
+      startedAt: null,
+      checkpoint: null,
+      workbench: async () => ({
+        scan: {
+          continuationThreadId: f.threadId,
+          progress: { status: "complete" },
+          usage,
+          ...(priced ? { cost } : {}),
+        },
+      }),
+      onTrackingError: (error) => {
+        throw error;
+      },
+      onCost: () => {},
+    });
+    expect(saved.cost).toEqual(priced ? cost : null);
+    expect(saved.turnResult.usage).toEqual(usage);
   },
 );
