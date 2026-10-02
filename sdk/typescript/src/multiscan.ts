@@ -326,6 +326,7 @@ async function runCampaign(
         if (options.recoverScan === undefined) attempt += 1;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
+        let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
@@ -350,6 +351,19 @@ async function runCampaign(
             );
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
+              const retainedCheckout = join(
+                output,
+                "recovery-checkouts",
+                task.id,
+                `attempt-${attempt}`,
+              );
+              const retained = await lstat(retainedCheckout).catch(
+                (error: NodeJS.ErrnoException) => {
+                  if (error.code !== "ENOENT") throw error;
+                  return undefined;
+                },
+              );
+              if (retained !== undefined) protectedRoot = retainedCheckout;
               attemptedResume = true;
               notifyProgress(options, {
                 repository: task.id,
@@ -386,6 +400,7 @@ async function runCampaign(
               await rm(checkout, { recursive: true, force: true });
               await mkdir(checkout, { mode: 0o700 });
             }
+            protectedRoot = checkout;
             await checkoutRevision(
               task,
               checkout,
@@ -477,6 +492,7 @@ async function runCampaign(
         if (threatModelPath === undefined)
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
+            protectedRoot,
             signal: options.signal,
           });
         await appendReceipt(
