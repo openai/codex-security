@@ -29,6 +29,12 @@ assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
 assert.match(rendered, /coverage\.deferred/);
+// The draft input schema rejects workbench-derived values; the worker prompt
+// must keep them out of every checkpoint and final submission.
+assert.match(rendered, /do not include those derived values in a draft/);
+for (const field of ["includePaths", "excludePaths", "inventoryStrategy"]) {
+  assert.equal(rendered.includes(`scope.${field}`), false);
+}
 const discoveryContext = firstJsonBlock(rendered);
 assert.deepEqual(discoveryContext, {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
