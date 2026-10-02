@@ -11,7 +11,7 @@ pub struct UserHomeResult {
 #[napi]
 pub fn user_home(username: Buffer) -> napi::Result<UserHomeResult> {
     let username = CString::new(username.as_ref())
-        .map_err(|_| napi::Error::from_reason("Path contains a NUL byte"))?;
+        .map_err(|_| napi::Error::from_reason("Username contains a NUL byte"))?;
     let mut buffer = vec![0_u8; 1024];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
