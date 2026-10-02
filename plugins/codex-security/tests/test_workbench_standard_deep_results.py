@@ -802,10 +802,13 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         parent_finding["title"],
         late_finding["title"],
     }
-    published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
-        "preservedSources"
-    ]
-    frozen_sources = json.loads(frozen_before)
+    published_scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    published_sources = published_scan["preservedSources"]
+    assert published_scan["threatModel"] == {**late["threatModel"], "origin": "recovered"}
+    frozen_state = json.loads(frozen_before)
+    frozen_sources = frozen_state["sources"]
+    model_source = result_path.relative_to(scan_dir).as_posix()
+    assert frozen_state["threatModelSource"] == model_source
     assert published_sources.items() >= frozen_sources.items()
     parent_sources = published_sources.keys() - frozen_sources.keys()
     assert len(parent_sources) == 1
@@ -813,15 +816,12 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     assert parent_source.startswith("checkpoints/")
     assert Path(parent_source).stem == published_sources[parent_source]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert (
-            json.loads(
-                connection.execute(
-                    "SELECT retained_source_digests_json FROM scans WHERE id = ?",
-                    (scan_id,),
-                ).fetchone()[0]
-            )
-            == published_sources
-        )
+        assert json.loads(
+            connection.execute(
+                "SELECT retained_source_digests_json FROM scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()[0]
+        ) == {"sources": published_sources, "threatModelSource": model_source}
 
 
 def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
