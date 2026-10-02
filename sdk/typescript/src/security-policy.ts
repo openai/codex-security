@@ -775,6 +775,7 @@ export async function runSecurityPolicyStages(options: {
   reasoningEffort: string;
   pluginVersion: string;
   pythonPath?: string;
+  protectedRoot?: string;
   signal: AbortSignal;
   onWarning?: (message: string) => void;
   onStage?: SecurityPolicyOptions["onStage"];
@@ -924,6 +925,7 @@ export async function runSecurityPolicyStages(options: {
       warning = await writeThreatModel(outputDir, {
         pluginRoot: options.pluginRoot,
         pythonPath: options.pythonPath,
+        protectedRoot: options.protectedRoot,
         signal,
       });
     } catch (error) {

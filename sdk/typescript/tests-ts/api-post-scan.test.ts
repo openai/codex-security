@@ -131,6 +131,7 @@ async function startPostScan(scenario: PostScanScenario) {
                   await writeThreatModel(scanDir, {
                     pluginRoot: runtime.plugin.installedRoot,
                     pythonPath: python!,
+                    protectedRoot: repository,
                   });
               }
               original = await readFile(artifactPath);
@@ -152,6 +153,7 @@ async function startPostScan(scenario: PostScanScenario) {
     client,
     scan,
     scanDir,
+    repository,
     artifactPath,
     outside,
     python: python!,
@@ -314,7 +316,10 @@ describe("completed scan follow-up instructions", () => {
         await fixture.client.close();
         expect(python).toHaveBeenCalled();
         for (const [options] of python.mock.calls)
-          expect(options?.configuredPath).toBe(fixture.python);
+          expect(options).toMatchObject({
+            configuredPath: fixture.python,
+            protectedRoot: fixture.repository,
+          });
       } finally {
         python.mockRestore();
       }

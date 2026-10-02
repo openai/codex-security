@@ -202,10 +202,9 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
-      if (scenario !== "scan-interrupted")
-        expect(python).toHaveBeenCalledWith(
-          expect.objectContaining({ protectedRoot: repository }),
-        );
+      expect(python).toHaveBeenCalledWith(
+        expect.objectContaining({ protectedRoot: repository }),
+      );
       if (original) expect(result.toJSON()).toEqual(original);
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(

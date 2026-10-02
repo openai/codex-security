@@ -1158,6 +1158,7 @@ export class CodexSecurity {
         ...model,
         pluginVersion: runtime.plugin.version,
         pythonPath: session.python,
+        protectedRoot: inputs.protectedRoot,
         signal,
         onWarning: warn,
         onStage: (stage) =>
@@ -1223,6 +1224,7 @@ export class CodexSecurity {
       expectation: ScanExpectation;
       pluginRoot: string;
       pythonPath: string;
+      protectedRoot: string;
       model: string;
       threadId: string | null;
     } | null = null;
@@ -1436,6 +1438,7 @@ export class CodexSecurity {
           expectation,
           pluginRoot: runtime.plugin.installedRoot,
           pythonPath: session.python,
+          protectedRoot,
           model,
           threadId: null,
         };
@@ -1962,6 +1965,7 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         pythonPath: session.python,
+        protectedRoot,
         expectation,
         authentication,
         workbenchValidated: true,
@@ -2199,6 +2203,7 @@ export class CodexSecurity {
             scanDir,
             pluginRoot: runtime.plugin.installedRoot,
             pythonPath: session.python,
+            protectedRoot,
             expectation,
             model,
             onReconnect: options.onReconnect,
@@ -2237,6 +2242,7 @@ export class CodexSecurity {
             signal,
             true,
             session.python,
+            protectedRoot,
           );
           notifyObserver(
             "onWarning",
@@ -2352,6 +2358,7 @@ export class CodexSecurity {
             ]),
             true,
             budgetRecovery.pythonPath,
+            budgetRecovery.protectedRoot,
           );
           if (result.coverage.completeness !== "partial") {
             throw new IncompleteScanError(
@@ -3308,6 +3315,7 @@ export class CodexSecurity {
         signal,
         true,
         python,
+        local.protectedRoot,
       );
       // Stable fixture identities are indexed by complete-scan without model matching.
       result.repositoryFindings = (await listRepositoryFindings(
@@ -3673,6 +3681,7 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   pythonPath?: string;
+  protectedRoot?: string;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
   workbenchValidated?: boolean;
@@ -3820,6 +3829,7 @@ export async function runScanEvents(
       options.signal,
       options.workbenchValidated,
       options.pythonPath,
+      options.protectedRoot,
     );
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
@@ -4228,6 +4238,7 @@ async function collectResult(
   signal: AbortSignal,
   workbenchValidated = false,
   pythonPath?: string,
+  protectedRoot?: string,
 ): Promise<ScanResult> {
   const required = [
     "scan-manifest.json",
@@ -4277,6 +4288,7 @@ async function collectResult(
     threatModelPath: await readThreatModelPath(scanDir, {
       pluginRoot,
       pythonPath,
+      protectedRoot,
       signal,
     }),
   });

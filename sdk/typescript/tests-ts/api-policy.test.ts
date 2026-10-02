@@ -16,7 +16,7 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import Ajv, { type AnySchema } from "ajv";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   CodexSecurity,
@@ -28,6 +28,7 @@ import {
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -223,9 +224,21 @@ describe("CodexSecurity policy API", () => {
         });
       },
     });
-    const draft = await f.security.generatePolicy(f.repository, {
-      outputDir: f.outputDir,
-    });
+    const python = spyOn(runtime, "resolvePluginPython");
+    let draft;
+    try {
+      draft = await f.security.generatePolicy(f.repository, {
+        outputDir: f.outputDir,
+      });
+      expect(python).toHaveBeenCalled();
+      for (const [selection] of python.mock.calls)
+        expect(selection).toMatchObject({
+          configuredPath: PYTHON,
+          protectedRoot: f.repository,
+        });
+    } finally {
+      python.mockRestore();
+    }
     const preview = await f.security.previewPolicy(draft);
     expect(f.pythonSelections).toHaveLength(2);
     for (const selection of f.pythonSelections)
