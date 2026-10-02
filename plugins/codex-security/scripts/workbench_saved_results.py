@@ -1241,7 +1241,9 @@ def preserve_scan_results_locked(
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
         existing, existing_findings, _ = finalize_scan(
-            scan_dir, expected_coverage_mode=db.expected_coverage_mode(scan)
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            projection_warnings=warnings,
         )
         db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
@@ -1258,6 +1260,7 @@ def preserve_scan_results_locked(
                     raw_frozen_sources is not None
                     and scan["seal_manifest_digest"] is not None
                     and not publication_follow_up_warnings
+                    and warnings == stored_warnings
                 ):
                     return True
                 record_publication(existing, existing_findings)
@@ -1326,7 +1329,9 @@ def preserve_scan_results_locked(
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(
+            prepared, projection_warnings=warnings
+        )
         db.verify_manifest_binding(scan, manifest)
         record_publication(manifest, findings)
     except BaseException:

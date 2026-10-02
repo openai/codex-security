@@ -3045,6 +3045,8 @@ def _prepare_scan_finalization(
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
+    *,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
@@ -3061,18 +3063,21 @@ def _write_prepared_scan_finalization(
     if was_sealed:
         write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
         _remove_scan_local_file_if_exists(scan_dir, "report.html")
-        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-        write_threat_model_projection_if_possible(scan_dir, manifest)
-        return manifest, findings, coverage
-
-    _write_scan_local_json(scan_dir, "findings.json", findings)
-    _write_scan_local_json(scan_dir, "coverage.json", coverage)
-    write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
-    _remove_scan_local_file_if_exists(scan_dir, "report.html")
-    _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
-    _validate_existing_seal(scan_dir, scan)
+    else:
+        _write_scan_local_json(scan_dir, "findings.json", findings)
+        _write_scan_local_json(scan_dir, "coverage.json", coverage)
+        write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
+        _remove_scan_local_file_if_exists(scan_dir, "report.html")
+        _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
+        _validate_existing_seal(scan_dir, scan)
     _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-    write_threat_model_projection_if_possible(scan_dir, manifest)
+    warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+    if (
+        warning is not None
+        and projection_warnings is not None
+        and warning not in projection_warnings
+    ):
+        projection_warnings.append(warning)
     return manifest, findings, coverage
 
 
@@ -3083,6 +3088,7 @@ def finalize_scan(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -3090,7 +3096,9 @@ def finalize_scan(
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
     )
-    return _write_prepared_scan_finalization(prepared, source_root)
+    return _write_prepared_scan_finalization(
+        prepared, source_root, projection_warnings=projection_warnings
+    )
 
 
 def main() -> int:

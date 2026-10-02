@@ -1445,6 +1445,7 @@ def complete_scan_locked(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
+        warnings = json.loads(scan["completion_warnings_json"])
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
@@ -1452,6 +1453,7 @@ def complete_scan_locked(
             manifest, _, _ = finalize_scan(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
+                projection_warnings=warnings,
             )
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
@@ -1460,6 +1462,12 @@ def complete_scan_locked(
         pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
         if cost_json is not None and scan["recipe_json"] is not None:
             scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
+        if warnings != json.loads(scan["completion_warnings_json"]):
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                    (json.dumps(warnings), scan["id"]),
+                )
         return scan_context(connection, scan["id"])
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
@@ -1546,7 +1554,9 @@ def complete_scan_locked(
         )
         add_warning()
         wrote = True
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(
+            prepared, projection_warnings=warnings
+        )
     except ContractError as exc:
         if wrote or (
             scan["mode"] == "deep"

@@ -572,8 +572,9 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("projection_failure_at", [None, "stop", "refresh"])
 def test_model_only_draft_is_available_before_findings_and_survives_stop(
-    tmp_path: Path, termination: str
+    tmp_path: Path, termination: str, projection_failure_at: str | None
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -638,6 +639,10 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
         "path": str(scan_dir / "exports" / "threatmodel.md"),
     }
     assert (scan_dir / "scan-manifest.json").read_bytes() == before
+    document = scan_dir / "threatmodel.md"
+    if projection_failure_at == "stop":
+        document.unlink()
+        document.mkdir()
     extra = ("--message", "Stopped after saving the model.") if termination == "fail-scan" else ()
     run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
@@ -645,7 +650,30 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert stopped["threatModelProvenance"]["provisional"] is True
     assert stopped["findingCount"] == 0
-    assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
+    if projection_failure_at != "stop":
+        assert document.read_text().startswith(model["content"])
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
+    if projection_failure_at == "refresh":
+        document.unlink()
+        document.mkdir()
+        stopped = run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)["scan"]
+    if projection_failure_at is not None:
+        warnings = stopped["warnings"]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("Automatic threat model save failed:")
+        assert "threatModelPath" not in stopped
+        assert "threatModel" not in stopped["artifacts"]
+        assert (
+            run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"]
+            == warnings
+        )
+        assert (
+            run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)["scan"][
+                "warnings"
+            ]
+            == warnings
+        )
+        assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
 
 
 @pytest.mark.parametrize("changed_file", ["scan-manifest.json", "findings.json"])
