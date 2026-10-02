@@ -210,6 +210,7 @@ const distFiles = new Set(
     "scan-events",
     "scan-monitoring",
     "scan-publication",
+    "scan-registration",
     "scan-preparation",
     "project-config",
     "project-config-schema",

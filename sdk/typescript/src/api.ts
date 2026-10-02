@@ -54,6 +54,7 @@ import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
 import { z } from "incur";
 import {
   runScanEvents,
+  runScanTurn,
   readCodexTurn,
   notifyObserver,
   throwIfAborted,
@@ -68,7 +69,12 @@ import {
   createScanCostReporter,
   ScanProgressReporter,
 } from "./scan-monitoring.js";
-import { collectResult } from "./scan-publication.js";
+import {
+  collectResult,
+  publishScan,
+  preservePublishedArtifacts,
+} from "./scan-publication.js";
+import { registerScan } from "./scan-registration.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -108,7 +114,6 @@ import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
-import { findScanSession } from "./scan-logs.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -127,11 +132,7 @@ import {
 import { resolveScanPrompts } from "./prompt-files.js";
 export { SCAN_AUTH_MODES } from "./scan-settings.js";
 export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
-import {
-  loadContract,
-  readScanFile,
-  type ScanExpectation,
-} from "./contract.js";
+import { loadContract, type ScanExpectation } from "./contract.js";
 import {
   runCustomValidation,
   writeCustomValidationStatus,
@@ -141,7 +142,6 @@ import {
   CodexSecurityError,
   ConfigurationError,
   IncompleteScanError,
-  OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
   ScanCostLimitExceededError,
@@ -220,7 +220,6 @@ import {
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type ProcessEnvironment,
-  type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -1154,7 +1153,6 @@ export class CodexSecurity {
       model: string;
       threadId: string | null;
     } | null = null;
-    let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let activeScan: {
@@ -1423,130 +1421,25 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration =
-        options.resumeScanId !== undefined
-          ? await workbench(workbenchOptions, [
-              "get-cli-scan-resume",
-              "--scan-id",
-              options.resumeScanId,
-            ])
-          : await workbench(
-              workbenchOptions,
-              [
-                "register-cli-scan",
-                "--repository",
-                repo,
-                "--scan-dir",
-                scanDir,
-                "--registration-json-stdin",
-                ...(options.archiveExisting === true
-                  ? ["--archive-existing"]
-                  : []),
-                ...(archivedScanDir === null
-                  ? []
-                  : ["--archived-scan-dir", archivedScanDir]),
-                ...(options.parentScanId === undefined
-                  ? []
-                  : ["--parent-scan-id", options.parentScanId]),
-              ],
-              JSON.stringify({
-                recipe,
-                userContext: options.scanPrompt,
-                ...(options.workflowId === undefined
-                  ? {}
-                  : { workflowId: options.workflowId }),
-              }),
-            );
-      const scanId = registration["scanId"];
-      const resumeThreadId =
-        options.resumeScanId === undefined
-          ? undefined
-          : registration["threadId"];
-      if (options.resumeScanId !== undefined) {
-        const savedRecipe = registration["recipe"];
-        if (
-          scanId !== options.resumeScanId ||
-          !isRecord(savedRecipe) ||
-          savedRecipe["repository"] !== repo ||
-          typeof resumeThreadId !== "string" ||
-          !resumeThreadId ||
-          JSON.stringify(savedRecipe["target"]) !==
-            JSON.stringify(recipe["target"])
-        ) {
-          throw new CodexSecurityError(
-            "The workbench returned mismatched scan resume context.",
-          );
-        }
-        const savedSession = await findScanSession(
-          runtime.codexHome,
-          resumeThreadId,
-        );
-        if (
-          savedSession === null ||
-          savedSession.workingDirectory !== scanDir
-        ) {
-          throw new CodexSecurityError(
-            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-          );
-        }
-        if (typeof registration["sealedProducerVersion"] === "string") {
-          expectation.pluginVersion = registration["sealedProducerVersion"];
-        }
-      }
-      const targetId = registration["targetId"];
-      const contract = registration["contract"];
-      const contractTarget = isRecord(contract)
-        ? contract["target"]
-        : undefined;
-      const allowedKinds = isRecord(contractTarget)
-        ? contractTarget["allowedKinds"]
-        : undefined;
-      const targetKind =
-        Array.isArray(allowedKinds) && allowedKinds.length === 1
-          ? allowedKinds[0]
-          : undefined;
-      const diffTarget = isRecord(contract)
-        ? contract["diffTarget"]
-        : undefined;
-      const snapshotDigest =
-        targetKind === "git_diff" && isRecord(diffTarget)
-          ? diffTarget["contentDigest"]
-          : isRecord(contractTarget)
-            ? contractTarget["requiredSnapshotDigest"]
-            : undefined;
-      const registeredRevision = registration["targetRevision"];
-      if (
-        typeof scanId !== "string" ||
-        typeof targetId !== "string" ||
-        registration["scanDir"] !== scanDir ||
-        typeof targetKind !== "string" ||
-        ![
-          "git_revision",
-          "git_worktree",
-          "git_diff",
-          "directory_snapshot",
-        ].includes(targetKind) ||
-        (snapshotDigest !== undefined && typeof snapshotDigest !== "string") ||
-        ((targetKind === "git_worktree" ||
-          targetKind === "directory_snapshot") &&
-          typeof snapshotDigest !== "string") ||
-        typeof registeredRevision !== "string"
-      ) {
-        throw new CodexSecurityError(
-          "The Codex Security workbench returned an invalid scan registration.",
-        );
-      }
-      const targetRevision =
-        registeredRevision === "unversioned" ? null : registeredRevision;
-      const registeredFileCount = registration["scopeFileCount"];
-      progressReporter.preflight(
-        typeof registeredFileCount === "number" &&
-          Number.isSafeInteger(registeredFileCount) &&
-          registeredFileCount >= 0
-          ? registeredFileCount
-          : null,
-        tracker,
-      );
+      const {
+        registration,
+        scanId,
+        resumeThreadId,
+        targetId,
+        targetKind,
+        snapshotDigest,
+        targetRevision,
+        scopeFileCount,
+      } = await registerScan({
+        scan: options,
+        recipe,
+        expectation,
+        scanDir,
+        archivedScanDir,
+        codexHome: runtime.codexHome,
+        workbench: (args, input) => workbench(workbenchOptions, args, input),
+      });
+      progressReporter.preflight(scopeFileCount, tracker);
       activeScan = { id: scanId, options: workbenchOptions };
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
@@ -1751,7 +1644,7 @@ export class CodexSecurity {
       });
       checkOpen();
 
-      const result = await runScanEvents({
+      const completed = await runScanTurn({
         thread,
         events,
         signal,
@@ -1864,41 +1757,6 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          let preparation: JsonObject;
-          try {
-            preparation = await workbench(workbenchOptions, [
-              "prepare-scan-completion",
-              "--scan-id",
-              scanId,
-            ]);
-          } catch (error) {
-            const saved = await workbench(workbenchOptions, [
-              "get-scan",
-              "--scan-id",
-              scanId,
-            ]).catch(() => null);
-            const savedScan = isRecord(saved) ? saved["scan"] : undefined;
-            const progress = isRecord(savedScan)
-              ? savedScan["progress"]
-              : undefined;
-            const failureMessage = isRecord(savedScan)
-              ? savedScan["failureMessage"]
-              : undefined;
-            if (
-              isRecord(progress) &&
-              progress["status"] === "failed" &&
-              typeof failureMessage === "string" &&
-              failureMessage.trim() !== ""
-            ) {
-              throw new IncompleteScanError(failureMessage);
-            }
-            throw error;
-          }
-          preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
-            ? preparation["targetWarnings"].filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : [];
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -1911,112 +1769,65 @@ export class CodexSecurity {
         onObserverError: options.onObserverError,
       });
       checkOpen();
-      const completion = await workbench(workbenchOptions, [
-        "complete-scan",
-        "--scan-id",
-        scanId,
-        ...(completionCost === null
-          ? []
-          : ["--cost-json", JSON.stringify(completionCost)]),
-      ]);
+      const { result, warnings } = await publishScan(
+        {
+          scanId,
+          scanDir,
+          pluginRoot: runtime.plugin.installedRoot,
+          expectation,
+          signal,
+          workbench: (args) => workbench(workbenchOptions, args),
+        },
+        completed,
+        completionCost,
+      );
       activeScan = null;
-      const completedScan = completion["scan"];
-      if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
-        const targetWarnings = new Set([
-          ...preparedTargetWarnings,
-          ...(Array.isArray(completion["targetWarnings"])
-            ? completion["targetWarnings"].filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : []),
-        ]);
-        for (const warning of completedScan["warnings"]) {
-          if (typeof warning === "string") {
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
-              warning,
-              targetWarnings.has(warning)
-                ? { kind: "target_changed" }
-                : undefined,
-            );
-          }
-        }
+      for (const warning of warnings) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          warning.message,
+          warning.targetChanged ? { kind: "target_changed" } : undefined,
+        );
       }
       if (runPostScan !== null) {
         const followUp = runPostScan;
         runPostScan = null;
-        const completedArtifacts = await Promise.all(
-          [
-            ...new Set([
-              "scan-manifest.json",
-              "findings.json",
-              "coverage.json",
-              "report.md",
-              ...result.manifest.scan.artifacts.map(
-                (artifact) => artifact.path,
-              ),
-            ]),
-          ].map(async (name) => ({
-            name,
-            contents: await readScanFile(scanDir, name, name, signal),
-          })),
-        );
-        let artifactRestorer: ScanArtifactRestorer | null = null;
-        try {
-          artifactRestorer = await prepareArtifactRestorer(
-            workbenchOptions,
-            scanDir,
-          );
-          await runScanEvents({
-            thread,
-            events: (await followUp()).events,
+        const failure = await preservePublishedArtifacts(
+          {
+            result,
             signal,
-            scanDir,
             pluginRoot: runtime.plugin.installedRoot,
             expectation,
-            model,
-            onReconnect: options.onReconnect,
-            onWorkerStatus: options.onWorkerStatus,
-            onObserverError: options.onObserverError,
-          });
-          checkOpen();
-        } catch (error) {
-          if (signal.aborted || this.#closed) throw error;
-          if (artifactRestorer !== null) {
-            for (const artifact of completedArtifacts) {
-              try {
-                await artifactRestorer.restore(
-                  artifact.name,
-                  artifact.contents,
-                );
-              } catch (cause) {
-                if (signal.aborted || this.#closed) throw cause;
-                throw new OutputDirectoryError(
-                  "Cannot restore an artifact outside the scan directory.",
-                  { cause },
-                );
-              }
-            }
-          }
-          await collectResult(
-            result.turnResult,
-            result.threadId,
-            scanDir,
-            runtime.plugin.installedRoot,
-            expectation,
-            signal,
-            true,
-          );
+          },
+          () => prepareArtifactRestorer(workbenchOptions, scanDir),
+          async () => {
+            await runScanEvents({
+              thread,
+              events: (await followUp()).events,
+              signal,
+              scanDir,
+              pluginRoot: runtime.plugin.installedRoot,
+              expectation,
+              model,
+              onReconnect: options.onReconnect,
+              onWorkerStatus: options.onWorkerStatus,
+              onObserverError: options.onObserverError,
+            });
+            checkOpen();
+          },
+        );
+        if (failure !== undefined) {
           notifyObserver(
             "onWarning",
             options.onWarning,
             options.onObserverError,
-            `Could not run post-scan instructions: ${errorMessage(error)}`,
+            `Could not run post-scan instructions: ${errorMessage(failure.error)}`,
           );
         }
       }
+
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
           workbench(workbenchOptions, args, input);
@@ -2165,18 +1976,22 @@ export class CodexSecurity {
           runPostScan = null;
           const result = await collectResult(
             {
-              status: "completed",
-              model: budgetRecovery.model,
-              usage: snapshot?.usage ?? null,
+              scanDir,
+              pluginRoot: budgetRecovery.pluginRoot,
+              expectation: budgetRecovery.expectation,
+              signal: AbortSignal.any([
+                this.#abortController.signal,
+                ...(options.signal === undefined ? [] : [options.signal]),
+              ]),
             },
-            budgetRecovery.threadId,
-            scanDir,
-            budgetRecovery.pluginRoot,
-            budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            {
+              threadId: budgetRecovery.threadId,
+              turnResult: {
+                status: "completed",
+                model: budgetRecovery.model,
+                usage: snapshot?.usage ?? null,
+              },
+            },
             true,
           );
           if (result.coverage.completeness !== "partial") {
@@ -3028,24 +2843,28 @@ export class CodexSecurity {
       }
       const result = await collectResult(
         {
-          status: "completed",
-          model,
-          usage,
-          mock: true,
-          finalResponse:
-            "Synthetic mock scan; no security analysis was performed.",
+          scanDir,
+          pluginRoot,
+          signal,
+          expectation: {
+            repository: local.repository,
+            repositoryRevision: revision,
+            target: local.target,
+            mode: local.mode,
+            pluginVersion: plugin.version,
+          },
         },
-        "",
-        scanDir,
-        pluginRoot,
         {
-          repository: local.repository,
-          repositoryRevision: revision,
-          target: local.target,
-          mode: local.mode,
-          pluginVersion: plugin.version,
+          threadId: "",
+          turnResult: {
+            status: "completed",
+            model,
+            usage,
+            mock: true,
+            finalResponse:
+              "Synthetic mock scan; no security analysis was performed.",
+          },
         },
-        signal,
         true,
       );
       // Stable fixture identities are indexed by complete-scan without model matching.

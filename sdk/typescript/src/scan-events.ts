@@ -106,12 +106,8 @@ export async function runScanEvents(
   try {
     const completed = await runScanTurn(options);
     const result = await collectResult(
-      completed.turnResult,
-      completed.threadId,
-      options.scanDir,
-      options.pluginRoot,
-      options.expectation,
-      options.signal,
+      options,
+      completed,
       options.workbenchValidated,
     );
     throwIfAborted(options.signal, options.scanDir);
