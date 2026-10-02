@@ -466,6 +466,10 @@ jobs:
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
         run: node --test plugins/codex-security/mcp-app/scripts/test_host_build.mjs
+      - name: Test native executable discovery
+        run: node --test plugins/codex-security/mcp-app/tests/test_native_executable.mjs
+      - name: Test native scans and permissions
+        run: node --test plugins/codex-security/mcp-app/tests/test_native_scan.mjs plugins/codex-security/mcp-app/tests/test_native_permissions.mjs
 
   plugin-source:
     name: plugin source contracts
