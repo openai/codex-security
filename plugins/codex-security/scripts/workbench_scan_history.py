@@ -1054,36 +1054,33 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        JOIN scans ON scans.id = matches.after_scan_id
+        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.before_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        JOIN scans ON scans.id = matches.before_scan_id
+        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.after_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, scan_id, occurrence_id, scan_id),
     ).fetchall()
-    linked_rows = list(
-        connection.execute(
-            f"""
-            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
-            SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
-                scans.started_at, scans.id AS scan_id
-            FROM linked
-            CROSS JOIN finding_occurrences AS occurrences
-                ON occurrences.finding_id = linked.finding_id
-            CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
-            """,
-            (occurrence_id, scan_id),
-        )
-    )
+    linked_rows = connection.execute(
+        _LINKED_FINDINGS_SQL.format(placeholders="?")
+        + """
+        SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
+            scans.started_at, scans.id AS scan_id
+        FROM linked
+        CROSS JOIN finding_occurrences AS occurrences ON occurrences.finding_id = linked.finding_id
+        CROSS JOIN scans ON scans.id = occurrences.scan_id
+        WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
+        """,
+        (occurrence_id, scan_id),
+    ).fetchall()
     known_scans = sorted(
         {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
     )

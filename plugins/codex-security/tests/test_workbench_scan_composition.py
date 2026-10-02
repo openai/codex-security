@@ -23,7 +23,6 @@ from workbench_test_support import (
 )
 
 CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
-EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
 def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple[Path, Path]:
@@ -413,9 +412,10 @@ def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
     run_workbench(
         state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic failure."
     )
-    metadata = Path(scan["scanDir"]) / EXECUTION_THREADS
-    metadata.parent.mkdir(parents=True, exist_ok=True)
-    metadata.write_text(json.dumps(["failed-follow-up", "repeated-follow-up"]))
+    for thread_id in ["failed-follow-up", "repeated-follow-up"]:
+        run_workbench(
+            state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", thread_id
+        )
     context = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])
     assert "compositionCheckpoint" not in context
     assert context["scan"]["continuationThreadId"] is None
@@ -897,6 +897,61 @@ def test_running_pass_retains_paid_receipt_before_resume_and_failure(tmp_path: P
     )
     run_workbench(state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Retry exhausted.")
     assert run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["cost"] == cost
+
+
+@pytest.mark.parametrize("missing_outputs", [False, True])
+@pytest.mark.parametrize("already_applied", [False, True])
+def test_membership_migration_backfills_stored_paths_once(
+    tmp_path: Path, missing_outputs: bool, already_applied: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent.previous-synthetic"
+    parent = register(state, target, parent_dir, mode="deep")
+    child = register(
+        state, target, parent_dir / "artifacts/deep-scan/passes/pass-1", parent=parent["scanId"]
+    )
+    rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
+    database = state / "workbench.sqlite3"
+    marker = parent_dir / "saved-output.txt"
+    marker.write_bytes(b"Saved outputs must not change during migration.")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM schema_migrations WHERE version = 48")
+        if already_applied:
+            connection.execute("UPDATE scans SET parent_scan_role = NULL")
+        else:
+            connection.execute("DROP INDEX scans_by_composition_parent")
+            connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 43")
+        before = connection.execute(
+            "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
+        ).fetchall()
+    if missing_outputs:
+        parent_dir.rename(tmp_path / "removed-output")
+    run_workbench(state, "database-info")
+    run_workbench(state, "database-info")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
+            ).fetchall()
+            == before
+        )
+        assert dict(connection.execute("SELECT id, parent_scan_role FROM scans")) == {
+            parent["scanId"]: None,
+            child["scanId"]: "deep_pass",
+            rerun["scanId"]: None,
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
+        ).fetchone() == (1,)
+    saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
+    assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
+    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
+        parent["scanId"],
+        rerun["scanId"],
+    }
 
 
 @pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
