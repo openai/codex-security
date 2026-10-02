@@ -14,11 +14,10 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
 from workbench_composition import CompositionView
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
+from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity, stored_diff_target
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import (
@@ -1285,103 +1284,3 @@ def _path_matches(path: str, pattern: str) -> bool:
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
-
-
-def _legacy_cli_scan_resume(
-    connection: sqlite3.Connection,
-    scan: sqlite3.Row,
-    workspace: sqlite3.Row,
-    *,
-    parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
-    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-    require_scan_directory: Callable[[Path], Path],
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
-) -> dict[str, Any]:
-    if scan["mode"] != "deep" or scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
-    if scan["status"] != "running" or scan["canceled_at"] is not None:
-        raise SystemExit(
-            "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
-        )
-    thread_id = scan["continuation_thread_id"]
-    owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
-    if (
-        not thread_id
-        or (owner is not None and owner != thread_id)
-        or scan["handoff_status"] != "delivered"
-        or scan["handoff_claim_token"] is not None
-    ):
-        raise SystemExit("Resume requires the original owning CLI session.")
-    run = connection.execute(
-        "SELECT status, cancel_requested FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
-    if run is not None and (
-        run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
-    ):
-        raise SystemExit("This Deep Scan has stopped and cannot resume.")
-    try:
-        repository = require_scan_target_identity(scan)
-    except SystemExit as exc:
-        raise SystemExit(
-            "Cannot resume: the original checkout is missing or was replaced."
-        ) from exc
-    if scan_target_identity(repository, None) != (
-        scan["target_revision"],
-        scan["target_snapshot_digest"],
-        scan["target_device"],
-        scan["target_inode"],
-    ):
-        raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-    recipe = parse_scan_recipe(scan["recipe_json"], repository)
-    scan_dir = require_scan_directory(Path(scan["scan_dir"]))
-    progress = connection.execute(
-        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
-    result = {
-        "contract": scan_contract(scan),
-        "recipe": recipe,
-        "scanDir": str(scan_dir),
-        "scanId": scan["id"],
-        "scopeFileCount": progress["scope_file_count"],
-        "startedAt": scan["started_at"],
-        "targetId": scan["target_id"],
-        "targetRevision": scan["target_revision"],
-        "threadId": thread_id,
-        "claimToken": scan["handoff_claim_token"],
-        "userContext": scan["user_context"],
-    }
-    # Active coordinators may still be writing drafts. Validate sealed results
-    # before attaching to a coordinator that has finished.
-    if run is not None and run["status"] == "succeeded":
-        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-        if manifest_path is not None:
-            manifest = read_json_object(manifest_path)
-            manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and (
-                manifest_scan.get("sealedAt") is not None
-                or manifest_scan.get("artifacts") is not None
-            ):
-                try:
-                    binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-                    _prepare_scan_finalization(
-                        scan_dir,
-                        expected_coverage_mode=binding["coverageMode"],
-                        completion_binding=binding,
-                    )
-                    result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
-                except ContractError as exc:
-                    raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
-    return result
-
-
-def require_current_deep_scan(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
-    if (
-        scan["mode"] == "deep"
-        and connection.execute(
-            "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone()
-        is not None
-    ):
-        raise SystemExit("This Deep Scan uses a retired runtime. Start a fresh scan.")

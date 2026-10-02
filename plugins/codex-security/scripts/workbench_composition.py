@@ -53,7 +53,6 @@ class CompositionView:
     checkpoint: CompositionCheckpoint | None
     children: tuple[sqlite3.Row, ...]
     execution_threads: tuple[str, ...]
-    legacy_run: sqlite3.Row | None
     saved_review_count: int = 0
     saved_review_maximum: int | None = None
 
@@ -117,8 +116,11 @@ def composition_execution_threads(
     return tuple(
         row["thread_id"]
         for row in connection.execute(
-            "SELECT thread_id FROM scan_execution_threads WHERE scan_id = ? ORDER BY thread_id",
-            (scan["id"],),
+            "SELECT thread_id FROM scan_execution_threads WHERE scan_id = ? "
+            "UNION SELECT sdk_thread_id FROM deep_scan_workers "
+            "WHERE scan_id = ? AND sdk_thread_id IS NOT NULL AND ? = 'deep' "
+            "ORDER BY thread_id",
+            (scan["id"], scan["id"], scan["mode"]),
         )
     )
 
@@ -127,16 +129,15 @@ def load_composition(
     connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
 ) -> CompositionView:
     if scan["mode"] != "deep":
-        return CompositionView(None, (), composition_execution_threads(connection, scan), None)
+        return CompositionView(None, (), composition_execution_threads(connection, scan))
     saved = connection.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?",
+        "SELECT completion_sequence, max_discovery_runs FROM deep_scan_runs WHERE scan_id = ?",
         (scan["id"],),
     ).fetchone()
     return CompositionView(
         read_composition_checkpoint(scan, load_aggregate=False) if checkpoint else None,
         tuple(composition_children(connection, scan)),
         composition_execution_threads(connection, scan),
-        saved,
         saved["completion_sequence"] if saved is not None else 0,
         saved["max_discovery_runs"] if saved is not None else None,
     )
