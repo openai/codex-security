@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import sqlite3
 import stat
 import sys
@@ -45,6 +44,7 @@ from finalize_scan_contract import (
     _write_prepared_scan_finalization,
     finalize_scan,
     open_scan_local_file_descriptor,
+    write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
 from report_projection import WRITEUP_REPORT_PATH_RE
@@ -1091,7 +1091,7 @@ def complete_budget_exhausted_scan(
             raise SystemExit("Only a running CLI Deep Scan can complete after its cost limit.")
         handoff.require_current_continuation(
             scan,
-            getattr(args, "claim_token", None),
+            args.claim_token,
             error_message="Scan completion is owned by another continuation.",
         )
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
@@ -1107,36 +1107,58 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
-        run = connection.execute(
-            "SELECT status, terminal_reason, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
-            (scan_id,),
-        ).fetchone()
-        if (
-            run is None
-            or run["status"] != "succeeded"
-            or run["terminal_reason"] not in {"saturated", "capped"}
-            or not run["manifest_path"]
-        ):
-            raise SystemExit(
-                "Budget-exhausted scan completion requires successfully completed Deep Scan "
-                "discovery."
-            )
+        composition = load_composition(connection, scan)
+        scan_history.require_composition_complete(scan, composition)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        candidates = (
-            []
-            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
-            else budget_exhausted_candidates(scan, scan_dir)
-        )
         warning = optional_text(args.message, maximum=2400)
         if warning is None:
             warning = (
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        saved_results.legacy_budget_exhausted_draft(
-            _WORKBENCH_DB_CONTEXT, scan, scan_dir, candidates, warning
-        )
         warnings = json.loads(scan["completion_warnings_json"])
+        if artifact_path(scan_dir, "scan-manifest.json", required=False) is None:
+            saved_results.save_composed_checkpoint(
+                _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
+            )
+            documents = saved_results.merge_saved_results(
+                scan_dir,
+                scan_id,
+                workbench_completion_binding(scan, now()),
+                warnings,
+                stopped=True,
+                reason=warning,
+            )
+            if documents is not None:
+                saved_results.write_draft_documents(
+                    _WORKBENCH_DB_CONTEXT,
+                    scan,
+                    scan_dir,
+                    dict(zip(("manifest", "findings", "coverage"), documents, strict=True)),
+                )
+        manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
+        manifest_scan = manifest.get("scan", {})
+        if manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") not in (
+            None,
+            [],
+        ):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+        committed_path = artifact_path(scan_dir, "artifacts/scan-draft.json", required=False)
+        draft = read_json_object(committed_path) if committed_path is not None else None
+        coverage = (
+            draft["coverage"]
+            if draft is not None
+            else read_json_object(artifact_path(scan_dir, "coverage.json", required=True))
+        )
+        coverage["completeness"] = "partial"
+        if not any(item.get("reason") == warning for item in coverage.setdefault("deferred", [])):
+            coverage["deferred"].append({"id": "scan-cost-limit", "reason": warning})
+        if draft is not None:
+            saved_results.write_draft_documents(_WORKBENCH_DB_CONTEXT, scan, scan_dir, draft)
+        else:
+            write_scan_local_bytes(
+                scan_dir, "coverage.json", (json.dumps(coverage) + "\n").encode()
+            )
         if warning not in warnings:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
@@ -1144,80 +1166,8 @@ def complete_budget_exhausted_scan(
             )
             connection.commit()
         return complete_scan_locked(
-            connection, scan_id, getattr(args, "claim_token", None), cost_json
+            connection, scan_id, args.claim_token, cost_json, composition=composition
         )
-
-
-def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
-    artifacts = deep_scan.canonical_discovery_artifacts(scan)
-    ledger = Path(artifacts["candidateLedgerPath"])
-    try:
-        inventory = Path(artifacts["inScopeFilesPath"])
-        inventory_descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan in-scope inventory",
-        )
-        with os.fdopen(inventory_descriptor, "rb") as source:
-            lines = re.split(r"\r?\n", source.read().decode("utf-8"))
-            in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan candidate ledger",
-        )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
-            candidates = [
-                json.loads(line, parse_constant=reject_non_finite_json)
-                for line in source
-                if line.strip()
-            ]
-    except (ContractError, OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
-
-    candidate_ids: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
-        candidate_id = candidate.get("candidate_id")
-        locations = candidate.get("locations")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id.strip()
-            or candidate_id in {".", ".."}
-            or "/" in candidate_id
-            or "\\" in candidate_id
-            or candidate_id in candidate_ids
-            or not isinstance(candidate.get("summary"), str)
-            or not candidate["summary"].strip()
-            or not isinstance(candidate.get("evidence"), str)
-            or not candidate["evidence"].strip()
-            or not isinstance(locations, list)
-            or not locations
-        ):
-            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
-        candidate_ids.add(candidate_id)
-        for location in locations:
-            if not isinstance(location, dict):
-                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
-            path = location.get("path")
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\\" in path
-                or "\x00" in path
-                or re.match(r"^[A-Za-z]:", path)
-                or PurePosixPath(path).is_absolute()
-                or any(part in {".", "..", ""} for part in path.split("/"))
-            ):
-                raise SystemExit(
-                    "Canonical Deep Scan candidate location must be repository-relative."
-                )
-        if not any(location["path"] in in_scope for location in locations):
-            raise SystemExit(
-                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
-            )
-    return candidates
 
 
 def complete_scan_locked(
@@ -1390,6 +1340,8 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
+    # Ordinary scans retain saved accounting unless an explicit usage envelope
+    # replaces it. Deep Scans supply a new total; earlier estimates are partial.
     completion_cost_json = cost_json
     if scan["mode"] != "deep" and "usage" not in scan_usage.stored_scan_cost_fields(cost_json):
         completion_cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
@@ -1475,6 +1427,7 @@ def complete_scan_locked(
 
 
 def sealed_scan_producer_version(scan: sqlite3.Row) -> str | None:
+    # A process can stop after sealing files but before committing completion.
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
     if manifest_path is not None:
@@ -3267,6 +3220,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
+    # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
     if os.name != "nt":
         if stat.S_IMODE(metadata.st_mode) & 0o077:
             raise SystemExit("Scan directory must not be accessible to other users (chmod 700).")
@@ -3355,6 +3309,7 @@ _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
 
 
 def main() -> None:
+    # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
     deep_scan.configure(

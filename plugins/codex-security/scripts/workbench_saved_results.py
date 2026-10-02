@@ -3072,15 +3072,19 @@ def legacy_budget_exhausted_draft(
             }
         )
     coverage["completeness"] = "partial"
-    try:
-        write_draft_documents(
-            db,
-            scan,
-            scan_dir,
-            {"manifest": manifest, "findings": findings, "coverage": coverage},
-        )
-    except (ContractError, OSError, TypeError, ValueError) as exc:
-        raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+    for name, payload in (
+        ("findings.json", findings),
+        ("coverage.json", coverage),
+        ("scan-manifest.json", manifest),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
 
 
 def _checkpoint_ids(value: Any) -> list[str]:

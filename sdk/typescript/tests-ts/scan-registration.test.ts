@@ -38,7 +38,6 @@ for (const continuation of ["resume", "registered"] as const) {
           },
           scanDir: "/synthetic/scan",
           archivedScanDir: null,
-          codexHome: "/synthetic/codex-home",
           workbench: async () => ({
             scanId: "saved",
             recipe: {

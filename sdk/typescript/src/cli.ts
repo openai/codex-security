@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { loadDeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
+
 import {
   execFile as execFileCallback,
   execFileSync,
@@ -2327,6 +2329,10 @@ export async function main(
             },
             dependencies.currentDirectory(),
           );
+          if (scanArguments.mode !== "deep")
+            throw new CodexSecurityError(
+              "Only Deep Scans can be resumed with this command.",
+            );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
             dependencies.currentDirectory(),
@@ -4709,16 +4715,17 @@ export async function main(
                       );
                       return undefined;
                     }
-                    const session =
-                      typeof saved["threadId"] === "string"
-                        ? await findScanSession(
-                            codexSecurityCredentialHome(
-                              dependencies.environment,
-                            ),
-                            saved["threadId"],
-                          )
-                        : null;
-                    if (session?.workingDirectory !== scanDir) {
+                    if (
+                      typeof saved["sealedProducerVersion"] !== "string" &&
+                      typeof saved["threadId"] === "string" &&
+                      (
+                        await findScanSession(
+                          codexSecurityCredentialHome(dependencies.environment),
+                          saved["threadId"],
+                        )
+                      )?.workingDirectory !==
+                        join(scanDir, "artifacts/deep-scan/merge")
+                    ) {
                       errorOutput.write(
                         `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
                       );
@@ -9249,42 +9256,38 @@ async function readDeepScanStop(
       nextStep: "To scan further, rerun with a higher --max-cost.",
     };
   }
-  if (result.threadId === null) return undefined;
   const response = await runWorkbench([
-    "get-deep-scan",
+    "get-scan",
     "--scan-id",
     result.manifest.scan.id,
-    "--thread-id",
-    result.threadId,
   ]);
-  const state = response["deepScan"] as
-    | {
-        terminalReason: string;
-        dispatchedCount: number;
-        completionSequence: number;
-        noNewStreak: number;
-        config: Required<DeepScanOptions>;
-        createdAt: string;
-        completedAt: string;
-      }
-    | undefined;
+  const state = await loadDeepScanCheckpointSummary(result.scanDir);
   if (state?.terminalReason === "saturated") {
     return {
       reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
-  const { maxDiscoveryRuns, maxTimeHours } = state.config;
-  if (state.dispatchedCount >= maxDiscoveryRuns) {
+  const recipe = response["recipe"] as
+    { deepScan?: Required<DeepScanOptions> } | undefined;
+  if (recipe?.deepScan === undefined) return undefined;
+  const { maxDiscoveryRuns, maxTimeHours } = recipe.deepScan;
+  const historical = state["legacy"] as { discoveryRuns?: number } | undefined;
+  if (
+    state.passes.length + (historical?.discoveryRuns ?? 0) >=
+    maxDiscoveryRuns
+  ) {
     const stillFindingIssues =
-      state.completionSequence > 0 && state.noNewStreak === 0;
+      state.mergedScanIds.length > 0 && state.noNewStreak === 0;
     return {
       reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
   const elapsedHours =
-    (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
+    (Date.parse(result.manifest.scan.completedAt) -
+      Date.parse(state.startedAt)) /
+    3_600_000;
   if (elapsedHours >= maxTimeHours) {
     return {
       reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,

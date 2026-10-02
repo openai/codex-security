@@ -1,5 +1,4 @@
-import { semanticFinding } from "./helpers/semantic-scan.js";
-import { prepareScanFindings } from "../src/scan-semantics.js";
+import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -90,7 +89,11 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  prepareScanFindings,
+  prepareSemanticScanDraft,
+} from "../src/scan-semantics.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -322,42 +325,9 @@ describe("plugin runtime preparation", () => {
     ).toEqual(["candidate-a", "candidate-b"]);
   });
 
-  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-
-    type Surface = {
-      id?: string;
-      label: string;
-      disposition: string;
-      receiptRefs?: string[];
-    };
-    type Deferred = { id: string; reason: string; surfaceIds: string[] };
-    const buildCoverage = new Function(
-      "semanticIdentifier",
-      "coverageMode",
-      "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
-    )(
-      (label: string) => label.toLowerCase(),
-      () => "deep_repository",
-      () => "repository",
-    ) as (
-      context: Record<string, unknown>,
-      contract: Record<string, unknown>,
-      coverage: { surfaces: Surface[]; deferred: Deferred[] },
-      scope: { includePaths: string[]; excludePaths: string[] },
-      target: Record<string, unknown>,
-    ) => {
-      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
-      deferred: Deferred[];
-    };
-
-    const coverage = {
+  test("disambiguates duplicate coverage surface identities without losing evidence", () => {
+    const coverage = semanticCoverage({
+      completeness: "partial",
       surfaces: [
         {
           id: "surface-web",
@@ -387,15 +357,26 @@ describe("plugin runtime preparation", () => {
           surfaceIds: ["surface-web", "surface_uploads"],
         },
       ],
-    };
+    });
     const original = structuredClone(coverage);
-    const canonical = buildCoverage(
-      { mode: "deep" },
-      {},
-      coverage,
-      { includePaths: ["."], excludePaths: [] },
-      {},
-    );
+    const canonical = prepareSemanticScanDraft(
+      {
+        mode: "deep",
+        targetContract: {
+          target: {
+            allowedKinds: ["directory_snapshot"],
+            targetId: "target_example",
+            displayName: "example",
+          },
+          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+        },
+      },
+      {
+        scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
+        findings: [],
+        coverage,
+      },
+    ).coverage;
 
     expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
       "surface-web",
@@ -413,7 +394,7 @@ describe("plugin runtime preparation", () => {
       "artifacts/primary.json",
     ]);
     expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect(canonical.deferred).toEqual(coverage.deferred);
+    expect<unknown>(canonical.deferred).toEqual(coverage.deferred);
     expect(coverage).toEqual(original);
   });
 
