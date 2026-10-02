@@ -154,7 +154,7 @@ async function startPostScan(scenario: PostScanScenario) {
     scanDir,
     artifactPath,
     outside,
-    python,
+    python: python!,
     get turns() {
       return turns;
     },
