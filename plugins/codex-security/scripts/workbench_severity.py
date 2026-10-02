@@ -89,10 +89,9 @@ def checkpoint(
         columns = ", ".join(row)
         parameters = ", ".join("?" for _ in row)
         updates = ", ".join(f"{column} = excluded.{column}" for column in row)
-        conflict = f"DO UPDATE SET {updates}"
         connection.execute(
             f"INSERT INTO scan_severity_assessments ({columns}) VALUES ({parameters}) "
-            f"ON CONFLICT(scan_id, finding_id) {conflict}",
+            f"ON CONFLICT(scan_id, finding_id) DO UPDATE SET {updates}",
             tuple(row.values()),
         )
     return {}
