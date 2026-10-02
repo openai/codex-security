@@ -23,11 +23,14 @@ const COMMAND_GROUPS: readonly Group[] = [
 ];
 
 const SCAN_GROUPS: readonly Group[] = [
-  ["Scope", ["path", "diff", "head", "working-tree", "base"]],
+  [
+    "Scope (at most one: --path, --diff, --working-tree)",
+    ["path", "diff", "head", "working-tree", "base"],
+  ],
   ["Configuration", ["config", "mode", "knowledge-base", "dry-run"]],
   ["Model and authentication", ["auth", "model", "effort", "provider"]],
   [
-    "Deep Scan",
+    "Deep Scan (requires --mode deep)",
     DEEP_SCAN_SETTINGS.flatMap(([, , , flag]) =>
       flag === null ? [] : [flag.slice(2)],
     ),
@@ -37,6 +40,9 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
+      "format",
+      "json",
+      "full-output",
       "max-cost",
       "show-cost",
       "fail-on-severity",
@@ -101,8 +107,9 @@ const VALUE_LABELS: Record<string, string> = {
 };
 
 const OUTPUT_GROUPS: readonly Group[] = [
-  ["Help and updates", ["help", "version", "update"]],
+  ["Help", ["help", "version", "update"]],
   ["Output", ["format", "json", "filter-output", "full-output"]],
+  ["Output transforms", ["token-count", "token-limit", "token-offset"]],
 ];
 
 function rowName(row: Row): string {
@@ -226,8 +233,24 @@ function globalRows(rows: Row[], command: string): Row[] {
   if (formats && command !== "scan import") {
     visible.push({
       label: "--json",
-      description: "Shorthand for --format json.",
+      description: scan
+        ? "Write structured results to stdout (--format json)."
+        : "Shorthand for --format json.",
     });
+  }
+  if (scan) {
+    const descriptions: Record<string, string> = {
+      "full-output":
+        "Include ok, data (or error), and metadata around the result.",
+      "token-count":
+        "Print the rendered output's token count instead of the result; not model usage.",
+      "token-limit":
+        "Truncate rendered output; can split JSON. Not a model token budget.",
+      "token-offset": "Skip rendered output tokens; can split JSON.",
+    };
+    for (const row of visible) {
+      row.description = descriptions[rowName(row)] ?? row.description;
+    }
   }
   return visible.map((row) =>
     optionRow(
@@ -245,9 +268,22 @@ export function formatCliHelp(text: string, columns = 80): string {
   if (!header) return text;
   const command = header[2]!.trim();
   const sections: string[] = [];
+  const trailingSections: string[] = [];
   // Presentation width only; long paths and copyable commands remain intact.
   const width = columns > 0 ? columns : 80;
   const blocks = text.trimEnd().split(/\n\n/u);
+  const globalOptions = globalRows(
+    parseRows(
+      blocks
+        .find((block) => block.startsWith("Global Options:\n"))
+        ?.split("\n")
+        .slice(1) ?? [],
+    ),
+    command,
+  );
+  const scanOutputOption = (row: Row) =>
+    command === "scan" &&
+    ["format", "json", "full-output"].includes(rowName(row));
   const examples = blocks.find((block) => block.startsWith("Examples:\n"));
   for (const [index, block] of blocks.entries()) {
     const [title = "", ...lines] = block.split("\n");
@@ -295,15 +331,20 @@ export function formatCliHelp(text: string, columns = 80): string {
       const rows = parseRows(lines).map((row) => optionRow(row, command));
       sections.push(
         ...(command === "scan"
-          ? groupedRows(rows, SCAN_GROUPS, "Advanced", width)
+          ? groupedRows(
+              [...rows, ...globalOptions.filter(scanOutputOption)],
+              SCAN_GROUPS,
+              "Advanced",
+              width,
+            )
           : command === "publish scan"
             ? groupedRows(rows, PUBLISH_GROUPS, "Options", width)
             : [renderRows("Options", rows, width)]),
       );
     } else if (title === "Global Options:") {
-      sections.push(
+      (command === "scan" ? trailingSections : sections).push(
         ...groupedRows(
-          globalRows(parseRows(lines), command),
+          globalOptions.filter((row) => !scanOutputOption(row)),
           OUTPUT_GROUPS,
           "Agent options",
           width,
@@ -338,5 +379,5 @@ export function formatCliHelp(text: string, columns = 80): string {
     );
     sections.push("Docs: https://learn.chatgpt.com/docs/security/cli");
   }
-  return `${sections.join("\n\n")}\n`;
+  return `${[...sections, ...trailingSections].join("\n\n")}\n`;
 }

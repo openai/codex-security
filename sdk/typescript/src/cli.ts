@@ -312,8 +312,7 @@ const MATCHING_MODEL_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
 );
-const SKILL_CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
+const SKILL_CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; quote strings, e.g. --codex 'model="gpt-5.6-terra"' or --codex 'model_reasoning_effort="high"'. Also supports model_provider, model_providers.<name>.<key>, and analytics.enabled=false.`;
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: z
     .array(optionValue("--codex"))
@@ -321,8 +320,7 @@ const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
     .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
-const CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
+const CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; e.g. --codex 'model_reasoning_effort="high"'. Prefer --effort for reasoning effort.`;
 const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
@@ -403,7 +401,7 @@ const VALUE_OPTIONS = new Set([
 ]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
-  .default("openai")
+  .optional()
   .describe("Inference provider for scans.");
 const SHOW_COST_OPTION = z
   .boolean()
@@ -1021,9 +1019,56 @@ interface ScanOutcome {
   error?: string;
 }
 
-const scanOutputSchema = z
+const scanOutputSchema: z.ZodType<Record<string, unknown> | undefined> = z
   .union([
-    z.record(z.string(), z.unknown()),
+    z.looseObject({
+      manifest: z
+        .record(z.string(), z.unknown())
+        .describe("Sealed scan metadata from scan-manifest.json."),
+      findings: z
+        .record(z.string(), z.unknown())
+        .describe("This scan's findings.json document."),
+      coverage: z
+        .record(z.string(), z.unknown())
+        .describe("Coverage and completeness from coverage.json."),
+      repositoryFindings: z
+        .array(z.record(z.string(), z.unknown()))
+        .optional()
+        .describe("Open repository findings, including earlier scans."),
+      scanDir: z.string().describe("Saved scan directory."),
+      threadId: z.string(),
+      reportPath: z.string().describe("Markdown report path."),
+      artifactsDir: z.string(),
+      sarifPath: z.string().nullable(),
+      cost: z.record(z.string(), z.unknown()).nullable(),
+      turn: z.record(z.string(), z.unknown()),
+      warnings: z.array(z.string()).optional(),
+      patchSeverity: FailureSeveritySchema.optional(),
+      patches: z.array(z.record(z.string(), z.unknown())).optional(),
+      pullRequest: z.record(z.string(), z.unknown()).optional(),
+    }),
+    z.looseObject({
+      ...DeepScanSettingsSchema.shape,
+      dryRun: z.literal(true),
+      repository: z.string(),
+      target: z.record(z.string(), z.unknown()),
+      mode: ScanSettingsSchema.shape.mode.unwrap(),
+      model: z.string(),
+      reasoningEffort: z.string(),
+      modelProvider: z.string().optional(),
+      knowledgeBasePaths: ScanSettingsSchema.shape.knowledgeBasePaths,
+      outputDir: z.string().nullable(),
+      archiveDir: z.string().optional(),
+      authentication: z
+        .record(z.string(), z.unknown())
+        .describe("Credential selection; dry runs do not verify credentials."),
+      maxCostUsd: ScanSettingsSchema.shape.maxCostUsd,
+      projectConfig: z.record(z.string(), z.unknown()).optional(),
+      scanPromptFile: ScanSettingsSchema.shape.scanPromptFile,
+      validationPromptFile: ScanSettingsSchema.shape.validationPromptFile,
+      failOnSeverity: FailureSeveritySchema.optional(),
+      deepScanSources: z.record(z.string(), z.unknown()).optional(),
+    }),
     z.object({
       status: z.literal("failed"),
       code: z.literal("SCAN_FAILED"),
@@ -1835,13 +1880,29 @@ export async function main(
     return exitCode;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const scanCommand =
+    argv[cliCommandIndex(argv)] === "scan" && !isScanImportCommand(argv);
+  const scanJsonFormat = scanCommand ? jsonOutputFormat(argv) : undefined;
+  const reportArgumentError = async (message: string): Promise<number> => {
+    errorOutput.write(`codex-security: ${message}\n`);
+    if (scanJsonFormat !== undefined) {
+      const error = { code: "SCAN_FAILED", message };
+      const failure = argv.includes("--full-output")
+        ? { ok: false, error, meta: { command: "scan" } }
+        : { status: "failed", ...error };
+      await writeCliOutput(
+        output,
+        `${JSON.stringify(failure, null, scanJsonFormat === "json" ? 2 : undefined)}\n`,
+      );
+    }
+    return 2;
+  };
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
   if (argumentError !== undefined && !policyFullOutput) {
-    errorOutput.write(`codex-security: ${argumentError}\n`);
-    return 2;
+    return reportArgumentError(argumentError);
   }
   const updateController = new AbortController();
   const pendingUpdate =
@@ -3506,11 +3567,17 @@ export async function main(
         "  codex-security scan . --path src --path tests\n" +
         "  codex-security scan . --working-tree\n" +
         "  codex-security scan . --diff origin/main\n" +
-        "  codex-security scan . --mode deep\n\n" +
+        "  codex-security scan . --mode deep\n" +
+        "  codex-security scan . --auth api-key --json --fail-on-severity high > ../findings.json\n\n" +
+        "Configuration notes:\n" +
+        "CLI input/output paths are relative to the current directory (scope paths are repository-relative). Flags override project configuration; displayed defaults are built-in defaults. Use init to create a config and info -c FILE --json to inspect it.\n\n" +
+        "Automation and results:\n" +
+        "The API-key example requires OPENAI_API_KEY or CODEX_API_KEY. Progress and summaries go to stderr. Completed scans leave stdout empty unless an output option is selected. --json writes results to stdout. Exit codes: 0 success (findings are report-only by default), 1 severity policy failed, 2 error or incomplete coverage, 130/143 interrupted/terminated. Browse saved results with scans and findings; use export to save reports.\n\n" +
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.",
+        "For imports, --json selects the input file; --format json selects output. Use ./import to scan a repository named import.\n\n" +
+        "Docs: https://learn.chatgpt.com/docs/security/cli",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -3545,57 +3612,71 @@ export async function main(
             .optional()
             .meta({ default: [] })
             .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
+              "Scan only repository-relative paths; repeat for multiple paths.",
             ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .optional()
             .meta({ default: [] })
             .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
+              "Security-context files or directories; repeatable. Replaces the configured list.",
             ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
-            .describe("Append scan instructions from FILE."),
+            .describe(
+              "Append model instructions from FILE to the scan prompt.",
+            ),
           validationPromptFile: optionValue("--validation-prompt-file")
             .optional()
             .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
+              "Replace final validation with model instructions from FILE; standard mode only.",
             ),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run FILE after each scan, including failures."),
+            .describe(
+              "Send FILE as model instructions after scanning (best effort); skips setup failures, cancellation, and cost exhaustion.",
+            ),
           diff: optionValue("--diff")
             .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
+            .describe(
+              "Scan committed changes from this ref to --head; requires a clean, nonsparse checkout, including no untracked files.",
+            ),
           workingTree: z
             .boolean()
             .optional()
             .meta({ default: false })
-            .describe("Scan staged and unstaged changes against --base."),
+            .describe(
+              "Scan staged, unstaged, and untracked changes against --base.",
+            ),
           head: optionValue("--head")
             .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
+            .describe(
+              "End ref for --diff; must match the checked-out commit (default: HEAD).",
+            ),
           base: optionValue("--base")
             .optional()
             .describe("Git base ref for --working-tree (default: HEAD)."),
           mode: ScanSettingsSchema.shape.mode.describe(
-            "Scan mode (default: standard); deep supports repository and path targets.",
+            "standard runs one scan; deep repeats discovery across workers for repository/path targets (default: standard).",
           ),
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
-            `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            `Model ID for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}); external providers require a configured or explicit model.`,
           ).shape,
-          provider: PROVIDER_OPTION,
+          provider: PROVIDER_OPTION.describe(
+            "Override the configured provider; if omitted, use configured provider or openai.",
+          ),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+              "New/empty artifact directory outside the enclosing Git worktree (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
             ),
           archiveExisting: z
             .boolean()
             .default(false)
-            .describe("Archive existing results; requires --output-dir."),
+            .describe(
+              "Archive existing results in the output directory set by --output-dir or configuration.",
+            ),
           pluginPath: optionValue("--plugin-path")
             .optional()
             .describe(PLUGIN_PATH_DESCRIPTION),
@@ -3607,7 +3688,7 @@ export async function main(
             .default([])
             .describe(CODEX_OVERRIDE_DESCRIPTION),
           failOnSeverity: FailureSeveritySchema.optional().describe(
-            "Exit 1 for findings at or above LEVEL.",
+            "Exit 1 for unresolved findings at or above LEVEL after patching.",
           ),
           patch: z
             .boolean()
@@ -3616,20 +3697,20 @@ export async function main(
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
-            .describe("Patch findings at or above LEVEL; requires --patch."),
+            .describe(
+              "Patch threshold (default: low); requires --patch. Interactive runs can select findings.",
+            ),
           createPr: CREATE_PR_OPTION.describe(
             "Create a draft pull request or merge request after verified patches; requires --patch.",
           ),
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+            "Estimated scan budget in USD; may overshoot. Excludes patching and post-scan instructions.",
           ),
           showCost: SHOW_COST_OPTION,
           headless: z
             .boolean()
             .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
+            .describe("Use plain text progress and skip interactive prompts."),
           dryRun: z
             .boolean()
             .default(false)
@@ -5952,10 +6033,9 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
-      errorOutput.write(
-        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      return reportArgumentError(
+        errorMessage(incurErrorMessage(frameworkOutput, scanCommand)),
       );
-      return 2;
     }
   }
   if (frameworkOutput.length === 0 && streamedLogs === undefined)
@@ -8015,18 +8095,69 @@ export function skillCommandFailure(
   return `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
-  const message = output
-    .split("\n")
-    .find((line) => line.startsWith("message: "))
-    ?.slice("message: ".length);
-  if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
+function jsonOutputFormat(
+  argv: readonly string[],
+): "json" | "jsonl" | undefined {
+  let format: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    if (argument === "--json") format = "json";
+    else if (argument === "--format") format = argv[++index];
+    else if (argument.startsWith("--format="))
+      format = argument.slice("--format=".length);
   }
+  return format === "json" || format === "jsonl" ? format : undefined;
+}
+
+function incurErrorMessage(output: string, scanArguments = false): string {
+  let message: string | undefined;
+  let validation = false;
+  try {
+    const parsed = JSON.parse(output) as {
+      error?: { code?: string; message?: string };
+      code?: string;
+      message?: string;
+    };
+    const error = parsed.error ?? parsed;
+    message = error.message;
+    validation = error.code === "VALIDATION_ERROR";
+  } catch {}
+  if (message === undefined) {
+    message = output
+      .split("\n")
+      .find((line) => line.startsWith("message: "))
+      ?.slice("message: ".length);
+    if (message === undefined) return output.trim();
+    try {
+      const parsed: unknown = JSON.parse(message);
+      if (typeof parsed === "string") message = parsed;
+    } catch {}
+    validation = /^code: VALIDATION_ERROR$/mu.test(output);
+  }
+  if (scanArguments && validation) {
+    const details = message.indexOf("\n\nDetails: ");
+    if (details >= 0) {
+      // Incur includes the Zod issues in its validation message in every format.
+      const issues = JSON.parse(
+        message.slice(details + "\n\nDetails: ".length),
+      ) as {
+        path: (string | number)[];
+        message: string;
+      }[];
+      return issues
+        .map(({ path, message }) => {
+          const name = path[0];
+          if (typeof name !== "string") return message;
+          const label =
+            name === "repository"
+              ? name
+              : `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
+          return `${label}: ${message}`;
+        })
+        .join("\n");
+    }
+  }
+  return message;
 }
 
 async function runExport(
@@ -8355,7 +8486,10 @@ async function executeScan(
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
-      !arguments_.dryRun && !arguments_.mock && interactive
+      !arguments_.headless &&
+      !arguments_.dryRun &&
+      !arguments_.mock &&
+      interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -9520,7 +9654,7 @@ export function parseCodexOverrides(
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
-  } else if (provider === "amazon-bedrock") {
+  } else if (provider !== undefined) {
     result["model_provider"] = provider;
   }
   for (const value of values) {
@@ -9546,7 +9680,9 @@ export function parseCodexOverrides(
     try {
       parsed = parseToml(`value = ${literal}`)["value"] as JsonValue;
     } catch {
-      throw new CodexSecurityError("Invalid --codex TOML value");
+      throw new CodexSecurityError(
+        "Invalid --codex TOML value. Preserve string quotes in the shell, for example: --codex 'model_reasoning_effort=\"high\"'.",
+      );
     }
     let cursor = result;
     for (const part of parts.slice(0, -1)) {
@@ -9571,10 +9707,7 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (
-        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-        key === "model_provider"
-      ) {
+      if (provider !== undefined && key === "model_provider") {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -9582,6 +9715,22 @@ export function parseCodexOverrides(
       throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
+  }
+  if (provider !== undefined) {
+    const effective = mergeCodexOverrides(defaults ?? {}, result);
+    const profile = effective["profile"];
+    const profiles = effective["profiles"] ?? {};
+    if (
+      typeof profile === "string" &&
+      isJsonObject(profiles) &&
+      isJsonObject(profiles[profile] ?? null)
+    ) {
+      const overrides = result["profiles"] ?? {};
+      result["profiles"] = mergeCodexOverrides(
+        isJsonObject(overrides) ? overrides : {},
+        { [profile]: { model_provider: provider } },
+      );
+    }
   }
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
     const selectedModel = scanModel(

@@ -258,6 +258,11 @@ export AWS_REGION="us-east-2"
 npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
+External providers require a model selected with `--model` or native
+configuration; the built-in OpenAI model default does not apply. An explicit
+`--provider openai` selects OpenAI. Omit `--provider` to retain the configured
+provider.
+
 Bedrock also accepts AWS access keys, profiles, web identity, container
 credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
 a Bedrock model with `--model`; OpenAI models such as `openai.gpt-5.6-luna`
@@ -543,13 +548,14 @@ All settings are optional; `{}` uses the existing defaults. JSON files can use a
 root `$schema` string pointing to the same packaged schema. Schema hints are for
 editors; the CLI uses its bundled validator without fetching URLs, coercing values,
 or dropping unknown keys. Native `codex` settings retain their existing checks and
-profile semantics. CLI `scan --schema --json` describes command arguments.
+profile semantics. CLI `scan --schema --json` describes command arguments and
+the completed-scan, dry-run, and failure result shapes.
 
 Settings use built-in defaults, applicable legacy deep defaults, the file, then
 explicit CLI values. Lists and scope variants are replaced. `--head` can refine
 a file diff and `--base` a file working-tree scope. A selected native profile can
-still override root model/effort values. Existing native alias-conflict checks
-and the behavior of `--provider openai` are unchanged.
+still override root model/effort values. `--provider openai` explicitly selects
+OpenAI; omitting `--provider` preserves the configured provider.
 
 File context, instruction, validation, and output paths resolve from the file's
 directory. CLI file paths resolve from the invocation directory; scope paths
@@ -565,9 +571,16 @@ remain unchanged.
 
 ### Scan options and output
 
-`--path` scopes a scan to one or more paths, `--diff` scans committed changes,
-and `--working-tree` scans staged and unstaged changes. Deep scans support
-repository and path targets.
+Standard mode runs discovery and validation for the selected scope. Deep mode
+uses repeated discovery workers, then combines and validates their findings.
+Deep scans support repository and path targets.
+
+`--path` scopes a scan to one or more repository-relative paths, `--diff REF`
+scans committed changes from `REF` to `--head` (default: `HEAD`), and
+`--working-tree` scans staged, unstaged, and untracked changes against `--base`
+(default: `HEAD`). These three scope selectors are mutually exclusive; `--path`
+cannot filter a diff. Committed-diff scans require a clean, nonsparse checkout,
+including no untracked files, and `--head` must resolve to the checked-out commit.
 
 Bulk scans use clean, shallow checkouts and support repository or path scopes.
 They reject configured diff or working-tree scopes before starting unless each
@@ -580,20 +593,35 @@ the parent repository.
 Repeat `--knowledge-base PATH` for UTF-8 text files with any extension (including
 JSON and SARIF), PDF, or Word (`.docx`) files. Directories are searched recursively,
 skipping other binary files. Explicitly supplied unsupported binary files are rejected.
-Bulk scans share these documents with every repository.
+Supplying this flag replaces the entire configured context list. CLI context,
+prompt, and output paths resolve from the invocation directory. Bulk scans share
+these documents with every repository.
 
-Use an empty output directory outside the scanned directory and enclosing Git
+Use a new or empty output directory outside the scanned directory and enclosing Git
 worktree. On macOS/Linux, existing directories must be private to you
 (`chmod 700`). `--archive-existing` moves previous results to
-`<output-dir>.previous-<timestamp>-<id>`; add `--dry-run` to preview the move.
-SARIF output, when produced, is at `<scan-dir>/exports/results.sarif`.
+`<output-dir>.previous-<timestamp>-<id>` and also works with a configured output
+directory; add `--dry-run` to preview the move. The final summary shows the saved
+directory; `scans` lists saved runs and `findings` lists their findings. SARIF
+output, when produced, is at `<scan-dir>/exports/results.sarif`.
+
+`--post-scan-prompt-file FILE` sends the file's contents to the model as follow-up
+instructions; it does not execute the file as a shell script. This is best effort
+after success or failure, and skips early setup failures, cancellation, and budget
+exhaustion. These instructions and follow-up patching are outside `--max-cost`.
 
 Scans are report-only by default. Set `--fail-on-severity high` to exit with
-`1` if a completed scan finds high or critical issues. Incomplete scans exit
-with `2`, writing available results to stdout and a coverage warning to stderr.
+`1` if a completed scan has unresolved high or critical issues after any patching.
+Incomplete scans exit with `2`, retaining available results and writing a coverage
+warning to stderr.
 
-For machine-readable scan output (`--format json` or `--format jsonl`), a scan
-execution failure writes one structured object to stdout:
+Without explicit output options, completed scans print progress and summaries
+to stderr and leave stdout empty. Use `--json` (an alias for `--format json`) to
+write results to stdout. `--headless` skips interactive questions and uses plain
+progress; choose `--auth` explicitly when you need a particular credential source.
+
+For machine-readable scan output (`--json`, `--format json`, or `--format jsonl`),
+argument and execution failures write one structured object to stdout:
 
 ```json
 {
@@ -603,8 +631,13 @@ execution failure writes one structured object to stdout:
 }
 ```
 
-With `--full-output`, the same code and message are reported under `error` in
-an `ok: false` envelope instead.
+With `--full-output`, successful results appear under `data` in an `ok: true`
+envelope; failures report the same code and message under `error` in an
+`ok: false` envelope.
+
+`--token-limit` and `--token-offset` slice rendered output after the scan; they
+do not limit model usage and can produce incomplete JSON. Avoid them when parsing
+scan results. `--full-output` keeps the envelope valid but truncated `data` is text.
 
 The command still exits with `2` for runtime, export, invalid-input, or
 incomplete-scan failures, and human-readable diagnostics remain on stderr.
@@ -787,9 +820,9 @@ and `scanOptions.auth` to select credentials.
 ### Configure deep scans
 
 For `scan --mode deep`, `--workers` sets discovery concurrency and `--subagents`
-sets subagents per worker. `--stop-after-no-new` stops after that many runs
-without new issues. `--max-discovery-runs` and `--max-time-hours` cap discovery
-runs and duration. SDK equivalents:
+sets subagents per worker. `--stop-after-no-new` stops after that many consecutive
+runs without new issues. `--max-discovery-runs` and `--max-time-hours` cap
+discovery runs and duration. SDK equivalents:
 
 ```ts
 await security.run("/path/to/repository", {
@@ -1001,9 +1034,9 @@ Review output and artifacts for sensitive information before sharing them.
 ### Progress and cost
 
 Interactive scans show full-screen progress; CI, redirected output, and
-`--headless` use plain status lines. Results go to stdout, progress and
-diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
-sensitive information before sharing them.
+`--headless` use plain status lines. Explicitly formatted results go to stdout;
+progress, summaries, and diagnostics go to stderr. Add `--verbose` for diagnostics.
+Check logs for sensitive information before sharing them.
 
 The token summary shows uncached input, cache reads, cache writes, output,
 and total tokens. Total tokens include all input plus output; cache reads and
@@ -1046,7 +1079,9 @@ reporting. This change does not change when spending limits stop scans.
 the limit, though in-flight requests can finish above it. If deep-scan
 discovery has finished, the scan returns a sealed partial report without more
 model calls and lists unvalidated candidates as follow-up work. Bulk scans
-apply the limit per repository attempt.
+apply the limit per repository attempt. No cost limit is set unless selected
+through a flag or configuration. Follow-up patching and post-scan instructions
+are outside this limit.
 
 With `--max-cost`, automatic finding-history matching makes at most one extra
 model call. If it needs more context, the completed scan is kept and a warning
@@ -1070,8 +1105,7 @@ existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
 the current limit, including after an approved increase.
 
 These amounts estimate API-equivalent model usage, not ChatGPT subscription
-allowance. Post-scan prompts run after scan cost tracking ends and are outside
-this limit.
+allowance. Post-scan prompts run after scan cost tracking ends.
 
 ### Bulk scans
 
@@ -1711,12 +1745,14 @@ source-line fingerprints. `export --help` lists all options.
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
 
-For CI, save output outside the checkout and set a severity threshold:
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`, save output outside the checkout,
+and set a severity threshold. Committed-diff scans require a clean checkout:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
 npx @openai/codex-security scan . \
   --diff origin/main \
+  --auth api-key \
   --output-dir "$SCAN_ROOT/results" \
   --json \
   --fail-on-severity high > "$SCAN_ROOT/findings.json"
@@ -1861,7 +1897,8 @@ its read-only Codex sandbox.
 
 `scan --patch` patches after a complete scan. `--patch-severity` defaults to
 `low`; `high` selects high and critical findings. Use the interactive browser
-to select findings and add patch instructions. Results include a `patches`
+to select findings and add patch instructions. Headless runs use the severity
+threshold without opening the browser. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
 Patching shows each finding's position, elapsed time, and live Codex activity.

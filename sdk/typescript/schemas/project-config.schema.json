@@ -112,7 +112,7 @@
             },
             "stop_after_no_new": {
               "default": 4,
-              "description": "Stop after this many runs find no new issues.",
+              "description": "Stop after this many consecutive discovery runs find no new issues.",
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991

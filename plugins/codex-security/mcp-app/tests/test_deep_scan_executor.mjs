@@ -1002,6 +1002,12 @@ async function testOpenAiCredentialsReachWorker() {
   const cases = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
     {
+      configuration:
+        'model_provider = "amazon-bedrock"\nprofile = "selected"\n[profiles.selected]\nmodel_provider = "openai"\n',
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+    },
+    {
       openai: "  synthetic-openai-key  ",
       codex: " ",
       expected: "synthetic-openai-key",
@@ -1021,6 +1027,7 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      configuration: 'model_provider = "synthetic-provider"\n',
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
@@ -1044,6 +1051,9 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      const configuration =
+        entry.configuration ?? 'model_provider = "openai"\n';
+      await writeFile(path.join(fixture.root, "config.toml"), configuration);
       childProcess.spawn = (command, args, options) =>
         originalSpawn(
           command,
@@ -1077,6 +1087,14 @@ async function testOpenAiCredentialsReachWorker() {
           );
           assert.equal(preflight.codexHome, fixture.root);
           assert.equal(invocation.codexHome, fixture.root);
+          assert.equal(
+            invocation.openaiAuthentication.configuration,
+            configuration,
+          );
+          assert.equal(
+            invocation.argv.some((arg) => arg.startsWith("model_provider=")),
+            false,
+          );
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -2229,7 +2247,8 @@ async function fakeCodexFixture(
     scriptPath,
     [
       "#!/usr/bin/env node",
-      'import { writeFileSync } from "node:fs";',
+      'import { readFileSync, writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
       `const preflightProfile = ${JSON.stringify(preflightProfile)};`,
       `const preflightAllowed = ${JSON.stringify(preflightAllowed)};`,
       `const accountResult = ${JSON.stringify(accountResult)};`,
@@ -2275,7 +2294,7 @@ async function fakeCodexFixture(
       "} else {",
       "let stdin = '';",
       "for await (const chunk of process.stdin) stdin += chunk;",
-      "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;",
+      "const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY, configuration: readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') } : undefined;",
       "const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;",
       "writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));",
       "if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",

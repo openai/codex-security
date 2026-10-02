@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { main } from "../src/cli.js";
+import { $ } from "bun";
+import { main, parseCodexOverrides } from "../src/cli.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
@@ -103,6 +104,17 @@ describe("CLI help", () => {
     expect(publish).toMatch(
       /^  codex-security publish scan .*--dry-run(?:\s+#.*)?$/mu,
     );
+  });
+
+  test("keeps TOML string quotes when a help example is copied into a shell", async () => {
+    const text = await help(["scan", "--help"]);
+    const example = option(text, "--codex").match(/--codex ('[^']+')/u)?.[1];
+    expect(example).toBeDefined();
+    // Bun's shell parses the displayed quoting on Unix and Windows.
+    const value = await $`printf '%s' ${{ raw: example! }}`.text();
+    expect(parseCodexOverrides([value])).toMatchObject({
+      model_reasoning_effort: "high",
+    });
   });
 
   test.each([

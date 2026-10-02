@@ -72,7 +72,8 @@ export const DeepScanSettingsSchema = z.strictObject({
   }),
   stopAfterNoNew: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.stopAfterNoNew,
-    description: "Stop after this many runs find no new issues.",
+    description:
+      "Stop after this many consecutive discovery runs find no new issues.",
   }),
   stopAfterConsecutiveErrors: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.stopAfterConsecutiveErrors,
