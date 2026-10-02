@@ -1,6 +1,9 @@
 node_modules/
 /reports/
 dist/
+# GitHub Actions executes these checked-in bundles without a build step.
+!/github-action/dist/
+/github-action/build/
 __pycache__/
 .pytest_cache/
 *.egg-info/
