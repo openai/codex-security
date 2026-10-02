@@ -112,6 +112,7 @@ function syntheticPermissionAppServer() {
   };
   capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
     const request = JSON.parse(line);
@@ -259,65 +260,6 @@ test("native preparation protects enclosing repositories for fresh and resumed c
       );
       assert.equal(environment.PATH, await realpath(dirname(process.execPath)));
       assert.equal(process.env.PATH, originalPath);
-    }
-  } finally {
-    restoreEnvironment();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("native preparation excludes scan output and knowledge sources from executable selection", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "native-inputs-")));
-  const repository = join(root, "repository");
-  const scanDir = join(root, "scan");
-  const knowledgeRoot = join(root, "knowledge");
-  const documents = join(knowledgeRoot, "docs");
-  const external = join(root, "external");
-  const name = process.platform === "win32" ? "codex.exe" : "codex";
-  const restoreEnvironment = captureEnvironment([
-    "CODEX_HOME",
-    "CODEX_CLI_PATH",
-    "PATH",
-    "CODEX_SECURITY_KNOWLEDGE_BASE",
-    "CODEX_SECURITY_CONFIG_PATH",
-    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-  ]);
-  try {
-    for (const directory of [repository, scanDir, documents, external]) {
-      await mkdir(directory, { recursive: true });
-    }
-    await mkdir(join(knowledgeRoot, ".git"));
-    for (const directory of [scanDir, knowledgeRoot, external]) {
-      await writeFile(join(directory, name), "inert executable fixture");
-      await chmod(join(directory, name), 0o700);
-    }
-    process.env.CODEX_HOME = root;
-    delete process.env.CODEX_SECURITY_CONFIG_PATH;
-    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const saved of [false, true]) {
-      if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
-      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
-      const request = {
-        ...input(),
-        scan: { ...input().scan, targetPath: repository, scanDir },
-        recipe: {
-          auth: "api-key",
-          ...(saved ? { knowledgeBasePaths: [documents], config: {} } : {}),
-        },
-      };
-      for (const directory of [scanDir, knowledgeRoot]) {
-        process.env.CODEX_CLI_PATH = join(directory, name);
-        await assert.rejects(
-          prepareNativeScan(request),
-          /outside the scan target/,
-        );
-      }
-      delete process.env.CODEX_CLI_PATH;
-      process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
-      const prepared = await prepareNativeScan(request);
-      const environment = prepared.client.dependencies.environment;
-      assert.equal(environment.CODEX_CLI_PATH, join(external, name));
-      assert.equal(environment.PATH, external);
     }
   } finally {
     restoreEnvironment();
@@ -565,6 +507,68 @@ test("native shutdown prevents an in-flight request from starting a new scan", a
     return true;
   });
   assert.equal(preparations, 0);
+});
+
+test("native preparation excludes scan output and knowledge sources from executable selection", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "native-inputs-")));
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const knowledgeRoot = join(root, "knowledge");
+  const documents = join(knowledgeRoot, "docs");
+  const external = join(root, "external");
+  const name = process.platform === "win32" ? "codex.exe" : "codex";
+  const restoreEnvironment = captureEnvironment([
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_HOME",
+    "CODEX_CLI_PATH",
+    "PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ]);
+  try {
+    for (const directory of [repository, scanDir, documents, external]) {
+      await mkdir(directory, { recursive: true });
+    }
+    await mkdir(join(knowledgeRoot, ".git"));
+    for (const directory of [scanDir, knowledgeRoot, external]) {
+      await writeFile(join(directory, name), "inert executable fixture");
+      await chmod(join(directory, name), 0o700);
+    }
+    process.env.CODEX_HOME = root;
+    process.env.CODEX_API_KEY = "synthetic-native-key";
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    for (const saved of [false, true]) {
+      if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+      const request = {
+        ...input(),
+        scan: { ...input().scan, targetPath: repository, scanDir },
+        recipe: saved
+          ? { auth: "api-key", knowledgeBasePaths: [documents], config: {} }
+          : undefined,
+      };
+      for (const directory of [scanDir, knowledgeRoot]) {
+        process.env.CODEX_CLI_PATH = join(directory, name);
+        await assert.rejects(
+          prepareNativeScan(request),
+          /outside the scan target/,
+        );
+      }
+      delete process.env.CODEX_CLI_PATH;
+      process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
+      const prepared = await prepareNativeScan(request);
+      const environment = prepared.client.dependencies.environment;
+      assert.equal(environment.CODEX_CLI_PATH, join(external, name));
+      assert.equal(environment.PATH, external);
+    }
+  } finally {
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native scans preserve selected Codex homes and saved settings", async () => {
@@ -938,6 +942,7 @@ test(
       "USERPROFILE",
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
       "PATH",
       "CODEX_HOME",
       "CODEX_CLI_PATH",
@@ -976,6 +981,7 @@ test(
         HOME: root,
         USERPROFILE: root,
         PATH: [repositoryBin, root, selectedTools].join(delimiter),
+        CODEX_SECURITY_KNOWLEDGE_BASE: selectedTools,
       });
       delete process.env.CODEX_CLI_PATH;
       delete process.env.CODEX_SECURITY_CONFIG_PATH;
@@ -991,6 +997,7 @@ if (process.argv.includes("app-server")) {
   const capture = (value) => fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   capture({ kind: "exec", executable: process.argv[1], argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-worker-thread" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
@@ -1076,6 +1083,8 @@ if (process.argv.includes("app-server")) {
           );
           const executed = observed.find((entry) => entry.kind === "exec");
           assert.equal(executed.executable, executable);
+          assert.equal(preflight.knowledgeBase, undefined);
+          assert.equal(executed.knowledgeBase, undefined);
           assert.equal(preflight.cwd, cwd);
           assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
           assert.equal(executed.argv.includes("resume"), resumed);
@@ -1646,6 +1655,24 @@ test("native saved scans retain settings, auth environment, permissions and iden
     assert.equal(options.auth, "api-key");
     assert.equal(options.maxCostUsd, 10);
     assert.equal(options.postScanPrompt, "Publish once.");
+    const documents = join(root, "ambient-documents");
+    await mkdir(documents);
+    process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+    const savedWithoutDocuments = await prepareNativeScan(request);
+    assert.equal(savedWithoutDocuments.options.knowledgeBasePaths, undefined);
+    assert.equal(
+      savedWithoutDocuments.client.dependencies.environment
+        .CODEX_SECURITY_KNOWLEDGE_BASE,
+      undefined,
+    );
+    const freshWithDocuments = await prepareNativeScan({
+      ...request,
+      recipe: undefined,
+    });
+    assert.deepEqual(freshWithDocuments.options.knowledgeBasePaths, [
+      documents,
+    ]);
+    delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
     const withoutContext = await prepareNativeScan({
       ...request,
       scan: { ...request.scan, userContext: null },

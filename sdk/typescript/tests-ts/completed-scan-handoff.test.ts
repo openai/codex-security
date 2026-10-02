@@ -7,12 +7,16 @@ test("does not request completed findings after a prompt-only scan", async () =>
     runtime,
   )?.[0];
   expect(source).toBeDefined();
+  const context = /function scanResponseContext\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
+    runtime,
+  )?.[0];
+  expect(context).toBeDefined();
 
   const promptOnlyScanResult = new Function(
     "isJsonObject2",
     "z6",
     "toolErrorResult",
-    `${source}\nreturn promptOnlyScanResult;`,
+    `${context}\n${source}\nreturn promptOnlyScanResult;`,
   )(
     (value: unknown) => value !== null && typeof value === "object",
     {
