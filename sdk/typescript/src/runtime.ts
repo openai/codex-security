@@ -1,3 +1,5 @@
+import { expandHome, environmentValue } from "./codex-home.js";
+export { expandHome } from "./codex-home.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -168,19 +170,6 @@ export interface WorkbenchCommandOptions {
 
 export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
-}
-
-function environmentValue(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested]?.trim();
-  if (exact) return exact;
-  return Object.entries(environment)
-    .find(
-      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-    )?.[1]
-    ?.trim();
 }
 
 export function codexSecurityStateDirectory(
@@ -3143,24 +3132,6 @@ async function sameFile(left: string, right: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-export function expandHome(
-  value: string,
-  environment: ProcessEnvironment = process.env,
-): string {
-  const home =
-    (process.platform === "win32"
-      ? (environmentValue(environment, "USERPROFILE") ??
-        environmentValue(environment, "HOME"))
-      : (environmentValue(environment, "HOME") ??
-        environmentValue(environment, "USERPROFILE"))) ?? homedir();
-  if (value === "~") return home;
-  if (value.startsWith("~/")) return join(home, value.slice(2));
-  if (value.startsWith("~\\")) {
-    return join(home, ...value.slice(2).split("\\"));
-  }
-  return value;
 }
 
 function safePrefix(value: string): string {
