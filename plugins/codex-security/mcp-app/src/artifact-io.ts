@@ -1,17 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
-}
 
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
@@ -19,18 +8,15 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
   scanId?: string;
   scope?: string;
   pluginRoot?: string;
   pythonCommand?: string;
   targetContract?: Readonly<Record<string, unknown>>;
   targetRevision?: string;
-  targetSnapshotDigest?: string;
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
@@ -178,7 +164,7 @@ export function paginateArtifactRows<Row>(
 }
 
 /**
- * Resolve one operation-owned destination inside its bound scan or worker root.
+ * Resolve one operation-owned destination inside its bound scan root.
  */
 export async function artifactDestination(
   context: ArtifactContext,
@@ -228,26 +214,17 @@ export async function replaceArtifactText(
   path: string,
   content: string,
 ): Promise<void> {
-  await withArtifactLock(path, async () => {
-    const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
-    try {
-      await fs.writeFile(temporary, content, {
-        encoding: "utf8",
-        mode: 0o600,
-        flag: "wx",
-      });
-      await fs.rename(temporary, path);
-    } finally {
-      await fs.rm(temporary, { force: true });
-    }
-  });
-}
-
-export async function replaceArtifactJson(
-  path: string,
-  value: unknown,
-): Promise<void> {
-  await replaceArtifactText(path, JSON.stringify(value, null, 2) + "\n");
+  const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
+  try {
+    await fs.writeFile(temporary, content, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    await fs.rename(temporary, path);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
 }
 
 export async function replaceArtifactJsonl(
@@ -258,72 +235,6 @@ export async function replaceArtifactJsonl(
     ? rows.map((row) => JSON.stringify(row)).join("\n") + "\n"
     : "";
   await replaceArtifactText(path, content);
-}
-
-export async function appendArtifactJsonl(
-  path: string,
-  rows: readonly unknown[],
-): Promise<void> {
-  if (rows.length === 0) return;
-  const content = rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
-  await withArtifactLock(path, async () => {
-    const handle = await fs.open(
-      path,
-      fsConstants.O_RDWR |
-        fsConstants.O_CREAT |
-        fsConstants.O_APPEND |
-        fsConstants.O_NOFOLLOW,
-      0o600,
-    );
-    try {
-      const metadata = await handle.stat();
-      if (!metadata.isFile()) {
-        throw new Error("Artifact append requires a regular file.");
-      }
-      let prefix = "";
-      if (metadata.size > 0) {
-        const finalByte = Buffer.alloc(1);
-        await handle.read(finalByte, 0, 1, metadata.size - 1);
-        if (finalByte[0] !== 0x0a) prefix = "\n";
-      }
-      await handle.appendFile(prefix + content, "utf8");
-    } finally {
-      await handle.close();
-    }
-  });
-}
-
-async function withArtifactLock(
-  path: string,
-  action: () => Promise<void>,
-): Promise<void> {
-  const lockPath = path + ".lock";
-  let lock: fs.FileHandle | undefined;
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    try {
-      lock = await fs.open(
-        lockPath,
-        fsConstants.O_WRONLY |
-          fsConstants.O_CREAT |
-          fsConstants.O_EXCL |
-          fsConstants.O_NOFOLLOW,
-        0o600,
-      );
-      break;
-    } catch (error) {
-      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-      await new Promise<void>((done) => setTimeout(done, 20));
-    }
-  }
-  if (!lock) {
-    throw new Error("Timed out waiting for the artifact write lock.");
-  }
-  try {
-    await action();
-  } finally {
-    await lock.close();
-    await fs.rm(lockPath, { force: true });
-  }
 }
 
 function validateArtifactComponents(
