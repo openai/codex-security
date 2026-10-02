@@ -62,6 +62,8 @@ interface SessionUsage {
   reasoning: SessionReasoning | null;
   reasoningCount: number;
   events?: Record<string, unknown>[];
+  replayedEvents: number;
+  replayedActivities: number;
 }
 
 interface ScanCostTrackerOptions {
@@ -69,6 +71,7 @@ interface ScanCostTrackerOptions {
   model: string;
   repository?: string;
   scanDirectory?: string;
+  includeArchivedSessions?: boolean;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
@@ -108,6 +111,8 @@ function createSessionUsage(): SessionUsage {
     prose: new Set(),
     reasoning: null,
     reasoningCount: 0,
+    replayedEvents: 0,
+    replayedActivities: 0,
   };
 }
 
@@ -118,6 +123,8 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #replayedEvents = new Map<string, number>();
+  readonly #replayedActivities = new Map<string, number>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
   #activeRefresh: Promise<void> | null = null;
@@ -249,9 +256,7 @@ export class ScanCostTracker {
       if (unknown) throw unknown.error;
     };
     try {
-      for await (const path of sessionFiles(
-        join(this.#options.codexHome, "sessions"),
-      )) {
+      for await (const path of this.#sessionFiles()) {
         let session = this.#sessions.get(path);
         if (session === undefined) {
           session = createSessionUsage();
@@ -354,6 +359,12 @@ export class ScanCostTracker {
           ? this.#options.workerNumber?.(threadId)
           : this.workerNumber(threadId);
       for (const event of session.events?.splice(0) ?? []) {
+        // Live and archived copies share transcript positions. Keep repeated
+        // equal events within one transcript while skipping another copy.
+        session.replayedEvents += 1;
+        if (session.replayedEvents <= (this.#replayedEvents.get(threadId) ?? 0))
+          continue;
+        this.#replayedEvents.set(threadId, session.replayedEvents);
         this.#options.onSessionEvent?.({
           threadId,
           parentThreadId: session.parentThreadId,
@@ -363,6 +374,13 @@ export class ScanCostTracker {
       }
       if (threadId !== this.#threadId) {
         for (const activity of session.activities.splice(0)) {
+          session.replayedActivities += 1;
+          if (
+            session.replayedActivities <=
+            (this.#replayedActivities.get(threadId) ?? 0)
+          )
+            continue;
+          this.#replayedActivities.set(threadId, session.replayedActivities);
           this.#options.onActivity?.({
             ...activity,
             id: `${threadId}:${activity.id}`,
@@ -396,6 +414,12 @@ export class ScanCostTracker {
     this.#reportCost(cost);
   }
 
+  async *#sessionFiles(): AsyncGenerator<string> {
+    yield* sessionFiles(join(this.#options.codexHome, "sessions"));
+    if (this.#options.includeArchivedSessions)
+      yield* sessionFiles(join(this.#options.codexHome, "archived_sessions"));
+  }
+
   #reportWorkerProgress(session: SessionUsage): void {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
@@ -407,7 +431,9 @@ export class ScanCostTracker {
           progress.filesTotal > expectedFilesTotal) ||
         (session.filesTotal !== null &&
           progress.filesTotal !== session.filesTotal) ||
-        progress.filesCompleted < session.filesCompleted
+        progress.filesCompleted < session.filesCompleted ||
+        progress.filesCompleted <
+          (this.#workerProgress.get(session.threadId) ?? 0)
       ) {
         continue;
       }
