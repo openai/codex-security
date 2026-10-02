@@ -9,7 +9,7 @@ const explicitSecretCategory = new RegExp(
 );
 const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
 const negatedSecretCategory = new RegExp(
-  String.raw`^(?:not(?:[-_\s]*a)?|non)[-_\s]*(?:${secretTerms})\b`,
+  String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
   "i",
 );
 const supportingLocation = (location) =>
@@ -70,11 +70,15 @@ function strings(value) {
 }
 
 function normalizeSourcePath(path) {
-  return path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
+  const normalized = path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
+  return process.platform === "win32" ? normalized?.toLowerCase() : normalized;
 }
 
 function validSourceRange(location, fixture) {
-  const source = fixture.files[normalizeSourcePath(location.path)];
+  const source = Object.entries(fixture.files).find(
+    ([path]) =>
+      normalizeSourcePath(path) === normalizeSourcePath(location.path),
+  )?.[1];
   const end = location.endLine ?? location.startLine;
   return (
     typeof source === "string" &&
@@ -89,7 +93,7 @@ function validSourceRange(location, fixture) {
 function matchesLocation(location, expected) {
   const end = location.endLine ?? location.startLine;
   return (
-    normalizeSourcePath(location.path) === expected.path &&
+    normalizeSourcePath(location.path) === normalizeSourcePath(expected.path) &&
     !supportingLocation(location) &&
     Number.isInteger(location.startLine) &&
     Number.isInteger(end) &&
@@ -109,12 +113,14 @@ function matches(finding, expected) {
   return (
     !negatedSecretCategory.test(category) &&
     secretCategory.test(category) &&
-    finding.taxonomy?.cwe?.some(
-      (cwe) =>
+    finding.taxonomy?.cwe?.some((value) => {
+      const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
+      return (
         expected.cwes.includes(cwe) ||
         (["CWE-200", "CWE-540"].includes(cwe) &&
-          explicitSecretCategory.test(category)),
-    ) &&
+          explicitSecretCategory.test(category))
+      );
+    }) &&
     finding.locations?.some((location) => matchesLocation(location, expected))
   );
 }

@@ -139,6 +139,9 @@ for (const category of [
   "not-a-password-exposure",
   "non-token-exposure",
   "non-api-key-exposure",
+  "no-secret-exposure",
+  "secret-free",
+  "without-credentials",
 ]) {
   test(`rejects negated category ${category}`, () => {
     const fixture = createFixture();
@@ -181,9 +184,15 @@ test("accepts plural and identifier-style credential categories", () => {
 test("accepts credential exposure with non-secret context in the category", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);
-  result.findings[0].taxonomy.category =
-    "credential exposure with non-secret context";
-  assert.equal(gradeResult(result, fixture).passed, true);
+  for (const category of [
+    "credential exposure with non-secret context",
+    "credential exposure with no-secret context",
+    "credential exposure with secret-free context",
+    "credential exposure with context without credentials",
+  ]) {
+    result.findings[0].taxonomy.category = category;
+    assert.equal(gradeResult(result, fixture).passed, true, category);
+  }
 });
 
 test("accepts a secret's valid source range and sensitive-data category", () => {
@@ -206,6 +215,69 @@ for (const category of [
     assert.equal(gradeResult(result, fixture).passed, true);
   });
 }
+
+test("accepts equivalent CWE spelling without weakening generic disclosure categories", () => {
+  const fixture = createFixture();
+  for (const [cwe, generic] of [
+    ["cwe-798", false],
+    ["CWE-0798", false],
+    [" CWE-798 ", false],
+    [" cwe-00200 ", true],
+    ["CWE-0540", true],
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].taxonomy.cwe = [cwe];
+    assert.equal(gradeResult(result, fixture).passed, true, cwe);
+    if (generic) {
+      result.findings[0].taxonomy.category = "sensitive-data-exposure";
+      assert.equal(gradeResult(result, fixture).passed, false, cwe);
+    }
+  }
+});
+
+test("rejects unrelated or malformed CWE identifiers after normalization", () => {
+  const fixture = createFixture();
+  for (const cwe of [" cwe-0089 ", "CWE-798-extra", "CWE-798.0", "798"]) {
+    const result = retainedResult(fixture);
+    result.findings[0].taxonomy.cwe = [cwe];
+    const report = gradeResult(result, fixture);
+    assert.equal(report.passed, false, cwe);
+    assert.equal(report.cases[0].found, false, cwe);
+  }
+});
+
+test("matches path casing only on Windows while preserving citation checks", () => {
+  const fixture = createFixture();
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  try {
+    for (const platform of ["linux", "win32"]) {
+      Object.defineProperty(process, "platform", { value: platform });
+      const result = retainedResult(fixture);
+      const finding = result.findings[0];
+      finding.locations.push(
+        { path: "src/client.py", startLine: 7, role: "sink" },
+        { path: "README.md", startLine: 1, role: "supporting" },
+      );
+      finding.codeEvidence.push(sourceEvidence(fixture, "README.md", 1));
+      for (const citation of [...finding.locations, ...finding.codeEvidence])
+        citation.path =
+          ".\\" + citation.path.toUpperCase().replaceAll("/", "\\");
+      assert.equal(gradeResult(result, fixture).passed, platform === "win32");
+      if (platform === "win32") {
+        finding.locations[1].endLine = 999;
+        assert.equal(gradeResult(result, fixture).passed, false);
+        delete finding.locations[1].endLine;
+        finding.locations[0].path = "SRC\\RUNTIME_CONFIG.PY";
+        const report = gradeResult(result, fixture);
+        assert.equal(report.passed, false);
+        assert.equal(report.cases[0].found, false);
+        assert.equal(report.falsePositiveCount, 1);
+      }
+    }
+  } finally {
+    Object.defineProperty(process, "platform", descriptor);
+  }
+});
 
 for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
   test(`accepts ${cwe} for the password in the database configuration`, () => {
