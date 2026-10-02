@@ -8553,6 +8553,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        const bedrock =
+          providerOptions.provider === "amazon-bedrock" ||
+          authentication.method === "aws_credentials";
         diagnostic("authentication.selected", {
           requested: auth ?? DEFAULT_SCAN_AUTH,
           method: authentication.method,
@@ -8570,7 +8573,7 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
-          if (authentication.method === "aws_credentials") {
+          if (bedrock) {
             dashboard.note(
               "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
             );
@@ -8589,13 +8592,15 @@ async function executeScan(
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
-          progress?.stage(
-            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
-          );
         } else if (authentication.method === "command") {
           progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
+        }
+        if (bedrock) {
+          progress?.stage(
+            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+          );
         }
         progress?.startTimer("Preparing scan");
       },
@@ -8783,7 +8788,11 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure, selectedAuthentication);
+        : scanFailureMessage(
+            failure,
+            selectedAuthentication,
+            providerOptions.provider,
+          );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -9118,11 +9127,49 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
+  provider?: string,
 ): string {
   // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const classification = classifyConnectionFailure(error);
+  if (
+    provider === "amazon-bedrock" ||
+    authentication?.method === "aws_credentials"
+  ) {
+    const detail = diagnosticValue(error);
+    switch (classification) {
+      case "unauthorized":
+        if (authentication?.method === "command") {
+          return `${detail}\n${authenticationFailureMessage(authentication)}`;
+        }
+        if (authentication?.method === "aws_credentials") {
+          return (
+            `${detail}\n${authenticationFailureMessage(authentication)} ` +
+            (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
+              ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
+              : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
+          );
+        }
+        return `${detail}\nAmazon Bedrock authentication failed. Check the credentials configured for the selected provider.`;
+      case "forbidden":
+        if (authentication?.method === "command") {
+          return (
+            `${detail}\nThe configured provider auth command's credentials cannot access the Amazon Bedrock model. ` +
+            "Check the configured provider auth command, AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+          );
+        }
+        return (
+          `${detail}\nThe AWS credentials${authentication?.method === "aws_credentials" ? ` from ${authentication.source}` : ""} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+        );
+      case "rate_limited":
+        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
+      default:
+        return detail;
+    }
+  }
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9139,28 +9186,6 @@ function scanFailureMessage(
       "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
-  }
-  const classification = classifyConnectionFailure(error);
-  if (authentication?.method === "aws_credentials") {
-    const detail = diagnosticValue(error);
-    switch (classification) {
-      case "unauthorized":
-        return (
-          `${detail}\n${authenticationFailureMessage(authentication)} ` +
-          (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
-            ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
-            : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
-        );
-      case "forbidden":
-        return (
-          `${detail}\nThe AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
-          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
-        );
-      case "rate_limited":
-        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
-      default:
-        return detail;
-    }
   }
   switch (classification) {
     case "unauthorized":

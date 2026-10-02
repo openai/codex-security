@@ -538,6 +538,82 @@ describe("CLI authentication", () => {
     expect(stderr.text()).not.toContain("codex-security login");
   });
 
+  test.each([
+    [
+      "UnrecognizedClientException: The security token included in the request is invalid.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "403 ExpiredTokenException: The security token included in the request has expired.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "401 NotAuthorized: You do not have permission to perform this action.",
+      "AWS identity and Bedrock model permissions, configured AWS region, and model ID",
+      "forbidden",
+    ],
+    [
+      "AccessDeniedException: Not authorized to invoke the selected model.",
+      "Check the configured provider auth command",
+      "forbidden",
+    ],
+    [
+      "400 ThrottlingException: Too many tokens, please wait before trying again.",
+      "Check the model quota in the configured AWS region",
+      "rate_limited",
+    ],
+  ] as const)(
+    "preserves command-authenticated Bedrock diagnostics in stderr and JSON: %s",
+    async (detail, expected, classification) => {
+      const stderr = capture(false);
+      const stdout = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.({ method: "command", verified: false });
+          throw new CodexSecurityError(detail);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+      expect(
+        await main(
+          [
+            "scan",
+            "--codex",
+            'model_provider="amazon-bedrock"',
+            "--codex",
+            'model_providers.amazon-bedrock.auth={command="synthetic-auth"}',
+            "--json",
+            "--verbose",
+            "--full-output",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+
+      const message = JSON.parse(stdout.text()).error.message;
+      for (const output of [stderr.text(), message]) {
+        expect(output).toContain(detail);
+        expect(output).toContain(expected);
+        expect(output).not.toContain("--auth chatgpt");
+        expect(output).not.toContain("codex-security login");
+        expect(output).not.toContain("stored ChatGPT credentials");
+        expect(output).not.toContain("AWS_BEARER_TOKEN_BEDROCK");
+        expect(output).not.toContain("AWS_SESSION_TOKEN");
+      }
+      expect(stderr.text()).toContain(`classification="${classification}"`);
+      expect(stderr.text()).toContain("Authentication: native Codex command");
+      expect(stderr.text()).toContain(
+        "OpenAI sign-in is not required for model access or local results",
+      );
+    },
+  );
+
   test("offers the existing interactive prompt when both sign-ins are available", async () => {
     for (const [argv, selection] of [
       [["scan"], "chatgpt"],

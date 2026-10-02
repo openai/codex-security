@@ -4493,21 +4493,34 @@ export function classifyConnectionFailure(
     return "unknown";
   }
   if (
-    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b|\bThrottlingException\b/iu.test(
-      message,
-    )
-  ) {
-    return "rate_limited";
-  }
-  if (
-    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b|\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu.test(
+    /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu.test(
       message,
     )
   ) {
     return "unauthorized";
   }
   if (
-    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b|\b(?:AccessDeniedException|NotAuthorized|OptInRequired)\b/iu.test(
+    /\b(?:AccessDeniedException|NotAuthorized|OptInRequired)\b/iu.test(message)
+  ) {
+    return "forbidden";
+  }
+  if (/\bThrottlingException\b/iu.test(message)) return "rate_limited";
+  if (
+    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
+      message,
+    )
+  ) {
+    return "rate_limited";
+  }
+  if (
+    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
+      message,
+    )
+  ) {
+    return "unauthorized";
+  }
+  if (
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
       message,
     )
   ) {

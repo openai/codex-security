@@ -756,6 +756,7 @@ describe("CodexSecurity orchestration", () => {
     ["HTTP 400 IncompleteSignature", "unauthorized"],
     ["AccessDeniedException", "forbidden"],
     ["NotAuthorized", "forbidden"],
+    ["HTTP 401 NotAuthorized", "forbidden"],
     ["OptInRequired", "forbidden"],
     ["ThrottlingException", "rate_limited"],
   ] as const)(
