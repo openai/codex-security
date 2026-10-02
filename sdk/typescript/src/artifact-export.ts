@@ -164,7 +164,7 @@ export async function writeThreatModel(
     ["--scan-dir", directory, "--write-threat-model"],
     options,
   );
-  return result.stderr.trim();
+  return result.stderr.trim().replace(/^codex-security: warning: /u, "");
 }
 
 /** Read the current document path without making an optional projection required. */

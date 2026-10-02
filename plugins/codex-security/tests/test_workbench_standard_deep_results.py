@@ -159,8 +159,9 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
 
 @pytest.mark.parametrize("head_available", [True, False], ids=["head", "fallback"])
 @pytest.mark.parametrize("legacy_retry", [False, True], ids=["new-freeze", "legacy-freeze"])
+@pytest.mark.parametrize("result_available", [False, True], ids=["unreadable", "stale-result"])
 def test_stopped_model_selection_survives_publication_retry(
-    tmp_path: Path, head_available: bool, legacy_retry: bool
+    tmp_path: Path, head_available: bool, legacy_retry: bool, result_available: bool
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
@@ -175,11 +176,17 @@ def test_stopped_model_selection_survives_publication_retry(
         checkpoint["threatModel"] = {"summary": summary}
         write_checkpoint(checkpoint_dir, checkpoint)
     selected = (max if head_available else min)(checkpoint_dir.glob("*.json"))
-    expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
     head_path = result_path.parent / "checkpoint-head.json"
     if head_available:
         head_path.write_text(json.dumps({"checkpoint": selected.name}))
-    result_path.write_text("{incomplete")
+    if result_available:
+        stale = {**checkpoint, "threatModel": {"summary": "The earlier worker model."}}
+        result_path.write_text(json.dumps(stale))
+        if not head_available:
+            selected = result_path
+    else:
+        result_path.write_text("{incomplete")
+    expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     wrapper = tmp_path / "fail_model_publication.py"
@@ -1734,9 +1741,11 @@ def test_stopped_findings_cannot_enter_remediation(
 def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path) -> None:
     state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    completed_model = json.loads(result_path.read_text())["threatModel"]
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
+        "threatModel": {"summary": "An obsolete worker model."},
         "findings": [],
         "coverage": {
             "completeness": "partial",
@@ -1753,8 +1762,8 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
         },
     }
     checkpoints = result_path.parent / "checkpoints"
-    checkpoints.mkdir()
-    (checkpoints / ("0" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    head = write_checkpoint(checkpoints, checkpoint)
+    (result_path.parent / "checkpoint-head.json").write_text(json.dumps({"checkpoint": head.name}))
 
     run_workbench(
         state_dir,
@@ -1769,6 +1778,8 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert not any(item.get("id") == "obsolete-surface" for item in coverage["surfaces"])
     assert not any(item.get("id") == "obsolete-work" for item in coverage["deferred"])
+    model = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"]
+    assert model == {**completed_model, "origin": "recovered"}
 
 
 def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(

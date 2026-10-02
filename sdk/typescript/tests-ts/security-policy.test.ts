@@ -876,7 +876,9 @@ describe("security policy generation", () => {
   test("finishes a policy when its optional model document cannot be written", async () => {
     const f = await fixture();
     policyGit(f.repository, "init", "--quiet");
+    const warnings: string[] = [];
     const draft = await f.generate({
+      onWarning: (warning) => warnings.push(warning),
       run: async (stage, prompt) => {
         if (stage === "threat_model")
           await mkdir(join(f.outputDir, "threatmodel.md"));
@@ -890,6 +892,11 @@ describe("security policy generation", () => {
       content: stageResult("threat_model").markdown,
     });
     expect(draft.content).toBe(POLICY);
+    expect(warnings.length).toBeGreaterThan(0);
+    for (const warning of warnings) {
+      expect(warning).toStartWith("Automatic threat model save failed:");
+      expect(warning).toContain("--artifact threat-model");
+    }
     const saved = JSON.parse(
       await readFile(join(f.outputDir, "policy-draft.json"), "utf8"),
     );

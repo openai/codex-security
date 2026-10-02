@@ -84,6 +84,7 @@ export async function policyFixture(): Promise<{
       prompt: string,
     ) => Promise<SecurityPolicyStageResult>;
     answerQuestions?: SecurityPolicyOptions["answerQuestions"];
+    onWarning?: (warning: string) => void;
     signal?: AbortSignal;
   }): Promise<SecurityPolicyDraft>;
   cleanup(): Promise<void>;
@@ -128,6 +129,7 @@ export async function policyFixture(): Promise<{
         signal: options.signal ?? new AbortController().signal,
         run: options.run ?? (async (stage) => stageResult(stage)),
         answerQuestions: options.answerQuestions,
+        onWarning: options.onWarning,
         cost: () => null,
       });
     },

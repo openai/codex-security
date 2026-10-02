@@ -744,7 +744,7 @@ def merge_saved_results(
         # Publication retries retain the choice made with the frozen source set.
         model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
         if not isinstance(model, dict):
-            raise ContractError("Frozen stopped-scan model checkpoint is unavailable.")
+            raise ContractError("Frozen stopped-scan model source is unavailable.")
         manifest["scan"]["threatModel"] = copy.deepcopy(model)
         if paths[frozen_model_source] is not None:
             manifest["scan"]["threatModel"]["origin"] = "recovered"
@@ -906,7 +906,12 @@ def merge_saved_results(
             model = draft["threatModel"]
             model_path = relative
             checkpoint_dir = Path(relative).parent
-            if worker_id is not None and checkpoint_dir.name == "checkpoints":
+            prefer_worker_head = worker_id is not None and (
+                checkpoint_dir.name == "checkpoints" or draft.get("complete") is False
+            )
+            if prefer_worker_head:
+                if checkpoint_dir.name != "checkpoints":
+                    checkpoint_dir /= "checkpoints"
                 try:
                     head = _read_scan_local_json(
                         scan_dir,
@@ -925,11 +930,7 @@ def merge_saved_results(
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
-            if (
-                selected_model_source is not None
-                and worker_id is not None
-                and checkpoint_dir.name == "checkpoints"
-            ):
+            if selected_model_source is not None and prefer_worker_head:
                 selected_model_source[:] = [model_path]
         for value in draft["findings"]:
             if relative == "parent" and parent_manifest:
