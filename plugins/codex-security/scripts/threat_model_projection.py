@@ -36,8 +36,10 @@ def threat_model_body(model: dict[str, Any]) -> str:
         ("Security Objectives", "securityObjectives"),
         ("Assumptions", "assumptions"),
     ):
-        values = model.get(key)
-        if not isinstance(values, list) or not values:
+        values = model.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError(f"threatModel.{key}: expected an array")
+        if not values:
             continue
         for index, value in enumerate(values):
             if not isinstance(value, str):

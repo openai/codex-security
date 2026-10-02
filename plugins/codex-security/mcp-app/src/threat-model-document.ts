@@ -83,6 +83,7 @@ function renderThreatModel(
     const child = spawn(
       python,
       [
+        "-I",
         "-X",
         "utf8",
         join(pluginRoot, "scripts", "threat_model_projection.py"),

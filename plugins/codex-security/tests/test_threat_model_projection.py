@@ -292,18 +292,27 @@ class ThreatModelProjectionTest(unittest.TestCase):
         )
 
     def test_malformed_model_is_reported_without_discarding_saved_content(self) -> None:
-        self.manifest["scan"]["threatModel"] = {"summary": "Queue boundaries.", "assets": [None]}
-        self.write_scan()
-        original = (self.scan_dir / "scan-manifest.json").read_bytes()
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError, r"threatModel.assets\[0\]: expected a string"
-        ):
-            FINALIZER.build_threat_model_export(self.scan_dir)
-        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO):
-            warning = FINALIZER.write_threat_model_projection_if_possible(self.scan_dir)
-        self.assertIn("threatModel.assets[0]: expected a string", warning)
-        self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), original)
-        self.assertFalse((self.scan_dir / "threatmodel.md").exists())
+        for assets in (None, "Stored records", {}, [None]):
+            with self.subTest(assets=assets):
+                self.manifest["scan"]["threatModel"] = {
+                    "summary": "Queue boundaries.",
+                    "assets": assets,
+                }
+                self.write_scan()
+                original = (self.scan_dir / "scan-manifest.json").read_bytes()
+                expected = (
+                    "threatModel.assets[0]: expected a string"
+                    if isinstance(assets, list)
+                    else "threatModel.assets: expected an array"
+                )
+                with self.assertRaises(FINALIZER.ContractError) as failure:
+                    FINALIZER.build_threat_model_export(self.scan_dir)
+                self.assertIn(expected, str(failure.exception))
+                with unittest.mock.patch("sys.stderr", new_callable=io.StringIO):
+                    warning = FINALIZER.write_threat_model_projection_if_possible(self.scan_dir)
+                self.assertIn(expected, warning)
+                self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), original)
+                self.assertFalse((self.scan_dir / "threatmodel.md").exists())
 
     def test_exports_legacy_documents_without_reformatting_or_mutating_them(self) -> None:
         body = "# Existing Model\n\n    Preserve indentation.\n"

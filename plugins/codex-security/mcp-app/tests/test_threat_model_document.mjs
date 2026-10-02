@@ -162,7 +162,15 @@ test("overlapping draft projections retain the latest committed model", async (t
   let activeRenderers = 0;
   let maximumRenderers = 0;
   let renderCount = 0;
-  t.mock.method(childProcess, "spawn", () => {
+  t.mock.method(childProcess, "spawn", (command, args) => {
+    assert.equal(command, "fixture-python");
+    assert.deepEqual(args, [
+      "-I",
+      "-X",
+      "utf8",
+      join(pluginRoot, "scripts", "threat_model_projection.py"),
+      "--input-json-stdin",
+    ]);
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
