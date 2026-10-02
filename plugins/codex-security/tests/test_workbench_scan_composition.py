@@ -15,6 +15,7 @@ import pytest
 from workbench_test_support import (
     SCRIPT,
     checkpoint,
+    composition_payload,
     recipe,
     register,
     run_workbench,
@@ -30,44 +31,6 @@ def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple
     target.mkdir()
     (target / "app.py").write_text(source)
     return tmp_path / "state", target
-
-
-@pytest.mark.parametrize("name", ["current", "legacy"])
-def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
-    state, target = _scan_workspace(tmp_path)
-    scan = register(state, target, tmp_path / "scan", mode="deep")
-    fixture = Path(__file__).parent / "fixtures/composition-checkpoints" / f"{name}.json"
-    original = json.loads(fixture.read_text())
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=fixture.read_text(),
-    )
-    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
-    stored = {"id": scan["scanId"], "scan_dir": scan["scanDir"]}
-    loaded = workbench_api["load_composition"].__globals__["read_composition_checkpoint"](stored)
-    assert loaded == original
-    encoded = json.dumps(
-        loaded, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-    assert json.loads(encoded) == original
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=encoded.decode(),
-    )
-    assert (
-        workbench_api["load_composition"].__globals__["read_composition_checkpoint"](stored)
-        == original
-    )
 
 
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
@@ -142,7 +105,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             assert executor.submit(writer.stdout.readline).result(timeout=5).strip() == "waiting"
             with pytest.raises(subprocess.TimeoutExpired):
                 writer.wait(timeout=0.1)
-            assert json.loads((Path(scan["scanDir"]) / CHECKPOINT).read_text()) == original
+            assert json.loads((Path(scan["scanDir"]) / CHECKPOINT).read_text()) == {
+                key: value for key, value in original.items() if key != "aggregate"
+            }
         finally:
             release_read.set()
             if writer is not None:
@@ -497,7 +462,7 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
         parent["scanId"],
         "--artifact-path",
         CHECKPOINT,
-        input_text=json.dumps(saved),
+        input_text=composition_payload(Path(parent["scanDir"]), saved),
     )
     run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
@@ -531,7 +496,9 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
             ]
             == "complete"
         )
-    assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
+    assert json.loads((parent_dir / CHECKPOINT).read_text()) == {
+        key: value for key, value in saved.items() if key != "aggregate"
+    }
 
 
 def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
@@ -549,7 +516,7 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
             child for child in children if child["id"] == child_id
         )
     )
-    monkeypatch.setattr(saved, "save_pending_checkpoint", lambda *_: None)
+    monkeypatch.setattr(saved, "write_scan_local_bytes", lambda *_: None)
     retained_coverage = {"surfaces": [{"id": "retained/surface", "summary": "Saved work"}]}
     with mock.patch.object(
         saved,
@@ -906,6 +873,51 @@ def test_membership_migration_backfills_stored_paths_once(
     }
 
 
+def test_scan_context_reads_metadata_without_loading_aggregate(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    assert (
+        run_workbench(state, "get-cli-scan-resume", "--scan-id", parent["scanId"])[
+            "compositionCheckpoint"
+        ]
+        is None
+    )
+    saved = checkpoint(state, parent)
+    saved.update(
+        aggregate={
+            "findings": [{"details": "full finding"}],
+            "coverage": {"surfaces": ["full surface"]},
+        },
+        mergeFailures=2,
+        terminalReason=None,
+    )
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        parent["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        input_text=composition_payload(Path(parent["scanDir"]), saved),
+    )
+    checkpoint_path = Path(parent["scanDir"]) / CHECKPOINT
+    full_checkpoint = checkpoint_path.read_bytes()
+    expected = {key: value for key, value in saved.items() if key != "aggregate"}
+    context = run_workbench(state, "get-cli-scan-resume", "--scan-id", parent["scanId"])
+    assert context["compositionCheckpoint"] == expected
+    assert checkpoint_path.read_bytes() == full_checkpoint
+    assert json.loads(full_checkpoint) == expected
+    (Path(parent["scanDir"]) / saved["aggregatePath"]).write_text("{corrupt aggregate")
+    assert (
+        run_workbench(state, "get-cli-scan-resume", "--scan-id", parent["scanId"])[
+            "compositionCheckpoint"
+        ]
+        == expected
+    )
+
+
 @pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
 def test_stopped_parent_rejects_late_pass_registration(tmp_path: Path, action: str) -> None:
     state, target = _scan_workspace(tmp_path)
@@ -996,7 +1008,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
             parent["scanId"],
             "--artifact-path",
             CHECKPOINT,
-            input_text=json.dumps(saved),
+            input_text=composition_payload(Path(parent["scanDir"]), saved),
         )
     composition_bytes = (parent_dir / CHECKPOINT).read_bytes()
     wrapper = tmp_path / "fail_first_parent_checkpoint.py"
@@ -1076,7 +1088,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     saved["aggregate"]["findings"][0]["title"] = (
         "Later composition must not replace frozen evidence"
     )
-    (parent_dir / CHECKPOINT).write_text(json.dumps(saved))
+    (parent_dir / CHECKPOINT).write_text(composition_payload(parent_dir, saved))
     for manifest_only in (False, True):
         if manifest_only:
             with sqlite3.connect(state / "workbench.sqlite3") as connection:

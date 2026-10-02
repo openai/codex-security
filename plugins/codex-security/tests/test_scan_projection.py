@@ -385,7 +385,7 @@ def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> N
         ],
         "openQuestions": [{"question": "Remaining coverage?"}],
     }
-    workbench_api["saved_results"].merge_coverage(coverage, addition)
+    workbench_api["saved_results"].union_coverage(coverage, addition)
     assert coverage == {
         "completeness": "partial",
         "surfaces": [

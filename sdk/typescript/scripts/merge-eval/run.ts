@@ -1,8 +1,17 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
-import { validateScanMerge, scanMergePrompt } from "../../src/scan-merge.js";
+import { definedEnvironment } from "../../src/execution-auth.js";
+import {
+  scanCompositionOverrides,
+  codexConfigOverrides,
+} from "../../src/config.js";
+import {
+  createScanMerger,
+  saveScanMergeSources,
+} from "../../src/scan-merge.js";
 import { mergeFixtures, parentId } from "./fixtures.js";
 import { gradeMerge } from "./grade.js";
 import { disabledMcpServers } from "../../src/scan-comparison.js";
@@ -24,46 +33,32 @@ if (
   );
 const output = resolve(destination);
 await mkdir(output, { recursive: true });
-const environment = Object.fromEntries(
-  Object.entries(process.env).filter(
-    (entry): entry is [string, string] => entry[1] !== undefined,
-  ),
+const pluginRoot = fileURLToPath(
+  new URL("../../../../plugins/codex-security/", import.meta.url),
 );
+const merge = await createScanMerger(pluginRoot);
+const environment = definedEnvironment(process.env);
 const command = resolveCodexCommand(environment);
+const config = scanCompositionOverrides(
+  {
+    project_doc_max_bytes: 0,
+    features: { apps: false, multi_agent: false },
+    mcp_servers: await disabledMcpServers(command, undefined, environment, {
+      workingDirectory: tmpdir(),
+    }),
+  },
+  0,
+);
 const codex = new Codex({
   codexPathOverride: executablePathForSpawn(command.command),
   env: environment,
-  config: {
-    project_doc_max_bytes: 0,
-    features: {
-      plugins: false,
-      apps: false,
-      multi_agent: false,
-      multi_agent_v2: { enabled: false },
-    },
-    mcp_servers: (await disabledMcpServers(command, undefined, environment, {
-      workingDirectory: tmpdir(),
-    })) as Record<string, { enabled: boolean }>,
-  },
+  configOverrides: [...codexConfigOverrides(config), "features.plugins=false"],
 });
 const results = [];
 for (let iteration = 0; iteration < Number(repetitions); iteration++) {
   for (const fixture of mergeFixtures()) {
     // The oracle and other repository files are never put in the model's working directory.
     const scanDir = await mkdtemp(join(tmpdir(), "completed-merge-eval-"));
-    const writer = {
-      async restore(path: string, bytes: Uint8Array) {
-        await mkdir(dirname(join(scanDir, path)), { recursive: true });
-        await writeFile(join(scanDir, path), bytes);
-      },
-    };
-    const prompt = await scanMergePrompt(
-      parentId,
-      fixture.inputs,
-      fixture.previous,
-      scanDir,
-      writer,
-    );
     const started = performance.now();
     const thread = codex.startThread({
       model,
@@ -81,12 +76,46 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
       scanDir,
     };
     try {
-      const turn = await thread.run(prompt);
-      record["usage"] = turn.usage;
-      record["output"] = turn.finalResponse;
-      const raw: unknown = JSON.parse(turn.finalResponse);
-      record["qualityErrors"] = gradeMerge(raw, fixture.expected);
-      validateScanMerge(raw, fixture.inputs, fixture.previous);
+      const turns: unknown[] = [];
+      record["turns"] = turns;
+      const restore = async (path: string, contents: string | Uint8Array) => {
+        await mkdir(dirname(join(scanDir, path)), { recursive: true });
+        await writeFile(join(scanDir, path), contents);
+      };
+      const contextPath = await saveScanMergeSources(
+        fixture.inputs,
+        {
+          restore,
+          async restoreMany(artifacts) {
+            for (const artifact of artifacts)
+              await restore(artifact.path, artifact.contents);
+          },
+        },
+        fixture.previous,
+      );
+      const result = await merge(
+        parentId,
+        fixture.inputs,
+        fixture.previous,
+        new AbortController().signal,
+        async (prompt, signal, outputSchema) => {
+          const turn = await thread.run(prompt, { signal, outputSchema });
+          turns.push({ usage: turn.usage, output: turn.finalResponse });
+          return JSON.parse(turn.finalResponse);
+        },
+        { contextPath: join(scanDir, contextPath) },
+      );
+      const accepted = result.aggregate;
+      record["output"] = {
+        scanId: accepted.scanId,
+        groups: accepted.findings.map(({ provenance }) => ({
+          sourceFindingIds: provenance.sourceFindingIds!,
+          representativeId: provenance.sourceFindingIds![0]!,
+        })),
+        scope: accepted.scope,
+        threatModel: accepted.threatModel,
+      };
+      record["qualityErrors"] = gradeMerge(accepted, fixture.expected);
       record["hostValid"] = true;
     } catch (error) {
       record["error"] = String(error);

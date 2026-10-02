@@ -2309,16 +2309,35 @@ describe("plugin runtime preparation", () => {
       });
       await writeFile(join(scanDir, artifact), expected);
       const python = await resolvePluginPython({ environment });
+      const restorationSignal = new AbortController();
       const restorer = await prepareScanArtifactRestorer(
         {
           python,
           pluginRoot: upgraded.installedRoot,
           environment,
+          signal: restorationSignal.signal,
         },
         scanDir,
       );
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      restorationSignal.abort();
       await restorer.restore(artifact, expected);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      await restorer.restoreMany([
+        { path: artifact, contents: Buffer.from([9, 0, 8]) },
+        { path: "artifacts/second.bin", contents: expected },
+        { path: artifact, contents: expected },
+      ]);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      expect(await readFile(join(scanDir, "artifacts/second.bin"))).toEqual(
+        expected,
+      );
+      await expect(
+        restorer.restoreMany([
+          { path: "../outside.bin", contents: expected },
+          { path: artifact, contents: Buffer.from([7]) },
+        ]),
+      ).rejects.toThrow("safely restore");
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
       const rolloutPath = join(root, "cached-rollout.jsonl");
@@ -2336,6 +2355,55 @@ describe("plugin runtime preparation", () => {
       });
     },
   );
+
+  test("keeps scan artifact directories, staging and cleanup inside the checked root", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const sibling = join(root, "sibling");
+    await Promise.all([
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(sibling, { mode: 0o700 }),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const writer = await prepareScanArtifactRestorer(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment: {} },
+      scanDir,
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    await writer.restore(
+      "artifacts/deep-scan/merge/retained.json",
+      Buffer.from("{}"),
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    expect(
+      await readFile(
+        join(scanDir, "artifacts/deep-scan/merge/retained.json"),
+        "utf8",
+      ),
+    ).toBe("{}");
+    await writer.restore("drafts/staged.json", Buffer.from("{}"));
+    await writer.remove("drafts/staged.json");
+    expect(await readdir(join(scanDir, "drafts"))).toEqual([]);
+
+    await writeFile(join(sibling, "retained.json"), "preserved");
+    await symlink(
+      sibling,
+      join(scanDir, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const operation of [
+      () => writer.prepareDirectory("linked/merge"),
+      () => writer.restore("linked/staged.json", Buffer.from("{}")),
+      () => writer.remove("linked/retained.json"),
+    ]) {
+      await expect(operation()).rejects.toThrow("Could not safely");
+      expect(await readdir(sibling)).toEqual(["retained.json"]);
+      expect(await readFile(join(sibling, "retained.json"), "utf8")).toBe(
+        "preserved",
+      );
+    }
+  });
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
