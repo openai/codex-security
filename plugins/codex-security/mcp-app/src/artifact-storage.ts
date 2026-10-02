@@ -16,6 +16,11 @@ import { requireArtifactRoot, type ArtifactContext } from "./artifact-io.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import { handoffClaimTokenSchema } from "./server/handoff-tools.js";
 
+const supplementalReservations = [
+  ...reservedArtifactPaths,
+  "artifacts/deep-scan",
+];
+
 const locationShape = {
   scanId: z.string().uuid().optional(),
   targetPath: z.string().min(1).optional(),
@@ -131,6 +136,7 @@ function components(path: string): string[] {
 function supplementalPath(
   input: ArtifactLocation,
   context: ArtifactContext,
+  reservations: readonly string[] = reservedArtifactPaths,
 ): string[] {
   const parts = components(input.path!);
   if (input.storage === "temporary") return parts;
@@ -142,7 +148,7 @@ function supplementalPath(
     (!context.scanId && path === "threat_model.md");
   if (
     !allowed ||
-    reservedArtifactPaths.some(
+    reservations.some(
       (reserved) => path === reserved || path.startsWith(reserved + "/"),
     )
   ) {
@@ -170,16 +176,9 @@ export async function saveCodexSecurityArtifact(
     );
   }
   const parts =
-    input.path === undefined ? undefined : supplementalPath(input, context);
-  // Deep Scan runtime state belongs to the host.
-  if (
-    input.storage === "persistent" &&
-    parts?.slice(0, 2).join("/").toLowerCase() === "artifacts/deep-scan"
-  ) {
-    throw new Error(
-      "Use the existing scan tools for canonical artifacts, ledgers and checkpoints.",
-    );
-  }
+    input.path === undefined
+      ? undefined
+      : supplementalPath(input, context, supplementalReservations);
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

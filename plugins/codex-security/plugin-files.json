@@ -33,6 +33,8 @@
     "mcp/server.mjs.br.part-002",
     "mcp/server.mjs.br.part-003",
     "mcp/server.mjs.br.part-004",
+    "mcp/server.mjs.br.part-005",
+    "mcp/server.mjs.br.part-006",
     "preflight/capability-profiles.toml",
     "references/artifact-storage.md",
     "references/config-preflight.md",
