@@ -3163,3 +3163,14 @@ def _pending_result_paths(scan_dir: Path) -> list[str]:
         for name in _children(scan_dir, "checkpoints/pending")
         if re.fullmatch(r"[0-9a-f]{64}\.json", name) and name not in acknowledged
     ]
+
+
+def union_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        rows = target.setdefault(field, [])
+        seen = {_encoded(row) for row in rows}
+        for row in source.get(field, []):
+            key = _encoded(row)
+            if key not in seen:
+                seen.add(key)
+                rows.append(copy.deepcopy(row))
