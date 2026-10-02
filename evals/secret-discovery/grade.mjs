@@ -184,7 +184,19 @@ export function gradeResult(result, fixture, repo) {
       )
       .map((location) => location.path);
     if (unexpectedLocations.length) return [{ index, unexpectedLocations }];
-    if (!fixture.positives.some((expected) => matches(finding, expected))) {
+    const cwes = finding.taxonomy?.cwe ?? [];
+    if (
+      cwes.length === 0 ||
+      cwes.some(
+        (cwe) =>
+          !fixture.positives.some((expected) =>
+            matches(
+              { ...finding, taxonomy: { ...finding.taxonomy, cwe: [cwe] } },
+              expected,
+            ),
+          ),
+      )
+    ) {
       return [{ index, reason: "no expected secret location and taxonomy" }];
     }
     return [];

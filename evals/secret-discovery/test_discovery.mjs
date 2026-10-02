@@ -226,7 +226,7 @@ test("accepts equivalent CWE spelling without weakening generic disclosure categ
     ["CWE-0540", true],
   ]) {
     const result = retainedResult(fixture);
-    result.findings[0].taxonomy.cwe = [cwe];
+    result.findings[0].taxonomy.cwe = ["CWE-798", cwe];
     assert.equal(gradeResult(result, fixture).passed, true, cwe);
     if (generic) {
       result.findings[0].taxonomy.category = "sensitive-data-exposure";
@@ -237,12 +237,21 @@ test("accepts equivalent CWE spelling without weakening generic disclosure categ
 
 test("rejects unrelated or malformed CWE identifiers after normalization", () => {
   const fixture = createFixture();
-  for (const cwe of [" cwe-0089 ", "CWE-798-extra", "CWE-798.0", "798"]) {
-    const result = retainedResult(fixture);
-    result.findings[0].taxonomy.cwe = [cwe];
-    const report = gradeResult(result, fixture);
-    assert.equal(report.passed, false, cwe);
-    assert.equal(report.cases[0].found, false, cwe);
+  for (const cwe of [
+    " cwe-0089 ",
+    "CWE-798-extra",
+    "CWE-798.0",
+    "798",
+    "CWE-321",
+  ]) {
+    for (const withValidCwe of [false, true]) {
+      const result = retainedResult(fixture);
+      result.findings[0].taxonomy.cwe = withValidCwe ? ["CWE-798", cwe] : [cwe];
+      const report = gradeResult(result, fixture);
+      assert.equal(report.passed, false, cwe);
+      assert.equal(report.cases[0].found, withValidCwe, cwe);
+      assert.equal(report.falsePositiveCount, 1, cwe);
+    }
   }
 });
 
@@ -548,6 +557,35 @@ test("multiple expected exposures can share a finding", () => {
   ]);
   result.findings[0].codeEvidence.push(...unused.codeEvidence);
   assert.equal(gradeResult(result, fixture).passed, true);
+});
+
+test("grouped exposures retain their applicable CWE classifications", () => {
+  const fixture = createFixture();
+  const result = retainedResult(fixture);
+  const indices = ["dotenv-url", "private-key"].map((id) =>
+    fixture.positives.findIndex((expected) => expected.id === id),
+  );
+  const grouped = indices.map((index) => result.findings[index]);
+  const finding = {
+    ...grouped[0],
+    taxonomy: {
+      category: "hardcoded-credentials",
+      cwe: ["CWE-256", "CWE-321"],
+    },
+    locations: grouped.flatMap((entry) => entry.locations),
+    codeEvidence: grouped.flatMap((entry) => entry.codeEvidence),
+  };
+  result.findings = result.findings.filter(
+    (_, index) => !indices.includes(index),
+  );
+  result.findings.push(finding);
+  assert.equal(gradeResult(result, fixture).passed, true);
+
+  finding.taxonomy.cwe.push("CWE-89");
+  const report = gradeResult(result, fixture);
+  assert.equal(report.recall, 1);
+  assert.equal(report.falsePositiveCount, 1);
+  assert.equal(report.passed, false);
 });
 
 for (const role of ["supporting", "expected_control"]) {
