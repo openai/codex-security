@@ -60,6 +60,7 @@ import {
   scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
+  type ScanModelConfiguration,
   writeCodexConfig,
 } from "./config.js";
 import {
@@ -115,7 +116,6 @@ import {
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
-  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -403,7 +403,7 @@ type ScanObserverName =
   | "onStage"
   | "onWarning";
 
-export interface ScanPreflight extends DeepScanOptions {
+export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -411,9 +411,7 @@ export interface ScanPreflight extends DeepScanOptions {
   outputDir: string | null;
   archiveDir?: string;
   authentication: ScanAuthentication;
-  model: string;
   modelProvider?: string;
-  reasoningEffort: string;
   maxCostUsd?: number;
   deepScanSources?: DeepScanSources;
 }
@@ -1066,7 +1064,7 @@ export class CodexSecurity {
             if (options.maxCostUsd !== undefined) budgetController.abort(error);
             else
               warn(
-                `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+                `Could not track policy-generation cost: ${errorMessage(error)}`,
               );
           },
         });
@@ -1088,7 +1086,7 @@ export class CodexSecurity {
                 tracker.start(event["thread_id"]);
               }
             },
-            onReconnect: (message) => warn(safeErrorMessage(message)),
+            onReconnect: warn,
           });
           usage = turn.usage;
           signal.throwIfAborted();
@@ -1100,7 +1098,7 @@ export class CodexSecurity {
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             warn(
-              `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+              `Could not track policy-generation cost: ${errorMessage(error)}`,
             );
             const cost = estimateScanCost(model.model, usage);
             if (cost !== null) reportCost(cost);
@@ -1131,7 +1129,7 @@ export class CodexSecurity {
           if (!stopped)
             await tracker
               .stop(usage)
-              .catch((error: unknown) => warn(safeErrorMessage(error)));
+              .catch((error: unknown) => warn(errorMessage(error)));
         }
       };
       return await runSecurityPolicyStages({
@@ -1981,7 +1979,7 @@ export class CodexSecurity {
               "onWarning",
               options.onWarning,
               options.onObserverError,
-              `Could not save scan session: ${safeErrorMessage(error)}`,
+              `Could not save scan session: ${errorMessage(error)}`,
             );
           }
         },
@@ -2376,7 +2374,7 @@ export class CodexSecurity {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
             status: "incomplete",
-            reason: safeErrorMessage(failure),
+            reason: errorMessage(failure),
           }).catch(() => undefined);
         }
         try {
@@ -2384,9 +2382,8 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Scan history can be shared; never persist credential-bearing failures.
             "--message",
-            safeErrorMessage(failure).slice(0, 2400),
+            errorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -3299,7 +3296,7 @@ export class CodexSecurity {
           "--scan-id",
           activeScan.id,
           "--message",
-          safeErrorMessage(error).slice(0, 2400),
+          errorMessage(error).slice(0, 2400),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();

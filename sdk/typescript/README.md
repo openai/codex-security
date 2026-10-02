@@ -488,7 +488,12 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 ```
 
-Use `scan --help` for options, `--version` for the installed version, and
+Use `--help` to browse commands by task, or `<command> --help` (or `-h`) for
+options and examples. `scan --help` groups options by scope, Deep Scan, results,
+and patching; `publish scan --help` groups destination settings. `scans` and
+`findings` run `list` when no subcommand is given.
+
+Use `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`
 runs local preflight checks. `info -c FILE --json` inspects resolved configuration
 and its sources without a repository or runtime.
@@ -528,7 +533,7 @@ scan:
   scope:
     paths: [src]
 codex:
-  model: gpt-6-sol
+  model: gpt-5.6-sol
   model_reasoning_effort: xhigh
 policy:
   fail_on_severity: high
@@ -838,7 +843,7 @@ configuration:
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
-model = "gpt-6-sol"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed" # "none" for amazon-bedrock
 show_raw_agent_reasoning = true
@@ -856,13 +861,28 @@ sandbox = "unelevated"
 ```
 
 Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
-for reasoning effort. Repeat `--codex KEY=VALUE` for other TOML settings:
+for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
+`policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
+`scans match`, and `scans compare`.
+
+Model IDs are passed through to Codex, including `gpt-6-astra`, `gpt-6.1-sol`,
+and `gpt-6-luna`; availability depends on your credentials and inference provider.
+For Astra and GPT-6.1 Sol, use `low`, `medium`, `high`, `xhigh`, or `max`, as
+documented in the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
+Omitting these flags preserves each command's defaults: scans, policy generation,
+validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
+matching and severity classification use Codex's configured model and `medium` effort.
+
+Repeat `--codex KEY=VALUE` for other TOML settings on commands that support it:
 
 ```bash
 npx @openai/codex-security scan . \
-  --model gpt-5.6-terra \
+  --model gpt-6.1-sol \
   --effort high \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
+
+npx @openai/codex-security patch issues.md --model gpt-6-astra --effort max
+npx @openai/codex-security verify-fix issues.md --model gpt-6.1-sol --effort high
 ```
 
 The thread limit of `9` includes the parent and up to eight delegated workers.
@@ -879,15 +899,15 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
-`model_reasoning_effort`, `model_provider`, `model_providers`, and
-`analytics.enabled` keys in `--codex`, but no other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--auth`, `--model`, and `--effort`.
+Their `--codex` overrides are limited to `model`, `model_reasoning_effort`,
+`model_provider`, `model_providers`, and `analytics.enabled`.
 Use the same provider settings as `scan` when routing a standalone patch
 through a custom inference gateway:
 
 ```bash
 npx @openai/codex-security patch "Security issue" \
-  --codex 'model="gateway-model"' \
+  --model gateway-model \
   --codex 'model_provider="gateway"' \
   --codex 'model_providers.gateway.name="Gateway"' \
   --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
@@ -896,8 +916,13 @@ npx @openai/codex-security patch "Security issue" \
 ```
 
 Set the selected provider's API-key environment variable before running the
-command. Provider settings also apply to `patch --assess-patch-risk`.
+command. Model, effort, and provider settings also apply to
+`patch --assess-patch-risk`.
 Sandbox, approval, and plugin settings remain controlled by the command.
+
+`scans resume` and `scans rerun` retain the saved scan's settings. `dedupe` uses
+separate screening and review models, so it does not expose a single model/effort
+override.
 
 Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
 built-in metrics for a command:
@@ -934,7 +959,7 @@ restrictions.
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                      |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
 | `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
@@ -954,6 +979,24 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
+
+### Troubleshooting
+
+By default, scans show progress, state transitions, warnings, and summaries.
+Add `--verbose` or set
+`CODEX_SECURITY_LOG_LEVEL=debug` to include lifecycle, configuration, retry,
+and worker diagnostics on stderr. `LOG_LEVEL=debug` is the fallback when
+`CODEX_SECURITY_LOG_LEVEL` is unset or blank.
+
+```bash
+npx @openai/codex-security scan . --verbose
+```
+
+Codex Security preserves diagnostic text, including credential-shaped values,
+in CLI output, stored failures, publication receipts, and patch-risk summaries.
+Verbosity controls the amount of diagnostic detail. Native Codex and upstream
+SDK output may already have been redacted before reaching Codex Security.
+Review output and artifacts for sensitive information before sharing them.
 
 ### Progress and cost
 
@@ -983,6 +1026,8 @@ means an upper estimate is unavailable, including models without verified
 long-context rates. `cost.pricing` records the price source, verification date,
 processing tier, short-context rates, and verified long-context rates when known.
 Models without known short-context prices still have no cost estimate.
+GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna have verified standard prices for cost
+estimates and `--max-cost` limits.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
@@ -1599,7 +1644,16 @@ retaining stable finding identities. Ctrl-C keeps comparisons already saved.
 Only high-confidence duplicates are grouped; uncertain and independently
 related findings stay separate. Matching preserves triage and sealed artifacts.
 
-Codex is called only when a new decision is needed, using existing authentication.
+Codex runs only for new matching decisions, using existing authentication.
+`scans match` and `scans compare` accept `--model` and `--effort`; the defaults
+are Codex's configured model and `medium` effort. Cached matches are reused
+even when these flags change. To recompute all matches:
+
+```bash
+npx @openai/codex-security scans match --all --force \
+  --model gpt-6.1-sol --effort high
+```
+
 Scans without sealed artifacts are skipped, but their confirmed links can still
 be reused. Older custom plugins save confirmed and uncertain matches; use the
 bundled plugin for related links and large comparisons.
@@ -1779,9 +1833,10 @@ npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
-`--scan latest` selects the current repository's latest scan. Patch commands
-support `--json`, including literal-text and file inputs. Change
-the model with `--codex 'model="gpt-5.6-sol"'` or effort with `--effort high`.
+`--scan latest` selects the current repository's latest completed scan. Patch
+commands support `--json`, including literal-text and file inputs. Change
+the model with `--model gpt-6.1-sol` or effort with `--effort high`.
+The existing `--codex 'model="..."'` syntax is also supported.
 Each finding gets its own saved Codex desktop task.
 
 Before patching, the CLI runs a command with the task's sandbox policy. If the

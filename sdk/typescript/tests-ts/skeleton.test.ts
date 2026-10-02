@@ -191,6 +191,7 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
+      "workflow-quality",
       "static-checks",
       "package",
       "test",
@@ -198,6 +199,7 @@ describe("TypeScript package skeleton", () => {
       "mcp",
       "plugin-host",
       "plugin-source",
+      "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
@@ -466,7 +468,7 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("keeps production dependency audits non-blocking in CI and releases", async () => {
+  test("blocks CI and releases when the production dependency audit fails", async () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
       const { jobs } = await workflow(workflowName);
       const audits = Object.values(jobs)
@@ -474,7 +476,7 @@ describe("TypeScript package skeleton", () => {
         .filter((step) => step.name === "Audit production dependencies");
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {
-        expect(audit["continue-on-error"]).toBe(true);
+        expect(audit).not.toHaveProperty("continue-on-error");
         expect(audit.run).toMatch(
           /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
         );

@@ -98,7 +98,7 @@ export function fakePreflight(
     mode: "standard",
     outputDir: null,
     authentication: { method: "stored_credentials", verified: false },
-    model: "gpt-6-sol",
+    model: "gpt-5.6-sol",
     reasoningEffort: "xhigh",
   };
 }

@@ -967,11 +967,9 @@ describe("database-backed Linear publication integration", () => {
       result.created.map(({ issueIdentifier }) => issueIdentifier),
     ).toEqual(["SEC-801", "SEC-802"]);
     expect(result.warnings).toEqual([
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+      "Could not save the publication receipt: Receipt storage unavailable: sk-proj-SYNTHETIC_RECEIPT_SECRET. Linear issues were already created; do not retry publication.",
     ]);
     expect(stderr.text()).toContain(result.warnings![0]!);
-    expect(stdout.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
     expect(publicationAttempts).toBe(1);
     expect(
       storedPublications(completed).map(({ external_id }) => external_id),

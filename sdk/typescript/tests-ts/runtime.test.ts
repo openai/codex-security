@@ -1,6 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { EventEmitter, once } from "node:events";
+import { EventEmitter } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -3430,10 +3430,8 @@ describe("runtime directories and plugin Python boundary", () => {
             );
           }),
         ]);
-        const ended = once(first.stdout, "end");
         first.stdout.end();
         first.stderr.end();
-        await ended;
         first.exitCode = 2;
         first.emit("close", 2, null);
         await nextTurn();
@@ -3602,6 +3600,86 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(count).toBe(expected);
     expect(observed).toBe(expected);
   });
+
+  test.each(["queued", "chunked"] as const)(
+    "streams %s Windows credential descriptors through EOF",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `streams ${kind} Windows credential descriptors through EOF`,
+        )
+      ) {
+        return;
+      }
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null as number | null,
+        signalCode: null,
+        kill: () => true,
+      });
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => child,
+      }));
+      const expected =
+        kind === "queued"
+          ? Array.from({ length: 4096 }, (_, i) => `descriptor-${i}`)
+          : ["first", "café", "middle", "last"];
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const observed: string[] = [];
+      const outcome = streamWindowsCredentialAclDescriptors(
+        "synthetic-credential-inspector",
+        [],
+        async (descriptor) => {
+          observed.push(descriptor);
+          if (observed.length === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      );
+      try {
+        if (kind === "queued") {
+          // End with more queued lines than readline's watermark while the
+          // first asynchronous descriptor inspection is still pending.
+          child.stdout.end(`${expected.join("\n")}\n`);
+        } else {
+          child.stdout.write(
+            Buffer.concat([Buffer.from("first\r\ncaf"), Buffer.from([0xc3])]),
+          );
+        }
+        await entered.promise;
+        if (kind === "chunked") {
+          child.stdout.end(
+            Buffer.concat([
+              Buffer.from([0xa9]),
+              Buffer.from("\r\n\r\nmiddle\rlast"),
+            ]),
+          );
+        }
+        child.stderr.end();
+        child.exitCode = 0;
+        child.emit("close", 0, null);
+        await nextTurn();
+        expect(observed).toEqual([expected[0]!]);
+        release.resolve();
+        expect(await outcome).toBe(expected.length);
+        expect(observed).toEqual(expected);
+      } finally {
+        release.resolve();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        mock.module("node:child_process", () => ({
+          ...childProcess,
+          spawn: originalSpawn,
+        }));
+      }
+    },
+  );
 
   test("preserves Windows credential ACL subprocess failures while streaming", async () => {
     await expect(
