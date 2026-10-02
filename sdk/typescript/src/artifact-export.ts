@@ -67,6 +67,7 @@ export interface ArtifactExportResult {
 
 interface HelperOptions {
   pythonPath?: string;
+  protectedRoot?: string;
   pluginRoot?: string;
   signal?: AbortSignal;
   output?: ArtifactOutput;
@@ -96,6 +97,7 @@ export async function runArtifactHelper(
   const python = await resolvePluginPython({
     configuredPath: options.pythonPath,
     environment,
+    protectedRoot: options.protectedRoot,
     signal: options.signal,
   });
   const plugin = options.pluginRoot ?? (await bundledPluginRoot());

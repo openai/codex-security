@@ -239,6 +239,7 @@ export async function runComponentScans(
             if (!options.signal?.aborted) {
               const path = await readThreatModelPath(receipt.outputDir, {
                 pythonPath: options.config?.pythonPath,
+                protectedRoot,
                 signal: options.signal,
               });
               if (path !== null) receipt.threatModelPath = path;

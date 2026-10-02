@@ -596,6 +596,7 @@ export class CodexSecurity {
           ...metadata,
           threatModelPath: await readThreatModelPath(state.scanDir, {
             pythonPath: this.config.pythonPath,
+            protectedRoot: local.protectedRoot,
             signal,
           }),
         });

@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
@@ -31,6 +31,7 @@ import {
 } from "../src/component-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
+import * as runtime from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
   matchScanFindings,
@@ -304,24 +305,36 @@ function uncertain(
 test("links independently scoped saved models including a failed component", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
-  const summary = await scan(paths, {
-    components: components.slice(0, 2),
-    createSecurity: client(async (_repository, options) => {
-      await mkdir(options.outputDir!, { recursive: true });
-      const failed = String(options.target).includes("web");
-      await writeFile(
-        join(options.outputDir!, failed ? "THREAT_MODEL.md" : "threatmodel.md"),
-        `# Model\n\nScope: ${String(options.target)}\n`,
-      );
-      if (failed) throw new Error("Synthetic component failure");
-      return completed(
-        options,
-        [],
-        "complete",
-        join(options.outputDir!, "threatmodel.md"),
-      );
-    }),
-  });
+  const python = spyOn(runtime, "resolvePluginPython");
+  let summary: Awaited<ReturnType<typeof scan>>;
+  try {
+    summary = await scan(paths, {
+      components: components.slice(0, 2),
+      createSecurity: client(async (_repository, options) => {
+        await mkdir(options.outputDir!, { recursive: true });
+        const failed = String(options.target).includes("web");
+        await writeFile(
+          join(
+            options.outputDir!,
+            failed ? "THREAT_MODEL.md" : "threatmodel.md",
+          ),
+          `# Model\n\nScope: ${String(options.target)}\n`,
+        );
+        if (failed) throw new Error("Synthetic component failure");
+        return completed(
+          options,
+          [],
+          "complete",
+          join(options.outputDir!, "threatmodel.md"),
+        );
+      }),
+    });
+    expect(python).toHaveBeenCalledWith(
+      expect.objectContaining({ protectedRoot: paths.repository }),
+    );
+  } finally {
+    python.mockRestore();
+  }
   const saved = await json(summary.summaryPath!);
   const report = await readFile(summary.reportPath!, "utf8");
   for (const [index, scope] of ["apps/api", "apps/web"].entries()) {

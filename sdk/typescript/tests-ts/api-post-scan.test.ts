@@ -13,11 +13,12 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   prepareScanArtifactRestorer,
   type ScanArtifactRestorer,
 } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
@@ -153,6 +154,7 @@ async function startPostScan(scenario: PostScanScenario) {
     scanDir,
     artifactPath,
     outside,
+    python,
     get turns() {
       return turns;
     },
@@ -300,14 +302,22 @@ describe("completed scan follow-up instructions", () => {
   test.each(ordinaryRestorationCases)(
     "restores completed scan artifacts after failed post-scan instructions: %s",
     async (_name, scenario) => {
-      const fixture = await startPostScan(scenario);
-      const result = await fixture.scan;
-      expect(result).toMatchObject({ scanDir: fixture.scanDir });
-      if (scenario.artifact === "threatmodel.md")
-        expect(result.threatModelPath).toBe(fixture.artifactPath);
-      expect(fixture.turns).toBe(2);
-      expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
-      await fixture.client.close();
+      const python = spyOn(runtime, "resolvePluginPython");
+      try {
+        const fixture = await startPostScan(scenario);
+        const result = await fixture.scan;
+        expect(result).toMatchObject({ scanDir: fixture.scanDir });
+        if (scenario.artifact === "threatmodel.md")
+          expect(result.threatModelPath).toBe(fixture.artifactPath);
+        expect(fixture.turns).toBe(2);
+        expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
+        await fixture.client.close();
+        expect(python).toHaveBeenCalled();
+        for (const [options] of python.mock.calls)
+          expect(options?.configuredPath).toBe(fixture.python);
+      } finally {
+        python.mockRestore();
+      }
     },
   );
 
