@@ -1,5 +1,21 @@
 import type { JsonObject } from "./types.js";
-import { isRecord as isObject } from "./record.js";
+import {
+  containsSavedFinding,
+  containsSavedValue,
+  exactUnion,
+  isObject,
+  prepareSemanticScanDraft,
+  preserveFindingDetails,
+  requireObject,
+  scanFindingIdentity,
+  validateCoverageSemantics,
+  validateFindingSemantics,
+  type SemanticScan,
+} from "../../../../sdk/typescript/src/scan-semantics.js";
+export {
+  preserveFindingDetails,
+  scanFindingIdentity,
+} from "../../../../sdk/typescript/src/scan-semantics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
@@ -112,45 +128,17 @@ export async function recordCodexSecurityScanDraft(
     const reconciled = preserved.input;
     if (finalDeepDraft && !publishDraft && reconciled !== parsed)
       await saveScanDraftCheckpoint(context, reconciled);
-    const contract = requireObject(
-      context.targetContract,
-      "scan draft: authoritative target contract",
-    );
-    const trustedTarget = requireObject(
-      contract.target,
-      "scan draft: authoritative target",
-    );
-    const trustedScope = requireObject(
-      contract.scope,
-      "scan draft: authoritative scope",
-    );
-    const target = buildTarget(context, contract, trustedTarget);
-    const scope = buildScope(context, trustedScope, reconciled.scope);
-    const findings = buildFindings(reconciled.findings, context.mode);
-    const coverage = buildCoverage(
-      context,
-      contract,
-      reconciled.coverage,
-      scope,
-      target,
-    );
     const hardening = await readExistingHardeningPortfolio(context);
-    const manifestScan: JsonObject = {
-      ...(reconciled.complete === false ? { complete: false } : {}),
-      target,
-      scope,
-      ...(reconciled.threatModel === undefined
-        ? {}
-        : { threatModel: reconciled.threatModel }),
-      ...(hardening === undefined ? {} : { hardening }),
-    };
+    const draft = prepareSemanticScanDraft(
+      context,
+      reconciled as SemanticScan,
+      hardening,
+    );
+    const { findings } = draft.findings;
+    const { coverage } = draft;
+    const manifestScan = draft.manifest.scan;
 
     try {
-      const draft = {
-        findings: { findings },
-        coverage,
-        manifest: { scan: manifestScan },
-      };
       let documentWarnings: string[] | void = undefined;
       if (publishDraft) {
         documentWarnings = await publishDraft(
@@ -1515,81 +1503,6 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   );
 }
 
-function withoutPreviousFindings(finding: JsonObject): JsonObject {
-  const result = structuredClone(finding);
-  if (isObject(result.provenance)) delete result.provenance.previousFindings;
-  return result;
-}
-
-/** Preserve both original sources and details synthesized after those sources. */
-export function preserveFindingDetails(
-  current: JsonObject,
-  previous: JsonObject,
-): void {
-  if (current.identity === undefined && previous.identity !== undefined) {
-    current.identity = structuredClone(previous.identity);
-  }
-  const provenance = requireObject(
-    current.provenance,
-    "saved finding provenance",
-  );
-  const oldProvenance = isObject(previous.provenance)
-    ? previous.provenance
-    : {};
-  for (const field of [
-    "sourceFindingIds",
-    "sourceFindings",
-    "previousFindings",
-    "originalCandidates",
-  ] as const) {
-    const values = exactUnion(
-      Array.isArray(provenance[field]) ? provenance[field] : [],
-      Array.isArray(oldProvenance[field]) ? oldProvenance[field] : [],
-    );
-    if (values.length) provenance[field] = values;
-  }
-  if (!containsSavedFinding(current, previous)) {
-    const original = withoutPreviousFindings(previous);
-    if (isObject(original.provenance))
-      delete original.provenance.sourceFindings;
-    provenance.previousFindings = exactUnion(
-      Array.isArray(provenance.previousFindings)
-        ? provenance.previousFindings
-        : [],
-      [original],
-    );
-  }
-}
-
-function containsSavedFinding(
-  current: JsonObject,
-  previous: JsonObject,
-): boolean {
-  const original = withoutPreviousFindings(previous);
-  if (current.identity === undefined) delete original.identity;
-  return containsSavedValue(current, original);
-}
-
-function containsSavedValue(current: unknown, previous: unknown): boolean {
-  if (Array.isArray(previous)) {
-    return (
-      Array.isArray(current) &&
-      previous.every((value) =>
-        current.some((entry) => containsSavedValue(entry, value)),
-      )
-    );
-  }
-  if (isObject(previous)) {
-    return (
-      isObject(current) &&
-      Object.entries(previous).every(([key, value]) =>
-        containsSavedValue(current[key], value),
-      )
-    );
-  }
-  return current === previous;
-}
-
 function deferredEntryPresent(
   entries: unknown[],
   previous: unknown,
@@ -1724,33 +1637,6 @@ function coverageHasOutstandingWork(coverage: JsonObject): boolean {
   );
 }
 
-function exactUnion<Value>(...groups: Value[][]): Value[] {
-  const seen = new Set<string>();
-  return groups.flat().filter((value) => {
-    const key = JSON.stringify(value);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-export function scanFindingIdentity(finding: JsonObject): string {
-  const identity = finding.identity as JsonObject | undefined;
-  if (identity)
-    return JSON.stringify([
-      finding.ruleId,
-      identity.anchor,
-      identity.instance ?? null,
-    ]);
-  const location = (finding.locations as JsonObject[])[0]!;
-  return JSON.stringify([
-    finding.ruleId,
-    location.path,
-    location.startLine,
-    location.endLine ?? null,
-  ]);
-}
-
 function findingCandidateId(finding: JsonObject): string | undefined {
   const provenance = finding.provenance;
   if (
@@ -1844,8 +1730,8 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
 
 function parseScanDraftDocument(input: unknown): ScanDraftInput {
   const parsed = scanDraftInputSchema.parse(input);
-  validateFindingSemantics(parsed.findings);
-  validateCoverageSemantics(parsed.coverage);
+  validateFindingSemantics(parsed.findings as SemanticScan["findings"]);
+  validateCoverageSemantics(parsed.coverage as SemanticScan["coverage"]);
   return parsed;
 }
 
@@ -2137,235 +2023,6 @@ function requireMatchingScan(
   }
 }
 
-function buildTarget(
-  context: ArtifactContext,
-  contract: JsonObject,
-  trustedTarget: JsonObject,
-): JsonObject {
-  const allowedKinds = trustedTarget.allowedKinds;
-  if (
-    !Array.isArray(allowedKinds) ||
-    !allowedKinds.length ||
-    !allowedKinds.every((kind) => typeof kind === "string")
-  ) {
-    throw new Error(
-      "scan draft: the authoritative target has no allowed target kind.",
-    );
-  }
-  if (
-    typeof trustedTarget.targetId !== "string" ||
-    !trustedTarget.targetId ||
-    typeof trustedTarget.displayName !== "string" ||
-    !trustedTarget.displayName
-  ) {
-    throw new Error(
-      "scan draft: the authoritative target identity is incomplete.",
-    );
-  }
-
-  const target: JsonObject = {
-    kind: allowedKinds[0],
-    targetId: trustedTarget.targetId,
-    displayName: trustedTarget.displayName,
-  };
-  if (context.mode === "diff") {
-    const diffTarget = requireObject(
-      contract.diffTarget,
-      "scan draft: authoritative diff target",
-    );
-    for (const field of ["baseRevision", "headRevision"] as const) {
-      const value = diffTarget[field];
-      if (typeof value !== "string" || !value) {
-        throw new Error(
-          `scan draft: authoritative diff target is missing ${field}.`,
-        );
-      }
-      target[field] = value;
-    }
-    if (diffTarget.kind === "working_tree") {
-      if (
-        typeof diffTarget.contentDigest !== "string" ||
-        !diffTarget.contentDigest
-      ) {
-        throw new Error(
-          "scan draft: authoritative working-tree target has no snapshot digest.",
-        );
-      }
-      target.snapshotDigest = diffTarget.contentDigest;
-    } else if (diffTarget.kind === "commit" || diffTarget.kind === "range") {
-      const digest = createHash("sha256")
-        .update("codex-security-diff/v1\0")
-        .update(diffTarget.kind)
-        .update("\0")
-        .update(target.baseRevision as string)
-        .update("\0")
-        .update(target.headRevision as string)
-        .digest("hex");
-      target.snapshotDigest = `codex-security-snapshot/v1:sha256:${digest}`;
-    } else {
-      throw new Error(
-        "scan draft: the authoritative diff target kind is invalid.",
-      );
-    }
-  } else {
-    if (context.targetRevision && context.targetRevision !== "unversioned") {
-      target.revision = context.targetRevision;
-    }
-    if (trustedTarget.requiredSnapshotDigest !== undefined) {
-      if (
-        typeof trustedTarget.requiredSnapshotDigest !== "string" ||
-        !trustedTarget.requiredSnapshotDigest
-      ) {
-        throw new Error(
-          "scan draft: the authoritative target snapshot digest is invalid.",
-        );
-      }
-      target.snapshotDigest = trustedTarget.requiredSnapshotDigest;
-    }
-  }
-  return target;
-}
-
-function buildScope(
-  context: ArtifactContext,
-  trustedScope: JsonObject,
-  semanticScope?: JsonObject,
-): JsonObject {
-  const includePaths = trustedScope.requiredIncludePaths;
-  const excludePaths = trustedScope.requiredExcludePaths;
-
-  return {
-    ...semanticScope,
-    includePaths:
-      includePaths === undefined
-        ? [
-            typeof trustedScope.requestedPath === "string"
-              ? trustedScope.requestedPath
-              : (context.scope ?? "."),
-          ]
-        : requireTextArray(
-            includePaths,
-            "scan draft: authoritative included scope",
-          ),
-    excludePaths:
-      excludePaths === undefined
-        ? []
-        : requireTextArray(
-            excludePaths,
-            "scan draft: authoritative excluded scope",
-          ),
-  };
-}
-
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
-  const anchorCounts = new Map<string, number>();
-  const anchors = findings.map((finding, index) => {
-    const candidateId = (finding.extensions as JsonObject | undefined)
-      ?.candidateId;
-    const identitySource =
-      typeof candidateId === "string" && candidateId.trim()
-        ? candidateId
-        : (finding.title as string);
-    const anchor =
-      finding.identity === undefined
-        ? semanticIdentifier(identitySource, `finding-${index + 1}`)
-        : ((finding.identity as JsonObject).anchor as string);
-    const ruleScopedAnchor = `${finding.ruleId}\0${anchor}`;
-    anchorCounts.set(
-      ruleScopedAnchor,
-      (anchorCounts.get(ruleScopedAnchor) ?? 0) + 1,
-    );
-    return anchor;
-  });
-
-  const identified: JsonObject[] = findings.map((finding, index) => {
-    if (finding.identity !== undefined) return { ...finding };
-    const identity: JsonObject = { anchor: anchors[index] };
-    const extensions = finding.extensions as JsonObject | undefined;
-    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
-    );
-    const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
-    if (
-      siblingSource !== undefined ||
-      (anchorCounts.get(ruleScopedAnchor) ?? 0) > 1
-    ) {
-      identity.instance = semanticIdentifier(
-        siblingSource ?? (finding.title as string),
-        `finding-${index + 1}`,
-      );
-    }
-    return {
-      ...finding,
-      identity,
-    };
-  });
-  if (mode !== "deep") return identified;
-
-  // Keep both findings when workers reuse an ID.
-  // Add a numeric suffix to make each ID unique.
-  const reserved = new Set(identified.map(scanFindingIdentity));
-  const used = new Set<string>();
-  return identified.map((finding) => {
-    const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
-      used.add(key);
-      return finding;
-    }
-    const identity = finding.identity as JsonObject;
-    const baseInstance = identity.instance ?? "saved";
-    let suffix = 2;
-    const distinct: JsonObject & { identity: JsonObject } = {
-      ...finding,
-      identity: { ...identity },
-    };
-    do {
-      distinct.identity.instance = `${baseInstance}-${suffix}`;
-      suffix += 1;
-    } while (
-      reserved.has(scanFindingIdentity(distinct)) ||
-      used.has(scanFindingIdentity(distinct))
-    );
-    const provenance = finding.provenance as JsonObject;
-    distinct.provenance = {
-      ...provenance,
-      preservedIdentity:
-        provenance.preservedIdentity ?? structuredClone(identity),
-    };
-    used.add(scanFindingIdentity(distinct));
-    return distinct;
-  });
-}
-
-function buildCoverage(
-  context: ArtifactContext,
-  contract: JsonObject,
-  semanticCoverage: JsonObject,
-  scope: JsonObject,
-  target: JsonObject,
-): JsonObject {
-  const openQuestions = semanticCoverage.openQuestions as
-    Array<string | JsonObject> | undefined;
-
-  return {
-    ...semanticCoverage,
-    mode: coverageMode(context, contract),
-    inventoryStrategy: inventoryStrategy(context, scope, target),
-    includePaths: scope.includePaths,
-    excludePaths: scope.excludePaths,
-    ...(openQuestions === undefined
-      ? {}
-      : {
-          openQuestions: openQuestions.map((question) =>
-            typeof question === "string"
-              ? { question: question.trim() }
-              : question,
-          ),
-        }),
-  };
-}
-
 function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
@@ -2431,164 +2088,6 @@ function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
   });
 }
 
-function coverageMode(context: ArtifactContext, contract: JsonObject): string {
-  if (context.mode === "diff") {
-    const diff = requireObject(
-      contract.diffTarget,
-      "scan draft: authoritative diff target",
-    );
-    const modes: Record<string, string> = {
-      commit: "commit",
-      range: "branch_diff",
-      working_tree: "working_tree",
-    };
-    const mode = modes[String(diff.kind)];
-    if (!mode)
-      throw new Error(
-        "scan draft: the authoritative diff coverage mode is invalid.",
-      );
-    return mode;
-  }
-
-  const trustedScope = requireObject(
-    contract.scope,
-    "scan draft: authoritative scope",
-  );
-  const includes = trustedScope.requiredIncludePaths;
-  const scoped = Array.isArray(includes)
-    ? includes.length !== 1 || includes[0] !== "."
-    : typeof trustedScope.requestedPath === "string" &&
-      trustedScope.requestedPath !== ".";
-  if (scoped) return "scoped_path";
-  return context.mode === "deep" ? "deep_repository" : "repository";
-}
-
-function inventoryStrategy(
-  context: ArtifactContext,
-  scope: JsonObject,
-  target: JsonObject,
-): string {
-  if (context.mode === "diff") return "diff";
-  const includePaths = scope.includePaths as string[];
-  if (includePaths.length !== 1 || includePaths[0] !== ".")
-    return "scoped_path";
-  if (context.mode === "deep") return "repository";
-  if (target.kind === "directory_snapshot") return "directory";
-  return "repository";
-}
-
-function validateFindingSemantics(findings: JsonObject[]): void {
-  for (const [findingIndex, finding] of findings.entries()) {
-    const severity = finding.severity as JsonObject;
-    if (
-      severity.score !== undefined &&
-      typeof severity.scoringSystem !== "string"
-    ) {
-      throw new Error(
-        `scan draft: findings[${findingIndex}].severity.scoringSystem is required with severity.score.`,
-      );
-    }
-
-    const locations = finding.locations as JsonObject[];
-    for (const [locationIndex, location] of locations.entries()) {
-      if (
-        typeof location.endLine === "number" &&
-        location.endLine < (location.startLine as number)
-      ) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].locations[${locationIndex}].endLine ` +
-            "must not precede startLine.",
-        );
-      }
-    }
-
-    const evidenceIds = new Set<string>();
-    for (const [evidenceName, evidenceCatalog] of [
-      ["codeEvidence", finding.codeEvidence],
-      ["code_evidence", finding.code_evidence],
-    ] as const) {
-      for (const [evidenceIndex, evidence] of (
-        (evidenceCatalog as JsonObject[] | undefined) ?? []
-      ).entries()) {
-        const id = evidence.id as string;
-        if (evidenceIds.has(id)) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].id ` +
-              `duplicates ${id}.`,
-          );
-        }
-        evidenceIds.add(id);
-        if (
-          typeof evidence.endLine === "number" &&
-          evidence.endLine < (evidence.startLine as number)
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].endLine ` +
-              "must not precede startLine.",
-          );
-        }
-      }
-    }
-
-    const referencedSections: Array<[string, unknown]> = [
-      ["rootCause", finding.rootCause],
-      ["root_cause", finding.root_cause],
-      ["validation", finding.validation],
-      ["attackPath", finding.attackPath],
-    ];
-    if (isObject(finding.attackPath)) {
-      for (const sectionName of [
-        "dataFlow",
-        "dataflow",
-        "data_flow",
-        "reachability",
-      ]) {
-        referencedSections.push([
-          `attackPath.${sectionName}`,
-          finding.attackPath[sectionName],
-        ]);
-      }
-    }
-    for (const [sectionName, section] of referencedSections) {
-      if (!isObject(section)) continue;
-      for (const referencesName of ["evidenceRefs", "evidence_refs"]) {
-        const references = section[referencesName];
-        if (references === undefined) continue;
-        if (
-          !Array.isArray(references) ||
-          references.some(
-            (reference) =>
-              typeof reference !== "string" || !evidenceIds.has(reference),
-          )
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${sectionName}.${referencesName} ` +
-              "must refer to that finding's existing code-evidence IDs.",
-          );
-        }
-      }
-    }
-  }
-}
-
-function validateCoverageSemantics(coverage: JsonObject): void {
-  if (coverage.completeness !== "complete") return;
-  if ((coverage.deferred as unknown[]).length > 0) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain deferred work.",
-    );
-  }
-  if (
-    (coverage.surfaces as JsonObject[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain needs_follow_up surfaces.",
-    );
-  }
-}
-
 async function readExistingHardeningPortfolio(
   context: ArtifactContext,
 ): Promise<{ portfolioPath: "hardening/hardening.md" } | undefined> {
@@ -2605,29 +2104,4 @@ async function readExistingHardeningPortfolio(
     throw error;
   }
   return { portfolioPath: "hardening/hardening.md" };
-}
-
-function requireObject(value: unknown, context: string): JsonObject {
-  if (!isObject(value)) throw new Error(`${context} must be an object.`);
-  return value;
-}
-
-function requireTextArray(value: unknown, context: string): string[] {
-  if (
-    !Array.isArray(value) ||
-    value.some((entry) => typeof entry !== "string" || !entry)
-  ) {
-    throw new Error(`${context} must contain an array of nonempty paths.`);
-  }
-  return [...value];
-}
-
-function semanticIdentifier(value: string, fallback: string): string {
-  const identifier = value
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
-  return identifier || fallback;
 }
