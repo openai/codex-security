@@ -2523,7 +2523,6 @@ export async function bootstrapPlugin(
   const stagedMatches =
     staged?.version === version &&
     (await pluginContentsMatch(root, stagedRoot, options.signal));
-
   if (!stagedMatches) {
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
@@ -2542,13 +2541,11 @@ export async function bootstrapPlugin(
   const registration = isRecord(marketplaces)
     ? marketplaces[MARKETPLACE_NAME]
     : undefined;
-
   const registered =
     isRecord(registration) &&
     registration["source_type"] === "local" &&
     typeof registration["source"] === "string" &&
     (await sameFile(registration["source"], marketplace));
-
   if (!registered) {
     await run(
       command,
@@ -2557,24 +2554,21 @@ export async function bootstrapPlugin(
       options.signal,
     );
   }
-
+  // The startup lock serializes bootstraps, but other scans can still be using
+  // the installed tree. Even a same-version `plugin add` replaces that tree
+  // and leaves their MCP coordinators with a deleted working directory.
   const installRecord = join(marketplace, "installed-plugin.json");
   const previous: unknown = await readFile(installRecord, "utf8")
     .then((value) => JSON.parse(value) as unknown)
     .catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError) {
+      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError)
         return null;
-      }
       throw error;
     });
-
   const plugins = configuration["plugins"];
   const plugin = isRecord(plugins)
     ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
     : undefined;
-
-  // Codex replaces the shared install even at the same version. Reuse it so
-  // workers from an earlier scan can keep using their plugin files.
   if (
     stagedMatches &&
     registered &&
@@ -2599,7 +2593,6 @@ export async function bootstrapPlugin(
       version,
     };
   }
-
   const output = await run(
     command,
     ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
@@ -2626,16 +2619,11 @@ export async function bootstrapPlugin(
       "Codex plugin install did not return the selected plugin path and version.",
     );
   }
-
   await writeFile(
     installRecord,
-    JSON.stringify({
-      installedPath: installed["installedPath"],
-      version,
-    }),
+    JSON.stringify({ installedPath: installed["installedPath"], version }),
     { mode: 0o600, signal: options.signal },
   );
-
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
@@ -2653,48 +2641,37 @@ async function pluginContentsMatch(
   allowExtraFiles = false,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
-
   const sourceMetadata = await lstat(source);
   const destinationMetadata = await lstat(destination).catch(
     (error: unknown) => {
-      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? "")) {
+      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? ""))
         return null;
-      }
       throw error;
     },
   );
-
   if (destinationMetadata === null) return false;
-
   if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
     if (
       sourceMetadata.size !== destinationMetadata.size ||
       (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
-    ) {
+    )
       return false;
-    }
-
     const [sourceBytes, destinationBytes] = await Promise.all([
       readFile(source, { signal }),
       readFile(destination, { signal }),
     ]);
-
     return sourceBytes.equals(destinationBytes);
   }
-
-  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
+  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory())
     return false;
-  }
-
   const entries = await readdir(source);
-
+  // An installed plugin can accumulate runtime files such as __pycache__.
+  // Only the pristine marketplace copy must have exactly the source entries.
   if (
     !allowExtraFiles &&
     entries.length !== (await readdir(destination)).length
-  ) {
+  )
     return false;
-  }
-
   for (const entry of entries) {
     if (
       !(await pluginContentsMatch(
@@ -2703,11 +2680,9 @@ async function pluginContentsMatch(
         signal,
         allowExtraFiles,
       ))
-    ) {
+    )
       return false;
-    }
   }
-
   return true;
 }
 
