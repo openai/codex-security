@@ -196,11 +196,9 @@ function selectedScanProfile(
 }
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const resolved = deepMerge(
-    cloneJson(config),
-    selectedScanProfile(config) ?? {},
-  );
-  delete resolved["profile"];
+  const selected = selectedScanProfile(config);
+  const resolved = deepMerge(cloneJson(config), selected ?? {});
+  if (selected !== undefined) delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
 }
@@ -499,4 +497,12 @@ function isObject(value: unknown): value is Record<string, JsonValue> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+/** Serialize full tables so dotted names and filesystem paths remain literal keys. */
+export function codexConfigOverrides(config: JsonObject): string[] {
+  return Object.entries(config).map(
+    ([name, value]) =>
+      `${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}=${inlineToml(value)}`,
+  );
 }
