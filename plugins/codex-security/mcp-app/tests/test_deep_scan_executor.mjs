@@ -1365,18 +1365,35 @@ async function testBedrockCredentialsReachWorker() {
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
     await writeFile(promptPath, "CAPTURE_SYNTHETIC_BEDROCK_AUTH\n");
-    const result = await new CodexSdkWorkerExecutor({
+    const executor = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
-      signal: new AbortController().signal,
     });
-    assert.equal(result.finalResponse, "fixture final response");
-    const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-    assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
+    for (const kind of ["discovery", "dedup"]) {
+      for (const resumeThreadId of [undefined, "fixture-bedrock-resume"]) {
+        const result = await executor.run({
+          kind,
+          promptPath,
+          workingDirectory,
+          subagents: 0,
+          resumeThreadId,
+          signal: new AbortController().signal,
+        });
+        assert.equal(result.finalResponse, "fixture final response");
+        const invocation = JSON.parse(
+          await readFile(fixture.markerPath, "utf8"),
+        );
+        assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
+        assert.equal(
+          invocation.argv.includes("resume"),
+          resumeThreadId !== undefined,
+        );
+        assert.ok(
+          invocation.argv.some((arg) =>
+            arg.includes("mcp_servers.codex-security.enabled=false"),
+          ),
+        );
+      }
+    }
   } finally {
     for (const [name, value] of Object.entries(previousEnvironment)) {
       restoreEnv(name, value);

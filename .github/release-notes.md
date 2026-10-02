@@ -39,6 +39,7 @@
 - update Codex for per-turn Cyber selection ([#1184](https://github.com/openai/codex-security/pull/1184))
 - add wide Windows candidate file operations ([#836](https://github.com/openai/codex-security/pull/836))
 - port candidate normalization to TypeScript ([#837](https://github.com/openai/codex-security/pull/837))
+- improve authentication and Blue/Red support ([#1188](https://github.com/openai/codex-security/pull/1188))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

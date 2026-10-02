@@ -34,6 +34,7 @@ async function interruptedScan(
     "safetyIdentifier" | "postScanPrompt" | "auth"
   > = {},
   resolvedDeep = false,
+  modelProvider?: string,
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -100,6 +101,9 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(modelProvider === "amazon-bedrock"
+      ? { AWS_PROFILE: "synthetic-bedrock" }
+      : {}),
     ...(settings.safetyIdentifier === undefined
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
@@ -110,7 +114,11 @@ async function interruptedScan(
     repository,
     target: { kind: "repository", paths: [] },
     mode,
-    config: { model: "gpt-5.6-sol", approval_policy: "never" },
+    config: {
+      model: "gpt-5.6-sol",
+      approval_policy: "never",
+      ...(modelProvider === undefined ? {} : { model_provider: modelProvider }),
+    },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
     ...settings,
@@ -395,6 +403,47 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
     (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
   ).toMatchObject({ progress: { status: "running" } });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+});
+
+test("resumed Bedrock scans retain provider context for the account advisory", async () => {
+  const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
+  const stdout = capture();
+  const stderr = capture();
+  const code = await main(
+    ["scans", "resume", f.scanId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      runWorkbench: f.command,
+      createSecurity: resumeClient(f, (options) => ({
+        startThread() {
+          throw new Error("Resume must not create a new thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          expect(options.env).toMatchObject({
+            AWS_PROFILE: "synthetic-bedrock",
+          });
+          expect(options.apiKey).toBeUndefined();
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+              throw new Error("Resumed Bedrock prompt captured");
+            },
+          };
+        },
+      })),
+    },
+  );
+  expect(code).not.toBe(0);
+  expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
 
 function resumeClient(

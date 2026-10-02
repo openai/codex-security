@@ -1206,6 +1206,11 @@ try {
   assert.equal(trustedAccessTool.annotations.readOnlyHint, true);
   assert.equal(trustedAccessTool.annotations.destructiveHint, false);
   assert.equal(trustedAccessTool.annotations.openWorldHint, false);
+  assert.match(trustedAccessTool.description, /ChatGPT account/);
+  assert.match(
+    trustedAccessTool.description,
+    /Skip it for Amazon Bedrock scans/,
+  );
 
   const unknownTrustedAccess = await requestAndWait(9601, "tools/call", {
     name: "get_codex_security_daybreak_access",
@@ -1233,7 +1238,7 @@ try {
   );
   assert.doesNotMatch(
     unknownTrustedAccess.result.content[0].text,
-    /protected results may not be displayable/,
+    /protected results associated with this account may not be displayable/,
   );
 
   const grantedTrustedAccess = {
@@ -1384,7 +1389,11 @@ try {
   );
   assert.match(
     refreshedTrustedAccess.result.content[0].text,
-    /protected results may not be displayable/,
+    /protected results associated with this account may not be displayable/,
+  );
+  assert.match(
+    refreshedTrustedAccess.result.content[0].text,
+    /does not determine Amazon Bedrock model access/,
   );
 
   const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {

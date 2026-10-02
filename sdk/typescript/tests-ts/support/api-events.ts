@@ -37,6 +37,7 @@ export type ScanObserverName = Parameters<
 type ScanEventOptions = Pick<
   Parameters<typeof runScanEvents>[0],
   | "authentication"
+  | "modelProvider"
   | "expectedFilesTotal"
   | "onActivity"
   | "onObserverError"

@@ -274,6 +274,59 @@ describe("one-shot scan events", () => {
     }
   });
 
+  test("does not apply ChatGPT account advisories to Bedrock scans", async () => {
+    for (const authentication of [
+      { method: "aws_credentials", source: "AWS_PROFILE", verified: false },
+      { method: "command", verified: false },
+    ] as const) {
+      for (const status of ["granted", "not_granted", "unknown"] as const) {
+        const scanDir = await copyCompletedScan(await temporaryDirectory());
+        const warnings: string[] = [];
+        const statuses: ScanTrustedAccessStatus[] = [];
+        const result = await runEvents(
+          scanDir,
+          tacEvents([tacToolCall(status)]),
+          {
+            authentication,
+            modelProvider: "amazon-bedrock",
+            onWarning: (warning) => warnings.push(warning),
+            onTrustedAccessStatus: (value) => statuses.push(value),
+          },
+        );
+
+        expect(result.turnResult.status).toBe("completed");
+        expect(warnings).toEqual([]);
+        expect(statuses).toEqual([]);
+      }
+    }
+  });
+
+  test("preserves Bedrock failures after an inapplicable account advisory", async () => {
+    const scanDir = join(await temporaryDirectory(), "partial-scan");
+    await mkdir(scanDir, { mode: 0o700 });
+    const message =
+      "HTTP 403 ExpiredTokenException: The security token included in the request is expired";
+    const warnings: string[] = [];
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "item.completed", item: tacToolCall("not_granted") };
+      yield { type: "turn.failed", error: { message } };
+    }
+
+    await expect(
+      runEvents(scanDir, events(), {
+        authentication: {
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        },
+        modelProvider: "amazon-bedrock",
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
+    expect(warnings).toEqual([]);
+  });
+
   test("does not mistake external-provider keys for OpenAI API organizations", async () => {
     for (const source of ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
