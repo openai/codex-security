@@ -1,3 +1,4 @@
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import {
   appendFile,
   chmod,
@@ -2469,6 +2470,55 @@ describe("CodexSecurity orchestration", () => {
         pathKind: "temporary",
       });
       expect(runtimeStarted).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env[temporaryVariable];
+      else process.env[temporaryVariable] = previous;
+      await client.close();
+    }
+  });
+
+  test("reused clients reject repository-local temporary storage for snapshot-only documents", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const temporaryRoot = join(repository, "tmp");
+    const document = join(root, "context.md");
+    await mkdir(temporaryRoot, { recursive: true });
+    await mkdir(codexHome);
+    await writeFile(document, "Synthetic document context.");
+    const snapshot = await readKnowledgeBaseSnapshot([document]);
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread() {
+            throw new Error("synthetic stop");
+          },
+        }),
+      },
+    );
+    const temporaryVariable = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    const previous = process.env[temporaryVariable];
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "first") }),
+      ).rejects.toThrow("synthetic stop");
+      process.env[temporaryVariable] = temporaryRoot;
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "second"),
+          knowledgeBaseSnapshot: snapshot,
+        }),
+      ).rejects.toMatchObject({
+        name: OutputInsideProtectedRootError.name,
+        outputDirectory: temporaryRoot,
+        protectedRoot: repository,
+        pathKind: "temporary",
+      });
     } finally {
       if (previous === undefined) delete process.env[temporaryVariable];
       else process.env[temporaryVariable] = previous;
