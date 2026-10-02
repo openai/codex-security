@@ -6,6 +6,7 @@ import {
   runtimeScanAuthentication,
   selectedScanEnvironment,
   environmentApiKey,
+  definedEnvironment,
   withoutCodexHome,
   environmentValue,
   type ScanAuthentication,
@@ -20,6 +21,7 @@ export type { ScanAuthentication } from "./execution-auth.js";
 import {
   prepareExecutionSource,
   createExecutionCodex,
+  lockExecutionConfiguration,
   SCAN_PERMISSION_PROFILE,
   type ScanPermissions,
   type PreparedRuntime,
@@ -78,6 +80,7 @@ import {
 } from "./codex-prompt.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -184,6 +187,7 @@ import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
+  disabledMcpServers,
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
 import {
@@ -2213,9 +2217,65 @@ export class CodexSecurity {
                 },
               ),
             environment,
+            config: {
+              ...this.config,
+              codexOverrides: deepMerge(
+                { ...session.runtimeConfig },
+                effectiveConfig,
+              ),
+            },
+            createCodex: async ({ config, configOverrides }) => {
+              const matcherConfig = config as JsonObject;
+              const release = await lockExecutionConfiguration(
+                session,
+                session.sessionConfig,
+                signal,
+              );
+              try {
+                matcherConfig["mcp_servers"] = await disabledMcpServers(
+                  session.source.command,
+                  matcherConfig,
+                  definedEnvironment(environment),
+                  { signal, workingDirectory: repo },
+                );
+              } finally {
+                await release?.();
+              }
+              const { codex } = this.#createSessionCodex(
+                session,
+                runtimePaths,
+                options.auth,
+                git,
+                matcherConfig,
+                configOverrides,
+              );
+              return {
+                startThread(threadOptions) {
+                  const thread = codex.startThread(threadOptions);
+                  return {
+                    async run(input, turnOptions) {
+                      const turn = await readCodexTurn({
+                        thread,
+                        events: (await thread.runStreamed(input, turnOptions))
+                          .events,
+                      });
+                      if (turn.status !== "completed") {
+                        throw new IncompleteScanError(
+                          "Codex Security comparison ended before the turn completed.",
+                        );
+                      }
+                      return { finalResponse: turn.finalResponse };
+                    },
+                  };
+                },
+              };
+            },
             model,
             cyberAccessProgram: options.cyberAccessProgram,
             signal,
+            inheritedPermissions: session.inheritedPermissions,
+            preserveProviderEnvironment:
+              session.source.preserveProviderEnvironment,
           });
           result.repositoryFindings = (await listRepositoryFindings(
             runWorkbench,
