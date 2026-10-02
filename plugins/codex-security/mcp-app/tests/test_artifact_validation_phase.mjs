@@ -11,23 +11,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
-const result = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
   candidateValidationRecordSchema,
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].contents).toString("base64")}`
+} = await loadTestModule(
+  new URL("../src/artifact-validation-phase.ts", import.meta.url),
 );
 
 const toolSchema = JSON.parse(

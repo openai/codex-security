@@ -1,18 +1,9 @@
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  loader: { ".md": "text" },
-  platform: "node",
-  write: false,
-});
-const { renderDedupPrompt, renderDiscoveryPrompt } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const { renderDedupPrompt, renderDiscoveryPrompt } = await loadTestModule(
+  new URL("../src/deep-scan/templates.ts", import.meta.url),
+  { loader: { ".md": "text" } },
 );
 
 const rendered = renderDiscoveryPrompt({

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { promises as fsPromises } from "node:fs";
 import {
@@ -15,22 +16,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
-const bundled = await build({
-  absWorkingDir: path.dirname(new URL(import.meta.url).pathname),
-  bundle: true,
-  entryPoints: ["../src/artifact-scan-draft.ts"],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-
-const module = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
+const module = await loadTestModule(
+  new URL("../src/artifact-scan-draft.ts", import.meta.url),
+  { absWorkingDir: path.dirname(fileURLToPath(import.meta.url)) },
 );
 const {
   completedScanInputSchema,

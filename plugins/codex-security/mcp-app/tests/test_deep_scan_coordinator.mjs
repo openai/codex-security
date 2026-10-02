@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
@@ -24,7 +25,7 @@ const bundle = await build({
       export * from "./registry.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
     `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+    resolveDir: fileURLToPath(new URL("../src/deep-scan/", import.meta.url)),
   },
   format: "esm",
   loader: { ".md": "text" },

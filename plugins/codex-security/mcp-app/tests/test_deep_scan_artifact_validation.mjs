@@ -10,22 +10,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-      .pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { validateDiscoveryArtifacts, validateReducerArtifacts } = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
-);
+const { validateDiscoveryArtifacts, validateReducerArtifacts } =
+  await loadTestModule(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";

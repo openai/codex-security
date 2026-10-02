@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import {
   mkdir,
   mkdtemp,
@@ -18,7 +19,7 @@ const bundle = await build({
       export * from "./artifact-deep-reducer-pages.ts";
       export * from "./artifact-deep-reducer.ts";
     `,
-    resolveDir: new URL("../src/", import.meta.url).pathname,
+    resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
   },
   format: "esm",
   platform: "node",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { execFile as nodeExecFile } from "node:child_process";
 import {
   mkdir,
@@ -13,21 +14,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
 const execFile = promisify(nodeExecFile);
 const temporaryRoots = [];
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const inventory = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const inventory = await loadTestModule(
+  new URL("../src/artifact-inventory.ts", import.meta.url),
 );
 
 try {
@@ -478,7 +470,7 @@ async function createFixture(label) {
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
   const workerRoot = path.join(fixtureRoot, "worker");
-  const pluginRoot = new URL("../../", import.meta.url).pathname;
+  const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
   await Promise.all([
     mkdir(repoRoot, { recursive: true }),
     mkdir(scanRoot, { recursive: true }),

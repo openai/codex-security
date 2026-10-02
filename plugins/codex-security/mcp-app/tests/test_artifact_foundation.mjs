@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import {
   mkdir,
   mkdtemp,
@@ -15,9 +16,9 @@ import { build } from "esbuild";
 const compiled = await build({
   bundle: true,
   entryPoints: [
-    new URL("../src/artifact-io.ts", import.meta.url).pathname,
-    new URL("../src/artifact-context.ts", import.meta.url).pathname,
-    new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
+    fileURLToPath(new URL("../src/artifact-io.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-context.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-schema-loader.ts", import.meta.url)),
   ],
   format: "esm",
   outdir: "codex-security-artifact-foundation",

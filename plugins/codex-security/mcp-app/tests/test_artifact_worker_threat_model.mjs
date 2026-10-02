@@ -11,20 +11,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { loadTestModule } from "./load_test_module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-threat-model.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const threatModel = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
+const threatModel = await loadTestModule(
+  new URL("../src/artifact-threat-model.ts", import.meta.url),
 );
 const schema = JSON.parse(
   await readFile(
