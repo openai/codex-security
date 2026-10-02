@@ -102,6 +102,7 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -1405,8 +1406,8 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const config = mergeCodexOverrides(
-        mergeCodexOverrides(ambientConfig, output.codexOverrides ?? {}),
+      const config = deepMerge(
+        deepMerge(ambientConfig, output.codexOverrides ?? {}),
         output.modelProvider !== undefined
           ? {
               model_provider: output.modelProvider,

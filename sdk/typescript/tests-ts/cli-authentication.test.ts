@@ -1340,6 +1340,32 @@ describe("skill authentication", () => {
     expect(result.launch).toBeUndefined();
   });
 
+  test.each(["patch", "verify-fix"] as const)(
+    "%s preserves valid names in unrelated ambient configuration",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: [],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "[mcp_servers.prototype]",
+          'command="synthetic-mcp"',
+          "enabled=false",
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+    },
+  );
+
   test.each([true, false])(
     "patch uses a custom provider table override with ambient selection (new key present: %p)",
     async (hasSelectedKey) => {
