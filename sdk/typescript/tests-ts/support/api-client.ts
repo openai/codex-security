@@ -69,7 +69,12 @@ export class TestClient extends CodexSecurity {
         environment: {},
         probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
+          async projectChild() {
+            throw new Error("Unexpected projection in test");
+          },
           restore: async () => {},
+          prepareDirectory: async () => {},
+          remove: async () => {},
         }),
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),

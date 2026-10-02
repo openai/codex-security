@@ -3,6 +3,8 @@ import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.mjs";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { importSource } from "./import-module.mjs";
 
@@ -451,6 +453,210 @@ try {
     /repeats assigned Standard scan worker/,
   );
 
+  const localCandidateWorkers = await Promise.all(
+    [1, 2].map(async (number) => {
+      const retained = finding(`candidate-${number}`, `src/route-${number}.ts`);
+      retained.provenance.candidateId = "candidate-1";
+      return createWorker({
+        workersRoot,
+        label: `candidate-${number}`,
+        id: `source:worker-${number}`,
+        result: workerDraft([retained]),
+        completionSequence: number,
+      });
+    }),
+  );
+  const localCandidateRoot = path.join(dedupRoot, "candidate-output");
+  await mkdir(localCandidateRoot);
+  const localCandidateContext = {
+    ...context,
+    root: localCandidateRoot,
+    deepReducer: { scanRoot, claimedWorkers: localCandidateWorkers },
+  };
+  const localInputs = await getCodexSecurityDeepReducerInputs(
+    localCandidateContext,
+  );
+  await recordCodexSecurityDeepReduction(
+    localCandidateContext,
+    reduction(
+      localInputs.discoveries.flatMap((worker) => worker.result.findings),
+    ),
+  );
+  const retained = JSON.parse(
+    await readFile(path.join(localCandidateRoot, "result.json"), "utf8"),
+  );
+  const rendered = renderFindings(retained.findings);
+  assert.match(rendered, /\| Reportable DSS findings \| 2 \|/);
+  assert.match(rendered, /\| Report instances \| 2 \|/);
+  for (const worker of localCandidateWorkers) {
+    assert.deepEqual(
+      JSON.parse(await readFile(worker.resultPath, "utf8")),
+      worker.result,
+    );
+  }
+
+  const siblingReports = [
+    finding("shared-report", "src/shared-report.ts"),
+    finding("sibling-report", "src/sibling-report.ts"),
+  ];
+  for (const report of siblingReports) {
+    report.provenance.candidateId = "candidate-1";
+    report.extensions = { candidateId: "candidate-1" };
+  }
+  const corroboratingWorkers = await Promise.all(
+    [siblingReports, [siblingReports[0]]].map((findings, index) =>
+      createWorker({
+        workersRoot,
+        label: `corroborating-${index}`,
+        id: `source:corroborating-${index}`,
+        result: workerDraft(findings),
+        completionSequence: index + 1,
+      }),
+    ),
+  );
+  const corroboratedRoot = path.join(dedupRoot, "corroborated-output");
+  await mkdir(corroboratedRoot);
+  const corroboratedContext = {
+    ...context,
+    root: corroboratedRoot,
+    deepReducer: { scanRoot, claimedWorkers: corroboratingWorkers },
+  };
+  const corroboratedInputs =
+    await getCodexSecurityDeepReducerInputs(corroboratedContext);
+  const [firstReport, siblingReport] =
+    corroboratedInputs.discoveries[0].result.findings;
+  const corroboration = corroboratedInputs.discoveries[1].result.findings[0];
+  const mergedReport = {
+    ...firstReport,
+    provenance: {
+      ...firstReport.provenance,
+      sourceFindingIds: [
+        ...firstReport.provenance.sourceFindingIds,
+        ...corroboration.provenance.sourceFindingIds,
+      ],
+    },
+  };
+  await recordCodexSecurityDeepReduction(
+    corroboratedContext,
+    reduction([mergedReport, siblingReport]),
+  );
+  const corroborated = JSON.parse(
+    await readFile(path.join(corroboratedRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(
+    corroborated.findings.map((finding) => finding.provenance.sourceFindingIds),
+    [
+      ["source:corroborating-0:0", "source:corroborating-1:0"],
+      ["source:corroborating-0:1"],
+    ],
+  );
+  const corroboratedReport = renderFindings(corroborated.findings);
+  assert.match(corroboratedReport, /\| Reportable DSS findings \| 1 \|/);
+  assert.match(corroboratedReport, /\| Report instances \| 2 \|/);
+  for (const worker of corroboratingWorkers) {
+    assert.deepEqual(
+      JSON.parse(await readFile(worker.resultPath, "utf8")),
+      worker.result,
+    );
+  }
+
+  const sourceCandidates = [
+    [finding("first-local", "src/first-local.ts")],
+    [
+      finding("first-local", "src/first-local.ts"),
+      finding("other-local", "src/other-local.ts"),
+    ],
+    [
+      finding("no-optional-id-a", "src/first.ts"),
+      finding("no-optional-id-b", "src/second.ts"),
+    ],
+    [
+      finding("shared-instance-a", "src/third.ts"),
+      finding("shared-instance-b", "src/fourth.ts"),
+    ].map((report) => ({
+      ...report,
+      identity: { ...report.identity, instance: "primary" },
+    })),
+  ];
+  for (const [workerIndex, reports] of sourceCandidates.entries()) {
+    if (workerIndex >= 2) continue;
+    for (const [reportIndex, report] of reports.entries()) {
+      const candidateId =
+        workerIndex === 1 && reportIndex === 0 ? "candidate-2" : "candidate-1";
+      report.provenance.candidateId = candidateId;
+      report.extensions = { candidateId };
+    }
+  }
+  const distinctWorkers = await Promise.all(
+    sourceCandidates.map((findings, index) =>
+      createWorker({
+        workersRoot,
+        label: `distinct-local-${index}`,
+        id: `source:distinct-local-${index}`,
+        result: workerDraft(findings),
+        completionSequence: index + 1,
+      }),
+    ),
+  );
+  const distinctRoot = path.join(dedupRoot, "distinct-local-output");
+  await mkdir(distinctRoot);
+  const distinctContext = {
+    ...context,
+    root: distinctRoot,
+    deepReducer: { scanRoot, claimedWorkers: distinctWorkers },
+  };
+  const distinctInputs =
+    await getCodexSecurityDeepReducerInputs(distinctContext);
+  const representative = distinctInputs.discoveries[0].result.findings[0];
+  const [sameIssue, otherIssue] = distinctInputs.discoveries[1].result.findings;
+  await recordCodexSecurityDeepReduction(
+    distinctContext,
+    reduction([
+      {
+        ...representative,
+        provenance: {
+          ...representative.provenance,
+          sourceFindingIds: [
+            ...representative.provenance.sourceFindingIds,
+            ...sameIssue.provenance.sourceFindingIds,
+          ],
+        },
+      },
+      otherIssue,
+      ...distinctInputs.discoveries.slice(2).flatMap((worker) =>
+        worker.result.findings.map((report, index) => ({
+          ...report,
+          extensions: {
+            candidateId: `${worker.workerId}-candidate-${index}`,
+            reportId: `${worker.workerId}-report-${index}`,
+          },
+        })),
+      ),
+    ]),
+  );
+  const distinct = JSON.parse(
+    await readFile(path.join(distinctRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(
+    distinct.findings[0].provenance.sourceFindings.map(({ id, finding }) => [
+      id,
+      finding.provenance.candidateId,
+    ]),
+    [
+      ["source:distinct-local-0:0", "candidate-1"],
+      ["source:distinct-local-1:0", "candidate-2"],
+    ],
+  );
+  const distinctReport = renderFindings(distinct.findings);
+  assert.match(distinctReport, /\| Reportable DSS findings \| 6 \|/);
+  assert.match(distinctReport, /\| Report instances \| 6 \|/);
+  for (const worker of distinctWorkers) {
+    assert.deepEqual(
+      JSON.parse(await readFile(worker.resultPath, "utf8")),
+      worker.result,
+    );
+  }
+
   await writeFile(
     first.resultPath,
     JSON.stringify({ ...first.result, complete: false }),
@@ -540,4 +746,32 @@ function retainedFinding(finding, sourceFindings) {
       sourceFindings,
     },
   };
+}
+
+function renderFindings(findings) {
+  const rendered = spawnSync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-I",
+      "-c",
+      `
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from report_projection import build_report_markdown
+findings = json.load(sys.stdin)
+print(build_report_markdown(
+    {"scan": {"target": {"displayName": "synthetic"}, "scope": {"includePaths": ["."]}}},
+    {"findings": findings},
+    {"mode": "deep_repository", "inventoryStrategy": "repository", "completeness": "complete", "surfaces": [], "deferred": []},
+))
+`,
+      fileURLToPath(new URL("../../scripts/", import.meta.url)),
+    ],
+    {
+      input: JSON.stringify(findings),
+      encoding: "utf8",
+    },
+  );
+  assert.equal(rendered.status, 0, rendered.stderr);
+  return rendered.stdout;
 }

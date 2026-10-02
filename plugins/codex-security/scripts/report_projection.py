@@ -18,7 +18,9 @@ DISPOSITION_LABELS = {
     "not_applicable": "Not applicable",
     "needs_follow_up": "Needs follow-up",
 }
-WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+WRITEUP_REPORT_PATH_RE = re.compile(
+    r"^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\.md$"
+)
 
 
 class ReportProjectionError(ValueError):
@@ -63,7 +65,7 @@ def _cell(value: Any) -> str:
     return _text(value, "none").replace("|", "\\|").replace("\n", "<br>")
 
 
-def _deep_report_id(finding: dict[str, Any]) -> str:
+def _deep_report_id(finding: dict[str, Any], fallback: str = "Unidentified report") -> str:
     extensions = finding.get("extensions")
     if isinstance(extensions, dict):
         report_id = extensions.get("reportId")
@@ -78,30 +80,47 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
         if isinstance(instance, str) and instance.strip():
             return instance
     occurrence_id = finding.get("occurrenceId")
-    return (
-        occurrence_id
-        if isinstance(occurrence_id, str) and occurrence_id.strip()
-        else "Unidentified report"
-    )
+    return occurrence_id if isinstance(occurrence_id, str) and occurrence_id.strip() else fallback
 
 
-def _deep_candidate_id(finding: dict[str, Any]) -> str:
-    extensions = finding.get("extensions")
-    if isinstance(extensions, dict):
-        candidate_id = extensions.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            return candidate_id
-    return _deep_report_id(finding)
+def _deep_candidate_key(
+    finding: dict[str, Any], fallback: str | None = None
+) -> tuple[str, tuple[str, ...]]:
+    provenance = finding.get("provenance")
+    worker_id = provenance.get("workerId") if isinstance(provenance, dict) else None
+    for field in ("provenance", "extensions"):
+        metadata = finding.get(field)
+        if isinstance(metadata, dict):
+            candidate_id = metadata.get("candidateId")
+            if isinstance(candidate_id, str) and candidate_id.strip():
+                # Standard workers choose candidate IDs locally. Their assigned
+                # source references distinguish those IDs without changing evidence.
+                sources = metadata.get("sourceFindingIds", []) if field == "provenance" else []
+                if not isinstance(sources, list):
+                    sources = []
+                namespaces = tuple(
+                    sorted(
+                        {source.rsplit(":", 1)[0] for source in sources if isinstance(source, str)}
+                    )
+                )
+                if not namespaces and isinstance(worker_id, str) and worker_id.strip():
+                    namespaces = (worker_id,)
+                return candidate_id, namespaces
+    # Instance labels and report IDs are not worker-local candidate identities.
+    return fallback if fallback is not None else _deep_report_id(finding), ()
 
 
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return False
-    return any(
-        isinstance(extensions.get(field), str) and extensions[field].strip()
-        for field in ("candidateId", "reportId")
-    )
+    for key in ("extensions", "provenance"):
+        metadata = finding.get(key)
+        if key == "provenance" and not _deep_candidate_key(finding)[1]:
+            continue
+        if isinstance(metadata, dict) and any(
+            isinstance(metadata.get(field), str) and metadata[field].strip()
+            for field in ("candidateId", "reportId")
+        ):
+            return True
+    return False
 
 
 def _uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
@@ -140,9 +159,40 @@ def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
 def _deep_finding_groups(
     findings: list[dict[str, Any]], writeup_paths: list[str | None]
 ) -> list[list[tuple[int, dict[str, Any], str | None]]]:
-    groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
-    for number, (finding, report_path) in enumerate(zip(findings, writeup_paths, strict=True), 1):
-        groups.setdefault(_deep_candidate_id(finding), []).append((number, finding, report_path))
+    parents = list(range(len(findings)))
+
+    def group_root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    source_groups: dict[tuple[str, str | None], int] = {}
+    for index, finding in enumerate(findings):
+        provenance = finding.get("provenance")
+        sources = provenance.get("sourceFindings") if isinstance(provenance, dict) else None
+        keys = []
+        if isinstance(sources, list):
+            for source in sources:
+                if (
+                    isinstance(source, dict)
+                    and isinstance(source.get("id"), str)
+                    and isinstance(source.get("finding"), dict)
+                ):
+                    candidate, _ = _deep_candidate_key(source["finding"], source["id"])
+                    keys.append((candidate, source["id"].rsplit(":", 1)[0]))
+        if not keys:
+            candidate, namespaces = _deep_candidate_key(finding)
+            keys = [(candidate, namespace) for namespace in namespaces or (None,)]
+        # A reducer may corroborate reports with different worker-local IDs.
+        # Join overlapping groups using each retained source's own candidate.
+        for key in keys:
+            previous = source_groups.setdefault(key, index)
+            parents[group_root(index)] = group_root(previous)
+
+    groups: dict[int, list[tuple[int, dict[str, Any], str | None]]] = {}
+    for index, (finding, report_path) in enumerate(zip(findings, writeup_paths, strict=True)):
+        groups.setdefault(group_root(index), []).append((index + 1, finding, report_path))
     return list(groups.values())
 
 

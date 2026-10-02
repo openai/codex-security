@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from workbench_test_support import register, run_workbench, write_completed_contract
+
+
+@pytest.fixture
+def projection_fixture(tmp_path):
+    target = tmp_path / "target"
+    for name in ("src/extract.py", "shared/control.py", "outside.py"):
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('synthetic fixture')\n" * 2)
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent"
+    parent = register(state, target, parent_dir, mode="deep")
+    raw_fixture = (
+        Path(__file__).parent / "fixtures/scan-projection/canonical-child.json"
+    ).read_text()
+    child_dir = parent_dir / json.loads(raw_fixture)["relativeDirectory"]
+    child = register(
+        state, target, child_dir, parent=parent["scanId"], role="deep_pass", paths=("src",)
+    )
+    fixture = json.loads(raw_fixture.replace("@CHILD@", child["scanId"]))
+    write_completed_contract(
+        child_dir,
+        child["scanId"],
+        target,
+        include_paths=["src"],
+        coverage_mode="scoped_path",
+        inventory_strategy="scoped_path",
+    )
+    for name, values in (
+        ("findings", {"findings": fixture["findings"]}),
+        ("coverage", fixture["coverage"]),
+    ):
+        path = child_dir / f"{name}.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
+    for name, contents in fixture["files"].items():
+        path = child_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    return state, parent_dir, parent, child_dir, child, fixture
+
+
+def completed_projection(
+    state, parent_dir, parent, child_dir, child, *, descriptor_limit=None, **overrides
+):
+    identity = parent_dir.stat()
+    request = {
+        "parentScanId": parent["scanId"],
+        "sourceScanId": child["scanId"],
+        "sourceDirectory": str(child_dir),
+        "parentDirectory": str(parent_dir),
+        "expectedParentIdentity": {"dev": str(identity.st_dev), "ino": str(identity.st_ino)},
+        **overrides,
+    }
+    command = [sys.executable, "-I", "-X", "utf8", "-B"]
+    if descriptor_limit is not None:
+        command.extend(
+            [
+                "-c",
+                (
+                    "import resource, runpy, sys; "
+                    f"resource.setrlimit(resource.RLIMIT_NOFILE, ({descriptor_limit}, "
+                    "resource.getrlimit(resource.RLIMIT_NOFILE)[1])); "
+                    "runpy.run_path(sys.argv.pop(), run_name='__main__')"
+                ),
+            ]
+        )
+    command.append(str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"))
+    return subprocess.run(
+        command,
+        input=json.dumps(request),
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("candidate_field", ["provenance", "extensions"])
+@pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
+def test_completed_projection_pairs_candidate_coverage_and_keeps_child_reports_distinct(
+    tmp_path, workbench_api, candidate_field, coverage_mode
+):
+    import report_projection
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('synthetic fixture')\n" * 50)
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent"
+    parent = register(state, target, parent_dir, mode="deep")
+    projected_findings = []
+    candidate_ids = []
+    for number in (1, 2):
+        child_dir = parent_dir / f"artifacts/deep-scan/passes/pass-{number}"
+        child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+        write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+        findings_path = child_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        findings["findings"][0].setdefault(candidate_field, {})["candidateId"] = "candidate-shared"
+        findings_path.write_text(json.dumps(findings))
+        coverage_path = child_dir / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["surfaces"][0]["candidateId"] = "candidate-shared"
+        coverage_path.write_text(json.dumps(coverage))
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+        original = findings_path.read_bytes()
+        completed = completed_projection(state, parent_dir, parent, child_dir, child)
+        assert completed.returncode == 0, completed.stderr
+        result = json.loads(completed.stdout)
+        projected = result["draft"]["findings"][0]
+        candidate_id = projected["provenance"]["candidateId"]
+        assert candidate_id == result["draft"]["coverage"]["surfaces"][0]["candidateId"]
+        assert result["sourceFindings"] == json.loads(original)["findings"]
+        assert findings_path.read_bytes() == original
+        candidate_ids.append(candidate_id)
+        projected_findings.append(projected)
+
+    assert len(set(candidate_ids)) == 2
+    manifest = json.loads((child_dir / "scan-manifest.json").read_text())
+    coverage["mode"] = coverage_mode
+    coverage["inventoryStrategy"] = (
+        "scoped_path" if coverage_mode == "scoped_path" else "repository"
+    )
+    report = report_projection.build_report_markdown(
+        manifest, {"findings": projected_findings}, coverage
+    )
+    assert "| Reportable DSS findings | 2 |" in report
+
+
+@pytest.mark.parametrize("rewrite", ["findings", "legacy-binding"])
+def test_completed_projection_rejects_rewritten_saved_scan(
+    projection_fixture, workbench_api, monkeypatch, rewrite
+):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    manifest_path = child_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if rewrite == "findings":
+        findings_path = child_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        index = fixture["expected"]["sourceFindingIndexes"][0]
+        findings["findings"][index]["summary"] = "Rewritten completed observation"
+        payload = json.dumps(findings).encode()
+        findings_path.write_bytes(payload)
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == "findings.json":
+                artifact["sha256"] = hashlib.sha256(payload).hexdigest()
+        message = "sealed scan manifest changed after completion"
+    else:
+        # Historical completed rows can lack a pinned digest; their target binding still applies.
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (child["scanId"],)
+            )
+        manifest["scan"]["target"]["displayName"] = "Different target"
+        message = "target displayName must match the workbench target"
+    manifest_path.write_text(json.dumps(manifest))
+    source_bytes = {
+        name: (child_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    listed = run_workbench(state, "list-scans", "--scan-root", str(child_dir))["scans"]
+    assert len(listed) == 1
+    assert listed[0]["scanId"] == child["scanId"]
+    assert listed[0]["progress"]["status"] == "complete"
+    projected = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert projected.returncode != 0
+    assert message in projected.stderr
+    assert not (parent_dir / "findings").exists()
+    assert {name: (child_dir / name).read_bytes() for name in source_bytes} == source_bytes
+
+
+def test_projection_preserves_long_report_references(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent"
+    parent = register(state, target, parent_dir, mode="deep")
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    slug = "a" * 250
+    report_path = f"findings/{slug}/{slug}.md"
+    source = child_dir / report_path
+    source.parent.mkdir(parents=True)
+    source.write_text("# Synthetic report\n[Evidence](poc/trace.txt)\n")
+    (source.parent / "poc").mkdir()
+    (source.parent / "poc/trace.txt").write_text("Synthetic supporting evidence\n")
+    findings_path = child_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": report_path}
+    findings_path.write_text(json.dumps(document))
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert completed.returncode == 0, completed.stderr
+    live = json.loads(completed.stdout)["draft"]["findings"][0]
+    projected = parent_dir / live["writeup"]["reportPath"]
+    assert projected.name == source.name
+    assert projected.read_bytes() == source.read_bytes()
+    assert (projected.parent / "poc/trace.txt").read_bytes() == (
+        source.parent / "poc/trace.txt"
+    ).read_bytes()
+    assert (
+        completed_projection(state, parent_dir, parent, child_dir, child).stdout == completed.stdout
+    )
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("sourceScanId", "wrong-child", "does not match"),
+        (
+            "expectedParentIdentity",
+            {"dev": "0", "ino": "0"},
+            "changed after artifact restoration setup",
+        ),
+    ],
+)
+def test_completed_projection_keeps_source_and_parent_binding(
+    projection_fixture, field, value, message
+):
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
+    completed = completed_projection(state, parent_dir, parent, child_dir, child, **{field: value})
+    assert completed.returncode != 0
+    assert message in completed.stderr
+    assert not (parent_dir / "findings").exists()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_completed_projection_does_not_follow_symlink_evidence(projection_fixture, directory):
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
+    outside = parent_dir.parent / "outside-evidence.txt"
+    if directory:
+        outside.mkdir()
+        (outside / "evidence.txt").write_text("Outside directory evidence")
+    else:
+        outside.write_text("Evidence outside the child must not be projected.")
+    (child_dir / "findings/check/unsafe.txt").symlink_to(outside, target_is_directory=directory)
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert completed.returncode == 0, completed.stderr
+    assert not (parent_dir / "findings").exists()
+    assert (child_dir / "findings/check/unsafe.txt").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "depth, descriptor_limit",
+    [
+        pytest.param(
+            260,
+            256,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptor limit"),
+        ),
+        pytest.param(
+            1050,
+            None,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="Evidence path exceeds other platforms' limits"
+            ),
+        ),
+    ],
+)
+def test_completed_projection_copies_deep_evidence(projection_fixture, depth, descriptor_limit):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    source = child_dir / "findings/check"
+    destination = child_dir / "findings/check"
+    components = ["d"] * depth
+    source_leaf = source.joinpath(*components, "evidence.bin")
+    destination_leaf = destination.joinpath(*components, "evidence.bin")
+    try:
+        directory = source
+        for component in components:
+            directory /= component
+            directory.mkdir()
+        source_leaf.write_bytes(b"\x00\xffSynthetic nested evidence")
+        completed = completed_projection(
+            state, parent_dir, parent, child_dir, child, descriptor_limit=descriptor_limit
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert destination_leaf.read_bytes() == source_leaf.read_bytes()
+        assert len(json.loads(completed.stdout)["draft"]["findings"]) == len(
+            fixture["expected"]["sourceFindingIndexes"]
+        )
+    finally:
+        # Do not make test teardown depend on a recursive directory remover either.
+        for leaf, root in ((source_leaf, source),):
+            leaf.unlink(missing_ok=True)
+            directory = leaf.parent
+            while directory != root:
+                if directory.exists():
+                    directory.rmdir()
+                directory = directory.parent
+
+
+@pytest.mark.parametrize("terminal", ["unsealed", "interrupted"])
+def test_completed_projection_requires_completed_seal(projection_fixture, terminal):
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
+    path = child_dir / "scan-manifest.json"
+    manifest = json.loads(path.read_text())
+    if terminal == "unsealed":
+        manifest["scan"].pop("sealedAt")
+        manifest["scan"].pop("artifacts")
+    else:
+        manifest["scan"]["status"] = "interrupted"
+    path.write_text(json.dumps(manifest))
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert completed.returncode != 0
+    assert "Only a sealed completed scan" in completed.stderr
+    assert not (parent_dir / "findings").exists()
+
+
+@pytest.mark.parametrize(
+    "location, scope, expected",
+    [
+        ("src/extract.py", "SRC", True),
+        ("src/extract.py", "Src/Extract.py", True),
+        ("src-other/extract.py", "SRC", False),
+        ("./SRC/extract.py", "src", True),
+    ],
+)
+def test_projection_keeps_windows_scope_case_semantics(
+    location, scope, expected, monkeypatch, tmp_path
+):
+    import ntpath
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import project_scan_artifacts as projection
+
+    monkeypatch.setattr(projection, "normcase", ntpath.normcase)
+    parent = tmp_path / "parent"
+    source = parent / "child"
+    source.mkdir(parents=True)
+    finding = {"locations": [{"path": location}], "provenance": {"source": "local_plugin"}}
+    result = projection.project_scan_artifacts(
+        "parent",
+        "child",
+        source,
+        parent,
+        {"scan": {"scope": {"includePaths": [scope], "excludePaths": []}}},
+        {"findings": [finding]},
+        {"completeness": "complete", "surfaces": [], "deferred": [], "explicitExclusions": []},
+    )
+    assert result["sourceFindings"] == ([finding] if expected else [])
+    if expected:
+        assert result["draft"]["findings"][0]["provenance"]["sourceFindingIds"] == ["child:0"]
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_projection_many_selected_paths_keeps_boundaries_and_source_order(
+    windows, monkeypatch, tmp_path
+):
+    import ntpath
+    import posixpath
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import project_scan_artifacts as projection
+
+    monkeypatch.setattr(projection, "normcase", ntpath.normcase if windows else posixpath.normcase)
+    parent = tmp_path / "parent"
+    source = parent / "child"
+    source.mkdir(parents=True)
+    findings = []
+    expected = []
+    for index in range(1000):
+        paths = {
+            0: [f"src/selected/{index}.py"],
+            1: [f"src/selected/{index}.py.extra"],
+            2: [f"src/selected-other/{index}.py"],
+            3: ["outside/file.py", f"DOCS/nested/{index}.md"],
+        }[index % 4]
+        finding = {
+            "locations": [{"path": path} for path in paths],
+            "provenance": {"source": "local_plugin"},
+        }
+        findings.append(finding)
+        if index % 4 == 0 or (windows and index % 4 == 3):
+            expected.append(finding)
+
+    def project(scopes):
+        return projection.project_scan_artifacts(
+            "parent",
+            "child",
+            source,
+            parent,
+            {"scan": {"scope": {"includePaths": scopes, "excludePaths": []}}},
+            {"findings": findings},
+            {"completeness": "complete", "surfaces": [], "deferred": [], "explicitExclusions": []},
+        )
+
+    projected = project([f"src/selected/{index}.py" for index in range(1000)] + ["./docs/"])
+    assert projected["sourceFindings"] == expected
+    for index, (draft, original) in enumerate(
+        zip(projected["draft"]["findings"], expected, strict=True)
+    ):
+        assert draft["locations"] == original["locations"]
+        assert draft["provenance"]["sourceFindingIds"] == [f"child:{index}"]
+    assert project(["."])["sourceFindings"] == findings
+
+
+def test_reprojection_does_not_retain_removed_supporting_evidence(projection_fixture):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    evidence = child_dir / "findings/check/transient.txt"
+    evidence.write_text("Synthetic supporting evidence\n")
+    first = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert first.returncode == 0, first.stderr
+    finding = json.loads(first.stdout)["draft"]["findings"][0]
+    report = parent_dir / finding["writeup"]["reportPath"]
+    assert (report.parent / evidence.name).read_bytes() == evidence.read_bytes()
+    evidence.unlink()
+    second = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert second.returncode == 0, second.stderr
+    assert not (report.parent / evidence.name).exists()
+    assert not (parent_dir / "findings" / child["scanId"]).exists()

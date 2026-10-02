@@ -4343,6 +4343,11 @@ describe("CodexSecurity orchestration", () => {
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
           prepareScanArtifactRestorer: async () => ({
+            prepareDirectory: async () => {},
+            remove: async () => {},
+            projectChild: async () => {
+              throw new Error("Unexpected child projection");
+            },
             restore: async (name, contents) => {
               if (scenario === "restore failure")
                 throw new Error("write failed");
