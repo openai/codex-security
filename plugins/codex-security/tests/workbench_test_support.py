@@ -28,9 +28,6 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
-    if checkpoint_dir.name == "checkpoints":
-        (checkpoint_dir / "pending").mkdir(exist_ok=True)
-        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     return checkpoint_path
 

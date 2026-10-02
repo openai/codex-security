@@ -1796,6 +1796,8 @@ export class CodexSecurity {
               prompt: options.validationPrompt,
               falsePositives: falsePositiveExamples,
               signal,
+              workbench: (args, input) =>
+                workbench(workbenchOptions, args, input),
               run: async (validationPrompt, outputSchema) => {
                 if (progressReporter.scopeFileCount !== null)
                   reportProgress({
@@ -1876,7 +1878,7 @@ export class CodexSecurity {
           pluginRoot: runtime.plugin.installedRoot,
           expectation,
           signal,
-          workbench: (args) => workbench(workbenchOptions, args),
+          workbench: (args, input) => workbench(workbenchOptions, args, input),
         },
         completed,
         completionCost,
