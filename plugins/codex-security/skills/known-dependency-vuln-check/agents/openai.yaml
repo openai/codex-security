@@ -1,0 +1,4 @@
+interface:
+  display_name: "Known Dependency Vulnerability Check"
+  short_description: "Find known vulnerabilities in repository dependencies"
+  default_prompt: "Use $known-dependency-vuln-check to identify known dependency advisories and analyze their actual reachability in this repository."

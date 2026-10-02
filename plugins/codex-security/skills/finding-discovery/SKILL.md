@@ -28,6 +28,8 @@ Read `../../references/security-guidance.md` and resolve the applicable policy b
 
 When a running diff scan already supplies its file inventory through `list_codex_security_review_items`, review that inventory directly and record all candidates once with `record_codex_security_discovery_candidates`. Do not generate ranked worklists, per-finding ledgers, discovery receipts, or discovery reports. Skip the legacy workflow and artifact requirements below.
 
+Check the exact requested diff for dependency-manifest and lockfile changes even when the source inventory omits them. When dependencies change or changed first-party usage makes a dependency newly relevant, invoke `$known-dependency-vuln-check` once, reusing an available `$dependency-resolution` result and preserving the caller's network restrictions. Include valid candidates in the same combined submission. Keep lookup gaps and advisory matches without an in-inventory anchor in the parent's `coverage.deferred` and mark coverage partial. Excluded manifests and lockfiles remain supporting context. Standard and Deep advisory analysis runs through `../../references/core-scan.md`.
+
 ### Code Diff Workflow
 For a targeted code diff without an existing compact inventory:
 
