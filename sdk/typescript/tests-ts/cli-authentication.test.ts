@@ -1451,6 +1451,78 @@ describe("skill authentication", () => {
     },
   );
 
+  test.each([
+    ["patch", "OPENAI_API_KEY"],
+    ["patch", "CODEX_API_KEY"],
+    ["verify-fix", "OPENAI_API_KEY"],
+    ["verify-fix", "CODEX_API_KEY"],
+  ] as const)(
+    "%s preserves provider key %s during OpenAI authentication",
+    async (command, envKey) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          `env_key=${JSON.stringify(envKey)}`,
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        result.requests
+          .filter((request) => request.method === "account/login/start")
+          .map((request) => request.params),
+      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
+      expect(result.launch.environment).toEqual(
+        envKey === "OPENAI_API_KEY"
+          ? {
+              OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+              CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+            }
+          : { CODEX_API_KEY: "SYNTHETIC_CODEX_KEY" },
+      );
+      expect(result.launch.args).toContain(
+        'cli_auth_credentials_store="ephemeral"',
+      );
+    },
+  );
+
+  test.each(["openrouter", "fireworks"] as const)(
+    "preserves OPENAI_API_KEY when configured as the %s provider key",
+    async (provider) => {
+      const result = await runProviderSkill({
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `model_providers.${provider}.name="Synthetic gateway"`,
+          `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
+          `model_providers.${provider}.wire_api="responses"`,
+          `model_providers.${provider}.env_key="OPENAI_API_KEY"`,
+          `model_providers.${provider}.requires_openai_auth=false`,
+        ],
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
   test.each(["validate", "patch", "verify-fix"])(
     "%s advertises scan auth modes",
     async (command) => {

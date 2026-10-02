@@ -1436,11 +1436,11 @@ export async function runCodexSkillCommand(
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
       const providerEnvKey =
-        !requiresOpenAiAuth &&
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
       if (
+        !requiresOpenAiAuth &&
         providerEnvKey !== undefined &&
         !hasCommandAuth(config) &&
         (output.auth !== "chatgpt" || isExternalModelProvider(provider))
@@ -1479,15 +1479,6 @@ export async function runCodexSkillCommand(
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
       );
-      if (authentication.method === "api_key" && !requiresOpenAiAuth) {
-        selected = {
-          ...selected,
-          [authentication.source]: environmentValue(
-            processEnvironment,
-            authentication.source,
-          ),
-        };
-      }
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -1571,6 +1562,15 @@ export async function runCodexSkillCommand(
             "--config",
             'cli_auth_credentials_store="ephemeral"',
           ];
+        }
+      }
+      if (authentication.method === "api_key" && providerEnvKey !== undefined) {
+        const providerKey = environmentValue(
+          processEnvironment,
+          providerEnvKey,
+        );
+        if (providerKey !== undefined) {
+          selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
       if (output.appServer === undefined) {
