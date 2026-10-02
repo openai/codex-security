@@ -58,6 +58,7 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  scanPreflightCodexConfig,
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
@@ -997,6 +998,8 @@ interface ScanArguments extends ResolvedScanSettings {
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
+  inheritedPermissions?: ScanOptions["inheritedPermissions"];
+  preserveProviderEnvironment?: boolean;
   mock?: boolean;
   workflowId?: string;
   safetyIdentifier?: string;
@@ -1882,7 +1885,26 @@ export async function main(
       value,
   ): Promise<JsonObject> => {
     try {
-      return await select(await dependencies.runWorkbench(args));
+      let result = await dependencies.runWorkbench(args);
+      const recipe = result["recipe"];
+      if (recipe !== undefined && isJsonObject(recipe)) {
+        const config = recipe["config"];
+        if (config !== undefined && isJsonObject(config)) {
+          result = {
+            ...result,
+            recipe: {
+              ...recipe,
+              config: {
+                ...scanPreflightCodexConfig(config),
+                ...(config["approval_policy"] === undefined
+                  ? {}
+                  : { approval_policy: config["approval_policy"] }),
+              },
+            },
+          };
+        }
+      }
+      return await select(result);
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
@@ -4724,6 +4746,9 @@ export async function main(
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
+                        inheritedPermissions: recipe.inheritedPermissions,
+                        preserveProviderEnvironment:
+                          recipe.preserveProviderEnvironment,
                         postScanPrompt:
                           recipe.postScanPrompt ?? prompts.postScanPrompt,
                         signal: controller.signal,
@@ -6172,6 +6197,17 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains invalid configuration.",
     );
   }
+  const inheritedPermissions = recipe["inheritedPermissions"];
+  if (
+    inheritedPermissions !== undefined &&
+    (!isJsonObject(inheritedPermissions) ||
+      !isJsonObject(inheritedPermissions["filesystem"] ?? null) ||
+      !isJsonObject(inheritedPermissions["network"] ?? null))
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid native permissions.",
+    );
+  }
   const reference = target["baseRef"] ?? target["base"];
   if (
     (reference !== undefined && typeof reference !== "string") ||
@@ -6260,6 +6296,9 @@ async function prepareScanArgumentsFromRecipe(
   }
   return {
     repository,
+    inheritedPermissions:
+      inheritedPermissions as ScanOptions["inheritedPermissions"],
+    preserveProviderEnvironment: recipe["preserveProviderEnvironment"] === true,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     target:
       paths.length > 0
@@ -8482,6 +8521,8 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      inheritedPermissions: arguments_.inheritedPermissions,
+      preserveProviderEnvironment: arguments_.preserveProviderEnvironment,
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),

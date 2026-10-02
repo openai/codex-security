@@ -124,13 +124,14 @@ export async function prepareNativeScan(
     ...(recipe.deepScan as JsonObject | undefined),
     auth: recipe.auth,
     knowledgeBasePaths:
-      recipe.knowledgeBasePaths ??
-      (inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
-        ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
-        : undefined),
-    maxCostUsd: recipe.maxCostUsd,
-    postScanPrompt: recipe.postScanPrompt,
-    failureSeverity: recipe.failOnSeverity,
+      input.recipe !== undefined
+        ? recipe.knowledgeBasePaths
+        : inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
+          ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
+          : undefined,
+    maxCostUsd: recipe?.maxCostUsd,
+    postScanPrompt: recipe?.postScanPrompt,
+    failureSeverity: recipe?.failOnSeverity,
     mode: "deep",
     scanPrompt: input.scan.userContext ?? undefined,
     outputDir: input.scan.scanDir,
@@ -156,6 +157,8 @@ export async function prepareNativeScan(
     ...codex.environment,
     CODEX_CLI_PATH: codex.executable,
   };
+  // The SDK forwards the prepared documents, including a saved empty selection.
+  delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
   const savedPermissions =

@@ -33,6 +33,7 @@ try {
   await bundleEntrypoint("main.ts", runtimeBundle);
 
   await testParentToolList(runtimeBundle);
+  await testPrivateRecipeContext(runtimeBundle, "source");
   await testClaimedParentArtifactOperations(runtimeBundle, "source");
   await testSemanticScanDraftCompletion(runtimeBundle, "source");
   await testCompactDiffScanCompletion(runtimeBundle, "source");
@@ -41,6 +42,7 @@ try {
 
   const shippedRuntime = path.join(bundledPluginRoot, "mcp", "server.mjs");
   await testParentToolList(shippedRuntime);
+  await testPrivateRecipeContext(shippedRuntime, "shipped");
   await testClaimedParentArtifactOperations(shippedRuntime, "shipped");
   await testSemanticScanDraftCompletion(shippedRuntime, "shipped");
   await testCompactDiffScanCompletion(shippedRuntime, "shipped");
@@ -1123,6 +1125,73 @@ async function testClaimedParentArtifactOperations(bundle, runtimeLabel) {
       assert.equal(await readFile(ledgerPath, "utf8"), originalLedger);
       assert.equal(await readFile(inventoryPath, "utf8"), originalInventory);
     }
+  } finally {
+    await client.close();
+  }
+}
+
+async function testPrivateRecipeContext(bundle, runtimeLabel) {
+  const fixtureRoot = await realpath(
+    await mkdtemp(path.join(temporaryRoot, `private-recipe-${runtimeLabel}-`)),
+  );
+  const repository = path.join(fixtureRoot, "repository");
+  const scanDirectory = path.join(fixtureRoot, "scan");
+  const environment = {
+    CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
+  };
+  await mkdir(repository);
+  await mkdir(scanDirectory, { mode: 0o700 });
+  await writeFile(path.join(repository, "fixture.py"), "print('fixture')\n");
+  const marker = "synthetic-private-recipe-marker";
+  const recipe = {
+    repository,
+    mode: "standard",
+    target: { kind: "repository", paths: [] },
+    config: {
+      model_providers: { fixture: { http_headers: { Authorization: marker } } },
+      mcp_servers: { fixture: { env: { SYNTHETIC_TOKEN: marker } } },
+    },
+  };
+  const workbench = (args, input) =>
+    JSON.parse(
+      execFileSync(
+        process.env.PYTHON ?? "python3",
+        [path.join(pluginRoot, "scripts", "workbench_db.py"), ...args],
+        {
+          env: { ...process.env, ...environment },
+          encoding: "utf8",
+          input: input === undefined ? undefined : JSON.stringify(input),
+        },
+      ),
+    );
+  const { scanId } = workbench(
+    [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDirectory,
+      "--registration-json-stdin",
+    ],
+    { recipe },
+  );
+  const client = await startClient(bundle, environment);
+  try {
+    const result = await client.callTool({
+      name: "get_codex_security_scan_context",
+      arguments: { scanId },
+    });
+    const context = requireSuccessfulTool(
+      result,
+      `${runtimeLabel}: private recipe context`,
+    );
+    assert.equal(context.scan.scanId, scanId);
+    assert.equal(Object.hasOwn(context, "recipe"), false);
+    assert.equal(JSON.stringify(result).includes(marker), false);
+    assert.deepEqual(
+      workbench(["get-scan-recipe", "--scan-id", scanId]).recipe,
+      recipe,
+    );
   } finally {
     await client.close();
   }

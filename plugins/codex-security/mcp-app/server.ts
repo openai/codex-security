@@ -2327,14 +2327,19 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
         text: `${disposition} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
       },
     ],
-    structuredContent: promptOnly,
+    structuredContent: scanResponseContext(promptOnly),
   };
+}
+
+function scanResponseContext(result: JsonObject) {
+  const { recipe: _recipe, ...context } = result;
+  return context;
 }
 
 function scanActionResult(result: JsonObject, summary: string) {
   return {
     content: [{ type: "text" as const, text: summary }],
-    structuredContent: result,
+    structuredContent: scanResponseContext(result),
   };
 }
 
