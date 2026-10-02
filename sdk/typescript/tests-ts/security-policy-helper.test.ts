@@ -151,6 +151,16 @@ describe("built SECURITY.md helper", () => {
       expect(run(["--repo", "~other", "--scope", "."], other).status).not.toBe(
         0,
       );
+      for (const profile of [
+        "\\\\host\\share\\",
+        "\\\\?\\UNC\\host\\share\\",
+        "\\\\?\\unc\\host\\share",
+      ]) {
+        const shareRoot = homeEnv({ USERPROFILE: profile, USERNAME: "share" });
+        const result = run(["--repo", root, "--scope", "~other"], shareRoot);
+        expect(result.status, result.stderr).not.toBe(0);
+        expect(result.stderr).toContain("Could not determine home directory.");
+      }
     },
   );
 
@@ -684,13 +694,13 @@ describe("built SECURITY.md helper", () => {
       const profiles = join(root, "profiles");
       write(profiles, "current/SECURITY.md", "current policy\n");
       write(profiles, "sibling/SECURITY.md", "sibling policy\n");
-      for (const [home, cwd] of [
-        [join(profiles, "current"), undefined],
-        [`${join(profiles, "current")}\\`, undefined],
-        [`${root.slice(0, 2)}current`, profiles],
-      ]) {
+      for (const [home, cwd, scope] of [
+        [join(profiles, "current"), undefined, "~sibling"],
+        [`${join(profiles, "current")}\\`, undefined, "~sibling"],
+        [`${root.slice(0, 2)}current`, profiles, "."],
+      ] as const) {
         const result = run(
-          ["--repo", "~sibling", "--scope", "~sibling"],
+          ["--repo", "~sibling", "--scope", scope],
           {
             ...process.env,
             USERPROFILE: home,
