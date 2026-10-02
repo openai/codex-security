@@ -41,7 +41,7 @@ function windowsJoin(left: string, right: string): string {
   const namespaced = left.startsWith("\\\\?\\");
   const base = left.startsWith("\\\\?\\UNC\\")
     ? `\\\\${left.slice(8)}`
-    : namespaced
+    : namespaced && win32.isAbsolute(left.slice(4))
       ? left.slice(4)
       : left;
   const drive = win32.parse(right).root;
