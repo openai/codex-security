@@ -6,7 +6,7 @@ import {
   saveScanDraftCheckpoint,
   scanFindingIdentity,
   type ScanDraftInput,
-} from "../artifact-scan-draft.js";
+} from "../artifact-worker-scan-draft.js";
 import {
   readJsonObject,
   requireRegularFile,

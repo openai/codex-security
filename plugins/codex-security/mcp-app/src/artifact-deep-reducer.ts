@@ -11,7 +11,7 @@ import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
   saveScanDraftCheckpoint,
-} from "./artifact-scan-draft.js";
+} from "./artifact-worker-scan-draft.js";
 import {
   loadArtifactZodSchema,
   type SchemaDocument,

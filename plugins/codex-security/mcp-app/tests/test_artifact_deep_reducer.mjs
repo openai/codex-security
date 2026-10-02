@@ -10,12 +10,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const bundled = await build({
   bundle: true,
   entryPoints: [
-    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+    fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
   ],
   format: "esm",
   platform: "node",
@@ -257,6 +258,39 @@ try {
     ),
     originalWorkerArtifacts,
     "reduction must not rewrite raw Standard worker coverage evidence",
+  );
+
+  const legacyRoot = path.join(dedupRoot, "legacy-retry", "output");
+  await mkdir(legacyRoot, { recursive: true });
+  const legacyContext = { ...context, root: legacyRoot };
+  await recordCodexSecurityDeepReduction(legacyContext, merged);
+  const legacyCheckpointRoot = path.join(legacyRoot, "checkpoints");
+  const legacyCheckpoint = (await readdir(legacyCheckpointRoot)).find((name) =>
+    name.endsWith(".json"),
+  );
+  const legacyContents = await readFile(
+    path.join(legacyCheckpointRoot, legacyCheckpoint),
+    "utf8",
+  );
+  await rm(path.join(legacyCheckpointRoot, "pending"), { recursive: true });
+  await recordCodexSecurityDeepReduction(legacyContext, {
+    ...merged,
+    scope: { summary: "Retrying the assigned source review." },
+  });
+  const retainedHistory = await readdir(legacyCheckpointRoot);
+  assert.equal(
+    retainedHistory.includes("pending"),
+    false,
+    "a reducer retry must not hide existing pre-index checkpoints",
+  );
+  assert.equal(
+    retainedHistory.filter((name) => name.endsWith(".json")).length,
+    2,
+  );
+  assert.equal(
+    await readFile(path.join(legacyCheckpointRoot, legacyCheckpoint), "utf8"),
+    legacyContents,
+    "the earlier reducer checkpoint remains byte-for-byte intact",
   );
 
   const collision = {
