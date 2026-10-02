@@ -4,9 +4,7 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
-  withoutOpenAiApiKeys,
   environmentApiKey,
-  definedEnvironment,
   withoutCodexHome,
   environmentValue,
   type ScanAuthentication,
@@ -20,8 +18,11 @@ export {
 export type { ScanAuthentication } from "./execution-auth.js";
 import {
   prepareExecutionSource,
+  createExecutionCodex,
+  SCAN_PERMISSION_PROFILE,
+  type ScanPermissions,
   type PreparedRuntime,
-  type PreparedSession,
+  type PreparedExecution,
   type ExecutionSource,
   type CodexClientLike,
   type CodexThreadLike,
@@ -50,11 +51,7 @@ import {
   resolve,
   sep,
 } from "node:path";
-import {
-  Codex,
-  type CodexOptions,
-  type ThreadOptions,
-} from "@openai/codex-sdk";
+import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
@@ -82,7 +79,6 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   resolveCodexProfile,
-  modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanApprovalPolicy,
   scanCyberAccessConfig,
@@ -193,7 +189,6 @@ import {
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
@@ -204,12 +199,10 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
-  executablePathForSpawn,
   expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
-  pluginExecutionEnvironment,
   environmentWithGit,
   pluginMetadata,
   planOutputArchive,
@@ -255,6 +248,10 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal Explicit restrictions inherited by a prepared worker. */
+  inheritedPermissions?: ScanPermissions;
+  /** @internal Retain an invoking native provider environment. */
+  preserveProviderEnvironment?: boolean;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
@@ -391,7 +388,7 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
-  createCodex(options: CodexOptions): CodexClientLike;
+  createCodex?(options: CodexOptions): CodexClientLike;
   environment: ProcessEnvironment;
   prepareRuntime?: (
     config: Readonly<CodexSecurityConfig>,
@@ -409,13 +406,10 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
   environment: process.env,
 };
 
-const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
-const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
@@ -934,7 +928,7 @@ export class CodexSecurity {
       const guidance = await resolveSecurityPolicyGuidance(
         target,
         runtime.plugin.pluginRoot,
-        session.scanEnvironment,
+        session.source.environment,
         signal,
         inputs.policyPaths,
         inputs.gitMetadataPaths,
@@ -2633,89 +2627,21 @@ export class CodexSecurity {
   }
 
   #createSessionCodex(
-    session: PreparedSession,
+    session: PreparedExecution,
     runtimePaths: Record<string, string>,
     _auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
-    const { runtime, python, externalProvider, apiKey, sessionConfig } =
-      session;
-    const commandAuth = hasCommandAuth(sessionConfig);
-    const environment: ProcessEnvironment = {
-      ...environmentWithGit(
-        pluginExecutionEnvironment(
-          python,
-          withoutCodexHome(session.source.environment),
-        ),
-        git,
-      ),
-      ...(externalProvider === null
-        ? {}
-        : { [externalProvider.env_key]: apiKey! }),
-      CODEX_HOME: runtime.codexHome,
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(
-        session.source.environment,
-      ),
-      ...runtimePaths,
-    };
-    for (const name of Object.keys(environment)) {
-      if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
-        delete environment[name];
-    }
-    if (session.safetyIdentifier !== undefined) {
-      environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
-    }
-    const sdkCodexConfig = { ...(config ?? sessionConfig) };
-    // Projects and permissions already live in generated TOML files; the SDK
-    // cannot safely encode their path and selector keys as dotted overrides.
-    delete sdkCodexConfig["projects"];
-    delete sdkCodexConfig["permissions"];
-    if (commandAuth) delete sdkCodexConfig["model_providers"];
-    const configuredResponsesMetadata = isRecord(
-      sdkCodexConfig["responses_api_metadata"],
-    )
-      ? sdkCodexConfig["responses_api_metadata"]
-      : {};
-    let codexPathOverride =
-      environmentValue(session.source.environment, "CODEX_CLI_PATH") ===
-      undefined
-        ? undefined
-        : session.source.command.command;
-    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
-    if (process.platform === "win32" && codexPathOverride === undefined) {
-      codexPathOverride = environment["CODEX_CLI_PATH"]!;
-      sdkEnvironment = bundledCodexSdkEnvironment(
-        codexPathOverride,
-        sdkEnvironment,
-      );
-    }
-    const codex = this.#dependencies.createCodex({
-      ...(codexPathOverride === undefined
-        ? {}
-        : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
-      ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth || configOverrides.length > 0
-        ? {
-            configOverrides: [
-              ...(commandAuth
-                ? modelProviderConfigOverride(sessionConfig)
-                : []),
-              ...configOverrides,
-            ],
-          }
-        : {}),
-      env: sdkEnvironment,
-      config: {
-        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-        responses_api_metadata: {
-          ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
-        },
-      },
-    });
-    return { codex, environment };
+    return createExecutionCodex(
+      { surface: this.#surface, createCodex: this.#dependencies.createCodex },
+      session,
+      runtimePaths,
+      config,
+      configOverrides,
+      git,
+    );
   }
 
   async #prepareSession(
@@ -2731,6 +2657,8 @@ export class CodexSecurity {
       | "auth"
       | "cyberAccessProgram"
       | "safetyIdentifier"
+      | "inheritedPermissions"
+      | "preserveProviderEnvironment"
       | "expectedPluginVersion"
       | "onAuthentication"
       | "onWarning"
@@ -2739,7 +2667,7 @@ export class CodexSecurity {
     signal: AbortSignal,
     temporaryRoot?: string,
     keepCredentialLock = false,
-  ): Promise<PreparedSession> {
+  ): Promise<PreparedExecution> {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
       this.#requireOpen();
@@ -2755,6 +2683,7 @@ export class CodexSecurity {
         configuration: requestedConfig,
         environment: this.#dependencies.environment,
         auth: options.auth,
+        preserveProviderEnvironment: options.preserveProviderEnvironment,
       });
       const {
         modelProvider,
@@ -2809,9 +2738,13 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
+      const inheritedPermissions = structuredClone(
+        options.inheritedPermissions,
+      );
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
         runtimeHome,
+        inheritedPermissions,
       );
       if (
         options.expectedPluginVersion !== undefined &&
@@ -2823,6 +2756,7 @@ export class CodexSecurity {
       }
       checkOpen();
       if (
+        !options.preserveProviderEnvironment &&
         authentication.method === "stored_credentials" &&
         this.#runtimeCredentialSource === "api_key"
       ) {
@@ -2845,6 +2779,7 @@ export class CodexSecurity {
         this.#runtimeCredentialSource = "api_key";
       }
       if (
+        !options.preserveProviderEnvironment &&
         !runtime.credentialsAvailable &&
         authentication.method === "stored_credentials"
       ) {
@@ -2862,6 +2797,7 @@ export class CodexSecurity {
           : null;
       }
       if (
+        !options.preserveProviderEnvironment &&
         !runtime.credentialsAvailable &&
         apiKey === null &&
         !commandAuth &&
@@ -2878,6 +2814,7 @@ export class CodexSecurity {
         );
       if (
         options.safetyIdentifier !== undefined &&
+        !options.preserveProviderEnvironment &&
         authentication.method !== "api_key" &&
         !(
           authentication.method === "stored_credentials" &&
@@ -2904,17 +2841,15 @@ export class CodexSecurity {
       });
       checkOpen();
       return {
+        policy: "ordinary",
         source,
+        inheritedPermissions,
         runtime,
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
         sessionConfig,
-        modelProvider,
-        externalProvider,
-        apiKey,
-        scanEnvironment,
         authentication,
         approvalPolicy,
         python,
@@ -4385,6 +4320,7 @@ export function classifyConnectionFailure(
 export function scanRuntimeCodexConfig(
   config: JsonObject,
   protectedCredentialHome?: string,
+  inheritedPermissions?: { filesystem: JsonObject; network: JsonObject },
 ): JsonObject {
   const approvalPolicy = scanApprovalPolicy(config);
   const hardened = structuredClone(config);
@@ -4415,11 +4351,19 @@ export function scanRuntimeCodexConfig(
       [SCAN_PERMISSION_PROFILE]: {
         filesystem: {
           ":root": "read",
-          ":workspace_roots": "write",
+          ...(inheritedPermissions === undefined
+            ? { ":workspace_roots": "write" }
+            : {}),
           ...(protectedCredentialHome === undefined
             ? {}
             : { [protectedCredentialHome]: "read" }),
+          ...inheritedPermissions?.filesystem,
         },
+        ...(inheritedPermissions === undefined
+          ? {}
+          : {
+              network: inheritedPermissions.network,
+            }),
       },
       [POLICY_PERMISSION_PROFILE]: {
         filesystem: policyFilesystemPermissions(),
