@@ -38,13 +38,19 @@ import {
   Progress,
   resolveCliPath,
 } from "../src/cli.js";
-import { scanPreflightCodexConfig } from "../src/api.js";
+import {
+  scanPreflightCodexConfig,
+  scanRuntimeCodexConfig,
+} from "../src/api.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
+  mergedCodexConfig,
+  writeCodexConfig,
 } from "../src/config.js";
 import {
   warningResult,
@@ -64,6 +70,8 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { fail, throwing } from "./support/errors.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -3293,6 +3301,117 @@ describe("CLI", () => {
         profiles: { selected: { model, model_provider: provider } },
         model_providers: { [provider]: providerConfig },
       });
+    },
+  );
+
+  test.each([
+    ["openrouter", "rerun", OPENROUTER_CODEX_PROVIDER, "OPENROUTER_API_KEY"],
+    ["openrouter", "resume", OPENROUTER_CODEX_PROVIDER, "OPENROUTER_API_KEY"],
+    ["fireworks", "rerun", FIREWORKS_CODEX_PROVIDER, "FIREWORKS_API_KEY"],
+    ["fireworks", "resume", FIREWORKS_CODEX_PROVIDER, "FIREWORKS_API_KEY"],
+  ] as const)(
+    "ordinary %s %s provider recipes remain executable after a display-name override",
+    async (provider, command, defaults, key) => {
+      const root = await temporaryDirectory("provider-replay-");
+      try {
+        const home = join(root, "home");
+        const repository = join(root, "repository");
+        await mkdir(home, { mode: 0o700 });
+        await mkdir(repository);
+        const originalConfig = {
+          model: "synthetic-model",
+          model_provider: provider,
+          model_providers: {
+            [provider]: {
+              ...defaults,
+              name: "Synthetic selected provider",
+              api_key: "synthetic-unsaved-key",
+            },
+          },
+        };
+        const environment = {
+          [key]: "synthetic-provider-key",
+          CODEX_HOME: home,
+        };
+        let savedRecipe: JsonObject | undefined;
+        await using initial = new TestClient(
+          { codexOverrides: originalConfig },
+          {
+            environment,
+            prepareRuntime: async () => preparedRuntime(home),
+            resolvePluginPython: async () => "python3",
+            runWorkbench: async (_options, args, input) => {
+              if (args[0] === "register-cli-scan")
+                savedRecipe = JSON.parse(input!).recipe;
+              return mockWorkbench(args, input);
+            },
+            createCodex: throwing("Synthetic recipe captured"),
+          },
+        );
+        await expect(
+          initial.run(repository, {
+            outputDir: join(root, "initial"),
+            auth: "api-key",
+          }),
+        ).rejects.toThrow("Synthetic recipe captured");
+        expect(savedRecipe).toBeDefined();
+        expect(JSON.stringify(savedRecipe)).not.toContain(
+          "synthetic-unsaved-key",
+        );
+        let replayConfig: CodexSecurityConfig | undefined;
+        let launched: ScanOptions | undefined;
+        const stderr = capture();
+        expect(
+          await main(
+            ["scans", command, "scan-original", "--json"],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment,
+              currentDirectory: repository,
+              onConfig: (config) => {
+                replayConfig = config;
+              },
+              onTurn: (_repository, options) => {
+                launched = options as ScanOptions;
+              },
+              onWorkbench: () => ({
+                scanId: "scan-original",
+                scanDir: join(root, "scan"),
+                recipe: savedRecipe!,
+              }),
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(launched?.resumeScanId).toBe(
+          command === "resume" ? "scan-original" : undefined,
+        );
+        const effective = await mergedCodexConfig(replayConfig!);
+        await writeCodexConfig(
+          join(home, "config.toml"),
+          scanRuntimeCodexConfig(effective, home),
+        );
+        const checked = await runCommand(
+          resolveCodexCommand({}).command,
+          ["mcp", "list", "--json"],
+          {
+            cwd: repository,
+            env: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              ...environment,
+            },
+            timeout: 10000,
+          },
+        );
+        expect(checked.status, checked.stderr).toBe(0);
+        expect(effective["model_providers"]).toMatchObject({
+          [provider]: defaults,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     },
   );
 

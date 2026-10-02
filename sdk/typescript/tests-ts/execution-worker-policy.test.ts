@@ -3,8 +3,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { scanRuntimeCodexConfig } from "../src/api.js";
-import { writeCodexConfig } from "../src/config.js";
+import {
+  scanPreflightCodexConfig,
+  scanRuntimeCodexConfig,
+} from "../src/api.js";
+import {
+  EXTERNAL_CODEX_PROVIDERS,
+  writeCodexConfig,
+  type JsonObject,
+} from "../src/config.js";
 import {
   createExecutionCodex,
   prepareExecutionSource,
@@ -24,19 +31,35 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([
-  ["ordinary", false],
-  ["ordinary", true],
-  ["discovery", false],
-  ["discovery", true],
-  ["merge", false],
-  ["merge", true],
+  ["ordinary", false, "ordinary"],
+  ["ordinary", true, "ordinary"],
+  ["discovery", false, "ordinary"],
+  ["discovery", true, "ordinary"],
+  ["merge", false, "ordinary"],
+  ["merge", true, "ordinary"],
+  ["discovery", true, "env_key"],
+  ["discovery", true, "bearer"],
+  ["merge", true, "env_key"],
+  ["merge", true, "bearer"],
+  ["discovery", false, "openrouter"],
+  ["discovery", false, "fireworks"],
+  ["merge", false, "openrouter"],
+  ["merge", false, "fireworks"],
 ] as const)(
-  "%s executions preserve selected inputs and enforce permissions and managed allowlists in initialized homes on fresh and resumed turns (preserve provider environment: %p)",
-  async (role, preserveProviderEnvironment) => {
+  "%s executions preserve selected inputs and enforce permissions and managed allowlists in initialized homes on fresh and resumed turns (preserve provider environment: %p, authentication: %s)",
+  async (role, preserveProviderEnvironment, providerAuth) => {
     const profileId =
       role === "ordinary"
         ? "codex_security_scan_execution"
         : "codex_security_deep_scan_worker";
+    const replayProvider =
+      providerAuth === "openrouter" || providerAuth === "fireworks"
+        ? providerAuth
+        : undefined;
+    const replayDefaults =
+      replayProvider === undefined
+        ? undefined
+        : EXTERNAL_CODEX_PROVIDERS[replayProvider];
     for (const resumed of [false, true]) {
       for (const scenario of [
         "accepted",
@@ -45,6 +68,7 @@ test.each([
         "fallback",
         "transport",
       ] as const) {
+        if (providerAuth !== "ordinary" && scenario !== "accepted") continue;
         const root = await temporaryDirectory();
         const home = join(root, "home");
         await mkdir(home);
@@ -68,7 +92,7 @@ test.each([
           for (let i = 0; i < args.length; i++) if (["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
           const allowed = ${JSON.stringify(scenario)} === "managed" ? parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,"requirements.toml"),"utf8")).allowed_permission_profiles : undefined;
           const record = value => fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify(value)+"\\n");
-          record({kind: args.includes("app-server") ? "preflight" : "exec",args,config,context:process.env.SYNTHETIC_CONTEXT,apiKey:process.env.CODEX_API_KEY,openAiKey:process.env.OPENAI_API_KEY});
+          record({kind: args.includes("app-server") ? "preflight" : "exec",args,config,context:process.env.SYNTHETIC_CONTEXT,apiKey:process.env.CODEX_API_KEY,openAiKey:process.env.OPENAI_API_KEY,providerKey:process.env.SYNTHETIC_PROVIDER_KEY,replayProviderKey:process.env[${JSON.stringify(replayDefaults?.env_key ?? "UNUSED_SYNTHETIC_PROVIDER_KEY")}]});
           if (args.includes("app-server")) {
             require("node:readline").createInterface({input:process.stdin}).on("line",line => {
               const request=JSON.parse(line); if (!request.id) return;
@@ -86,13 +110,18 @@ test.each([
           }
         `,
         );
-        const environment = {
+        const environment: NodeJS.ProcessEnv = {
+          ...(replayDefaults === undefined
+            ? {}
+            : { [replayDefaults.env_key]: "synthetic-selected" }),
           PATH: process.env["PATH"],
           CODEX_CLI_PATH: executable,
-          OPENAI_API_KEY: "synthetic-selected",
+          OPENAI_API_KEY:
+            providerAuth === "ordinary" ? "synthetic-selected" : undefined,
+          SYNTHETIC_PROVIDER_KEY: "synthetic-provider-selected",
           SYNTHETIC_CONTEXT: "selected",
         };
-        const config = {
+        const config: JsonObject = {
           ...(scenario === "managed"
             ? {
                 permissions: {
@@ -104,6 +133,32 @@ test.each([
               }
             : {}),
           model: "synthetic-model",
+          ...(replayProvider !== undefined
+            ? scanPreflightCodexConfig({
+                model_provider: replayProvider,
+                model_providers: {
+                  [replayProvider]: {
+                    ...replayDefaults!,
+                    name: "Synthetic selected provider",
+                  },
+                },
+              })
+            : providerAuth === "ordinary"
+              ? {}
+              : {
+                  model_provider: "synthetic",
+                  model_providers: {
+                    synthetic: {
+                      base_url: "https://example.invalid/v1",
+                      ...(providerAuth === "env_key"
+                        ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+                        : {
+                            experimental_bearer_token:
+                              "synthetic-bearer-selected",
+                          }),
+                    },
+                  },
+                }),
           mcp_servers: {
             synthetic: {
               command: "synthetic-mcp",
@@ -122,6 +177,7 @@ test.each([
           configuration: config,
           environment,
           preserveProviderEnvironment,
+          ...(providerAuth === "ordinary" ? {} : { auth: "api-key" }),
         });
         const inheritedPermissions = {
           filesystem: { [join(root, "private")]: "deny" },
@@ -145,8 +201,11 @@ test.each([
           python: process.execPath,
           releaseCredentialHome: null,
         };
-        environment.SYNTHETIC_CONTEXT = "later";
-        environment.OPENAI_API_KEY = "synthetic-later";
+        if (replayDefaults !== undefined)
+          environment[replayDefaults.env_key] = "synthetic-later";
+        environment["SYNTHETIC_CONTEXT"] = "later";
+        environment["OPENAI_API_KEY"] = "synthetic-later";
+        environment["SYNTHETIC_PROVIDER_KEY"] = "synthetic-provider-later";
         const worker =
           role === "ordinary"
             ? session
@@ -201,11 +260,28 @@ test.each([
               record.config.permissions[record.config.default_permissions];
             expect(record.context).toBe("selected");
             expect(record.apiKey).toBe(
-              preserveProviderEnvironment ? undefined : "synthetic-selected",
+              preserveProviderEnvironment || replayProvider !== undefined
+                ? undefined
+                : "synthetic-selected",
             );
             expect(record.openAiKey).toBe(
-              preserveProviderEnvironment ? "synthetic-selected" : undefined,
+              preserveProviderEnvironment && providerAuth === "ordinary"
+                ? "synthetic-selected"
+                : undefined,
             );
+            expect(record.providerKey).toBe("synthetic-provider-selected");
+            if (providerAuth !== "ordinary") {
+              expect(record.config.model_provider).toBe(
+                replayProvider ?? "synthetic",
+              );
+              expect(record.config["model_providers"]).toEqual(
+                replayProvider === undefined
+                  ? config["model_providers"]
+                  : { [replayProvider]: replayDefaults },
+              );
+              if (replayProvider !== undefined)
+                expect(record.replayProviderKey).toBe("synthetic-selected");
+            }
             expect(profile.filesystem[join(root, "private")]).toBe("deny");
             expect(profile.network.enabled).toBe(false);
             expect(profile.filesystem[":root"]).toBe("read");

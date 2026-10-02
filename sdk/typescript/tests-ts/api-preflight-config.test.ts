@@ -926,6 +926,36 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "does not synthesize %s defaults over native provider settings",
+    (_name, provider, _apiKey, model, providerConfig) => {
+      const cases: JsonObject[] = [
+        { base_url: "https://example.invalid/custom" },
+        { env_key: "SYNTHETIC_PROVIDER_KEY" },
+        { experimental_bearer_token: "synthetic-provider-token" },
+        { auth: { command: "synthetic-auth", args: ["synthetic-account"] } },
+        { requires_openai_auth: true },
+      ];
+      for (const settings of cases) {
+        const projected = scanPreflightCodexConfig(
+          {
+            profile: "selected",
+            profiles: { selected: { model, model_provider: provider } },
+            model_providers: {
+              [provider]: { ...providerConfig, ...settings },
+            },
+          },
+          true,
+        );
+        expect(scanModelProvider(projected)).toBe(provider);
+        expect(projected).not.toHaveProperty("model_providers");
+        expect(projected["profiles"]).toEqual({
+          selected: { model, model_provider: provider },
+        });
+      }
+    },
+  );
+
   test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
     const config = scanPreflightCodexConfig({
       model_provider: "openai",

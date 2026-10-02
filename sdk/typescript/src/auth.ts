@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "smol-toml";
-import type { JsonObject } from "./config.js";
+import { inlineToml, type JsonObject } from "./config.js";
 import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
   executablePathForSpawn,
@@ -242,10 +242,19 @@ export async function accountStatus(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
+  config: Readonly<JsonObject> = {},
 ): Promise<AccountStatus> {
   const result = await runCodexCommand(
     command,
-    ["login", "status"],
+    [
+      ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+        config[key] === undefined
+          ? []
+          : ["--config", `${key}=${inlineToml(config[key])}`],
+      ),
+      "login",
+      "status",
+    ],
     environment,
     undefined,
     signal,

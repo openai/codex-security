@@ -3240,6 +3240,92 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test("native Deep scans keep concurrent overrides out of the caller's saved settings", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const savedConfig = join(codexHome, "codex-security", "config.toml");
+    const selectedConfig = join(root, "selected-deep.toml");
+    const original = "[deep_scan]\nworkers = 7\n";
+    await mkdir(repository);
+    await mkdir(dirname(savedConfig), { recursive: true });
+    await writeFile(savedConfig, original);
+    await writeFile(selectedConfig, "[deep_scan]\nworkers = 8\n");
+    const environments: Record<string, string | undefined>[] = [];
+    const clients = [2, 5].map((workers) => {
+      const environment = {
+        CODEX_HOME: codexHome,
+        CODEX_API_KEY: "synthetic-native-key",
+        CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: selectedConfig,
+      };
+      return {
+        workers,
+        client: new TestClient(
+          {},
+          {
+            environment,
+            ambientExecution: {
+              environment,
+              command: { command: process.execPath },
+              configuration: {},
+              preserveProviderEnvironment: false,
+              auth: "api-key",
+              pluginRoot: PLUGIN_ROOT,
+            },
+            resolvePluginPython: async () => "/managed/python",
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options) => {
+              environments.push(options.env!);
+              return {
+                startThread: () => ({
+                  id: null,
+                  async runStreamed() {
+                    throw new Error("native settings captured");
+                  },
+                }),
+              };
+            },
+          },
+        ),
+      };
+    });
+    try {
+      await Promise.all(
+        clients.map(({ client, workers }) =>
+          expect(
+            client.run(repository, {
+              mode: "deep",
+              workers,
+              outputDir: join(root, `scan-${workers}`),
+            }),
+          ).rejects.toThrow("native settings captured"),
+        ),
+      );
+      const paths = environments.map(
+        (environment) => environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+      );
+      expect(new Set(paths).size).toBe(2);
+      const counts = await Promise.all(
+        paths.map(async (path) => {
+          expect(path).not.toBe(savedConfig);
+          expect(path).not.toBe(selectedConfig);
+          return (
+            parseToml(await readFile(path, "utf8"))["deep_scan"] as {
+              workers: number;
+            }
+          ).workers;
+        }),
+      );
+      expect(counts.sort()).toEqual([2, 5]);
+      expect(await readFile(savedConfig, "utf8")).toBe(original);
+      expect(await readFile(selectedConfig, "utf8")).toBe(
+        "[deep_scan]\nworkers = 8\n",
+      );
+    } finally {
+      await Promise.all(clients.map(({ client }) => client.close()));
+    }
+  });
+
   test.each([
     ["defaults", "absolute"],
     ["complete overrides", "absolute"],

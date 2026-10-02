@@ -1,4 +1,7 @@
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { parse as parseToml } from "smol-toml";
+import { accountStatus, configuredCodexHome } from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { isRecord } from "./record.js";
 import {
@@ -10,17 +13,19 @@ import {
 import {
   EXTERNAL_CODEX_PROVIDERS,
   deepMerge,
+  providerProcessConfiguration,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
   modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelProvider,
+  scanCompositionOverrides,
   setScanSubagentBudget,
   writeCodexConfig,
   type JsonObject,
 } from "./config.js";
-import { AuthenticationRequiredError } from "./errors.js";
+import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
 import {
   scanAuthentication,
   environmentApiKey,
@@ -37,6 +42,12 @@ import {
   environmentWithGit,
   executablePathForSpawn,
   pluginExecutionEnvironment,
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  createMarketplace,
+  MARKETPLACE_NAME,
+  PLUGIN_NAME,
+  pluginMetadata,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
@@ -89,7 +100,7 @@ export function prepareExecutionSource(input: {
       : null;
   const authentication = scanAuthentication(
     environment,
-    input.auth,
+    preserveProviderEnvironment ? "auto" : input.auth,
     modelProvider,
     commandAuth,
   );
@@ -225,7 +236,15 @@ export function createExecutionCodex(
   if (session.safetyIdentifier !== undefined) {
     environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
   }
-  const sdkCodexConfig = { ...(config ?? sessionConfig) };
+  const launchConfig = { ...(config ?? sessionConfig) };
+  if (commandAuth && launchConfig["model_providers"] === undefined) {
+    launchConfig["model_providers"] = sessionConfig["model_providers"]!;
+  }
+  const launch = runtime.preserveCodexHomeConfig
+    ? providerProcessConfiguration(launchConfig, environment)
+    : { config: launchConfig, environment };
+  const sdkCodexConfig = { ...launch.config };
+  Object.assign(environment, launch.environment);
   // Projects and permissions already live in generated TOML files; the SDK
   // cannot safely encode their path and selector keys as dotted overrides.
   delete sdkCodexConfig["projects"];
@@ -290,7 +309,7 @@ export function createExecutionCodex(
     ...(commandAuth || configOverrides.length > 0
       ? {
           configOverrides: [
-            ...(commandAuth ? modelProviderConfigOverride(sessionConfig) : []),
+            ...(commandAuth ? modelProviderConfigOverride(launch.config) : []),
             ...configOverrides,
           ],
         }
@@ -367,6 +386,172 @@ export function createExecutionCodex(
   };
 }
 
+export interface AmbientExecution {
+  readonly command: CodexCommand;
+  readonly configuration: JsonObject;
+  readonly environment: ProcessEnvironment;
+  readonly preserveProviderEnvironment: boolean;
+  readonly auth?: ScanAuthMode;
+  readonly pluginRoot: string;
+}
+
+/** Native execution keeps the invoking account and applies the same provider selection as SDK workers. */
+export async function prepareAmbientExecution(
+  input: {
+    command: CodexCommand;
+    configuration: JsonObject;
+    environment: ProcessEnvironment;
+    pluginRoot: string;
+    auth?: ScanAuthMode;
+  },
+  signal?: AbortSignal,
+): Promise<AmbientExecution> {
+  const config = structuredClone(input.configuration);
+  const environment = { ...input.environment };
+  let auth = input.auth;
+  config["approval_policy"] = "never";
+  let modelProvider = scanModelProvider(config);
+  const providers = config["model_providers"] as JsonObject | undefined;
+  if (modelProvider === undefined && providers?.["openai"] !== undefined) {
+    config["model_provider"] = "openai";
+    modelProvider = "openai";
+  }
+  const provider =
+    typeof modelProvider === "string" &&
+    !["openai", "ollama", "lmstudio"].includes(modelProvider)
+      ? (providers?.[modelProvider] as JsonObject | undefined)
+      : undefined;
+  const configuredProvider =
+    hasCommandAuth(config) ||
+    provider?.["env_key"] !== undefined ||
+    typeof provider?.["experimental_bearer_token"] === "string" ||
+    (provider?.["requires_openai_auth"] !== true &&
+      ((modelProvider !== undefined && modelProvider !== "openai") ||
+        provider !== undefined));
+  if (!configuredProvider && (auth ?? "auto") === "auto") {
+    if (config["forced_login_method"] === "chatgpt") {
+      auth = "chatgpt";
+    } else if (config["forced_login_method"] === "api") {
+      if (
+        environment["CODEX_API_KEY"]?.trim() ||
+        environment["OPENAI_API_KEY"]?.trim()
+      )
+        auth = "api-key";
+    } else if (
+      !environment["CODEX_API_KEY"]?.trim() &&
+      environment["OPENAI_API_KEY"]?.trim()
+    ) {
+      const status = await accountStatus(
+        { command: input.command.command },
+        selectedScanEnvironment(environment, "chatgpt"),
+        signal,
+        config,
+      );
+      if (status.authenticated) auth = "chatgpt";
+      else if (!/not logged in|unauthenticated/i.test(status.details))
+        throw new CodexSecurityError(
+          status.details || "Could not determine Codex account status.",
+        );
+    }
+  }
+  const selectedEnvironment = configuredProvider
+    ? environment
+    : selectedScanEnvironment(environment, auth, modelProvider);
+  if (!configuredProvider && selectedEnvironment["CODEX_API_KEY"]?.trim())
+    delete selectedEnvironment["OPENAI_API_KEY"];
+
+  return {
+    command: { ...input.command },
+    configuration: config,
+    environment: selectedEnvironment,
+    preserveProviderEnvironment: configuredProvider,
+    auth,
+    pluginRoot: input.pluginRoot,
+  };
+}
+
+export async function prepareAmbientRuntime(
+  execution: AmbientExecution,
+  signal?: AbortSignal,
+  preparedPlugin?: PluginInstall,
+): Promise<PreparedRuntime> {
+  const requestedHome =
+    execution.environment["CODEX_HOME"] ||
+    configuredCodexHome(execution.environment);
+  await mkdir(requestedHome, { recursive: true, mode: 0o700 });
+  const codexHome = await realpath(requestedHome);
+  const bootstrapWorkspace = await createIsolatedHome();
+  try {
+    const marketplaceRoot =
+      preparedPlugin?.marketplaceRoot ??
+      (await createMarketplace(
+        bootstrapWorkspace,
+        execution.pluginRoot,
+        signal,
+      ));
+    const pluginRoot = join(marketplaceRoot, "plugins", PLUGIN_NAME);
+    return {
+      codexHome,
+      preserveCodexHomeConfig: true,
+      bootstrapWorkspace,
+      configPath: join(bootstrapWorkspace, "config-preflight.toml"),
+      deepScanConfigPath: join(bootstrapWorkspace, "deep-scan-config.toml"),
+      environment: {
+        ...definedEnvironment(execution.environment),
+        CODEX_HOME: codexHome,
+      },
+      credentialsAvailable: false,
+      plugin: preparedPlugin ?? {
+        pluginRoot,
+        installedRoot: pluginRoot,
+        marketplaceRoot,
+        marketplaceName: MARKETPLACE_NAME,
+        ...(await pluginMetadata(pluginRoot)),
+      },
+    };
+  } catch (error) {
+    await cleanupSdkDirectory(bootstrapWorkspace);
+    throw error;
+  }
+}
+
+export async function nativeScanConfiguration(
+  environment: NodeJS.ProcessEnv,
+  input: { recipe?: JsonObject; model?: string; reasoningEffort?: string },
+  subagents: number,
+): Promise<JsonObject> {
+  const ambientPath = join(
+    environment["CODEX_HOME"] || configuredCodexHome(environment),
+    "config.toml",
+  );
+  const ambient = await readFile(ambientPath, "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    },
+  );
+  const selected = environment["CODEX_SECURITY_CONFIG_PATH"]
+    ? parseToml(
+        await readFile(environment["CODEX_SECURITY_CONFIG_PATH"], "utf8"),
+      )
+    : {};
+  const config = scanCompositionOverrides(
+    deepMerge(
+      resolveCodexProfile(
+        deepMerge(parseToml(ambient) as JsonObject, selected as JsonObject),
+      ),
+      (input.recipe?.["config"] as JsonObject | undefined) ?? {},
+    ),
+    subagents,
+  );
+  if (input.recipe?.["config"] === undefined) {
+    if (input.model) config["model"] = input.model;
+    if (input.reasoningEffort)
+      config["model_reasoning_effort"] = input.reasoningEffort;
+  }
+  return config;
+}
+
 function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
   const config = structuredClone(sessionConfig);
   config["mcp_servers"] = {
@@ -398,6 +583,7 @@ export function prepareMergeExecution(
   setScanSubagentBudget(config, subagents);
   return { ...session, policy: "merge", sessionConfig: config };
 }
+
 /** Read-only helpers retain denied paths while intentionally removing write access. */
 export function prepareReadOnlyExecution(
   config: JsonObject,
