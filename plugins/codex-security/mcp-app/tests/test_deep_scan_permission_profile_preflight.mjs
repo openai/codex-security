@@ -697,26 +697,69 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  await withFakeCodex(
-    {
-      hangAt: "config/read",
-    },
-    async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-      const controller = new AbortController();
-      const running = preflightDeepScanWorkerPermissionProfile({
+  for (const [ignoreTermination, inheritStdio] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    await withFakeCodex(
+      {
+        hangAt: "config/read",
+        ignoreTermination,
+        inheritStdio,
+      },
+      async ({
         codexPath,
         cwd,
-        profileId,
-        configOverrides: rawOverrides,
-        expectedProfile,
-        signal: controller.signal,
-      });
-      await waitForFile(readyPath);
-      controller.abort(new DOMException("fixture aborted", "AbortError"));
-      await assert.rejects(running, (error) => error?.name === "AbortError");
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
+        readyPath,
+        terminatedPath,
+        descendantPidPath,
+        children,
+      }) => {
+        const controller = new AbortController();
+        const running = preflightDeepScanWorkerPermissionProfile({
+          codexPath,
+          cwd,
+          profileId,
+          configOverrides: rawOverrides,
+          expectedProfile,
+          signal: controller.signal,
+        });
+        await waitForFile(readyPath);
+        controller.abort(new DOMException("fixture aborted", "AbortError"));
+        let timeout;
+        try {
+          await assert.rejects(
+            Promise.race([
+              running,
+              new Promise((_, reject) => {
+                timeout = setTimeout(
+                  () => reject(new Error("Preflight did not stop")),
+                  5_000,
+                );
+              }),
+            ]),
+            (error) => error?.name === "AbortError",
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
+        assert.ok(
+          children[0].exitCode !== null || children[0].signalCode !== null,
+        );
+        if (inheritStdio) {
+          const pid = Number(await readFile(descendantPidPath, "utf8"));
+          assert.doesNotThrow(() => process.kill(pid, 0));
+        }
+        if (ignoreTermination && process.platform !== "win32") {
+          assert.equal(children[0].signalCode, "SIGKILL");
+        } else {
+          await assertPreflightStopped(children, terminatedPath);
+        }
+      },
+    );
+  }
 }
 
 async function assertPreflightStopped(children, terminatedPath) {
@@ -784,6 +827,7 @@ async function withFakeCodex(
   const envPath = path.join(root, "env.json");
   const readyPath = path.join(root, "ready");
   const terminatedPath = path.join(root, "terminated");
+  const descendantPidPath = path.join(root, "descendant-pid");
   const fixture = {
     ...scenario,
     argvPath,
@@ -792,6 +836,7 @@ async function withFakeCodex(
     envPath,
     readyPath,
     terminatedPath,
+    descendantPidPath,
   };
   await writeFile(scriptPath, fakeCodexSource(fixture), "utf8");
   await chmod(scriptPath, 0o755);
@@ -837,9 +882,25 @@ async function withFakeCodex(
       envPath,
       readyPath,
       terminatedPath,
+      descendantPidPath,
       children,
     });
   } finally {
+    const descendantPid = await readFile(descendantPidPath, "utf8").catch(
+      (error) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      },
+    );
+    if (descendantPid !== undefined)
+      process.kill(Number(descendantPid), "SIGKILL");
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = new Promise((resolve) => child.once("close", resolve));
+        child.kill("SIGKILL");
+        await closed;
+      }
+    }
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
@@ -848,6 +909,7 @@ async function withFakeCodex(
 
 function fakeCodexSource(scenario) {
   return `#!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 
 const scenario = JSON.parse(${JSON.stringify(JSON.stringify(scenario))});
@@ -858,12 +920,20 @@ writeFileSync(scenario.envPath, JSON.stringify({
   sentinel: process.env.DEEP_SCAN_PREFLIGHT_ENV_SENTINEL ?? null
 }));
 if (scenario.stderr) process.stderr.write(scenario.stderr);
+if (scenario.inheritStdio) {
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  writeFileSync(scenario.descendantPidPath, String(descendant.pid));
+  descendant.unref();
+}
 let buffer = "";
 let catalogIndex = 0;
+if (scenario.ignoreTermination) setInterval(() => {}, 1_000);
 
 process.on("SIGTERM", () => {
   writeFileSync(scenario.terminatedPath, "SIGTERM");
-  process.exit(0);
+  if (!scenario.ignoreTermination) process.exit(0);
 });
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -881,7 +951,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   writeFileSync(scenario.terminatedPath, "stdin-end");
-  process.exit(0);
+  if (!scenario.ignoreTermination) process.exit(0);
 });
 
 function handle(message) {
