@@ -1451,7 +1451,7 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
         environment=deep_environment(codex_home),
         check=False,
     )
-    assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
+    assert "must finish and save its aggregate" in str(premature["stderr"])
 
     begun = run_workbench(
         state_dir,

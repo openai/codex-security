@@ -116,6 +116,46 @@ def pending_scan(tmp_path, workbench_api, monkeypatch, request):
         )
 
 
+@pytest.mark.parametrize("pending_scan", ["standard", "deep", "deep_child"], indirect=True)
+def test_completion_retains_checkpoint_after_failed_commit_and_later_draft(
+    pending_scan, monkeypatch
+):
+    fixture = pending_scan
+    saved, directory = fixture.saved, fixture.directory
+    fixture.publish(fixture.empty)
+    committed = (directory / "artifacts/scan-draft.json").read_bytes()
+    write = saved.write_scan_local_bytes
+
+    def fail_commit(root, relative, contents, **kwargs):
+        if relative == "artifacts/scan-draft.json":
+            raise OSError("Synthetic committed draft interruption")
+        return write(root, relative, contents, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "write_scan_local_bytes", fail_commit)
+        with pytest.raises(OSError, match="committed draft interruption"):
+            fixture.publish(fixture.documents)
+    assert (directory / "artifacts/scan-draft.json").read_bytes() == committed
+    retained = {path.name: path.read_bytes() for path in (directory / "checkpoints").glob("*.json")}
+    assert any(fixture.expected["title"] in value.decode() for value in retained.values())
+    fixture.publish(fixture.empty)
+    run_workbench(fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id)
+    findings = json.loads((directory / "findings.json").read_text())["findings"]
+    assert {finding["title"] for finding in findings} == {
+        fixture.expected["title"],
+        *([fixture.child_title] if fixture.child_title else []),
+    }
+    retained_finding = next(
+        finding for finding in findings if finding["title"] == fixture.expected["title"]
+    )
+    assert retained_finding["codeEvidence"] == fixture.expected["codeEvidence"]
+    assert fixture.expected["title"] in (directory / "report.md").read_text()
+    assert json.loads((directory / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    assert all(
+        (directory / "checkpoints" / name).read_bytes() == value for name, value in retained.items()
+    )
+
+
 def test_later_commits_retire_accepted_markers_after_cleanup_interruption(
     pending_scan, monkeypatch
 ):
@@ -270,6 +310,18 @@ def test_pending_review_on_an_already_resolved_surface_survives_completion(
     coverage = json.loads((fixture.directory / "coverage.json").read_text())
     assert coverage["deferred"] == pending["coverage"]["deferred"]
     assert coverage["completeness"] == "partial"
+
+
+@pytest.mark.parametrize("pending_scan", ["deep_child"], indirect=True)
+def test_capped_completion_retains_parent_only_and_unmerged_child_findings(pending_scan):
+    fixture = pending_scan
+    fixture.publish(fixture.documents)
+    run_workbench(fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id)
+    findings = json.loads((fixture.directory / "findings.json").read_text())["findings"]
+    assert {finding["title"] for finding in findings} == {
+        fixture.expected["title"],
+        fixture.child_title,
+    }
 
 
 @pytest.mark.parametrize("staged", [False, True, "legacy"])
