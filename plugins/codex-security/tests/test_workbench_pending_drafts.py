@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -301,3 +302,28 @@ def test_checkpoint_copy_failure_retains_pending_evidence(pending_scan, monkeypa
     if staged != "legacy":
         assert markers[0].read_bytes() == evidence
     assert (fixture.directory / "checkpoints" / markers[0].name).read_bytes() == evidence
+
+
+@pytest.mark.parametrize("pending_scan", ["deep"], indirect=True)
+def test_preindex_checkpoint_stays_acknowledged_after_later_aggregates(pending_scan):
+    fixture = pending_scan
+    payload = {
+        "scanId": fixture.scan_id,
+        "complete": True,
+        "findings": fixture.documents["findings"]["findings"],
+        "coverage": fixture.documents["coverage"],
+    }
+    contents = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    history = fixture.directory / "checkpoints"
+    history.mkdir(exist_ok=True)
+    (history / name).write_bytes(contents)
+    fixture.publish(fixture.documents)
+    for _ in range(2):
+        fixture.publish(fixture.empty)
+        accepted = json.loads((fixture.directory / "artifacts/scan-draft.json").read_text())
+        assert accepted["findings"]["findings"] == []
+        current = history / "pending" if (history / "pending").exists() else history
+        unread = {p.name for p in current.glob("*.json")} - set(accepted["reconciledCheckpointIds"])
+        assert name not in unread
+        assert (history / name).read_bytes() == contents

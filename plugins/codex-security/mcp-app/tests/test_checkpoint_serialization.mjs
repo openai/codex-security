@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-const modules = ["artifact-scan-draft.ts", "artifact-worker-scan-draft.ts"];
+const modules = ["artifact-worker-scan-draft.ts"];
 for (const name of modules) {
   const bundle = await build({
     absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
