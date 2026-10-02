@@ -807,12 +807,7 @@ describe("scan and patch workflow", () => {
     );
     const repository = join(directory, "repository");
     await mkdir(repository, { recursive: true });
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: repository,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const git = repositoryGit(repository);
 
     try {
       git("init", "--initial-branch=main");
@@ -917,12 +912,7 @@ describe("scan and patch workflow", () => {
       patchRiskSummary(),
     ].join("\n");
     let pullRequestArguments: readonly string[] = [];
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: repository,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const git = repositoryGit(repository);
 
     try {
       await mkdir(join(repository, "src"), { recursive: true });
@@ -1052,12 +1042,7 @@ describe("scan and patch workflow", () => {
     );
     const repository = join(directory, "repository");
     await mkdir(repository, { recursive: true });
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: repository,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const git = repositoryGit(repository);
 
     try {
       git("init", "--initial-branch=main");
@@ -1387,12 +1372,7 @@ describe("scan and patch workflow", () => {
     let pullRequestArguments: readonly string[] = [];
     const githubCommands: string[][] = [];
     await mkdir(join(repository, "src"), { recursive: true });
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: repository,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const git = repositoryGit(repository);
 
     try {
       git("init", "--initial-branch=main");
@@ -1567,12 +1547,7 @@ describe("scan and patch workflow", () => {
       let failOnce = true;
       let publishedUrl = "";
       await mkdir(join(repository, "src"), { recursive: true });
-      const git = (...args: string[]) =>
-        execFileSync("git", args, {
-          cwd: repository,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        }).trim();
+      const git = repositoryGit(repository);
 
       try {
         git("init", "--initial-branch=main");
@@ -2412,12 +2387,7 @@ describe("scan and patch workflow", () => {
     expect(scan.stderr).toContain("--create-pr requires --patch");
 
     const directory = await mkdtemp(join(tmpdir(), "codex-security-dirty-pr-"));
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: directory,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const git = repositoryGit(directory);
     try {
       git("init", "--initial-branch=main");
       git("config", "user.name", "Synthetic User");
@@ -2457,3 +2427,12 @@ describe("scan and patch workflow", () => {
     }
   });
 });
+
+function repositoryGit(repository: string) {
+  return (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repository,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+}

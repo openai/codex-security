@@ -104,7 +104,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd: request.workingDirectory,
-          profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
           configOverrides,
           expectedProfile: workerProfile,
           env: childEnv,
@@ -168,7 +167,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             ? {}
             : { cyberAccessProgram: runtimeSettings.cyberAccessProgram }),
         });
-        let finalResponse = "";
         let threadId: string | undefined;
         let turnCompleted = false;
         let lastStreamError: string | undefined;
@@ -186,11 +184,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               controller.abort(fallbackError);
               throw fallbackError;
             }
-            if (event.item.type === "agent_message") {
-              finalResponse = event.item.text;
-            } else {
-              appendSafeItemDiagnostic(diagnostics, event.item);
-            }
+            appendSafeItemDiagnostic(diagnostics, event.item);
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
             request.signal.removeEventListener("abort", forwardAbort);
@@ -217,7 +211,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           );
         }
         return {
-          finalResponse,
           threadId: threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };

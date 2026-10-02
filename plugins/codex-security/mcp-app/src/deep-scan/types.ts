@@ -27,8 +27,6 @@ export interface DeepScanCanonicalArtifacts {
   candidateLedgerPath: string;
 }
 
-export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
-
 export interface DeepScanRunState {
   scanId: string;
   status: DeepScanRunStatus;
@@ -56,11 +54,6 @@ export interface PersistedDeepScanDedupInput {
   dedupWorkerId: string;
   discoveryWorkerId: string;
   inputOrder: number;
-}
-
-export interface BeginDeepScanResult {
-  run: DeepScanRunState;
-  shouldStart: boolean;
 }
 
 export interface DeepScanCoordinatorClaim {
@@ -93,19 +86,13 @@ export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
 /** The authoritative worker record returned after SQLite commits the change. */
-export interface PersistedDeepScanWorker {
-  id: string;
-  kind: DeepScanWorkerKind;
-  status: DeepScanWorkerStatus;
-  promptPath: string;
-  artifactDir: string;
-  attempt: number;
-  threadId?: string;
-  resultManifestPath?: string;
+export interface PersistedDeepScanWorker extends Omit<
+  DeepScanWorkerMutation,
+  "scanId" | "replaceableFailureKind"
+> {
   completionSequence?: number;
   consecutiveErrors?: number;
   mergeState: DeepScanMergeState;
-  error?: string;
 }
 
 /** Inputs committed atomically when a reducer finishes. */
@@ -129,7 +116,7 @@ export interface DeepScanStore {
     reasoningEffort?: string;
     threadId: string;
     scanRoot: string;
-  }): Promise<BeginDeepScanResult>;
+  }): Promise<DeepScanRunState>;
   get(scanId: string, threadId: string): Promise<DeepScanRunState>;
   claimCoordinator(
     input: DeepScanCoordinatorLeaseInput,
@@ -200,7 +187,6 @@ export interface CodexWorkerRequest {
 
 export interface CodexWorkerResult {
   threadId?: string;
-  finalResponse: string;
   diagnostics?: CodexWorkerDiagnostic[];
 }
 

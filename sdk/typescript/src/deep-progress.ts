@@ -1,3 +1,5 @@
+import { isRecord } from "./record.js";
+
 export interface DeepScanProgress {
   completed: number;
   active: number;
@@ -78,10 +80,8 @@ export class DeepScanProgressTracker {
   public stop(): void {
     if (this.#stopped) return;
     this.#stopped = true;
-    if (this.#timer !== null) {
-      clearInterval(this.#timer);
-      this.#timer = null;
-    }
+    clearInterval(this.#timer ?? undefined);
+    this.#timer = null;
     this.#abortController?.abort();
     this.#abortController = null;
   }
@@ -130,8 +130,4 @@ function isCount(value: unknown): value is number {
 
 function isPositiveCount(value: unknown): value is number {
   return isCount(value) && value > 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

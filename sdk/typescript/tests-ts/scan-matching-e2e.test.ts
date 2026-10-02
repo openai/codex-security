@@ -27,6 +27,7 @@ import {
 } from "../src/scan-comparison.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson } from "./support/json.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
 
@@ -74,8 +75,6 @@ test("matches sealed scan history end to end without merging related findings", 
         args,
         input,
       );
-    const readJson = async <T>(path: string): Promise<T> =>
-      JSON.parse(await readFile(path, "utf8")) as T;
     const writeJson = async (path: string, value: unknown) =>
       writeFile(path, JSON.stringify(value));
     const artifacts: string[] = [];

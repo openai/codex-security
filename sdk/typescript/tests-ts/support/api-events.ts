@@ -37,6 +37,7 @@ export type ScanObserverName = Parameters<
 type ScanEventOptions = Pick<
   Parameters<typeof runScanEvents>[0],
   | "authentication"
+  | "modelProvider"
   | "expectedFilesTotal"
   | "onActivity"
   | "onObserverError"
@@ -77,6 +78,13 @@ export function createApiTestFixtures() {
       temporaryDirectories.push(path);
       return path;
     },
+  };
+}
+
+export async function* failedPostScanEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
   };
 }
 

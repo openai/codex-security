@@ -13,21 +13,13 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
 const execFile = promisify(nodeExecFile);
 const temporaryRoots = [];
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const inventory = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+
+const inventory = await importSource(
+  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
 );
 
 try {

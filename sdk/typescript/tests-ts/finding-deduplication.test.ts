@@ -101,16 +101,6 @@ function screening(
   };
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
-}
-
 test.each(["screening", "pair-review"])(
   "%s fills each free slot immediately and preserves serial grouping",
   async (stage) => {
@@ -128,8 +118,8 @@ test.each(["screening", "pair-review"])(
         };
       },
     };
-    const gates = entries.map(() => deferred<void>());
-    const started = entries.map(() => deferred<void>());
+    const gates = entries.map(() => Promise.withResolvers<void>());
+    const started = entries.map(() => Promise.withResolvers<void>());
     const starts: number[] = [];
     const phases: string[] = [];
     let active = 0;
@@ -188,10 +178,10 @@ test("ready pairs take free slots before pending screenings and share the concur
   const nominations = new Set(
     ids.map((id) => pairKey([id, neighbor.findingId])),
   );
-  const screeningGates = entries.map(() => deferred<void>());
-  const screeningStarts = entries.map(() => deferred<void>());
-  const pairGates = entries.map(() => deferred<void>());
-  const pairStarts = entries.map(() => deferred<void>());
+  const screeningGates = entries.map(() => Promise.withResolvers<void>());
+  const screeningStarts = entries.map(() => Promise.withResolvers<void>());
+  const pairGates = entries.map(() => Promise.withResolvers<void>());
+  const pairStarts = entries.map(() => Promise.withResolvers<void>());
   const events: string[] = [];
   let active = 0;
   let peak = 0;
@@ -262,9 +252,9 @@ test("ready pairs take free slots before pending screenings and share the concur
 test("a pair waits for its delayed reciprocal screening and honors a DISTINCT veto", async () => {
   const entries = [entry(1), entry(2)];
   const ids = entries.map((finding) => finding.findingId);
-  const gates = entries.map(() => deferred<void>());
-  const started = entries.map(() => deferred<void>());
-  const finished = deferred<void>();
+  const gates = entries.map(() => Promise.withResolvers<void>());
+  const started = entries.map(() => Promise.withResolvers<void>());
+  const finished = Promise.withResolvers<void>();
   const reviewed: string[] = [];
   const result = new FindingDeduplicator(
     candidates(entries),
@@ -325,11 +315,11 @@ test("reverse completion preserves pair orientation and the final input-order fi
     },
     { finding: entries[2]!, potentialDuplicates: [finalA] },
   ];
-  const lookupStarts = entries.map(() => deferred<void>());
-  const lookupGates = entries.map(() => deferred<void>());
-  const screenStarts = entries.map(() => deferred<void>());
-  const screenGates = entries.map(() => deferred<void>());
-  const pairStarted = deferred<void>();
+  const lookupStarts = entries.map(() => Promise.withResolvers<void>());
+  const lookupGates = entries.map(() => Promise.withResolvers<void>());
+  const screenStarts = entries.map(() => Promise.withResolvers<void>());
+  const screenGates = entries.map(() => Promise.withResolvers<void>());
+  const pairStarted = Promise.withResolvers<void>();
   const reviewed: Finding[][] = [];
   const result = new FindingDeduplicator(
     {
@@ -389,9 +379,9 @@ test.each(["screen", "pair", "cancel"])(
     const ids = entries.map((finding) => finding.findingId);
     const starts: string[] = [];
     const completed: string[] = [];
-    const screenGate = deferred<void>();
-    const pairGate = deferred<void>();
-    const pairStarted = deferred<void>();
+    const screenGate = Promise.withResolvers<void>();
+    const pairGate = Promise.withResolvers<void>();
+    const pairStarted = Promise.withResolvers<void>();
     const controller = new AbortController();
     const failure = new Error("Synthetic mixed-stage failure");
     const result = new FindingDeduplicator(
@@ -459,8 +449,8 @@ test.each(["screen", "pair", "cancel"])(
 
 test("terminal failure drains started reviews without starting queued jobs", async () => {
   const entries = [entry(1), entry(2), entry(3)];
-  const gates = entries.map(() => deferred<void>());
-  const started = entries.map(() => deferred<void>());
+  const gates = entries.map(() => Promise.withResolvers<void>());
+  const started = entries.map(() => Promise.withResolvers<void>());
   const calls: string[] = [];
   const failure = new Error("Synthetic review failure");
   const result = new FindingDeduplicator(

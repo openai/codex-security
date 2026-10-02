@@ -376,14 +376,10 @@ describe("publish check", () => {
         deps.forceExit = () => {
           forced = true;
         };
-        let started!: () => void;
-        const operationStarted = new Promise<void>((resolve) => {
-          started = resolve;
-        });
-        let finishCleanup!: () => void;
-        const cleanup = new Promise<void>((resolve) => {
-          finishCleanup = resolve;
-        });
+        const { promise: operationStarted, resolve: started } =
+          Promise.withResolvers<void>();
+        const { promise: cleanup, resolve: finishCleanup } =
+          Promise.withResolvers<void>();
         const operation = async (
           _directory: string,
           options: { signal?: AbortSignal },
@@ -787,14 +783,10 @@ describe("publish scan", () => {
       const signals = new FakeSignals();
       const events: string[] = [];
       let now = 0;
-      let enteredPublication!: () => void;
-      const publicationStarted = new Promise<void>((resolve) => {
-        enteredPublication = resolve;
-      });
-      let finishRecovery!: () => void;
-      const recoveryFinished = new Promise<void>((resolve) => {
-        finishRecovery = resolve;
-      });
+      const { promise: publicationStarted, resolve: enteredPublication } =
+        Promise.withResolvers<void>();
+      const { promise: recoveryFinished, resolve: finishRecovery } =
+        Promise.withResolvers<void>();
       const deps = dependencies({ signals });
       deps.environment["CODEX_SECURITY_LINEAR_API_KEY"] = "synthetic-key";
       deps.now = () => now;
@@ -1952,14 +1944,10 @@ describe("publish scan", () => {
         };
         const listeners = new Map<string, () => void>();
         const removed: string[] = [];
-        let enteredPublication!: () => void;
-        const publicationStarted = new Promise<void>((resolve) => {
-          enteredPublication = resolve;
-        });
-        let finishRecovery!: () => void;
-        const recoveryFinished = new Promise<void>((resolve) => {
-          finishRecovery = resolve;
-        });
+        const { promise: publicationStarted, resolve: enteredPublication } =
+          Promise.withResolvers<void>();
+        const { promise: recoveryFinished, resolve: finishRecovery } =
+          Promise.withResolvers<void>();
         const deps = dependencies();
         deps.addSignalListener = (name, listener) => {
           listeners.set(name, listener);

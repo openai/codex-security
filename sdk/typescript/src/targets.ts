@@ -12,7 +12,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
+import { InvalidTargetError, abortReason } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
@@ -822,13 +822,6 @@ export async function abortable<T>(
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function expandHome(value: string): string {

@@ -710,10 +710,8 @@ describe("semantic scan comparison", () => {
     });
     const controller = new AbortController();
     let observedSignal: AbortSignal | undefined;
-    let statusStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      statusStarted = resolve;
-    });
+    const { promise: started, resolve: statusStarted } =
+      Promise.withResolvers<void>();
 
     const waiting = comparisonEnvironment(
       { CODEX_SECURITY_STATE_DIR: stateDirectory },

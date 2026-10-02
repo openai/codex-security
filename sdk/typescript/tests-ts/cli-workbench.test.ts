@@ -763,14 +763,10 @@ describe("CLI workbench", () => {
     "debounces matching %s and allows a later %s to terminate a blocked workbench",
     async (first, second, delay, expectedExit) => {
       const signals = new FakeSignals();
-      let began!: () => void;
-      const started = new Promise<void>((resolve) => {
-        began = resolve;
-      });
-      let finish!: (value: JsonObject) => void;
-      const pending = new Promise<JsonObject>((resolve) => {
-        finish = resolve;
-      });
+      const { promise: started, resolve: began } =
+        Promise.withResolvers<void>();
+      const { promise: pending, resolve: finish } =
+        Promise.withResolvers<JsonObject>();
       let observedSignal: AbortSignal | undefined;
       const forced: string[] = [];
       let now = 0;

@@ -2,21 +2,14 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [new URL("../src/python_command.ts", import.meta.url).pathname],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
   resolvePythonCommand,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+} = await importSource(
+  new URL("../src/python_command.ts", import.meta.url).pathname,
 );
 
 const windowsHome = "C:\\Users\\fixture";

@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -285,8 +286,4 @@ async function* sessionEvents(
     lines.close();
     stream.destroy();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

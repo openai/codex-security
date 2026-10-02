@@ -1,5 +1,6 @@
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -183,10 +184,8 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
-    if (this.#timer !== null) {
-      clearInterval(this.#timer);
-      this.#timer = null;
-    }
+    clearInterval(this.#timer ?? undefined);
+    this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
     if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
@@ -834,10 +833,6 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {

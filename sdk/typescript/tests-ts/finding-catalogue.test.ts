@@ -762,22 +762,14 @@ describe("finding catalogue", () => {
     });
     const pieces: string[] = [];
     let expectedOffset = 0;
-    const request = (offset: number) => ({
-      ...empty,
-      request: {
-        kind: "evidence",
-        beforeOccurrenceIds: ["large"],
-        afterOccurrenceIds: [],
-        offset,
-      },
-    });
+
     const observed = conversation((prompt, index) => {
       expect(characters(prompt)).toBeLessThanOrEqual(1 << 20);
       if (index === 0) {
         expect(data<CatalogueData>(prompt).findings.before).toEqual([
           { occurrenceId: "large", detailsOmitted: true },
         ]);
-        return request(0);
+        return largeEvidenceRequest(0);
       }
       const payload = data<EvidenceData>(prompt);
       expect(payload.offset).toBe(expectedOffset);
@@ -786,7 +778,9 @@ describe("finding catalogue", () => {
       if (payload.nextOffset !== null)
         expect(payload.nextOffset).toBe(expectedOffset);
       pieces.push(payload.content);
-      return payload.nextOffset === null ? empty : request(payload.nextOffset);
+      return payload.nextOffset === null
+        ? empty
+        : largeEvidenceRequest(payload.nextOffset);
     });
     await matchScanFindings(
       { before: [original], after: [finding("new")] },
@@ -862,20 +856,13 @@ describe("finding catalogue", () => {
   test.each(["overlap", "skip"] as const)(
     "rejects an evidence cursor that would %s the previous page",
     async (scenario) => {
-      const request = (offset: number) => ({
-        ...empty,
-        request: {
-          kind: "evidence",
-          beforeOccurrenceIds: ["large"],
-          afterOccurrenceIds: [],
-          offset,
-        },
-      });
       const observed = conversation((prompt, index) => {
-        if (index === 0) return request(0);
+        if (index === 0) return largeEvidenceRequest(0);
         const nextOffset = data<EvidenceData>(prompt).nextOffset;
         expect(nextOffset).not.toBeNull();
-        return request(nextOffset! + (scenario === "overlap" ? -1 : 1));
+        return largeEvidenceRequest(
+          nextOffset! + (scenario === "overlap" ? -1 : 1),
+        );
       });
       await expect(
         matchScanFindings(
@@ -1184,4 +1171,14 @@ describe("finding catalogue", () => {
       ).rejects.toThrow("invalid related pair");
     }
   });
+});
+
+const largeEvidenceRequest = (offset: number) => ({
+  ...empty,
+  request: {
+    kind: "evidence",
+    beforeOccurrenceIds: ["large"],
+    afterOccurrenceIds: [],
+    offset,
+  },
 });

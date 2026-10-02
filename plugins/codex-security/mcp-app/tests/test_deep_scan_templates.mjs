@@ -1,18 +1,9 @@
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  loader: { ".md": "text" },
-  platform: "node",
-  write: false,
-});
-const { renderDedupPrompt, renderDiscoveryPrompt } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
+  new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
+  { loader: { ".md": "text" } },
 );
 
 const rendered = renderDiscoveryPrompt({
@@ -72,6 +63,7 @@ assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 
 const dedup = renderDedupPrompt({
   reducerLabel: "dedup-0001",
+  claimedWorkerIds: ["worker-001"],
   discoveries: [
     {
       workerId: "worker-001",
@@ -106,7 +98,7 @@ for (const field of [
 const previousReduction = firstJsonBlock(
   renderDedupPrompt({
     reducerLabel: "dedup-0002",
-    discoveries: [],
+    claimedWorkerIds: [],
   }),
 );
 assert.deepEqual(previousReduction, {
