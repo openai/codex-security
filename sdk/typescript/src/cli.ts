@@ -9208,6 +9208,7 @@ async function readDeepScanStop(
       nextStep: "To scan further, rerun with a higher --max-cost.",
     };
   }
+  if (result.threadId === null) return undefined;
   const response = await runWorkbench([
     "get-deep-scan",
     "--scan-id",

@@ -1200,6 +1200,7 @@ describe("ordinary scan composition", () => {
           );
         const completed = new ScanResult({
           ...result(id, options.outputDir!),
+          cost: undefined,
           turnResult: {
             model: "gpt-6-astra",
             usage: { input_tokens: 100, output_tokens: 10 },
@@ -1918,6 +1919,7 @@ describe("ordinary scan composition", () => {
         }
         const completed = new ScanResult({
           ...result(scanId, options.outputDir!),
+          cost: undefined,
           turnResult: {
             model: "gpt-6-astra",
             usage: { input_tokens: 10000, output_tokens: 2000 },
