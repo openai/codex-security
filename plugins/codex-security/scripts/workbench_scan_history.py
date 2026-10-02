@@ -313,6 +313,7 @@ def list_scans(
                 "mode": row["mode"],
                 "model": row["model"],
                 "parentScanId": row["parent_scan_id"],
+                "parentScanRole": row["parent_scan_role"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
                     "coverage": {
