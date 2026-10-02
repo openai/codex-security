@@ -1022,7 +1022,7 @@ describe("CLI authentication", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({
         status: "failed",
         code: "SCAN_FAILED",
-        message: message.includes("access token") ? "[redacted]" : message,
+        message,
       });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
@@ -1315,17 +1315,19 @@ describe("skill authentication", () => {
     },
   );
   test.each([
-    ["auto", false, undefined],
-    ["chatgpt", false, undefined],
-    ["chatgpt", true, undefined],
-    ["chatgpt", false, "synthetic"],
-    ["api-key", false, undefined],
-    ["api-key", true, undefined],
-    ["auto", false, "synthetic"],
-    ["api-key", false, "synthetic"],
+    ["auto", false, undefined, false],
+    ["chatgpt", false, undefined, false],
+    ["chatgpt", true, undefined, false],
+    ["chatgpt", false, "synthetic", false],
+    ["api-key", false, undefined, false],
+    ["api-key", true, undefined, false],
+    ["auto", false, "synthetic", false],
+    ["api-key", false, "synthetic", false],
+    ["api-key", false, "synthetic", true],
+    ["chatgpt", false, "synthetic", true],
   ] as const)(
-    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s)",
-    async (auth, loginFailure, provider) => {
+    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s, explicit: %p)",
+    async (auth, loginFailure, provider, explicitProvider) => {
       const repository = join(stateDirectory, "repository");
       await mkdir(repository);
       const ambientHome = join(stateDirectory, "ambient");
@@ -1360,7 +1362,14 @@ describe("skill authentication", () => {
           'forced_login_method = "api"',
         );
       }
-      if (provider !== undefined) {
+      const providerConfiguration = {
+        name: "Synthetic provider",
+        base_url: "https://example.test/v1",
+        wire_api: "responses",
+        env_key: "OPENAI_API_KEY",
+        requires_openai_auth: auth === "chatgpt",
+      };
+      if (provider !== undefined && !explicitProvider) {
         await writeFile(
           join(ambientHome, "config.toml"),
           [
@@ -1405,7 +1414,24 @@ describe("skill authentication", () => {
       };
       expect(
         await main(
-          ["patch", "Synthetic issue", "--auth", auth],
+          [
+            "patch",
+            "Synthetic issue",
+            "--auth",
+            auth,
+            ...(explicitProvider
+              ? [
+                  "--codex",
+                  `model_provider=${JSON.stringify(provider)}`,
+                  ...Object.entries(providerConfiguration).flatMap(
+                    ([key, value]) => [
+                      "--codex",
+                      `model_providers.${provider}.${key}=${JSON.stringify(value)}`,
+                    ],
+                  ),
+                ]
+              : []),
+          ],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -1446,7 +1472,7 @@ describe("skill authentication", () => {
         expect(
           requests.find((request) => request.method === "thread/start").params
             .modelProvider,
-        ).toBeUndefined();
+        ).toBe(explicitProvider ? provider : undefined);
       }
       expect(methods).toEqual([
         "initialize",

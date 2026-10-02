@@ -200,7 +200,7 @@ def python_arguments(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 def python_outline(text: str) -> list[str]:
     try:
         tree = ast.parse(text)
-    except (SyntaxError, ValueError, TypeError, MemoryError):
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         return []
 
     outline: list[str] = []

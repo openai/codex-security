@@ -94,8 +94,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--hidden",
         "--path-separator",
         "/",
+        # Prune Git metadata and its contents even when the scope starts inside .git.
         "--glob",
-        "!.git/**",
+        "!**/.git",
+        "--glob",
+        "!**/.git/**",
         "--",
         scope,
     ]
@@ -150,9 +153,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     "Repository contains a path that cannot fit in the file inventory"
                 )
             rows.append(path + b"\n")
-        rows.sort()
 
-    return write_inventory(output, rows)
+    return write_inventory(output, sorted(set(rows)))
 
 
 def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:

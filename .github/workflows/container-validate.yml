@@ -8,7 +8,6 @@ permissions:
 
 jobs:
   validate:
-    if: github.repository == 'openai/codex-security'
     name: validate-linux-${{ matrix.architecture }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -28,6 +27,40 @@ jobs:
           persist-credentials: false
       - name: Prepare native runtime
         uses: ./.github/actions/download-native
+
+      - name: Verify customer build excludes secrets and scan data
+        shell: bash
+        run: |
+          set -euo pipefail
+          ignore_file=.dockerignore
+          if [[ -f Dockerfile.dockerignore ]]; then
+            ignore_file=Dockerfile.dockerignore
+            if ! cmp -s .dockerignore "$ignore_file"; then
+              echo "Dockerfile-specific ignore rules must match the approved customer baseline." >&2
+              exit 1
+            fi
+          fi
+
+          if grep -Fq '!' "$ignore_file"; then
+            echo "Customer Docker ignore rules must not re-include excluded files: $ignore_file" >&2
+            exit 1
+          fi
+
+          for pattern in \
+            '**/.env' \
+            '**/.env.*' \
+            '**/.npmrc' \
+            '**/node_modules' \
+            '**/*.csv' \
+            '**/repositories.csv' \
+            '**/results' \
+            '**/security-scans' \
+            '**/state'; do
+            if ! grep -Fxq -- "$pattern" "$ignore_file"; then
+              echo "Missing customer Docker build exclusion in $ignore_file: $pattern" >&2
+              exit 1
+            fi
+          done
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -82,6 +115,26 @@ jobs:
 
       - name: Verify hardened Codex command sandbox
         run: bash docker/verify-container-sandbox.sh codex-security:release-candidate
+
+      - name: Reject interactive repository discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          if output="$(docker run --rm -t codex-security:release-candidate bulk-scan 2>&1)"; then
+            echo "The customer container must require a repository CSV." >&2
+            exit 1
+          else
+            status=$?
+          fi
+          if [[ "$status" -ne 2 ]]; then
+            printf 'The customer container returned unexpected exit status %s:\n%s\n' "$status" "$output" >&2
+            exit 1
+          fi
+          expected='codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.'
+          if [[ "${output//$'\r'/}" != "$expected" ]]; then
+            printf 'The customer container returned an unexpected repository discovery error:\n%s\n' "$output" >&2
+            exit 1
+          fi
 
       - name: Verify host-scoped Git credentials
         shell: bash

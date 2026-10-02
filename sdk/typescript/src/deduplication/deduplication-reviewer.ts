@@ -130,6 +130,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
+      findingIds: findings.map((finding) => finding.findingId),
       model: "gpt-5.6-luna",
       effort: "xhigh",
       prompt: screeningPrompt(findings),
@@ -141,6 +142,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
   async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
     return await this.runner.run({
       stage: "pair-review",
+      findingIds: findings.map((finding) => finding.findingId),
       model: "gpt-5.6-sol",
       effort: "high",
       prompt: pairReviewPrompt(findings),

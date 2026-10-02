@@ -107,7 +107,7 @@ jobs:
           node build.mjs
           node check.mjs
           native_node="$(command -v node)"
-          PATH= "$native_node" proof.mjs
+          PATH='' "$native_node" proof.mjs
       - name: Set up Node.js 20
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -127,7 +127,7 @@ jobs:
         run: |
           node check.mjs
           native_node="$(command -v node)"
-          PATH= "$native_node" proof.mjs
+          PATH='' "$native_node" proof.mjs
       - name: Upload verified native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

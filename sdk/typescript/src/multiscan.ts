@@ -24,7 +24,7 @@ import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import {
   OutputDirectoryNotEmptyError,
-  safeErrorMessage,
+  errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
@@ -455,10 +455,8 @@ async function runCampaign(
           }
           requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
           failure = requiresRecovery
-            ? safeErrorMessage(
-                `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`,
-              )
-            : safeErrorMessage(error);
+            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
+            : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
             await rm(checkout, { recursive: true, force: true });

@@ -6,7 +6,7 @@ import { gunzipSync } from "node:zlib";
 import {
   assertPublicPackageContents,
   MAX_EXPANDED_ASSET_BYTES,
-} from "./package-internal-references.mjs";
+} from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { regularTarListingLines } from "./package-tar-listing.mjs";
@@ -52,9 +52,11 @@ function tar(args, encoding = "buffer") {
 
 let offset = 0;
 const archiveFiles = new Map();
+const archiveMetadata = [];
 for (; offset + 512 <= archiveBytes.byteLength;) {
   const header = archiveBytes.subarray(offset, offset + 512);
   if (header.every((byte) => byte === 0)) {
+    archiveMetadata.push(header);
     offset += 512;
     continue;
   }
@@ -83,6 +85,12 @@ for (; offset + 512 <= archiveBytes.byteLength;) {
       path,
       archiveBytes.subarray(contentsStart, contentsStart + size),
     );
+    archiveMetadata.push(
+      header,
+      archiveBytes.subarray(contentsStart + size, nextOffset),
+    );
+  } else {
+    archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
   }
   offset = nextOffset;
 }
@@ -175,6 +183,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cli-help",
     "cli-scan-logs-json",
     "classify-severity",
     "classify-scan-severity",
@@ -347,7 +356,7 @@ for (const file of files) {
   }
 }
 
-assertPublicPackageContents(archiveBytes, archiveFiles);
+assertPublicPackageContents(archiveFiles, Buffer.concat(archiveMetadata));
 
 if (args.length === 1) {
   const smoke = spawnSync(
