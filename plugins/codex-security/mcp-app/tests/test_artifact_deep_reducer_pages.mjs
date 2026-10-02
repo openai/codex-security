@@ -9,10 +9,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importModule } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
+const {
+  deepReducerInputsInputSchema,
+  deepReducerPageResponse,
+  getCodexSecurityDeepReducerInputs,
+  getCodexSecurityDeepReducerInputsPage,
+  recordCodexSecurityDeepReduction,
+} = await importModule({
   stdin: {
     contents: `
       export * from "./artifact-deep-reducer-pages.ts";
@@ -20,20 +25,7 @@ const bundle = await build({
     `,
     resolveDir: new URL("../src/", import.meta.url).pathname,
   },
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const {
-  deepReducerInputsInputSchema,
-  deepReducerPageResponse,
-  getCodexSecurityDeepReducerInputs,
-  getCodexSecurityDeepReducerInputsPage,
-  recordCodexSecurityDeepReduction,
-} = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
-);
 
 for (const maxBytes of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
   assert.equal(

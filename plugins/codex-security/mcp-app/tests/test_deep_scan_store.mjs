@@ -1,20 +1,21 @@
+import { deferred } from "./deferred.mjs";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [new URL("../src/deep-scan/store.ts", import.meta.url).pathname],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { WorkbenchDeepScanStore, parseDeepScan } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
+  new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
 );
+
+const canonical = {
+  inScopeFilesPath:
+    "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
+  candidateLedgerPath:
+    "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
+};
 
 await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();
@@ -53,9 +54,8 @@ async function testBeginProtocolAndParsing() {
     threadId: "thread-fixture",
     scanRoot: "/fixture/scans",
   });
-  assert.equal(result.shouldStart, true);
-  assert.equal(result.run.scanId, scanId);
-  assert.deepEqual(result.run.config, {
+  assert.equal(result.scanId, scanId);
+  assert.deepEqual(result.config, {
     workers: 6,
     subagents: 3,
     stopAfterNoNew: 6,
@@ -98,7 +98,7 @@ async function testBeginProtocolAndParsing() {
     threadId: "thread-fixture",
     scanRoot: "/fixture/scans",
   });
-  assert.equal(joined.shouldStart, false);
+  assert.equal(joined.scanId, scanId);
   assert.equal(flagValue(joinedArgs, "--claim-token"), claimToken);
 }
 
@@ -375,12 +375,6 @@ async function testReplaceableDiscoveryFailureProtocol() {
 
 async function testCanonicalCommitProtocol() {
   const scanId = randomUUID();
-  const canonical = {
-    inScopeFilesPath:
-      "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-    candidateLedgerPath:
-      "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-  };
   const reducerId = randomUUID();
   const resultManifestPath =
     "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
@@ -758,12 +752,6 @@ function idempotentPersistenceScenarios() {
   const scanId = randomUUID();
   const workerId = randomUUID();
   const reducerId = randomUUID();
-  const canonical = {
-    inScopeFilesPath:
-      "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-    candidateLedgerPath:
-      "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-  };
   const worker = {
     id: workerId,
     kind: "discovery",
@@ -1089,12 +1077,4 @@ function repeatedFlagValues(args, flag) {
   return args.flatMap((value, index) =>
     value === flag ? [args[index + 1]] : [],
   );
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }

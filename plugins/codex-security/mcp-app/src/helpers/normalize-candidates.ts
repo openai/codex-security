@@ -1,3 +1,4 @@
+import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -16,14 +17,10 @@ import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import {
   expandHome,
   resolvedPath as resolveFilePath,
+  windowsFiles,
   windowsRelativePath,
 } from "./resolve-security-md";
-import { windowsBinding } from "../native";
-import {
-  pathText,
-  widePath,
-  windowsFileSystem,
-} from "../../../native/windows-files.mjs";
+import { pathText, widePath } from "../../../native/windows-files.mjs";
 
 const roles = [
   "entrypoint",
@@ -61,10 +58,6 @@ interface Candidate {
   instance?: string;
 }
 
-function object(value: unknown): value is Row {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -74,7 +67,6 @@ function stableJson(value: unknown): string {
 }
 
 const windows = process.platform === "win32";
-const windowsFiles = () => windowsFileSystem(windowsBinding());
 const fsPath = (value: string) =>
   windows ? widePath(value) : encodePosixPath(value);
 const readFile = (path: string) =>

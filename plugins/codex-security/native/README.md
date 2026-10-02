@@ -1,10 +1,8 @@
 # Native OS primitives
 
-These bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
+These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
 
-The nine Node-API 8 functions are typed in `binding.mts`. Paths remain byte buffers. `statAt` never follows the final symlink; device and inode numbers are decimal strings so JavaScript does not round them. `openAt` and `duplicate` create descriptors with close-on-exec set. Node owns subsequent reads, writes, `fstat`, `fsync`, and close calls. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
-
-`openAt` and `fileLock` retry EINTR, matching the current Python helpers. Other operations return their native errno. `readDescriptor` retries one interrupted Node read without losing earlier chunks. Blocking locks must run outside the main JavaScript event loop; a process that holds a lock releases it on close or exit. A Python signal handler can raise during a blocked call, so later routing must preserve cancellation through the worker lifecycle.
+The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
 
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
@@ -17,11 +15,7 @@ cargo +1.97.1 fmt --check --manifest-path plugins/codex-security/native/Cargo.to
 cargo +1.97.1 clippy --locked --manifest-path plugins/codex-security/native/Cargo.toml -- -D warnings
 ```
 
-The proof runs without Python. It checks directory replacement, byte paths, unreadable-file metadata, long raw symlinks, descriptor duplication, Node descriptor I/O, account lookup, contention, unlock, and process-death release. Linux exercises undecodable filename bytes; macOS uses valid UTF-8 filenames required by APFS. CI invokes it with an empty `PATH`. During migration, the same protocol can compare the existing Python lock helper:
-
-```sh
-node plugins/codex-security/native/proof.mjs python3 plugins/codex-security/scripts
-```
+The proof runs without Python. It checks current and named account lookup, missing accounts, and embedded-NUL rejection. CI invokes it with an empty `PATH`.
 
 Build outputs stay under ignored `target` and `dist` directories. Linux output directories include the C runtime: `linux-x64-gnu`, `linux-arm64-gnu`, `linux-x64-musl`, and `linux-arm64-musl`. The dependency-free `platform.mts` helper distinguishes glibc from musl using the Node diagnostic report header, without a subprocess. macOS and Windows retain their platform and architecture directories. Source, Cargo registry, and compiler paths are remapped before compilation; actual payload bytes are checked for private paths. Before an artifact is uploaded, run:
 
@@ -35,9 +29,9 @@ The `native-unix` workflow builds Linux artifacts in digest-pinned manylinux 2.2
 
 The `native-musl` workflow uses native x64 and arm64 Ubuntu workers with digest-pinned Rust 1.97.1 Alpine compiler images. Musl builds disable static CRT linkage so Node can load the shared library. After the ELF and private-path checks, each unchanged artifact runs the full proof in pinned Node 20.0.0 Alpine 3.17 and Node 22.13.0 Alpine 3.21 images, with musl 1.2.3 and 1.2.5 respectively. Compilation uses the locked registry offline; runtime containers mount only the source and artifact read-only. Python is absent, and proof processes receive an empty `PATH`.
 
-Windows uses `windows-binding.mts` and the same Rust crate. `WindowsHandle` owns a non-inheritable handle through Rust's `File`; explicit `close()` and garbage collection release it. Handles never cross into Node's CRT descriptor table. Paths and returned names are UTF-16LE buffers without a NUL terminator, preserving lone surrogates. Volume identities and file positions are decimal strings; file IDs retain all 128 bits in a buffer.
+Windows uses `windows-binding.mts` and the same Rust crate. `WindowsHandle` owns a non-inheritable handle through Rust's `File`; explicit `close()` and garbage collection release it. Handles never cross into Node's CRT descriptor table. Paths and returned names are UTF-16LE buffers without a NUL terminator, preserving lone surrogates. Volume identities are decimal strings; file IDs retain all 128 bits in a buffer.
 
-The binding exposes synchronous file and directory creation, attributes and reparse tags, identity and final/opened names, read/write/seek/size/EOF/flush, exact-handle rename and deletion, and exclusive whole-file locking. Rust's `File` supplies ordinary I/O, cursor-preserving truncation, `sync_all` for flush, and locks. Calls return numeric Windows errors, including 6 for closed handles and 33 for nonblocking lock contention. Buffer ranges, path encoding, and 64-bit seek arguments are checked before use. Overlapped handles are unsupported because pending operations could retain native buffers beyond the call. Path authorization, ancestor traversal, and reparse-point policy remain the caller's responsibility.
+The binding exposes synchronous file and recursive directory creation, attributes and reparse tags, identity and final/opened names, read/write, and exact-handle rename and deletion. Rust's `File` supplies ordinary I/O. Calls return numeric Windows errors, including 6 for closed handles. Buffer ranges and path encoding are checked before use. Overlapped handles are unsupported because pending operations could retain native buffers beyond the call. Path authorization, ancestor traversal, and reparse-point policy remain the caller's responsibility.
 
 Four additional operations preserve Windows strings at the Node boundary. `windowsArguments` returns the complete OS argument vector, including the executable and Node options, using Rust's CRT-compatible parser. `windowsEnvironment` reads one wide environment name and distinguishes an absent value (`null`) from an empty buffer. `windowsAbsolutePath` resolves against the native current directory and drive directories without requiring the destination to exist. `windowsDirectoryEntries` uses `std::fs::read_dir` and cached `DirEntry::file_type()` values without opening each child; names remain UTF-16LE, and construction or iteration failures return their numeric Windows error and an empty array. Directory symlinks and junctions have both directory and symbolic-link flags. The typed adapter exposes this enumerator through `entriesWithTypes`, which `resolve-security-md --list` uses on Windows.
 
@@ -51,11 +45,7 @@ node plugins/codex-security/native/check.mjs
 node --expose-gc plugins/codex-security/native/proof-windows.mjs
 ```
 
-The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. It checks PE architecture and private paths, then runs the same artifact on Node 22.13.0 and 20.0.0 with an empty `PATH`. The proof covers handle lifetime and garbage collection, ancestor replacement, junctions, exact-handle operations, raw UTF-16 and long paths, numeric errors, and whole-file locking and release. Blocking locks run in child processes. A separate Node 22 invocation uses the runner's Python to compare both directions of contention, unlock, close, and process-death release against the existing `msvcrt` byte-zero lock. Python is only an optional migration oracle:
-
-```sh
-node --expose-gc plugins/codex-security/native/proof-windows.mjs python plugins/codex-security/scripts
-```
+The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. It checks PE architecture and private paths, then runs the same artifact on Node 22.13.0 and 20.0.0 with an empty `PATH`. The proof covers handle lifetime and garbage collection, ancestor replacement, junctions, exact-handle operations, raw UTF-16 and long paths, and numeric errors.
 
 The build also compiles the test-only `windows-wide-launcher` Rust example. It starts a Node proof child with lone surrogates in arguments, environment values, and its working directory. That child checks complete directory iteration, distinct surrogate and replacement-character files, canonical paths, bounded reads, output truncation, and recursive long paths through the typed adapter. A Rust file guard with sharing disabled remains open while the child enumerates its name; an explicit data read fails with a sharing violation. Attribute-only access is not blocked by Windows file sharing. Adapter path and I/O tests run on the same matrix. The launcher cleans up the wide fixtures and is never included in the uploaded or bundled native payloads.
 
