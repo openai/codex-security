@@ -1,3 +1,7 @@
+import {
+  recordCodexSecurityWorkerScanDraft,
+  type ScanDraftInput,
+} from "../artifact-worker-scan-draft.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
 import {
@@ -38,9 +42,7 @@ import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
   scanDraftInputSchema,
-  type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 
 import {

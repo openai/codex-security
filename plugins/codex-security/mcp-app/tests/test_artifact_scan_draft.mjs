@@ -1,4 +1,5 @@
 import "./test_checkpoint_serialization.mjs";
+import "./test_artifact_worker_identity.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promises as fsPromises } from "node:fs";
@@ -16,13 +17,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
 const bundled = await build({
-  absWorkingDir: path.dirname(new URL(import.meta.url).pathname),
+  absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
   bundle: true,
   entryPoints: ["../src/artifact-scan-draft.ts"],
   format: "esm",
@@ -38,10 +40,21 @@ const {
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  recordCodexSecurityWorkerScanDraft,
   saveScanDraftCheckpoint,
   scanDraftInputSchema,
 } = module;
+
+const workerBundle = await build({
+  absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
+  bundle: true,
+  entryPoints: ["../src/artifact-worker-scan-draft.ts"],
+  format: "esm",
+  platform: "node",
+  write: false,
+});
+const { recordCodexSecurityWorkerScanDraft } = await import(
+  `data:text/javascript;base64,${Buffer.from(workerBundle.outputFiles[0].text).toString("base64")}`
+);
 
 const root = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-scan-draft-")),
