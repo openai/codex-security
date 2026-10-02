@@ -1,4 +1,8 @@
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { once } from "node:events";
+import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -6,8 +10,15 @@ import {
   type McpToolCallItem,
   type ThreadEvent,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
-import { runScanEvents } from "../src/api.js";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { runScanEvents, scanRuntimeCodexConfig } from "../src/api.js";
+import { parse as parseToml } from "smol-toml";
+import {
+  deepMerge,
+  resolveCodexProfile,
+  scanCompositionOverrides,
+  type JsonObject,
+} from "../src/config.js";
 import {
   CodexSecurityError,
   IncompleteScanError,
@@ -23,9 +34,22 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   completedEvents,
   createApiTestFixtures,
+  preparedRuntime,
   runEvents,
   type ScanObserverName,
 } from "./support/api-events.js";
+
+import {
+  createExecutionCodex,
+  prepareExecutionSource,
+  prepareDiscoveryExecution,
+  prepareMergeExecution,
+  type ScanPermissions,
+  type CodexClientLike,
+  type ExecutionPolicy,
+  type PreparedExecution,
+} from "../src/execution-preparation.js";
+import { readCodexTurn } from "../src/scan-events.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -475,47 +499,63 @@ describe("one-shot scan events", () => {
     expect(result.turnResult.status).toBe("completed");
   });
 
-  test("lets the workbench seal artifacts before validating completed scans", async () => {
-    const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
-    const events = completedEvents();
-    let finalized = false;
+  test.each(["unchanged", "unknown"] as const)(
+    "lets the workbench seal artifacts with %s final usage",
+    async (finalUsage) => {
+      const root = await temporaryDirectory();
+      const scanDir = join(root, "scan");
+      let streamFinished = false;
+      const events = (async function* () {
+        yield* completedEvents();
+        streamFinished = true;
+      })();
+      let finalized = false;
 
-    const result = await runScanEvents({
-      thread: {
-        id: null,
-        async runStreamed() {
-          return { events };
+      const result = await runScanEvents({
+        thread: {
+          id: null,
+          async runStreamed() {
+            return { events };
+          },
         },
-      },
-      events,
-      signal: new AbortController().signal,
-      scanDir,
-      pluginRoot: PLUGIN_ROOT,
-      expectation: {
-        repository: "/repository",
-        repositoryRevision: "deadbeef",
-        target: { kind: "repository", paths: [] },
-        mode: "standard",
-        pluginVersion: "0.1.0",
-      },
-      onFinalize: async (usage) => {
-        expect(usage).toMatchObject({
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-        });
-        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
-        await copyCompletedScan(root);
-        finalized = true;
-      },
-    });
+        events,
+        signal: new AbortController().signal,
+        scanDir,
+        pluginRoot: PLUGIN_ROOT,
+        model: "gpt-5.6-sol",
+        expectation: {
+          repository: "/repository",
+          repositoryRevision: "deadbeef",
+          target: { kind: "repository", paths: [] },
+          mode: "standard",
+          pluginVersion: "0.1.0",
+        },
+        onFinalize: async (usage) => {
+          expect(streamFinished).toBe(true);
+          expect(usage).toMatchObject({
+            input_tokens: 10,
+            cached_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            output_tokens: 3,
+          });
+          expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
+          await copyCompletedScan(root);
+          finalized = true;
+          return finalUsage === "unknown" ? null : undefined;
+        },
+      });
 
-    expect(finalized).toBe(true);
-    expect(result.threadId).toBe("thread-1");
-    expect(result.turnResult.status).toBe("completed");
-  });
+      expect(finalized).toBe(true);
+      expect(result.threadId).toBe("thread-1");
+      expect(result.turnResult.status).toBe("completed");
+      if (finalUsage === "unknown") {
+        expect(result.turnResult.usage).toBeNull();
+        expect(result.cost).toBeNull();
+      } else {
+        expect(result.cost?.inputTokens).toBe(10);
+      }
+    },
+  );
 
   test("reports a scan as started only after the thread starts", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
@@ -741,13 +781,6 @@ describe("one-shot scan events", () => {
   });
 
   test("fails the scan for every turn.failed error payload shape", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
     const payloads: Array<[string, unknown]> = [
       ["object message", { message: "model refused the turn" }],
       ["null", null],
@@ -762,7 +795,7 @@ describe("one-shot scan events", () => {
       const scanDir = await copyCompletedScan(await temporaryDirectory());
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
-        yield { type: "turn.completed", usage };
+        yield { type: "turn.started" };
         yield { type: "turn.failed", error } as unknown as ThreadEvent;
       }
       await expect(
@@ -773,16 +806,9 @@ describe("one-shot scan events", () => {
   });
 
   test("reuses only a nested turn.failed message and falls back otherwise", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
     async function* failedWith(error: unknown): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.completed", usage };
+      yield { type: "turn.started" };
       yield { type: "turn.failed", error } as unknown as ThreadEvent;
     }
 
@@ -1227,4 +1253,369 @@ describe("one-shot scan events", () => {
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
   });
+});
+
+describe("Deep worker terminal lifecycle", () => {
+  async function execution(
+    root: string,
+    policy: ExecutionPolicy,
+    overlay: boolean,
+    createCodex: Parameters<typeof createExecutionCodex>[0]["createCodex"],
+    settings?: {
+      configuration: JsonObject;
+      subagents: number;
+      environment: Record<string, string>;
+      permissions: ScanPermissions;
+    },
+  ): Promise<CodexClientLike> {
+    const codexHome = join(root, "codex-home");
+    await mkdir(codexHome, { mode: 0o700 });
+    const environment = {
+      PATH: process.env["PATH"] ?? "",
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      ...settings?.environment,
+    };
+    const configuration = settings?.configuration ?? {};
+    const source = prepareExecutionSource({
+      command: { command: process.execPath },
+      configuration,
+      environment,
+    });
+    const sessionConfig =
+      settings === undefined
+        ? {}
+        : scanRuntimeCodexConfig(
+            policy === "discovery"
+              ? scanCompositionOverrides(configuration, settings.subagents)
+              : configuration,
+            codexHome,
+            settings.permissions,
+          );
+    const session: PreparedExecution = {
+      policy,
+      source,
+      runtime: preparedRuntime(codexHome),
+      runtimeHome: codexHome,
+      effectiveConfig: {},
+      preflightConfig: {},
+      sessionConfig,
+      ...(settings === undefined
+        ? {}
+        : { inheritedPermissions: settings.permissions }),
+      ...(overlay ? { runtimeConfig: {} } : {}),
+      authentication: source.authentication,
+      approvalPolicy: "never",
+      python: process.execPath,
+      releaseCredentialHome: null,
+    };
+    const prepared =
+      settings === undefined || policy === "ordinary"
+        ? session
+        : policy === "merge"
+          ? prepareMergeExecution(session, settings.subagents)
+          : prepareDiscoveryExecution(session);
+    return createExecutionCodex({ surface: "sdk", createCodex }, prepared, {})
+      .codex;
+  }
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      [false, true].flatMap((resume) =>
+        [false, true].map((overlay) => ({ policy, resume, overlay })),
+      ),
+    ),
+  )(
+    "closes a completed real Deep subprocess: %j",
+    async ({ policy, resume, overlay }) => {
+      const root = await temporaryDirectory();
+      const preload = join(root, "held-open.mjs");
+      const events: ThreadEvent[] = [];
+      for await (const event of completedEvents()) events.push(event);
+      await writeFile(
+        preload,
+        [
+          "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
+          ...events.map(
+            (event) =>
+              `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
+          ),
+          "setInterval(() => {}, 1_000);",
+          "await new Promise(() => {});",
+        ].join("\n"),
+      );
+      const executable = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const codex = await execution(
+        root,
+        policy,
+        overlay,
+        (options) =>
+          new Codex({
+            ...options,
+            codexPathOverride: executable,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
+          }),
+      );
+      const thread = resume
+        ? codex.resumeThread!("thread-1", {})
+        : codex.startThread({});
+      const controller = new AbortController();
+      let child: childProcess.ChildProcess | undefined;
+      const originalSpawn = childProcess.spawn;
+      const spawning = spyOn(childProcess, "spawn").mockImplementation(((
+        ...args: Parameters<typeof childProcess.spawn>
+      ) => {
+        const spawned = originalSpawn(...args);
+        if (args[0] === executable) {
+          child = spawned;
+        }
+        return spawned;
+      }) as typeof childProcess.spawn);
+      try {
+        const { events } = await thread.runStreamed(
+          "Synthetic process fixture; no model.",
+          { signal: controller.signal },
+        );
+        await expect(
+          readCodexTurn({
+            thread,
+            events,
+          }),
+        ).resolves.toMatchObject({
+          threadId: "thread-1",
+          status: "completed",
+          finalResponse: "scan complete",
+        });
+        expect(child).toBeDefined();
+        // Codex removes child listeners while closing its stream iterator.
+        // Observe exit after that cleanup, or accept an exit already reported.
+        if (child!.exitCode === null && child!.signalCode === null)
+          await once(child!, "exit");
+      } finally {
+        spawning.mockRestore();
+        controller.abort();
+        if (child && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await once(child, "exit");
+        }
+      }
+    },
+  );
+
+  test.each(
+    (["ordinary", "discovery", "merge"] as const).flatMap((policy) =>
+      [false, true].map((resume) => ({ policy, resume })),
+    ),
+  )(
+    "isolates selected profile budgets and settings at child launches: %j",
+    async ({ policy, resume }) => {
+      const configuration: JsonObject = {
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile: "selected",
+        profiles: {
+          selected: {
+            model: "synthetic-selected-model",
+            model_reasoning_effort: "high",
+            features: {
+              multi_agent_v2: {
+                enabled: true,
+                max_concurrent_threads_per_session: 9,
+              },
+            },
+            default_permissions: "profile-permissions",
+            permissions: { profile: { filesystem: { ":root": "write" } } },
+            shell_environment_policy: {
+              set: { SYNTHETIC_PROFILE_SETTING: "selected" },
+            },
+          },
+        },
+        mcp_servers: { synthetic: { command: "synthetic-user-mcp" } },
+      };
+      const original = structuredClone(configuration);
+      const executable = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      await Promise.all(
+        [0, 2].map(async (subagents) => {
+          const root = await temporaryDirectory();
+          const capture = join(root, "child.json");
+          const preload = join(root, "capture-child.mjs");
+          const events: ThreadEvent[] = [];
+          for await (const event of completedEvents()) events.push(event);
+          await writeFile(
+            preload,
+            [
+              'import { writeFileSync } from "node:fs";',
+              "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
+              `writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv, key: process.env.CODEX_API_KEY, inherited: process.env.SYNTHETIC_INHERITED }));`,
+              ...events.map(
+                (event) =>
+                  `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
+              ),
+              "process.exit(0);",
+            ].join("\n"),
+          );
+          const permissions: ScanPermissions = {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "read",
+              [join(root, "allowed")]: "write",
+            },
+            network: { enabled: false },
+          };
+          const codex = await execution(
+            root,
+            policy,
+            false,
+            (options) =>
+              new Codex({
+                ...options,
+                codexPathOverride: executable,
+                env: {
+                  ...options.env,
+                  NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                },
+              }),
+            {
+              configuration,
+              subagents,
+              permissions,
+              environment: {
+                OPENAI_API_KEY: `synthetic-key-${subagents}`,
+                SYNTHETIC_INHERITED: `inherited-${subagents}`,
+              },
+            },
+          );
+          const thread = resume
+            ? codex.resumeThread!("thread-1", { approvalPolicy: "never" })
+            : codex.startThread({ approvalPolicy: "never" });
+          const streamed = await thread.runStreamed(
+            "Synthetic settings fixture; no model.",
+            {},
+          );
+          await expect(
+            readCodexTurn({ thread, events: streamed.events }),
+          ).resolves.toMatchObject({ status: "completed" });
+          const observed = JSON.parse(await readFile(capture, "utf8")) as {
+            argv: string[];
+            key: string;
+            inherited: string;
+          };
+          expect(observed.key).toBe(`synthetic-key-${subagents}`);
+          expect(observed.inherited).toBe(`inherited-${subagents}`);
+          expect(observed.argv.includes("resume")).toBe(resume);
+          let config: JsonObject = {};
+          for (let index = 0; index < observed.argv.length; index++) {
+            if (
+              observed.argv[index] === "--config" ||
+              observed.argv[index] === "-c"
+            )
+              config = deepMerge(
+                config,
+                parseToml(observed.argv[++index]!) as JsonObject,
+              );
+          }
+          if (policy !== "ordinary") {
+            expect(config).not.toHaveProperty("profile");
+            expect(config).not.toHaveProperty("profiles");
+          }
+          expect(resolveCodexProfile(config)).toMatchObject({
+            model: "synthetic-selected-model",
+            model_reasoning_effort: "high",
+            features: {
+              multi_agent_v2: {
+                enabled: true,
+                max_concurrent_threads_per_session:
+                  policy === "ordinary" ? 9 : subagents + 1,
+              },
+            },
+            approval_policy: "never",
+            default_permissions: "codex_security_scan",
+            permissions: { codex_security_scan: permissions },
+            shell_environment_policy: {
+              set: { SYNTHETIC_PROFILE_SETTING: "selected" },
+            },
+            mcp_servers: {
+              synthetic: { command: "synthetic-user-mcp" },
+              ...(policy === "ordinary"
+                ? {}
+                : { "codex-security": { command: "node", enabled: false } }),
+            },
+          });
+          expect(
+            (config["permissions"] as JsonObject)["profile"],
+          ).toBeUndefined();
+        }),
+      );
+      expect(configuration).toEqual(original);
+    },
+  );
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      (["before", "active", "completed"] as const).map((when) => ({
+        policy,
+        when,
+      })),
+    ),
+  )(
+    "forwards only active Deep worker cancellation: %j",
+    async ({ policy, when }) => {
+      const root = await temporaryDirectory();
+      const parent = new AbortController();
+      const cancellation = new Error("Synthetic coordinator cancellation.");
+      if (when === "before") parent.abort(cancellation);
+      let workerSignal: AbortSignal | undefined;
+      let closed = false;
+      const codex = await execution(root, policy, false, () => ({
+        startThread: () => ({
+          id: "thread-1",
+          async runStreamed(_input, options) {
+            workerSignal = options.signal;
+            return {
+              events: (async function* () {
+                try {
+                  workerSignal!.throwIfAborted();
+                  yield { type: "thread.started", thread_id: "thread-1" };
+                  workerSignal!.throwIfAborted();
+                  yield { type: "turn.completed", usage: null };
+                  throw new Error(
+                    "A completed worker must close its iterator.",
+                  );
+                } finally {
+                  closed = true;
+                  if (when === "completed") parent.abort(cancellation);
+                }
+              })(),
+            };
+          },
+        }),
+      }));
+      const thread = codex.startThread({});
+      const { events } = await thread.runStreamed("Synthetic events.", {
+        signal: parent.signal,
+      });
+      const result = readCodexTurn({
+        thread,
+        events,
+        onEvent: (event) => {
+          if (when === "active" && event.type === "thread.started")
+            parent.abort(cancellation);
+        },
+      });
+      if (when === "completed")
+        await expect(result).resolves.toMatchObject({ status: "completed" });
+      else await expect(result).rejects.toBe(cancellation);
+      expect(closed).toBe(true);
+      expect(workerSignal).not.toBe(parent.signal);
+      expect(workerSignal!.aborted).toBe(when !== "completed");
+      expect(parent.signal.reason).toBe(cancellation);
+    },
+  );
 });

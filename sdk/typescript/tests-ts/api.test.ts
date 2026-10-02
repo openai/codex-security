@@ -2991,6 +2991,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const updates: DeepScanProgress[] = [];
+    const parentProgress: ScanProgress[] = [];
     const environment = { CODEX_CLI_PATH: process.execPath };
     const client = new TestClient(
       {},
@@ -3009,6 +3010,9 @@ describe("CodexSecurity orchestration", () => {
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 2 };
+          }
           if (args[0] === "get-scan") {
             return {
               scan: {
@@ -3028,8 +3032,27 @@ describe("CodexSecurity orchestration", () => {
           startThread: () => ({
             id: null,
             async runStreamed() {
-              await Bun.sleep(0);
-              throw new Error("deep progress captured");
+              return {
+                events: (async function* (): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: "thread-1" };
+                  for (const phase of ["discovery", "reporting"]) {
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        id: `parent-${phase}`,
+                        type: "agent_message",
+                        text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+                          phase,
+                          filesCompleted: 2,
+                          filesTotal: 2,
+                        })}`,
+                      },
+                    };
+                  }
+                  await Bun.sleep(0);
+                  throw new Error("deep progress captured");
+                })(),
+              };
             },
           }),
         }),
@@ -3040,10 +3063,15 @@ describe("CodexSecurity orchestration", () => {
       client.run(repository, {
         mode: "deep",
         onDeepProgress: (progress) => updates.push(progress),
+        onProgress: (progress) => parentProgress.push(progress),
       }),
     ).rejects.toThrow("deep progress captured");
     await Bun.sleep(0);
     expect(updates).toEqual([{ completed: 3, active: 2, maximum: 40 }]);
+    expect(parentProgress.slice(-2)).toEqual([
+      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
+      { phase: "reporting", filesCompleted: 2, filesTotal: 2 },
+    ]);
     await client.close();
   });
 
