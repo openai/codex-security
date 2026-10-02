@@ -79,6 +79,7 @@ export async function policyFixture(): Promise<{
   generate(options?: {
     path?: string;
     pluginPath?: string;
+    pluginRoot?: string;
     run?: (
       stage: SecurityPolicyStage,
       prompt: string,
@@ -119,7 +120,7 @@ export async function policyFixture(): Promise<{
         policyPaths: sources.policyPaths,
         gitMetadataPaths: sources.gitMetadataPaths,
         outputDir,
-        pluginRoot: PLUGIN_ROOT,
+        pluginRoot: options.pluginRoot ?? PLUGIN_ROOT,
         pluginPath: options.pluginPath,
         guidance: "Synthetic inherited guidance",
         revision: null,

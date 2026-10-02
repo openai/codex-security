@@ -1,4 +1,6 @@
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { semanticFinding } from "./helpers/semantic-scan.js";
+import { prepareScanFindings } from "../src/scan-semantics.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -38,7 +40,6 @@ import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -291,36 +292,22 @@ describe("plugin runtime preparation", () => {
   });
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+    const findings = prepareScanFindings([
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-a" },
+      }),
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-b" },
+      }),
+    ]);
+
+    expect(
+      findings.map(
+        (finding) => (finding["identity"] as { anchor: string }).anchor,
       ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const source =
-      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string, fallback: string) => value || fallback) as (
-      findings: Array<{
-        title: string;
-        extensions: { candidateId: string };
-      }>,
-    ) => Array<{ identity: { anchor: string } }>;
-
-    const findings = buildFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
-    ]);
-
-    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
-      "candidate-a",
-      "candidate-b",
-    ]);
+    ).toEqual(["candidate-a", "candidate-b"]);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
