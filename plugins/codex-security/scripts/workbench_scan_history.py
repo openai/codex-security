@@ -269,9 +269,10 @@ def list_scans(
     if args is not None and args.query:
         query = args.query.strip().casefold()
         if query:
+            connection.create_function("codex_security_casefold", 1, str.casefold)
             clauses.append(
                 "(instr(lower(scans.target_path), ?) > 0 "
-                "OR instr(lower(COALESCE(scans.name, '')), ?) > 0 "
+                "OR instr(codex_security_casefold(COALESCE(scans.name, '')), ?) > 0 "
                 "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
                 "OR instr(lower(scans.scope), ?) > 0 "
                 "OR instr(lower(scans.mode), ?) > 0)"
