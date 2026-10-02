@@ -1794,6 +1794,7 @@ export class CodexSecurity {
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
+        modelProvider,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1953,6 +1954,7 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
         authentication,
+        modelProvider,
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
@@ -3648,6 +3650,7 @@ interface ScanEventRunOptions {
   pluginRoot: string;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
+  modelProvider?: unknown;
   workbenchValidated?: boolean;
   model?: string;
   expectedFilesTotal?: number;
@@ -3678,7 +3681,11 @@ export async function runScanEvents(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
-        if (!tacStatusReported) {
+        if (
+          !tacStatusReported &&
+          options.modelProvider !== "amazon-bedrock" &&
+          options.authentication?.method !== "aws_credentials"
+        ) {
           const tacStatus = trustedAccessStatusFromEvent(event);
           if (tacStatus !== null) {
             tacStatusReported = true;
@@ -3978,6 +3985,7 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
   discoveryPrompt?: string,
+  modelProvider?: unknown,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -3985,6 +3993,11 @@ function scanPrompt(
     discoveryPrompt ??
       `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
+    ...(modelProvider === "amazon-bedrock"
+      ? [
+          "This scan uses Amazon Bedrock with AWS authentication. Skip the ChatGPT account Daybreak access advisory, including get_codex_security_daybreak_access and get_tac_status; it does not check Bedrock model access or access to local scan results. OpenAI login is not required for this scan. Report any actual provider error unchanged.",
+        ]
+      : []),
     ...(mode === "deep"
       ? [
           `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
@@ -4479,6 +4492,19 @@ export function classifyConnectionFailure(
   if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
     return "unknown";
   }
+  if (
+    /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu.test(
+      message,
+    )
+  ) {
+    return "unauthorized";
+  }
+  if (
+    /\b(?:AccessDeniedException|NotAuthorized|OptInRequired)\b/iu.test(message)
+  ) {
+    return "forbidden";
+  }
+  if (/\bThrottlingException\b/iu.test(message)) return "rate_limited";
   if (
     /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
       message,

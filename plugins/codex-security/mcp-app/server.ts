@@ -632,7 +632,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Check Codex Security Daybreak Access",
       description:
-        "Check this account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan.",
+        "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
       inputSchema: z.object({}).strict(),
       annotations: {
         readOnlyHint: true,
@@ -690,7 +690,7 @@ export function createCodexSecurityServer(): McpServer {
       };
       const warning =
         access.status === "not_granted"
-          ? " This check is advisory: a scan may run, but protected results may not be displayable."
+          ? " This ChatGPT account check is advisory: a scan may run, but protected results associated with this account may not be displayable. It does not determine Amazon Bedrock model access or access to local CLI results."
           : "";
       return {
         content: [
