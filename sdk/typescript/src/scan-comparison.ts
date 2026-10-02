@@ -178,8 +178,10 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
 
 interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
-  "cyberAccessProgram" | "environment" | "model" | "signal"
+  "environment" | "model" | "signal"
 > {
+  /** @internal Cyber access program already selected by the calling scan. */
+  cyberAccessProgram?: CyberAccessProgram;
   scanId: string;
   repository: string;
   previousFindings: readonly Record<string, unknown>[];
