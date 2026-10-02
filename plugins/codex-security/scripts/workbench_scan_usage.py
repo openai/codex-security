@@ -65,12 +65,6 @@ def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
     return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
 
 
-def measured_scan_cost_json(usage: Mapping[str, Any]) -> str:
-    """Keep usage in the already-migrated scans.cost_json column."""
-
-    return json.dumps({"usage": dict(usage)}, separators=(",", ":"), allow_nan=False)
-
-
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
