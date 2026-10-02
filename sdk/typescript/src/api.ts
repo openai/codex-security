@@ -30,6 +30,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { isRecord } from "./record.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -4430,10 +4431,6 @@ function environmentApiKeyEntry(
     if (value) return { source: requested, value };
   }
   return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function reconnectAttempt(message: string): [number, number] | null {

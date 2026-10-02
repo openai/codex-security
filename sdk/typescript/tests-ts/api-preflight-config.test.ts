@@ -1,3 +1,4 @@
+import { pythonExecutable } from "./support/python.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdir,
@@ -150,11 +151,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter =
-        process.env["PYTHON"] ??
-        Bun.which("python3") ??
-        Bun.which("python") ??
-        Bun.which("py");
+      const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
       const result = spawnSync(
         interpreter!,

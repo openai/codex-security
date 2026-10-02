@@ -702,10 +702,8 @@ test.each(["result", "error"] as const)(
       const inputStream = new PassThrough();
       const messages: Message[] = [];
       let release!: () => void;
-      let started!: () => void;
-      const writing = new Promise<void>((resolve) => {
-        started = resolve;
-      });
+      const { promise: writing, resolve: started } =
+        Promise.withResolvers<void>();
       const output = new Writable({
         write(chunk, _encoding, callback) {
           messages.push(JSON.parse(chunk.toString()));

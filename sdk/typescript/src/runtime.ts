@@ -58,8 +58,10 @@ import {
   type ProtectedScanPathKind,
   SandboxUnavailableError,
   errorMessage,
+  abortReason,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import {
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -394,9 +396,7 @@ function windowsCredentialAclFailure(error: unknown): string {
   const detail =
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
-      : error instanceof Error
-        ? error.message
-        : String(error);
+      : errorMessage(error);
   const normalized = errorMessage(detail)
     .replace(/\s+/gu, " ")
     .trim()
@@ -3206,21 +3206,10 @@ function processErrorDetail(error: unknown): string {
   return String(error) || "unknown error";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function nodeErrorCode(error: unknown): string | undefined {
   return isRecord(error) && typeof error["code"] === "string"
     ? error["code"]
     : undefined;
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function throwIfSignalAborted(signal?: AbortSignal): void {

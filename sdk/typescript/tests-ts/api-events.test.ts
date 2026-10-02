@@ -642,10 +642,8 @@ describe("one-shot scan events", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const abortController = new AbortController();
     const reconnects: Array<[number, number]> = [];
-    let notifyReconnect!: () => void;
-    const reconnectSeen = new Promise<void>((resolve) => {
-      notifyReconnect = resolve;
-    });
+    const { promise: reconnectSeen, resolve: notifyReconnect } =
+      Promise.withResolvers<void>();
     async function* interruptedEvents(): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-2" };
       yield { type: "error", message: "Reconnecting... 2/5" };
@@ -713,14 +711,9 @@ describe("one-shot scan events", () => {
   test("keeps the Codex stream alive through reconnect notifications", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const reconnects: Array<[number, number]> = [];
-    let release!: () => void;
-    const paused = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let notifyReconnect!: () => void;
-    const reconnectSeen = new Promise<void>((resolve) => {
-      notifyReconnect = resolve;
-    });
+    const { promise: paused, resolve: release } = Promise.withResolvers<void>();
+    const { promise: reconnectSeen, resolve: notifyReconnect } =
+      Promise.withResolvers<void>();
     let closed = false;
     async function* reconnectingEvents(): AsyncGenerator<ThreadEvent> {
       try {

@@ -31,10 +31,8 @@ describe("delegated scan attribution", () => {
       await mkdir(ambientHome);
       let active = 0;
       let maximumActive = 0;
-      let releaseConcurrentScans!: () => void;
-      const concurrentScans = new Promise<void>((resolve) => {
-        releaseConcurrentScans = resolve;
-      });
+      const { promise: concurrentScans, resolve: releaseConcurrentScans } =
+        Promise.withResolvers<void>();
 
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {

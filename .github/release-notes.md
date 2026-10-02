@@ -45,6 +45,7 @@
 - bump the codex group across 3 directories with 2 updates ([#1195](https://github.com/openai/codex-security/pull/1195))
 - remove unused OS primitives and proofs ([#1192](https://github.com/openai/codex-security/pull/1192))
 - remove unused scan machinery and share fixtures ([#1193](https://github.com/openai/codex-security/pull/1193))
+- consolidate helpers and adjacent tooling ([#1194](https://github.com/openai/codex-security/pull/1194))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

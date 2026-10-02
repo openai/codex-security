@@ -1,3 +1,4 @@
+import { pythonExecutable } from "./support/python.js";
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -25,15 +26,6 @@ function git(directory: string, ...args: string[]): void {
     windowsHide: true,
   });
   expect(result.status, result.stderr).toBe(0);
-}
-
-function pythonExecutable(): string | null {
-  return (
-    process.env["PYTHON"] ??
-    Bun.which("python3") ??
-    Bun.which("python") ??
-    Bun.which("py")
-  );
 }
 
 test("writes nested Git pointers as UTF-8 independently of the locale", () => {

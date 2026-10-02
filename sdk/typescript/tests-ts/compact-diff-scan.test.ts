@@ -1,4 +1,5 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { git } from "./git-fixture.js";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -34,20 +35,6 @@ function createRepository(): { root: string; repository: string } {
   mkdirSync(repository);
   git(repository, "init", "-q");
   return { root, repository };
-}
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
 }
 
 function writeSource(

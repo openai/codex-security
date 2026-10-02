@@ -45,6 +45,7 @@ import {
   FakeSignals,
 } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson as readJsonFile } from "./support/json.js";
 
 const temporary: string[] = [];
 const components: ComponentPlan["components"] = [
@@ -104,9 +105,7 @@ async function largePlanningFixture() {
   return { ...paths, files: files.sort() };
 }
 
-async function json(path: string) {
-  return JSON.parse(await readFile(path, "utf8"));
-}
+const json = readJsonFile<any>;
 
 function finding(
   id: string,
@@ -303,10 +302,8 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   let active = 0,
     peak = 0,
     closed = 0;
-  let unblock!: () => void;
-  const bothStarted = new Promise<void>((resolve) => {
-    unblock = resolve;
-  });
+  const { promise: bothStarted, resolve: unblock } =
+    Promise.withResolvers<void>();
   const seen: ScanOptions[] = [];
   const summary = await scan(paths, {
     workers: 2,

@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_remediation as remediation
+from deep_scan_workbench import non_negative_int
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -393,13 +394,6 @@ def parse_args(description: str) -> argparse.Namespace:
         index = arguments.index("--user-context-stdin")
         arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
     return parser.parse_args(arguments)
-
-
-def non_negative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("expected a non-negative integer")
-    return parsed
 
 
 def positive_int(value: str) -> int:
