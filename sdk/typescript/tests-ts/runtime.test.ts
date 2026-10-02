@@ -1789,7 +1789,7 @@ describe("plugin runtime preparation", () => {
       "missing registration",
       "extra staged file",
     ])("repairs %s before reusing the installation", async (damage) => {
-      const { home, staged, installed, record, calls, bootstrap } =
+      const { selected, home, staged, installed, record, calls, bootstrap } =
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
       switch (damage) {
@@ -1831,11 +1831,64 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
         installedPath: installed,
         version: "1.2.3",
+        pluginRoot: selected,
       });
       await bootstrap();
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
     });
   });
+
+  test.each(["unchanged", "different source", "edited source"])(
+    "preserves installed plugin contents across %s selections",
+    async (selection) => {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      await mkdir(home);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        WINDIR: process.env["WINDIR"],
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_HOME: home,
+        TMPDIR: root,
+        TMP: root,
+        TEMP: root,
+      };
+      const codexCommand = resolveCodexCommand(environment);
+      const options = { codexCommand, environment, isolateSelection: true };
+      const first = await bootstrapPlugin(home, selected, options);
+      const identity = await stat(first.installedRoot, { bigint: true });
+      const secondSource =
+        selection === "different source"
+          ? await plugin(join(root, "another-source"))
+          : selected;
+      if (selection !== "unchanged")
+        await writeFile(
+          join(secondSource, "scripts", "helper.py"),
+          "print('new selection')\n",
+        );
+      const second = await bootstrapPlugin(home, secondSource, options);
+      expect(second.installedRoot === first.installedRoot).toBe(
+        selection === "unchanged",
+      );
+      const restored = await bootstrapPlugin(
+        home,
+        join(first.marketplaceRoot, "plugins", "codex-security"),
+        options,
+      );
+      expect(restored.installedRoot).toBe(first.installedRoot);
+      const current = await stat(first.installedRoot, { bigint: true });
+      expect([current.dev, current.ino]).toEqual([identity.dev, identity.ino]);
+      expect(
+        await readFile(
+          join(first.installedRoot, "scripts", "helper.py"),
+          "utf8",
+        ),
+      ).toBe("print('ok')\n");
+    },
+  );
 
   test("does not preserve a different marketplace when numeric identities collide", async () => {
     const root = await temporaryDirectory();

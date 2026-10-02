@@ -1,17 +1,22 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
-import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
+import {
+  acquireCodexSecurityCredentialHomeLock,
+  resolveCodexCommand,
+  setCodexSecurityCredentialLogout,
+} from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
 import {
   completedEvents,
+  copyPluginVariant,
   createApiTestFixtures,
   preparedRuntime,
 } from "./support/api-events.js";
@@ -21,6 +26,93 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
+  test("reused managed clients restore their selected plugin before preparation and native startup", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const state = join(root, "state");
+    await mkdir(repository);
+    const selections = await Promise.all(
+      ["selected-a", "selected-b"].map((name) => copyPluginVariant(root, name)),
+    );
+    const prepared: string[] = [];
+    const launched: string[] = [];
+    let outputs = 0;
+    const clients = selections.map(
+      (pluginPath) =>
+        new TestClient(
+          { pluginPath },
+          {
+            environment: {
+              CODEX_SECURITY_STATE_DIR: state,
+              OPENAI_API_KEY: "synthetic-plugin-selection-key",
+            },
+            resolvePluginPython: async () => {
+              const config = parseToml(
+                await readFile(
+                  join(state, "codex-home", "config.toml"),
+                  "utf8",
+                ),
+              );
+              const marketplace = Object.values(
+                config["marketplaces"] as Record<string, { source: string }>,
+              )[0]!;
+              const record = JSON.parse(
+                await readFile(
+                  join(marketplace.source, "installed-plugin.json"),
+                  "utf8",
+                ),
+              );
+              prepared.push(record.pluginRoot);
+              return process.execPath;
+            },
+            prepareOutputDir: async () => {
+              const directory = join(root, `scan-${++outputs}`);
+              await mkdir(directory, { mode: 0o700 });
+              return directory;
+            },
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options) => ({
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  const servers = JSON.parse(
+                    execFileSync(
+                      resolveCodexCommand({}).command,
+                      ["mcp", "list", "--json"],
+                      {
+                        env: options.env,
+                        cwd: root,
+                        encoding: "utf8",
+                      },
+                    ),
+                  ) as { name: string; transport: { args: string[] } }[];
+                  launched.push(
+                    servers.find(({ name }) => name === "synthetic-plugin")!
+                      .transport.args[0]!,
+                  );
+                  throw new Error("synthetic plugin selection observed");
+                },
+              }),
+            }),
+          },
+        ),
+    );
+    try {
+      for (const client of [clients[0]!, clients[1]!, clients[0]!])
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic plugin selection observed",
+        );
+      expect(prepared).toEqual([
+        selections[0]!,
+        selections[1]!,
+        selections[0]!,
+      ]);
+      expect(launched).toEqual(["selected-a", "selected-b", "selected-a"]);
+    } finally {
+      await Promise.all(clients.map((client) => client.close()));
+    }
+  });
+
   test.each(["direct", "profile"])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
@@ -114,15 +206,13 @@ describe("CodexSecurity orchestration", () => {
           ...overrides.model_providers["synthetic.provider"],
           auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
         };
-        expect(parseToml(captured!.configOverrides![0]!)).toEqual({
+        expect(captured!.config).toMatchObject({
+          model_provider: "synthetic.provider",
           model_providers: { "synthetic.provider": provider },
         });
-        if (profile) {
-          expect(captured?.config?.["profile"]).toBe("review");
-          expect(captured?.config?.["profiles"]).toEqual({
-            review: { model_provider: "synthetic.provider" },
-          });
-        } else {
+        expect(captured!.config).not.toHaveProperty("profile");
+        expect(captured!.config).not.toHaveProperty("profiles");
+        if (!profile) {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
@@ -222,15 +312,11 @@ describe("CodexSecurity orchestration", () => {
                   },
                 },
               });
-              const codexConfig = await readFile(
-                join(codexHome!, "config.toml"),
-                "utf8",
-              );
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
-              expect(codexConfig).not.toContain("model_reasoning_summary");
-              expect(codexConfig).not.toContain("show_raw_agent_reasoning");
-              expect(options.config).not.toHaveProperty("projects");
-              expect(options.config).not.toHaveProperty("permissions");
+              expect(options.config).toHaveProperty("projects");
+              expect(options.config).toHaveProperty(
+                "permissions.codex_security_scan",
+              );
               expect(options.config).toMatchObject({
                 default_permissions: "codex_security_scan",
                 allow_login_shell: false,
@@ -432,35 +518,43 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    if (++scansStarted === 2) {
-                      expect(
-                        existsSync(
-                          join(credentialHome, ".codex-security-scan.lock"),
-                        ),
-                      ).toBe(false);
-                      releaseScans();
-                    }
-                    const credentialConfig = parseToml(
-                      await readFile(
-                        join(credentialHome, "config.toml"),
-                        "utf8",
-                      ),
-                    );
-                    expect(credentialConfig["model"]).toBeUndefined();
-                    const before = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(before["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    await concurrentScans;
-                    const after = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(after["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    throw new Error("parallel managed scan reached");
+                    return {
+                      events: (async function* () {
+                        const credentialConfig = parseToml(
+                          await readFile(
+                            join(credentialHome, "config.toml"),
+                            "utf8",
+                          ),
+                        );
+                        expect(credentialConfig["model"]).toBe(expectedModel);
+                        const before = parseToml(
+                          await readFile(deepScanConfigPath!, "utf8"),
+                        );
+                        expect(before["deep_scan"]).toMatchObject({
+                          workers: index + 2,
+                        });
+                        yield {
+                          type: "thread.started",
+                          thread_id: `synthetic-${index}`,
+                        };
+                        if (++scansStarted === 2) {
+                          expect(
+                            existsSync(
+                              join(credentialHome, ".codex-security-scan.lock"),
+                            ),
+                          ).toBe(false);
+                          releaseScans();
+                        }
+                        await concurrentScans;
+                        const after = parseToml(
+                          await readFile(deepScanConfigPath!, "utf8"),
+                        );
+                        expect(after["deep_scan"]).toMatchObject({
+                          workers: index + 2,
+                        });
+                        throw new Error("parallel managed scan reached");
+                      })(),
+                    };
                   },
                 }),
               };
@@ -652,3 +746,113 @@ process.exit(process.exitCode ?? 0);
     }
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "managed authentication waits for native startup and restores its selected settings",
+  async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    const capture = join(root, "status-configs.json");
+    const executable = join(root, "synthetic-status");
+    const node = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    await writeFile(
+      executable,
+      `#!${node}
+const fs = require("node:fs");
+const capture = ${JSON.stringify(capture)};
+const seen = fs.existsSync(capture) ? JSON.parse(fs.readFileSync(capture, "utf8")) : [];
+seen.push(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME, "config.toml"), "utf8"));
+fs.writeFileSync(capture, JSON.stringify(seen));
+console.log(seen.length === 1 ? "Not logged in" : "Logged in using ChatGPT");
+process.exit(seen.length === 1 ? 1 : 0);
+`,
+    );
+    await chmod(executable, 0o700);
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+        resolveCodexCommand: () => ({ command: executable }),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          plugin: {
+            ...preparedRuntime(home).plugin,
+            marketplaceName: "codex-security-sdk-synthetic-selection",
+            marketplaceRoot: join(home, "selected-marketplace"),
+          },
+          credentialsAvailable: false,
+          environment: { CODEX_HOME: home },
+          configPath: join(root, "preflight.toml"),
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        createCodex: () => {
+          throw new Error("synthetic authenticated execution reached");
+        },
+      },
+    );
+    try {
+      const sharedConfig = join(home, "config.toml");
+      const selectedByOtherScan = 'model = "synthetic-other-scan"\n';
+      await writeFile(sharedConfig, selectedByOtherScan);
+      const release = await acquireCodexSecurityCredentialHomeLock(home);
+      let settled = false;
+      const outcome = client
+        .run(repository)
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        // Another native process still owns the shared configuration.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(settled).toBe(false);
+        expect(await readFile(sharedConfig, "utf8")).toBe(selectedByOtherScan);
+        expect(existsSync(capture)).toBe(false);
+      } finally {
+        await release();
+      }
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(((await outcome) as Error).message).toContain(
+        "No credentials were found",
+      );
+      await writeFile(
+        join(home, "config.toml"),
+        'forced_login_method = "chatgpt"\nforced_chatgpt_workspace_id = "synthetic-other-workspace"\n',
+      );
+      await expect(client.run(repository)).rejects.toThrow(
+        "synthetic authenticated execution reached",
+      );
+      const configs = JSON.parse(await readFile(capture, "utf8")).map(
+        (text: string) => parseToml(text),
+      );
+      expect(configs).toHaveLength(2);
+      for (const config of configs) {
+        expect(config).toMatchObject({
+          marketplaces: {
+            "codex-security-sdk-synthetic-selection": {
+              source_type: "local",
+              source: join(home, "selected-marketplace"),
+            },
+          },
+          plugins: {
+            "codex-security@codex-security-sdk-synthetic-selection": {
+              enabled: true,
+            },
+          },
+        });
+        expect(config).not.toHaveProperty("forced_login_method");
+        expect(config).not.toHaveProperty("forced_chatgpt_workspace_id");
+      }
+    } finally {
+      await client.close();
+    }
+  },
+);

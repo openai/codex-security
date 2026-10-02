@@ -14,6 +14,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { runScanEvents, scanRuntimeCodexConfig } from "../src/api.js";
 import { parse as parseToml } from "smol-toml";
 import {
+  codexConfigOverrides,
   deepMerge,
   resolveCodexProfile,
   scanCompositionOverrides,
@@ -1473,9 +1474,13 @@ describe("Deep worker terminal lifecycle", () => {
             root,
             policy,
             false,
-            (options) =>
+            ({ config, configOverrides, ...options }) =>
               new Codex({
                 ...options,
+                configOverrides: [
+                  ...codexConfigOverrides((config ?? {}) as JsonObject),
+                  ...(configOverrides ?? []),
+                ],
                 codexPathOverride: executable,
                 env: {
                   ...options.env,
@@ -1548,9 +1553,6 @@ describe("Deep worker terminal lifecycle", () => {
                 : { "codex-security": { command: "node", enabled: false } }),
             },
           });
-          expect(
-            (config["permissions"] as JsonObject)["profile"],
-          ).toBeUndefined();
         }),
       );
       expect(configuration).toEqual(original);

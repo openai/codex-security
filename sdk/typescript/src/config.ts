@@ -217,28 +217,20 @@ export function removeManagedPluginRegistration(config: JsonObject): void {
   }
 }
 
-/** Apply a worker budget to a config owned by this scan. */
-export function setScanSubagentBudget(
-  config: JsonObject,
-  subagents: number,
-): void {
-  const features = isObject(config["features"]) ? config["features"] : {};
-  features["multi_agent_v2"] = {
-    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
-    enabled: true,
-    max_concurrent_threads_per_session: subagents + 1,
-  };
-  config["features"] = features;
-}
-
 /** Carry a selected scan into another ordinary client without copying managed plugin registration. */
 export function scanCompositionOverrides(
   config: JsonObject,
   subagents: number,
 ): JsonObject {
   const result = resolveCodexProfile(config);
-  setScanSubagentBudget(result, subagents);
   removeManagedPluginRegistration(result);
+  const features = isObject(result["features"]) ? result["features"] : {};
+  features["multi_agent_v2"] = {
+    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
+    enabled: true,
+    max_concurrent_threads_per_session: subagents + 1,
+  };
+  result["features"] = features;
   if (isObject(result["agents"])) delete result["agents"]["max_threads"];
   return result;
 }

@@ -91,52 +91,66 @@ describe("delegated scan attribution", () => {
                 startThread: (threadOptions: ThreadOptions) => ({
                   id: null,
                   async runStreamed() {
-                    active += 1;
-                    maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) releaseConcurrentScans();
-                    try {
-                      const initialEnvironment = { ...options.env };
-                      expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
-                      expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
-                      expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-                        expectedGitDirectory,
-                      );
-                      expect(
-                        options.env?.["PATH"]?.split(delimiter),
-                      ).not.toContain(
-                        join(
-                          root,
-                          `${surface === "cli" ? "sdk" : "cli"}-tools`,
-                        ),
-                      );
-                      expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
-                        `synthetic-${surface}-ssh`,
-                      );
-                      expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
-                      expect(options.config).toMatchObject({
-                        responses_api_metadata: {
-                          codex_security_surface: surface,
-                        },
-                      });
-                      expect(threadOptions.threadSource).toBe("security_scan");
-                      await concurrentScans;
-                      const sharedConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(sharedConfig).not.toHaveProperty(
-                        "responses_api_metadata",
-                      );
-                      expect(options.env).toEqual(initialEnvironment);
-                      throw new Error("delegated attribution observed");
-                    } finally {
-                      active -= 1;
-                    }
+                    return {
+                      events: (async function* () {
+                        active += 1;
+                        maximumActive = Math.max(maximumActive, active);
+                        if (active === 2) releaseConcurrentScans();
+                        try {
+                          const initialEnvironment = { ...options.env };
+                          expect(options.env?.["CODEX_HOME"]).toBe(
+                            credentialHome,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).toContain(expectedGitDirectory);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).not.toContain(
+                            join(
+                              root,
+                              `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                            ),
+                          );
+                          expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                            `synthetic-${surface}-ssh`,
+                          );
+                          expect(options.env).not.toHaveProperty(
+                            "OPENAI_API_KEY",
+                          );
+                          expect(options.config).toMatchObject({
+                            responses_api_metadata: {
+                              codex_security_surface: surface,
+                            },
+                          });
+                          expect(threadOptions.threadSource).toBe(
+                            "security_scan",
+                          );
+                          yield {
+                            type: "thread.started",
+                            thread_id: `synthetic-${surface}`,
+                          };
+                          await concurrentScans;
+                          const sharedConfig = parseToml(
+                            await readFile(
+                              join(credentialHome, "config.toml"),
+                              "utf8",
+                            ),
+                          );
+                          expect(sharedConfig).not.toHaveProperty(
+                            "responses_api_metadata",
+                          );
+                          expect(options.env).toEqual(initialEnvironment);
+                          throw new Error("delegated attribution observed");
+                        } finally {
+                          active -= 1;
+                        }
+                      })(),
+                    };
                   },
                 }),
               }),

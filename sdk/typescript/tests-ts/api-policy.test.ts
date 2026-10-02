@@ -1481,7 +1481,7 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("leaves quoted model-provider names in the native configuration", async () => {
+  test("preserves quoted model-provider names in policy settings", async () => {
     const provider = "synthetic.provider";
     const f = await setup({
       config: {
@@ -1499,7 +1499,9 @@ describe("CodexSecurity policy API", () => {
     });
     await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
     expect(f.configuration()?.config?.["model_provider"]).toBe(provider);
-    expect(f.configuration()?.config).not.toHaveProperty("model_providers");
+    expect<unknown>(f.configuration()?.config?.["model_providers"]).toEqual(
+      f.security.config.codexOverrides?.["model_providers"],
+    );
     await f.security.close();
   });
 

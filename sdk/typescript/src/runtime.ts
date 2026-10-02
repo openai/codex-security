@@ -1,7 +1,7 @@
 import { expandHome, environmentValue } from "./codex-home.js";
 export { expandHome } from "./codex-home.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   constants,
@@ -61,7 +61,7 @@ import {
   SandboxUnavailableError,
   errorMessage,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import { writeCodexConfig, type JsonObject } from "./config.js";
 import type { ScanMergeInput } from "./scan-merge.js";
 import {
   resolveTrustedExecutable,
@@ -139,7 +139,7 @@ export interface PluginInstall {
   pluginRoot: string;
   marketplaceRoot: string;
   installedRoot: string;
-  marketplaceName: typeof MARKETPLACE_NAME;
+  marketplaceName: string;
   name: typeof PLUGIN_NAME;
   version: string;
 }
@@ -2441,15 +2441,16 @@ export async function createMarketplace(
   codexHome: string,
   pluginRoot: string,
   signal?: AbortSignal,
+  marketplaceName = MARKETPLACE_NAME,
 ): Promise<string> {
   throwIfSignalAborted(signal);
   const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
+  const marketplace = pluginMarketplaceDirectory(codexHome, marketplaceName);
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
   throwIfSignalAborted(signal);
   const manifest = {
-    name: MARKETPLACE_NAME,
+    name: marketplaceName,
     interface: { displayName: "Codex Security SDK" },
     plugins: [
       {
@@ -2537,6 +2538,7 @@ export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
   options: {
+    isolateSelection?: boolean;
     codexCommand?: CodexCommand;
     runCodex?: (
       command: CodexCommand,
@@ -2550,7 +2552,12 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const marketplace = join(codexHome, "sdk-marketplace");
+  // Codex keys installed trees by marketplace and version. Keep different
+  // contents in different namespaces so active workers retain their files.
+  const marketplaceName = options.isolateSelection
+    ? `${MARKETPLACE_NAME}-${await pluginSelectionDigest(root, options.signal)}`
+    : MARKETPLACE_NAME;
+  const marketplace = pluginMarketplaceDirectory(codexHome, marketplaceName);
   throwIfSignalAborted(options.signal);
   const command =
     options.codexCommand ?? resolveCodexCommand(options.environment);
@@ -2583,7 +2590,7 @@ export async function bootstrapPlugin(
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }
-    await createMarketplace(codexHome, root, options.signal);
+    await createMarketplace(codexHome, root, options.signal, marketplaceName);
   }
 
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
@@ -2595,7 +2602,7 @@ export async function bootstrapPlugin(
   const configuration = parse(config);
   const marketplaces = configuration["marketplaces"];
   const registration = isRecord(marketplaces)
-    ? marketplaces[MARKETPLACE_NAME]
+    ? marketplaces[marketplaceName]
     : undefined;
   const registered =
     isRecord(registration) &&
@@ -2623,13 +2630,21 @@ export async function bootstrapPlugin(
     });
   const plugins = configuration["plugins"];
   const plugin = isRecord(plugins)
-    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
+    ? plugins[`${PLUGIN_NAME}@${marketplaceName}`]
     : undefined;
+  if (options.isolateSelection) {
+    await writeCodexConfig(join(codexHome, "config.toml"), {
+      ...(configuration as JsonObject),
+      ...codexSecurityPluginRegistration({
+        marketplaceRoot: marketplace,
+        marketplaceName,
+      }),
+    });
+  }
   if (
     stagedMatches &&
-    registered &&
-    isRecord(plugin) &&
-    plugin["enabled"] === true &&
+    (options.isolateSelection ||
+      (registered && isRecord(plugin) && plugin["enabled"] === true)) &&
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
@@ -2640,18 +2655,24 @@ export async function bootstrapPlugin(
       true,
     ))
   ) {
+    if (previous["pluginRoot"] !== root)
+      await writeFile(
+        installRecord,
+        JSON.stringify({ ...previous, pluginRoot: root }),
+        { mode: 0o600, signal: options.signal },
+      );
     return {
       pluginRoot: root,
       marketplaceRoot: marketplace,
       installedRoot: previous["installedPath"],
-      marketplaceName: MARKETPLACE_NAME,
+      marketplaceName,
       name,
       version,
     };
   }
   const output = await run(
     command,
-    ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+    ["plugin", "add", "--json", `${PLUGIN_NAME}@${marketplaceName}`],
     environment,
     options.signal,
   );
@@ -2677,17 +2698,74 @@ export async function bootstrapPlugin(
   }
   await writeFile(
     installRecord,
-    JSON.stringify({ installedPath: installed["installedPath"], version }),
+    JSON.stringify({
+      installedPath: installed["installedPath"],
+      version,
+      pluginRoot: root,
+    }),
     { mode: 0o600, signal: options.signal },
   );
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
     installedRoot: installed["installedPath"],
-    marketplaceName: MARKETPLACE_NAME,
+    marketplaceName,
     name,
     version,
   };
+}
+
+/** Select one stable plugin tree without changing the shared authentication home. */
+export function codexSecurityPluginRegistration(
+  plugin: Pick<PluginInstall, "marketplaceRoot" | "marketplaceName">,
+): JsonObject {
+  return {
+    marketplaces: {
+      [plugin.marketplaceName]: {
+        source_type: "local",
+        source: plugin.marketplaceRoot,
+      },
+    },
+    plugins: {
+      [`${PLUGIN_NAME}@${plugin.marketplaceName}`]: { enabled: true },
+    },
+  };
+}
+
+function pluginMarketplaceDirectory(codexHome: string, name: string): string {
+  return join(codexHome, name === MARKETPLACE_NAME ? "sdk-marketplace" : name);
+}
+
+async function pluginSelectionDigest(
+  root: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const visit = async (path: string): Promise<void> => {
+    throwIfSignalAborted(signal);
+    const metadata = await lstat(path);
+    if (metadata.isDirectory()) {
+      hash.update(JSON.stringify([relative(root, path), "directory"]));
+      for (const entry of (await readdir(path)).sort())
+        await visit(join(path, entry));
+    } else if (metadata.isFile()) {
+      hash.update(
+        JSON.stringify([
+          relative(root, path),
+          metadata.mode & 0o111,
+          createHash("sha256")
+            .update(await readFile(path, { signal }))
+            .digest("hex"),
+        ]),
+      );
+    } else {
+      throw new PluginBootstrapError(
+        `Plugin contains an unsafe source path: ${path}`,
+      );
+    }
+  };
+  await visit(root);
+  return hash.digest("hex");
 }
 
 async function pluginContentsMatch(

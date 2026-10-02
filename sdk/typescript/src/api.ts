@@ -195,6 +195,7 @@ import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
+  codexSecurityPluginRegistration,
   bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
@@ -400,6 +401,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
+  preparedExecution?: PreparedExecution;
 }
 
 interface ClientDependencies {
@@ -438,6 +440,7 @@ export class CodexSecurity {
 
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
+  readonly #preparedExecution: PreparedExecution | undefined;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -462,6 +465,7 @@ export class CodexSecurity {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
     this.#surface = runtimeOptions.surface;
+    this.#preparedExecution = runtimeOptions.preparedExecution;
   }
 
   public async run(
@@ -1904,11 +1908,17 @@ export class CodexSecurity {
             },
             createCodex: async ({ config, configOverrides }) => {
               const matcherConfig = config as JsonObject;
-              const release = await lockExecutionConfiguration(
-                session,
-                session.sessionConfig,
-                signal,
-              );
+              const release =
+                session.runtimeConfig === undefined
+                  ? undefined
+                  : await lockExecutionConfiguration(
+                      session.runtime.codexHome,
+                      deepMerge(
+                        { ...session.runtimeConfig },
+                        session.sessionConfig,
+                      ),
+                      signal,
+                    );
               try {
                 matcherConfig["mcp_servers"] = await disabledMcpServers(
                   session.source.command,
@@ -2382,6 +2392,15 @@ export class CodexSecurity {
     temporaryRoot?: string,
     keepCredentialLock = false,
   ): Promise<PreparedExecution> {
+    if (this.#preparedExecution !== undefined) {
+      const prepared = this.#preparedExecution;
+      return {
+        ...prepared,
+        sessionConfig: structuredClone(prepared.sessionConfig),
+        effectiveConfig: structuredClone(prepared.effectiveConfig),
+        releaseCredentialHome: null,
+      };
+    }
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
       this.#requireOpen();
@@ -2479,10 +2498,6 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!keepCredentialLock || runtime.deepScanConfigPath !== undefined) {
-        await releaseCredentialHome?.();
-        releaseCredentialHome = null;
-      }
       if (externalProvider === null && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
@@ -2491,6 +2506,20 @@ export class CodexSecurity {
         !runtime.credentialsAvailable &&
         authentication.method === "stored_credentials"
       ) {
+        if (
+          runtime.configPath !== undefined &&
+          !runtime.preserveCodexHomeConfig
+        ) {
+          releaseCredentialHome ??=
+            await acquireCodexSecurityCredentialHomeLock(
+              runtime.codexHome,
+              signal,
+            );
+          await writeCodexConfig(join(runtime.codexHome, "config.toml"), {
+            ...sessionConfig,
+            ...codexSecurityPluginRegistration(runtime.plugin),
+          });
+        }
         const status = await accountStatus(
           source.command,
           {
@@ -2549,11 +2578,20 @@ export class CodexSecurity {
         signal,
       });
       checkOpen();
+      const runtimeConfig =
+        runtime.configPath === undefined || runtime.preserveCodexHomeConfig
+          ? undefined
+          : codexSecurityPluginRegistration(runtime.plugin);
+      if (!keepCredentialLock || runtime.deepScanConfigPath !== undefined) {
+        await releaseCredentialHome?.();
+        releaseCredentialHome = null;
+      }
       return {
         policy: "ordinary",
         source,
         inheritedPermissions,
         runtime,
+        runtimeConfig,
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
@@ -2638,6 +2676,7 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
+        isolateSelection: true,
         codexCommand: source.command,
         environment: withoutCodexHome(source.environment),
         signal,
@@ -3124,6 +3163,7 @@ export class CodexSecurity {
         signal,
       );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
+        isolateSelection: true,
         codexCommand: source.command,
         environment: withoutCodexHome(processEnvironment),
         signal,
@@ -3396,25 +3436,15 @@ export function scanRuntimeCodexConfig(
   inheritedPermissions?: { filesystem: JsonObject; network: JsonObject },
 ): JsonObject {
   const approvalPolicy = scanApprovalPolicy(config);
-  const hardened = structuredClone(config);
+  const hardened = resolveCodexProfile(config);
   delete hardened["sandbox_mode"];
   delete hardened["approvals_reviewer"];
-  const profiles = hardened["profiles"];
-  if (isRecord(profiles)) {
-    for (const profile of Object.values(profiles)) {
-      if (!isRecord(profile)) continue;
-      delete profile["approval_policy"];
-      delete profile["approvals_reviewer"];
-      delete profile["default_permissions"];
-      delete profile["permissions"];
-      delete profile["sandbox_mode"];
-    }
-  }
-  const configuredPermissions = isRecord(hardened["permissions"])
-    ? hardened["permissions"]
+  const configuredPermissions = isRecord(config["permissions"])
+    ? structuredClone(config["permissions"])
     : {};
   return {
     ...hardened,
+    model_provider: hardened["model_provider"] ?? "openai",
     approval_policy: approvalPolicy,
     approvals_reviewer: "auto_review",
     allow_login_shell: false,
@@ -3482,9 +3512,6 @@ function requirePolicyConfigKeys(config: JsonObject): void {
 function policyCodexConfig(config: JsonObject): JsonObject {
   const resolved = resolveCodexProfile(config);
   requirePolicyConfigKeys(resolved);
-  // The selected provider is already written as TOML. The SDK cannot quote
-  // provider names when it flattens this table into command-line overrides.
-  delete resolved["model_providers"];
   const features = isRecord(resolved["features"]) ? resolved["features"] : {};
   return {
     ...resolved,
@@ -3581,6 +3608,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "model_reasoning_summary",
       "model_provider",
       "service_tier",
+      "cyber_access_program",
     ]) {
       const value = source[key];
       if (safeString(value)) result[key] = value;
