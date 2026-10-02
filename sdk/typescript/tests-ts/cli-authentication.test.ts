@@ -1227,7 +1227,7 @@ describe("skill authentication", () => {
     ambientConfig,
   }: {
     command?: "validate" | "patch" | "verify-fix";
-    auth?: "auto" | "api-key";
+    auth?: "auto" | "chatgpt" | "api-key";
     overrides: readonly string[];
     environment?: NodeJS.ProcessEnv;
     ambientConfig?: string;
@@ -1452,6 +1452,69 @@ describe("skill authentication", () => {
   );
 
   test.each([
+    ["ollama", "auto"],
+    ["ollama", "api-key"],
+    ["lmstudio", "auto"],
+    ["lmstudio", "api-key"],
+  ] as const)(
+    "patch ignores replacement authentication for native provider %s with %s auth",
+    async (provider, auth) => {
+      const result = await runProviderSkill({
+        auth,
+        overrides: [`model_provider=${JSON.stringify(provider)}`],
+        ambientConfig: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `[model_providers.${provider}]`,
+          'name="Synthetic override"',
+          'base_url="https://ignored.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="IGNORED_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s keeps native OpenAI authentication despite a provider table override",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="openai"'],
+        ambientConfig: [
+          'model_provider="openai"',
+          "[model_providers.openai]",
+          'name="Synthetic override"',
+          'base_url="https://ignored.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="OPENAI_API_KEY"',
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.launch.args).toContain(
+        'cli_auth_credentials_store="ephemeral"',
+      );
+      expect(
+        result.requests
+          .filter((request) => request.method === "account/login/start")
+          .map((request) => request.params),
+      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
+    },
+  );
+
+  test.each([
     ["patch", "auto"],
     ["patch", "api-key"],
     ["verify-fix", "auto"],
@@ -1566,17 +1629,23 @@ describe("skill authentication", () => {
     }
   });
 
-  test.each(["openrouter", "fireworks"] as const)(
-    "preserves OPENAI_API_KEY when configured as the %s provider key",
-    async (provider) => {
+  test.each([
+    ["openrouter", "api-key"],
+    ["fireworks", "api-key"],
+    ["openrouter", "chatgpt"],
+    ["fireworks", "chatgpt"],
+  ] as const)(
+    "preserves OPENAI_API_KEY when configured as the %s provider key with %s auth",
+    async (provider, auth) => {
       const result = await runProviderSkill({
+        auth,
         overrides: [
           `model_provider=${JSON.stringify(provider)}`,
           `model_providers.${provider}.name="Synthetic gateway"`,
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
           `model_providers.${provider}.wire_api="responses"`,
           `model_providers.${provider}.env_key="OPENAI_API_KEY"`,
-          `model_providers.${provider}.requires_openai_auth=false`,
+          `model_providers.${provider}.requires_openai_auth=${auth === "chatgpt"}`,
         ],
         environment: {
           OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
@@ -1587,6 +1656,31 @@ describe("skill authentication", () => {
       expect(result.launch.environment).toEqual({
         OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
       });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s uses native provider bearer authentication without an OpenAI login",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        auth: "auto",
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'experimental_bearer_token="SYNTHETIC_BEARER_TOKEN"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({});
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );

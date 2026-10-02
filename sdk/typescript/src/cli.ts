@@ -1423,8 +1423,10 @@ export async function runCodexSkillCommand(
           : {},
       );
       const provider = scanModelProvider(config);
+      // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
-        typeof provider === "string"
+        typeof provider === "string" &&
+        !["openai", "ollama", "lmstudio"].includes(provider)
           ? (
               config["model_providers"] as
                 Record<string, JsonObject> | undefined
@@ -1434,18 +1436,22 @@ export async function runCodexSkillCommand(
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
+      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const explicitChatgpt =
+        output.auth === "chatgpt" && !isExternalModelProvider(provider);
+      const providerBearer =
+        typeof providerConfiguration?.["experimental_bearer_token"] ===
+        "string";
       const requiresOpenAiAuth =
-        providerEnvKey === undefined &&
+        !commandAuth &&
+        (explicitChatgpt ||
+          (providerEnvKey === undefined && !providerBearer)) &&
         (provider === undefined ||
           provider === "openai" ||
           providerConfiguration?.["requires_openai_auth"] === true);
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      if (
-        providerEnvKey !== undefined &&
-        !hasCommandAuth(config) &&
-        (output.auth !== "chatgpt" || isExternalModelProvider(provider))
-      ) {
+      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
         const key = environmentEntry(
           processEnvironment,
           providerEnvKey,
@@ -1463,7 +1469,7 @@ export async function runCodexSkillCommand(
           processEnvironment,
           output.auth,
           provider,
-          hasCommandAuth(config),
+          commandAuth,
         );
       }
       if (
