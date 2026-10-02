@@ -85,6 +85,12 @@ function resolvedPath(path: Buffer): Buffer {
 function expandHome(path: string, posixHome: string | undefined): string {
   if (!path.startsWith("~")) return path;
   if (process.platform === "win32") {
+    // path.join('C:', 'name') is rooted; 'C:.' keeps it drive-relative.
+    const joinHome = (home: string, child: string) =>
+      win32.join(
+        home.length === 2 && home[1] === ":" ? `${home}.` : home,
+        child,
+      );
     const environment = (name: string) =>
       windowsBinding()
         .windowsEnvironment(Buffer.from(name, "utf16le"))
@@ -104,11 +110,11 @@ function expandHome(path: string, posixHome: string | undefined): string {
       if (currentUsername !== win32.basename(home)) {
         throw new HomeExpansionError("Could not determine home directory.");
       }
-      home = win32.join(win32.dirname(home), username);
+      home = joinHome(win32.dirname(home), username);
     }
     if (home.startsWith("~"))
       throw new HomeExpansionError("Could not determine home directory.");
-    return win32.join(home, separator === -1 ? "" : path.slice(end + 1));
+    return joinHome(home, separator === -1 ? "" : path.slice(end + 1));
   }
   if (path === "~" || path.startsWith("~/")) {
     const home = posixHome ?? homedir();
@@ -329,17 +335,24 @@ function resolveSecurityMd(
 ): string {
   const root = resolveRoot(repo, posixHome);
   const expandedScope = parsedPath(expandHome(scope, posixHome));
-  const requestedScope =
-    process.platform === "win32"
-      ? windowsFiles().absolute(
-          encodePath(windowsJoin(decodePath(root), expandedScope)),
-        )
-      : expandedScope.startsWith("/")
-        ? encodePosixPath(expandedScope)
-        : appendPath(root, encodePosixPath(expandedScope));
+  let requestedScope: Buffer;
+  if (windows) {
+    const files = windowsFiles();
+    // Preserve the requested namespace semantics when joining relative scopes.
+    const requestedRoot = files.absolute(
+      encodePath(parsedPath(expandHome(repo, posixHome))),
+    );
+    requestedScope = files.absolute(
+      encodePath(windowsJoin(decodePath(requestedRoot), expandedScope)),
+    );
+  } else {
+    requestedScope = expandedScope.startsWith("/")
+      ? encodePosixPath(expandedScope)
+      : appendPath(root, encodePosixPath(expandedScope));
+  }
   let resolvedScope: Buffer;
   try {
-    // Resolve links before '..', including Python's accepted file/.. paths.
+    // On POSIX, resolve links before '..', including accepted file/.. paths.
     resolvedScope = resolvedPath(requestedScope);
   } catch (error) {
     if (error instanceof SymlinkLoopError) throw error;
