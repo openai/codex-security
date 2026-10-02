@@ -272,6 +272,21 @@ def _source_digests(value: Any, label: str) -> dict[str, str]:
     return value
 
 
+def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
+        sources = _source_digests(value["sources"], "Saved stopped-scan")
+        model_source = value.get("threatModelSource")
+        if not isinstance(model_source, str) or model_source not in sources:
+            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+        return sources, model_source
+    return _source_digests(value, "Saved stopped-scan"), None
+
+
+def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
+    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+    return json.dumps(state, sort_keys=True)
+
+
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -295,7 +310,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
 
         if manifest_path is None:
             if frozen_sources is not None:
-                return bool(_source_digests(json.loads(frozen_sources), "Frozen stopped-scan"))
+                return bool(_retained_source_state(json.loads(frozen_sources))[0])
             return has_saved_source()
         if scan["seal_manifest_digest"] is None:
             try:
@@ -334,7 +349,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
-        frozen_sources = _source_digests(json.loads(raw_frozen_sources), "Saved stopped-scan")
+        frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
         include_parent = False
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
@@ -531,6 +546,8 @@ def merge_saved_results(
     reason: str,
     frozen_source_digests: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
+    frozen_model_source: str | None = None,
+    selected_model_source: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -723,6 +740,16 @@ def merge_saved_results(
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
+    if frozen_model_source is not None:
+        # Publication retries retain the choice made with the frozen source set.
+        model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
+        if not isinstance(model, dict):
+            raise ContractError("Frozen stopped-scan model checkpoint is unavailable.")
+        manifest["scan"]["threatModel"] = copy.deepcopy(model)
+        if paths[frozen_model_source] is not None:
+            manifest["scan"]["threatModel"]["origin"] = "recovered"
+        if selected_model_source is not None:
+            selected_model_source[:] = [frozen_model_source]
     coverage = (
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
@@ -877,6 +904,7 @@ def merge_saved_results(
             continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
             model = draft["threatModel"]
+            model_path = relative
             checkpoint_dir = Path(relative).parent
             if worker_id is not None and checkpoint_dir.name == "checkpoints":
                 try:
@@ -886,15 +914,23 @@ def merge_saved_results(
                         "Saved worker checkpoint head",
                     ).get("checkpoint")
                     if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{64}\.json", head):
-                        current = drafts_by_path.get((checkpoint_dir / head).as_posix(), {})
+                        head_path = (checkpoint_dir / head).as_posix()
+                        current = drafts_by_path.get(head_path, {})
                         if isinstance(current.get("threatModel"), dict):
                             model = current["threatModel"]
+                            model_path = head_path
                 except (ContractError, OSError, ValueError):
                     # If the optional head cannot be read, retain the admitted checkpoint model.
                     pass
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
+            if (
+                selected_model_source is not None
+                and worker_id is not None
+                and checkpoint_dir.name == "checkpoints"
+            ):
+                selected_model_source[:] = [model_path]
         for value in draft["findings"]:
             if relative == "parent" and parent_manifest:
                 finding = copy.deepcopy(value)
@@ -1188,13 +1224,17 @@ def preserve_scan_results_locked(
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
+    model_source: list[str] = []
+    saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
+    if raw_frozen_sources is not None:
+        frozen_source_digests, saved_model_source = _retained_source_state(
+            json.loads(raw_frozen_sources)
+        )
+        if saved_model_source is not None:
+            model_source.append(saved_model_source)
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
-    elif raw_frozen_sources is not None:
-        frozen_source_digests = _source_digests(
-            json.loads(raw_frozen_sources), "Saved stopped-scan"
-        )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -1252,7 +1292,7 @@ def preserve_scan_results_locked(
                 "updated_at = ? WHERE id = ? AND status = 'failed'",
                 (
                     digest,
-                    json.dumps(retained_sources, sort_keys=True),
+                    _encode_retained_sources(retained_sources, model_source),
                     json.dumps(list(dict.fromkeys(warnings))),
                     timestamp,
                     scan_id,
@@ -1305,6 +1345,8 @@ def preserve_scan_results_locked(
         **db.workbench_completion_binding(scan, scan["completed_at"], existing),
         "status": outcome,
     }
+    if recovery_source_digests is not None:
+        model_source.clear()
     documents = merge_saved_results(
         scan_dir,
         scan_id,
@@ -1320,6 +1362,8 @@ def preserve_scan_results_locked(
             f"{scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=frozen_source_digests,
+        frozen_model_source=model_source[0] if model_source else None,
+        selected_model_source=model_source,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
@@ -1341,7 +1385,9 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None:
+    if frozen_source_digests is None or (
+        recovery_source_digests is None and saved_model_source is None and model_source
+    ):
         retained_sources = documents[0].get("scan", {}).get("preservedSources")
         if not isinstance(retained_sources, dict) or not all(
             isinstance(relative, str) and isinstance(digest, str)
@@ -1351,8 +1397,12 @@ def preserve_scan_results_locked(
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "
-                "WHERE id = ? AND retained_source_digests_json IS NULL",
-                (json.dumps(retained_sources, sort_keys=True), scan_id),
+                "WHERE id = ? AND retained_source_digests_json IS ?",
+                (
+                    _encode_retained_sources(retained_sources, model_source),
+                    scan_id,
+                    raw_frozen_sources,
+                ),
             )
     prepared = _prepare_scan_finalization(
         scan_dir,

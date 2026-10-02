@@ -157,6 +157,153 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
+@pytest.mark.parametrize("head_available", [True, False], ids=["head", "fallback"])
+@pytest.mark.parametrize("legacy_retry", [False, True], ids=["new-freeze", "legacy-freeze"])
+def test_stopped_model_selection_survives_publication_retry(
+    tmp_path: Path, head_available: bool, legacy_retry: bool
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    checkpoint = json.loads(result_path.read_text())
+    checkpoint["complete"] = False
+    checkpoint["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
+    checkpoint_dir = result_path.parent / "checkpoints"
+    for summary in ("Queue producers cross a boundary.", "Queue consumers cross a boundary."):
+        checkpoint["threatModel"] = {"summary": summary}
+        write_checkpoint(checkpoint_dir, checkpoint)
+    selected = (max if head_available else min)(checkpoint_dir.glob("*.json"))
+    expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
+    head_path = result_path.parent / "checkpoint-head.json"
+    if head_available:
+        head_path.write_text(json.dumps({"checkpoint": selected.name}))
+    result_path.write_text("{incomplete")
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    wrapper = tmp_path / "fail_model_publication.py"
+    wrapper.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+        "import workbench_db\n"
+        "import workbench_saved_results\n"
+        "def fail_publication(*args, **kwargs):\n"
+        "    raise OSError('injected publication failure')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n"
+        "raise SystemExit(workbench_db.main())\n"
+    )
+    failed = subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Worker stopped.",
+        ],
+        capture_output=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "CODEX_SECURITY_STATE_DIR": str(state_dir),
+        },
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 0, failed.stderr
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        frozen = json.loads(
+            connection.execute(
+                "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+        )
+    assert frozen["threatModelSource"] == selected.relative_to(scan_dir).as_posix()
+    if legacy_retry:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
+                (json.dumps(frozen["sources"]), scan_id),
+            )
+        retry = subprocess.run(
+            [
+                sys.executable,
+                str(wrapper),
+                "preserve-scan-results",
+                "--scan-id",
+                scan_id,
+                "--thread-id",
+                "standard-worker-thread",
+            ],
+            capture_output=True,
+            env={
+                **os.environ,
+                "CODEX_HOME": str(codex_home),
+                "CODEX_SECURITY_STATE_DIR": str(state_dir),
+            },
+            text=True,
+            check=False,
+        )
+        assert retry.returncode != 0
+        assert "injected publication failure" in retry.stderr
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            assert (
+                json.loads(
+                    connection.execute(
+                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                    ).fetchone()[0]
+                )
+                == frozen
+            )
+
+    checkpoint["threatModel"] = {"summary": "The later worker model."}
+    late = write_checkpoint(checkpoint_dir, checkpoint)
+    head_path.write_text(json.dumps({"checkpoint": late.name}))
+    environment = {"CODEX_HOME": str(codex_home)}
+    retried = run_workbench(
+        state_dir,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+        environment=environment,
+    )["scan"]
+    manifest_path = scan_dir / "scan-manifest.json"
+    published = json.loads(manifest_path.read_text())["scan"]
+    assert published["threatModel"] == expected_model
+    assert expected_model["summary"] in (scan_dir / "threatmodel.md").read_text()
+    assert published["preservedSources"] == frozen["sources"]
+    assert late.relative_to(scan_dir).as_posix() not in published["preservedSources"]
+    assert retried["findingCount"] == 1
+
+    # Older plain-map rows still refresh the existing sealed result unchanged.
+    first_seal = manifest_path.read_bytes()
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
+            (json.dumps(frozen["sources"]), scan_id),
+        )
+    run_workbench(
+        state_dir,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+        environment=environment,
+    )
+    assert manifest_path.read_bytes() == first_seal
+    recovered = run_workbench(
+        state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
+    )["scan"]
+    published = json.loads(manifest_path.read_text())["scan"]
+    assert published["threatModel"] == {**checkpoint["threatModel"], "origin": "recovered"}
+    assert late.relative_to(scan_dir).as_posix() in published["preservedSources"]
+    assert recovered["findingCount"] == 1
+
+
 def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
