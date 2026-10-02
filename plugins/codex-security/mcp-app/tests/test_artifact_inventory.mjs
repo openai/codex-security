@@ -13,26 +13,21 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { build } from "esbuild";
+import { importTestModule } from "./import-test-module.mjs";
 
 const execFile = promisify(nodeExecFile);
 const temporaryRoots = [];
-const bundle = await build({
-  bundle: true,
+const inventory = await importTestModule({
   entryPoints: [
     new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
   ],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const inventory = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
 
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPrepareListsIgnoredTrackedFilesOnce();
+  await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
@@ -144,6 +139,82 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   assert.deepEqual(
     [...first.items, ...second.items].map((item) => item.path),
     expected.split("\n").filter(Boolean),
+  );
+}
+
+async function testPrepareListsIgnoredTrackedFilesOnce() {
+  const fixture = await createFixture("ignored tracked files");
+  await initializeRepository(fixture.repoRoot);
+  await writeRepositoryFile(fixture.repoRoot, ".gitignore", "generated/\n");
+  for (const name of ["a.ts", "b.ts"]) {
+    await writeRepositoryFile(
+      fixture.repoRoot,
+      `generated/${name}`,
+      "export const value = 1;\n",
+    );
+  }
+  await runGit(fixture.repoRoot, "add", "--force", "--", "generated");
+  const context = { ...fixture.scan, scope: "generated" };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 2,
+  });
+  const first = await inventory.listCodexSecurityReviewItems(context, {
+    limit: 1,
+  });
+  assert.deepEqual(first, {
+    items: [{ path: "generated/a.ts" }],
+    nextCursor: "1",
+  });
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(context, {
+      cursor: first.nextCursor,
+      limit: 1,
+    }),
+    { items: [{ path: "generated/b.ts" }] },
+  );
+}
+
+async function testPrepareExcludesGitMetadata() {
+  const fixture = await createFixture("nested repositories");
+  for (const [name, source] of [
+    [".git/config", "[core]\n"],
+    ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
+    ["vendor/lib/.git/hooks/example.py", "pass\n"],
+    ["vendor/lib/handler.py", "pass\n"],
+    ["vendor/worktree/.git", "gitdir: ../../.git/worktrees/example\n"],
+    ["vendor/worktree/handler.py", "pass\n"],
+    [".gitignore", "*.skip\n"],
+    [".github/workflows/check.yml", "name: example\n"],
+    ["src/widget.git", "example\n"],
+  ]) {
+    await writeRepositoryFile(fixture.repoRoot, name, source);
+  }
+
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    { reviewItemsTotal: 5 },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [
+      { path: "./.github/workflows/check.yml" },
+      { path: "./.gitignore" },
+      { path: "./src/widget.git" },
+      { path: "./vendor/lib/handler.py" },
+      { path: "./vendor/worktree/handler.py" },
+    ],
+  });
+
+  const metadataScope = { ...fixture.scan, scope: "vendor/lib/.git/hooks" };
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(metadataScope),
+    { reviewItemsTotal: 0 },
+  );
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(metadataScope),
+    {
+      items: [],
+    },
   );
 }
 
@@ -456,7 +527,9 @@ async function standardInventory(repository, scope) {
       "--files",
       "--hidden",
       "--glob",
-      "!.git/**",
+      "!**/.git",
+      "--glob",
+      "!**/.git/**",
       "--path-separator=/",
       "--",
       scope,

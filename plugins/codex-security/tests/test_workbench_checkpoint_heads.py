@@ -14,8 +14,10 @@ from test_workbench_standard_deep_results import (
     write_saved_parent,
 )
 from workbench_test_support import (
+    fail_deep_scan,
     replay_saved_results,
     run_workbench,
+    saved_binding,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
@@ -64,17 +66,7 @@ def test_late_head_changes_require_explicit_recovery(
         result.unlink()
     select(result.parent, completed, 200)
     environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(
-        state,
-        "fail-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--message",
-        "Worker stopped.",
-        "--deep-status",
-        "failed",
-        environment=environment,
-    )
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
     manifest_path = scan_dir / "scan-manifest.json"
     first_manifest = manifest_path.read_bytes()
     frozen = json.loads(first_manifest)["scan"]["preservedSources"]
@@ -125,13 +117,7 @@ def test_late_head_changes_require_explicit_recovery(
 def checkpoint_scan():
     scan_id = "head-observation"
     pending, closed = drafts(scan_id)
-    binding = {
-        "status": "interrupted",
-        "allowedTargetKinds": ["git_revision"],
-        "target": {"kind": "git_revision", "repository": "synthetic", "revision": "head"},
-        "scope": {"includePaths": ["."], "excludePaths": []},
-        "coverageMode": "deep_repository",
-    }
+    binding = saved_binding("deep_repository", repository="synthetic")
     return scan_id, pending, closed, binding
 
 

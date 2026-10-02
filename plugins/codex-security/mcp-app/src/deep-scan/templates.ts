@@ -1,13 +1,6 @@
 import discoveryTemplate from "../../templates/deep-scan/discovery.md";
 import dedupTemplate from "../../templates/deep-scan/dedup.md";
 
-const TEMPLATES = {
-  discovery: discoveryTemplate,
-  dedup: dedupTemplate,
-} as const;
-
-type DeepScanTemplate = keyof typeof TEMPLATES;
-
 export interface DiscoveryPromptInput {
   scanId: string;
   pluginRoot: string;
@@ -22,7 +15,6 @@ export interface DedupPromptInput {
   reducerLabel: string;
   discoveries: {
     workerId: string;
-    resultPath: string;
   }[];
 }
 
@@ -33,7 +25,7 @@ export function renderDiscoveryPrompt(
   input: DiscoveryPromptInput,
   falsePositiveFeedbackPath?: string,
 ): string {
-  const prompt = renderDeepScanTemplate("discovery", {
+  const prompt = renderDeepScanTemplate(discoveryTemplate, {
     DISCOVERY_CONTEXT_JSON: formattedJson({
       scanId: input.scanId,
       pluginRoot: input.pluginRoot,
@@ -53,7 +45,7 @@ export function renderDiscoveryPrompt(
 }
 
 export function renderDedupPrompt(input: DedupPromptInput): string {
-  return renderDeepScanTemplate("dedup", {
+  return renderDeepScanTemplate(dedupTemplate, {
     DEDUP_CONTEXT_JSON: formattedJson({
       reducerLabel: input.reducerLabel,
       claimedWorkerIds: input.discoveries.map((worker) => worker.workerId),
@@ -62,10 +54,9 @@ export function renderDedupPrompt(input: DedupPromptInput): string {
 }
 
 function renderDeepScanTemplate(
-  name: DeepScanTemplate,
+  template: string,
   values: Record<string, string>,
 ): string {
-  const template = TEMPLATES[name];
   const placeholders = [...template.matchAll(/\{\{([A-Z0-9_]+)\}\}/g)];
   const missing = placeholders
     .map((match) => match[1])

@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { build } from "esbuild";
+import { buildTestEntrypoint } from "./build-test-entrypoint.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -728,13 +728,22 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       }),
       `${runtimeLabel}: correct the same scan and accept exactly one draft`,
     );
+    const {
+      documentType,
+      schemaVersion,
+      scanId: coverageScanId,
+      ...savedCoverage
+    } = JSON.parse(
+      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+    );
+    assert.equal(documentType, "codex-security.coverage");
+    assert.equal(schemaVersion, "1.0");
+    assert.equal(coverageScanId, scanId);
     assert.deepEqual(drafted, {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverage: JSON.parse(
-        await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
-      ),
+      coverage: savedCoverage,
       operation: "replace",
       status: "draft_written",
     });
@@ -1718,20 +1727,14 @@ function reducerPagingFinding(id) {
 }
 
 async function bundleEntrypoint(entrypoint, outfile) {
-  await build({
-    bundle: true,
+  await buildTestEntrypoint({
     define: {
       __dirname: JSON.stringify(applicationRoot),
       "import.meta.url": "__filename",
     },
     entryPoints: [path.join(applicationRoot, entrypoint)],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
     logOverride: { "empty-import-meta": "silent" },
     outfile,
-    platform: "node",
     target: "node20",
   });
 }

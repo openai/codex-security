@@ -1,12 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -23,7 +16,9 @@ import {
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const temporaryDirectories: string[] = [];
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const temporaryDirectories = createTemporaryDirectories();
 const EXTERNAL_PROVIDER_CASES = [
   [
     "OpenRouter",
@@ -41,19 +36,10 @@ const EXTERNAL_PROVIDER_CASES = [
   ],
 ] as const;
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-preflight-")),
-  );
-  temporaryDirectories.push(path);
+  const path = await temporaryDirectories.create("codex-security-preflight-");
   return path;
 }
 

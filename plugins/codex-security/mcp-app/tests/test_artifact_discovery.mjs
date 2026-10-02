@@ -12,17 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
+import { importTestModule } from "./import-test-module.mjs";
 const {
   compactDiscoveryCandidateSchema,
   discoveryCandidatesInputSchema,
@@ -32,9 +22,11 @@ const {
   recordCodexSecurityDiscoveryCandidates,
   workbenchDiscoveryCandidatesInputSchema,
   workbenchListCodexSecurityCandidatesInputSchema,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = await importTestModule({
+  entryPoints: [
+    new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
+  ],
+});
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const definitions = JSON.parse(

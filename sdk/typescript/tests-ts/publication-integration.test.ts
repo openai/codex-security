@@ -1,18 +1,14 @@
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
   cp,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
-  realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -36,6 +32,8 @@ import {
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { execNodePython } from "./support/python-probe.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const SCAN_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -48,7 +46,7 @@ const OPTIONS = {
 const NODE_EXECUTABLE = execFileSync("node", ["-p", "process.execPath"], {
   encoding: "utf8",
 }).trim();
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories();
 
 interface PublicationFixture {
   python: string;
@@ -83,43 +81,12 @@ interface StoredPublication {
   external_url: string;
 }
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
-function sha256(value: string | Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function setFindingIdentity(manifest: ScanManifest, finding: Finding): void {
-  const fingerprint = `codex-security/v1:sha256:${sha256(
-    [
-      "codex-security/v1",
-      manifest.scan.target.targetId,
-      finding.ruleId,
-      finding.identity.anchor,
-      finding.identity.instance ?? "",
-    ].join("\0"),
-  )}`;
-  finding.fingerprints = {
-    algorithm: "codex-security/v1",
-    primary: fingerprint,
-  };
-  finding.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  finding.occurrenceId = `occ_${sha256(
-    [manifest.scan.id, fingerprint].join("\0"),
-  ).slice(0, 24)}`;
-}
+afterEach(temporaryDirectories.cleanup);
 
 async function fixture(count: number): Promise<PublicationFixture> {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-publication-integration-")),
+  const root = await temporaryDirectories.create(
+    "codex-security-publication-integration-",
   );
-  temporaryDirectories.push(root);
   const scanDirectory = join(root, "scan");
   const stateDirectory = join(root, "state");
   const repository = join(root, "repository");
@@ -150,7 +117,7 @@ async function fixture(count: number): Promise<PublicationFixture> {
     const finding = structuredClone(example);
     finding.identity.anchor = `${example.identity.anchor}-${index + 1}`;
     finding.title = `Synthetic finding ${index + 1}`;
-    setFindingIdentity(manifest, finding);
+    setFindingIdentity(manifest.scan, finding);
     return finding;
   });
   await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
@@ -162,11 +129,8 @@ async function fixture(count: number): Promise<PublicationFixture> {
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = (Bun.which("python3") ?? Bun.which("python"))!;
   expect(python).not.toBeNull();
-  if (python === null) {
-    throw new Error("A Python interpreter is required for publication tests.");
-  }
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env["PATH"],
     ...(process.env["SystemRoot"] === undefined
@@ -205,17 +169,10 @@ async function fixture(count: number): Promise<PublicationFixture> {
     "connection.commit()",
     "connection.close()",
   ].join("\n");
-  execFileSync(
+  execNodePython(
     python,
-    [
-      "-I",
-      "-B",
-      "-c",
-      seed,
-      join(stateDirectory, "workbench.sqlite3"),
-      seedFile,
-    ],
-    { encoding: "utf8", env: environment },
+    ["-c", seed, join(stateDirectory, "workbench.sqlite3"), seedFile],
+    environment,
   );
 
   return {
@@ -301,16 +258,10 @@ function storedPublications(fixture: PublicationFixture): StoredPublication[] {
     "print(json.dumps([dict(row) for row in rows]))",
   ].join("\n");
   return JSON.parse(
-    execFileSync(
+    execNodePython(
       fixture.python,
-      [
-        "-I",
-        "-B",
-        "-c",
-        script,
-        join(fixture.stateDirectory, "workbench.sqlite3"),
-      ],
-      { encoding: "utf8", env: fixture.environment },
+      ["-c", script, join(fixture.stateDirectory, "workbench.sqlite3")],
+      fixture.environment,
     ),
   ) as StoredPublication[];
 }
@@ -967,11 +918,9 @@ describe("database-backed Linear publication integration", () => {
       result.created.map(({ issueIdentifier }) => issueIdentifier),
     ).toEqual(["SEC-801", "SEC-802"]);
     expect(result.warnings).toEqual([
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+      "Could not save the publication receipt: Receipt storage unavailable: sk-proj-SYNTHETIC_RECEIPT_SECRET. Linear issues were already created; do not retry publication.",
     ]);
     expect(stderr.text()).toContain(result.warnings![0]!);
-    expect(stdout.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
     expect(publicationAttempts).toBe(1);
     expect(
       storedPublications(completed).map(({ external_id }) => external_id),

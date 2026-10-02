@@ -16,6 +16,7 @@ import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
@@ -429,18 +430,12 @@ function resumeClient(
 
 async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   // Advance the persisted clock to exercise a coordinator reaching its time cap.
-  const expired = Bun.spawnSync(
-    [
-      f.python,
-      "-I",
-      "-B",
-      "-c",
-      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      f.scanId,
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const expired = runPython(f.python, [
+    "-c",
+    "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET created_at = '2000-01-01T00:00:00+00:00' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    f.scanId,
+  ]);
   expect(expired.exitCode, new TextDecoder().decode(expired.stderr)).toBe(0);
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), f.scanDir, {
     recursive: true,

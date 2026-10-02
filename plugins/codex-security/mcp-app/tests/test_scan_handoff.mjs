@@ -1,16 +1,9 @@
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { importTestModule } from "./import-test-module.mjs";
 
-const bundle = await build({
-  bundle: true,
+const { buildScanHandoffPrompt } = await importTestModule({
   entryPoints: [new URL("../src/scan-handoff.ts", import.meta.url).pathname],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const { buildScanHandoffPrompt } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
 
 const scanId = "scan-contract-fixture";
 const scanDir = "/tmp/codex-security-contract-fixture";

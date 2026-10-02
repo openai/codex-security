@@ -10,6 +10,7 @@ import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -17,18 +18,11 @@ const receipt = {
   findingCount: 1,
 };
 
-const temporaryDirectories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+afterEach(temporaryDirectories.cleanup);
 
 async function savedScansFixture() {
-  const root = await mkdtemp(join(tmpdir(), "cloud-saved-scans-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create("cloud-saved-scans-");
   const scans = await Promise.all(
     [1, 2, 3].map(async (index) => {
       const scanDir = join(root, `scan ${index}`);
@@ -67,7 +61,7 @@ describe("publish scan to Cloud", () => {
         dependencies(),
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("--csv <string>");
+    expect(stdout.text()).toContain("--csv <file>");
     expect(stdout.text()).toContain("Findings CSV");
   });
 
@@ -513,6 +507,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test("keeps receipts and continues after a failed scan without retrying", async () => {
+    const failure = `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`;
     const deps = dependencies();
     const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
       resolve(deps.currentDirectory(), path),
@@ -521,7 +516,7 @@ describe("publish scan to Cloud", () => {
     deps.publishScanToCloud = async (directory) => {
       calls.push(directory);
       if (directory === directories[1]) {
-        throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+        throw new Error(failure);
       }
       return {
         ...receipt,
@@ -551,11 +546,18 @@ describe("publish scan to Cloud", () => {
         { scanDir: directories[0], ...receipt },
         { scanDir: directories[2], ...receipt, scanId: "scan-3" },
       ],
-      failed: [{ scanDir: directories[1], error: "[redacted]" }],
+      failed: [
+        {
+          scanDir: directories[1],
+          error: failure,
+        },
+      ],
       notAttempted: [],
     });
-    expect(stderr.text()).toContain("[redacted]");
-    expect(stderr.text()).not.toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain(
+      `Cloud failed: ${SYNTHETIC_CREDENTIALS} [2J continued\n`,
+    );
+    expect(stderr.text()).not.toContain("\u001b");
   });
 
   test.each([false, true])(
@@ -776,8 +778,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test("publishes a scan once through canonical and directory-linked paths", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cloud-publish-links-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectories.create("cloud-publish-links-");
     const scans = join(root, "scans");
     const scanDir = join(scans, "completed-scan");
     const linkedScans = join(root, "linked-scans");
@@ -989,10 +990,12 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("reports publication failures without leaking credentials or claiming success", async () => {
+  test("reports original publication failures without claiming success", async () => {
     const deps = dependencies();
     deps.publishScanToCloud = async () => {
-      throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+      throw new Error(
+        `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
+      );
     };
     const stdout = capture();
     const stderr = capture();
@@ -1005,7 +1008,9 @@ describe("publish scan to Cloud", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("codex-security: [redacted]\n");
+    expect(stderr.text()).toBe(
+      `codex-security: Cloud failed: ${SYNTHETIC_CREDENTIALS} [2J continued\n`,
+    );
   });
 
   test("preserves a confirmed single-scan receipt when cancellation follows the response", async () => {

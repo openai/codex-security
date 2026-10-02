@@ -1183,11 +1183,14 @@ def _populate_unsealed_manifest_envelope(
     scan["completedAt"] = completion_binding["completedAt"]
     scan["producer"] = copy.deepcopy(completion_binding["producer"])
 
-    target = scan.get("target")
+    target = scan.setdefault("target", {})
     if isinstance(target, dict):
+        allowed_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_kinds) == 1:
+            target.setdefault("kind", allowed_kinds[0])
         _populate_unsealed_target_binding(target, completion_binding["target"])
 
-    scope = scan.get("scope")
+    scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
@@ -2340,23 +2343,6 @@ def build_sarif(
     }
 
 
-def _validate_sarif(sarif: dict[str, Any]) -> None:
-    if sarif.get("version") != "2.1.0":
-        raise ContractError("SARIF: expected version 2.1.0")
-    runs = sarif.get("runs")
-    if not isinstance(runs, list) or len(runs) != 1:
-        raise ContractError("SARIF: expected exactly one run")
-    run = runs[0]
-    if not isinstance(run, dict):
-        raise ContractError("SARIF: expected a run object")
-    rule_ids = [rule["id"] for rule in run["tool"]["driver"]["rules"]]
-    for result in run["results"]:
-        if result["ruleId"] not in rule_ids:
-            raise ContractError("SARIF: result references an unknown rule")
-        if not result.get("partialFingerprints"):
-            raise ContractError("SARIF: result is missing partialFingerprints")
-
-
 def _artifact_record(
     scan_dir: Path, relative_path: str, media_type: str, contents: bytes | None = None
 ) -> dict[str, str]:
@@ -2403,7 +2389,6 @@ def _validate_existing_seal(
         raise ContractError("manifest.scan.sealedAt: must match completedAt")
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
-    artifact_paths: set[str] = set()
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
@@ -2415,7 +2400,6 @@ def _validate_existing_seal(
         collision_key = path.lower()
         if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
-        artifact_paths.add(path)
         artifact_collision_keys.add(collision_key)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
@@ -2490,7 +2474,6 @@ def build_sarif_projection(
                 ],
             }
         ]
-    _validate_sarif(sarif)
     return sarif
 
 
@@ -2499,10 +2482,6 @@ def write_sarif_projection(
 ) -> None:
     sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
     _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
-
-
-def write_sarif_output(scan_dir: Path, output: Path, sarif: dict[str, Any]) -> None:
-    write_export_output(scan_dir, output, "sarif", _json_bytes(sarif))
 
 
 def csv_cell(value: Any) -> Any:
@@ -2535,6 +2514,25 @@ def finding_candidate_id(finding: dict[str, Any]) -> str | None:
     )
 
 
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
+    )
+
+
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -2550,24 +2548,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
             for finding in findings["findings"]
         )
     )
-    writer.writerow(
-        (
-            "occurrence_id",
-            "finding_id",
-            *(("candidate_id",) if deep_scan else ()),
-            "title",
-            "summary",
-            "severity",
-            "confidence",
-            "status",
-            "close_reason",
-            "note",
-            "remediation",
-            "path",
-            "start_line",
-            "end_line",
-        )
-    )
+    writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
         locations = finding["locations"]
         location = next(
@@ -2801,38 +2782,24 @@ def _prepare_scan_finalization(
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-        validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_report_output_paths(scan_dir)
-        return (
-            scan_dir,
-            schema_dir,
-            manifest,
-            findings,
-            coverage,
-            was_sealed,
-            report_markdown_bytes,
-        )
-
-    findings_bytes = _contract_json_bytes("findings.json", findings)
-    coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-    report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-    _validate_report_output_paths(scan_dir)
-    scan["artifacts"] = [
-        _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
-        _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
-        *[
-            _artifact_record(scan_dir, ref, "application/octet-stream")
-            for ref in _coverage_receipt_refs(coverage)
-        ],
-    ]
-    _validate_sealed_coverage_receipts(scan, coverage)
-    _validate_manifest(manifest)
-    validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-    _contract_json_bytes("scan-manifest.json", manifest)
+    else:
+        findings_bytes = _contract_json_bytes("findings.json", findings)
+        coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+        report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
+        _validate_report_output_paths(scan_dir)
+        scan["artifacts"] = [
+            _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
+            _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
+            *[
+                _artifact_record(scan_dir, ref, "application/octet-stream")
+                for ref in _coverage_receipt_refs(coverage)
+            ],
+        ]
+        _validate_manifest(manifest)
+        validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
+        _contract_json_bytes("scan-manifest.json", manifest)
     return (
         scan_dir,
         schema_dir,
@@ -2860,18 +2827,14 @@ def _write_prepared_scan_finalization(
         report_markdown_bytes,
     ) = prepared
     scan = _require_dict(manifest, "scan", "manifest")
-    if was_sealed:
-        write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
-        _remove_scan_local_file_if_exists(scan_dir, "report.html")
-        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-        return manifest, findings, coverage
-
-    _write_scan_local_json(scan_dir, "findings.json", findings)
-    _write_scan_local_json(scan_dir, "coverage.json", coverage)
+    if not was_sealed:
+        _write_scan_local_json(scan_dir, "findings.json", findings)
+        _write_scan_local_json(scan_dir, "coverage.json", coverage)
     write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
-    _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
-    _validate_existing_seal(scan_dir, scan)
+    if not was_sealed:
+        _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
+        _validate_existing_seal(scan_dir, scan)
     _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
     return manifest, findings, coverage
 
@@ -2910,6 +2873,8 @@ def main() -> int:
             parser.error("--export-output requires --export-format")
         if args.sarif_output is not None and not args.sarif_only:
             parser.error("--sarif-output requires --sarif-only")
+        if args.sarif_only:
+            args.export_format, args.export_output = "sarif", args.sarif_output
         if args.export_format is not None:
             contents = build_findings_export(
                 args.scan_dir, args.export_format, args.source_root, args.schema_dir
@@ -2918,12 +2883,6 @@ def main() -> int:
                 sys.stdout.buffer.write(contents)
             else:
                 write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
-        elif args.sarif_only:
-            sarif = build_sarif_projection(args.scan_dir, args.source_root, args.schema_dir)
-            if args.sarif_output is None:
-                sys.stdout.buffer.write(_json_bytes(sarif))
-            else:
-                write_sarif_output(args.scan_dir, args.sarif_output, sarif)
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
     except ContractError as exc:

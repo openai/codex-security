@@ -32,9 +32,11 @@ TEXT_CODE_EXTENSIONS = {
     ".go",
     ".graphql",
     ".h",
+    ".hh",
     ".hpp",
     ".hs",
     ".html",
+    ".hxx",
     ".java",
     ".js",
     ".json",
@@ -71,7 +73,19 @@ TEXT_CODE_EXTENSIONS = {
 }
 
 JAVASCRIPT_EXTENSIONS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"}
-JAVA_LIKE_EXTENSIONS = {".c", ".cc", ".cpp", ".cs", ".cxx", ".h", ".hpp", ".java", ".mm"}
+JAVA_LIKE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".java",
+    ".mm",
+}
 BRACE_LANGUAGE_EXTENSIONS = {
     *JAVASCRIPT_EXTENSIONS,
     *JAVA_LIKE_EXTENSIONS,
@@ -186,7 +200,7 @@ def python_arguments(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 def python_outline(text: str) -> list[str]:
     try:
         tree = ast.parse(text)
-    except (SyntaxError, ValueError, TypeError, MemoryError):
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         return []
 
     outline: list[str] = []
@@ -459,7 +473,7 @@ def match_type_declaration(line: str, suffix: str) -> tuple[str, str] | None:
         match = re.search(r"\b(class|struct|enum|protocol|actor|extension)\s+([A-Za-z_]\w*)", line)
     elif suffix == ".dart":
         match = re.search(r"\b(class|mixin|enum|extension)\s+([A-Za-z_]\w*)", line)
-    elif suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".mm"}:
+    elif suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm"}:
         match = re.search(
             r"\b(class|struct|union|enum(?:\s+class)?)\s+([A-Za-z_]\w*)",
             line,
@@ -511,12 +525,20 @@ def match_java_like_function(
     prefix = before[: name_match.start()].strip()
     if not prefix and name != (type_name or ""):
         return None
-    if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".mm"} and prefix.startswith(
-        ("typedef", "using")
-    ):
+    if suffix in {
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".mm",
+    } and prefix.startswith(("typedef", "using")):
         return None
     if (
-        suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".mm"}
+        suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm"}
         and type_name is None
         and line.endswith(";")
         and not re.search(

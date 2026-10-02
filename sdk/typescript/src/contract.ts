@@ -136,7 +136,7 @@ export async function loadContractWithScanDirectory(
       }
       valid = result;
       if (!valid && filename === "findings.json") {
-        payload = legacySealedFindingsForValidation(payload);
+        payload = normalizePersistedFindings(payload);
         const compatibleResult = validate(payload);
         if (typeof compatibleResult !== "boolean") {
           throw new Error("asynchronous JSON Schema validation is unsupported");
@@ -217,7 +217,8 @@ export async function requireCanonicalScanDirectory(
 
 type JsonRecord = Record<string, unknown>;
 
-function legacySealedFindingsForValidation(payload: unknown): unknown {
+/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+export function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;

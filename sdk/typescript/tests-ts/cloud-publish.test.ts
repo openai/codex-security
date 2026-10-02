@@ -1,14 +1,5 @@
-import { createHash } from "node:crypto";
-import {
-  chmod,
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -20,8 +11,9 @@ import {
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const directories = createTemporaryDirectories({ canonical: false });
 const login = {
   auth_mode: "chatgpt",
   tokens: {
@@ -68,24 +60,16 @@ const csvRow = [
 ].join(",");
 
 async function csvFixture(contents = `${csvHeader}\n${csvRow}\n`) {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-cloud-csv-"));
-  directories.push(root);
+  const root = await directories.create("codex-security-cloud-csv-");
   const path = join(root, "findings.csv");
   await writeFile(path, contents);
   return path;
 }
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(directories.cleanup);
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-cloud-"));
-  directories.push(root);
+  const root = await directories.create("codex-security-cloud-");
   const scan = join(root, "scan");
   const home = join(root, "home");
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scan, {
@@ -133,17 +117,7 @@ async function addSecondFinding(scan: string): Promise<void> {
   const second = structuredClone(findings.findings[0]!);
   second.identity.instance = "second-instance";
   second.title = "A second synthetic finding";
-  const sha256 = (value: string): string =>
-    createHash("sha256").update(value).digest("hex");
-  const fingerprint = `codex-security/v1:sha256:${sha256(
-    [
-      "codex-security/v1",
-      manifest.scan.target.targetId,
-      second.ruleId,
-      second.identity.anchor,
-      second.identity.instance,
-    ].join("\0"),
-  )}`;
+  const fingerprint = findingFingerprint(manifest.scan.target.targetId, second);
   second.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
   second.occurrenceId = `occ_${sha256(
     [manifest.scan.id, fingerprint].join("\0"),
@@ -154,9 +128,7 @@ async function addSecondFinding(scan: string): Promise<void> {
   const artifact = manifest.scan.artifacts.find(
     ({ path }) => path === "findings.json",
   )!;
-  artifact.sha256 = createHash("sha256")
-    .update(await readFile(findingsPath))
-    .digest("hex");
+  artifact.sha256 = sha256(await readFile(findingsPath));
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 

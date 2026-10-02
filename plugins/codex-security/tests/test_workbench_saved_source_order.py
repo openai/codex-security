@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 from test_workbench_checkpoint_heads import drafts, select
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import run_workbench, saved_discovery_worker, write_checkpoint
+from workbench_test_support import (
+    fail_deep_scan,
+    run_workbench,
+    saved_binding,
+    saved_discovery_worker,
+    write_checkpoint,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
@@ -88,17 +94,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     os.utime(original, ns=(100, 100))
     select(output, original, 100)
     if explicit_recovery:
-        run_workbench(
-            state,
-            "fail-deep-scan",
-            "--scan-id",
-            scan_id,
-            "--message",
-            "Worker stopped.",
-            "--deep-status",
-            "failed",
-            environment={"CODEX_HOME": str(codex_home)},
-        )
+        fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
         result.write_bytes(result.read_bytes())
         os.utime(result, ns=(300, 300))
     directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
@@ -156,13 +152,7 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     checkpoint = write_checkpoint(output / "checkpoints", pending)
     os.utime(checkpoint, ns=(200, 200))
     workers = [saved_discovery_worker(output, "worker", 1)]
-    binding = {
-        "status": "interrupted",
-        "allowedTargetKinds": ["git_revision"],
-        "target": {"kind": "git_revision", "repository": "synthetic", "revision": "head"},
-        "scope": {"includePaths": ["."], "excludePaths": []},
-        "coverageMode": "deep_repository",
-    }
+    binding = saved_binding("deep_repository", repository="synthetic")
 
     def merge(frozen=None):
         return saved.merge_saved_results(
@@ -196,17 +186,7 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
 def test_order_metadata_is_not_new_evidence(tmp_path: Path) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    run_workbench(
-        state,
-        "fail-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--message",
-        "Worker stopped.",
-        "--deep-status",
-        "failed",
-        environment={"CODEX_HOME": str(codex_home)},
-    )
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
     orphan = scan_dir / "source-order" / ("0" * 64 + ".json")
     orphan.write_text(json.dumps({"scanId": scan_id, "sources": {}}))

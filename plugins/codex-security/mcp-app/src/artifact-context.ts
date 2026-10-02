@@ -21,22 +21,9 @@ export interface ScanArtifactContextOptions {
   pythonCommand?: string;
 }
 
-export interface WorkerArtifactContextInput {
-  root: string;
-  repoRoot: string;
+export type WorkerArtifactContextInput = Omit<ArtifactContext, "layout"> & {
   layout?: "worker" | "reducer";
-  scanId?: string;
-  scope?: string;
-  pluginRoot?: string;
-  pythonCommand?: string;
-  targetContract?: Readonly<Record<string, unknown>>;
-  targetRevision?: string;
-  targetSnapshotDigest?: string;
-  handoffClaimToken?: string;
-  status?: string;
-  mode?: string;
-  deepReducer?: ArtifactContext["deepReducer"];
-}
+};
 
 /**
  * Resolve parent artifacts from their authoritative, persisted workbench scan.

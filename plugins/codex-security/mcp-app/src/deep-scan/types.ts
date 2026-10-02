@@ -27,8 +27,6 @@ export interface DeepScanCanonicalArtifacts {
   candidateLedgerPath: string;
 }
 
-export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
-
 export interface DeepScanRunState {
   scanId: string;
   status: DeepScanRunStatus;

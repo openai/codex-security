@@ -1,22 +1,14 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    fileURLToPath(
-      new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
-    ),
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
+import { importTestModule } from "./import-test-module.mjs";
 const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-  );
+  await importTestModule({
+    entryPoints: [
+      fileURLToPath(
+        new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
+      ),
+    ],
+  });
 
 const rootRead = {
   path: { type: "special", value: { kind: "root" } },

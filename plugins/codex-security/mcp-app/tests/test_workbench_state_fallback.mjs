@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { buildTestEntrypoint } from "./build-test-entrypoint.mjs";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
@@ -49,16 +49,10 @@ async function testWorkbenchStateFallback() {
   await mkdir(targetPath, { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFakePython(fakePythonPath);
-  await build({
-    bundle: true,
+  await buildTestEntrypoint({
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
     outfile: serverBundlePath,
-    platform: "node",
     target: "node20",
   });
 

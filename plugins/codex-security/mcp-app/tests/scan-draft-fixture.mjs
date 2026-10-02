@@ -4,19 +4,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-
-const bundled = await build({
+import { importTestModule } from "./import-test-module.mjs";
+export const draftApi = await importTestModule({
   absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
-  bundle: true,
   entryPoints: ["../src/artifact-scan-draft.ts"],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-export const draftApi = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
-);
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 

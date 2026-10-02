@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { build } from "esbuild";
+import { buildTestEntrypoint } from "./build-test-entrypoint.mjs";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(
@@ -899,16 +899,10 @@ async function testDeepScanStdioLifecycle() {
 }
 
 async function bundleServer(outfile) {
-  await build({
-    bundle: true,
+  await buildTestEntrypoint({
     define: { "import.meta.url": "__filename" },
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
     outfile,
-    platform: "node",
     target: "node20",
   });
 }

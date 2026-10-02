@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -62,18 +63,10 @@ test("writes nested Git pointers as UTF-8 independently of the locale", () => {
     "pathlib.Path.open = locale_open",
     "target.copy_git_worktree_files(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), ())",
   ].join("\n");
-  const result = spawnSync(
+  const result = runNodePython(
     python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probe,
-      join(PLUGIN_ROOT, "scripts"),
-      repository,
-      checkout,
-    ],
-    { encoding: "utf8", windowsHide: true },
+    ["-c", probe, join(PLUGIN_ROOT, "scripts"), repository, checkout],
+    { windowsHide: true },
   );
 
   expect(result.status, result.stderr).toBe(0);

@@ -12,11 +12,9 @@ import re
 import sqlite3
 import stat
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,31 +57,6 @@ _PUBLICATION_FOLLOW_UP_WARNING = (
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
-
-
-@dataclass(frozen=True)
-class WorkbenchDbContext:
-    ARTIFACTS: dict[str, str]
-    artifact_path: Callable[..., Path | None]
-    deep_scan: ModuleType
-    expected_coverage_mode: Callable[..., str]
-    handoff: ModuleType
-    index_findings: Callable[..., None]
-    now: Callable[[], str]
-    optional_text: Callable[..., str | None]
-    parse_scan_cost: Callable[..., dict[str, Any] | None]
-    published_manifest_digest: Callable[..., str]
-    read_json_object: Callable[[Path], dict[str, Any]]
-    require_canonical_scan_directory: Callable[[Path], Path]
-    require_recorded_manifest_digest: Callable[..., None]
-    require_scan: Callable[..., Any]
-    require_uuid: Callable[[str, str], str]
-    require_workspace: Callable[..., Any]
-    scan_completion_lock: Callable[..., Any]
-    scan_context: Callable[..., dict[str, Any]]
-    verify_manifest_binding: Callable[..., None]
-    workbench_completion_binding: Callable[..., dict[str, Any]]
-    workspace_state: Callable[..., dict[str, Any]]
 
 
 def _encoded(value: Any) -> bytes:
@@ -191,15 +164,6 @@ def _checkpoint_head_directory(relative: str) -> Path | None:
     return None
 
 
-def _validate_checkpoint_head(
-    scan_dir: Path, directory: Path, scan_id: str, head: dict[str, Any]
-) -> None:
-    checkpoint = head.get("checkpoint")
-    if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
-        raise ContractError("checkpoint head does not name a saved checkpoint")
-    _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
-
-
 def _capture_saved_source(
     scan_dir: Path,
     relative: str,
@@ -210,13 +174,13 @@ def _capture_saved_source(
     write: bool = True,
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result_observation(scan_dir, relative, scan_id, kind=kind)
+        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return {relative: (digest, observed)}
-    head, _, observed = _read_saved_result_observation(scan_dir, relative, scan_id)
+    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     directory = Path(relative).parent
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result_observation(scan_dir, selected, scan_id)
+    _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
@@ -235,7 +199,7 @@ def _is_source_order_snapshot(relative: str) -> bool:
     )
 
 
-def _read_saved_result_observation(
+def _read_saved_result(
     scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
 ) -> tuple[dict[str, Any], str, int]:
     draft, _, metadata = _read_scan_local_json_with_metadata(
@@ -243,7 +207,10 @@ def _read_saved_result_observation(
     )
     directory = _checkpoint_head_directory(relative)
     if directory is not None:
-        _validate_checkpoint_head(scan_dir, directory, scan_id, draft)
+        checkpoint = draft.get("checkpoint")
+        if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
+            raise ContractError("checkpoint head does not name a saved checkpoint")
+        _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
         if Path(relative).name == "checkpoint-head.json":
             return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
         observed = draft.get("observedAtNs")
@@ -260,18 +227,11 @@ def _read_saved_result_observation(
     return draft, _digest(draft), metadata.st_mtime_ns
 
 
-def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
-) -> tuple[dict[str, Any], str]:
-    draft, digest, _ = _read_saved_result_observation(scan_dir, relative, scan_id, kind=kind)
-    return draft, digest
-
-
 def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
     times: dict[str, int] = {}
     snapshots = [path for path in sources if _is_source_order_snapshot(path)]
     for path in snapshots:
-        record, digest = _read_saved_result(scan_dir, path, scan_id)
+        record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
         if digest != sources[path] or not isinstance(record.get("sources"), dict):
             raise ContractError("saved source ordering changed after the scan stopped")
         for relative, observation in record["sources"].items():
@@ -480,7 +440,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources)
     for relative, expected_digest in recovery_sources.items():
         try:
-            _, digest, observed = _read_saved_result_observation(
+            _, digest, observed = _read_saved_result(
                 scan_dir, relative, scan["id"], kind=paths.get(relative)
             )
         except (ContractError, OSError, ValueError) as exc:
@@ -532,15 +492,10 @@ def _finding_key(finding: dict[str, Any]) -> str:
         else finding.get("identity")
     )
     if not isinstance(identity, dict):
-        extensions = finding.get("extensions")
-        source = str(
-            (extensions.get("candidateId") if isinstance(extensions, dict) else None)
-            or finding.get("title")
-            or "finding"
-        )
-        identity = {
-            "anchor": re.sub(r"[^a-z0-9._/-]+", "-", source.lower()).strip("._/-") or "finding"
-        }
+        normalized = dict(finding)
+        normalized.pop("identity", None)
+        _ensure_finding_identity(normalized)
+        identity = normalized["identity"]
     locations = finding.get("locations", [])
     if not isinstance(locations, list):
         locations = []
@@ -900,7 +855,7 @@ def merge_saved_results(
         if parent_manifest is not None and parent is not None:
             parent_scan = parent_manifest["scan"]
             try:
-                previous_head, _, head_modified = _read_saved_result_observation(
+                previous_head, _, head_modified = _read_saved_result(
                     scan_dir, "checkpoint-head.json", scan_id
                 )
             except (ContractError, OSError, ValueError):
@@ -915,7 +870,7 @@ def merge_saved_results(
                 head_path = scan_dir / "checkpoint-head.json"
                 tied_observations = False
                 if head_modified == parent_modified:
-                    previous_parent, _ = _read_saved_result(
+                    previous_parent, _, _ = _read_saved_result(
                         scan_dir, f"checkpoints/{previous_head['checkpoint']}", scan_id
                     )
                     if previous_parent != parent:
@@ -1049,7 +1004,7 @@ def merge_saved_results(
 
     for relative, worker_id in paths.items():
         try:
-            draft, digest, observed = _read_saved_result_observation(
+            draft, digest, observed = _read_saved_result(
                 scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
             )
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
@@ -1433,7 +1388,6 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
-                            resolved.setdefault(candidate_key, "reported")
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -2167,15 +2121,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
-        # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
-        copied_manifest = copy.deepcopy(manifest)
-        copied_findings = copy.deepcopy(findings)
-        copied_coverage = copy.deepcopy(coverage)
-        _populate_unsealed_manifest_envelope(copied_manifest, copied_manifest["scan"], binding)
-        _populate_unsealed_artifact_envelope(
-            copied_manifest, copied_findings, copied_coverage, binding
-        )
-        _validate_completion_binding(copied_manifest, copied_findings, copied_coverage, binding)
+        # Save scan IDs without sealing the draft.
+        _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
+        _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
+        _validate_completion_binding(manifest, findings, coverage, binding)
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()

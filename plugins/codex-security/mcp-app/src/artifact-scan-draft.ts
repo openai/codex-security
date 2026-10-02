@@ -350,7 +350,11 @@ async function preserveScanDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  const current = await readCurrentCheckpoints(context, currentCheckpointName);
+  const current: SavedScanDraft[] = await readSavedCheckpoints(
+    context,
+    "current",
+    currentCheckpointName,
+  );
   const archived =
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
@@ -974,11 +978,12 @@ async function readCheckpointHead(
   return { checkpoint: head.checkpoint, modifiedMs: Number(metadata.mtimeMs) };
 }
 
-async function readCurrentCheckpoints(
+async function readSavedCheckpoints(
   context: ArtifactContext,
-  excludedCheckpoint: string,
-): Promise<SavedScanDraft[]> {
-  const checkpointRoot = join(context.root, "checkpoints");
+  kind: "current" | "archived",
+  excludedCheckpoint?: string,
+): Promise<Array<SavedScanDraft & { name: string }>> {
+  let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
   if (
@@ -986,51 +991,56 @@ async function readCurrentCheckpoints(
     !checkpointRootMetadata.isDirectory()
   ) {
     throw new Error(
-      "scan checkpoint: current checkpoint set is not a safe directory.",
+      `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
     );
   }
-  const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
-    fs.realpath(context.root),
-    fs.realpath(checkpointRoot),
-  ]);
-  if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
-    throw new Error(
-      "scan checkpoint: current checkpoint set escaped its artifact directory.",
-    );
+  if (kind === "current") {
+    const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
+      fs.realpath(context.root),
+      fs.realpath(checkpointRoot),
+    ]);
+    if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
+      throw new Error(
+        "scan checkpoint: current checkpoint set escaped its artifact directory.",
+      );
+    }
+    checkpointRoot = canonicalCheckpointRoot;
   }
 
-  const head = await readCheckpointHead(context, "current");
+  const head =
+    kind === "current" ? await readCheckpointHead(context, kind) : undefined;
   const checkpointHead = head?.checkpoint;
 
-  const checkpoints: Array<SavedScanDraft & { head: boolean; name: string }> =
-    [];
-  for (const entry of await fs.readdir(canonicalCheckpointRoot, {
-    withFileTypes: true,
-  })) {
-    if (
-      !entry.isFile() ||
-      !entry.name.endsWith(".json") ||
-      entry.name === excludedCheckpoint
-    )
-      continue;
-    const checkpointPath = join(canonicalCheckpointRoot, entry.name);
+  const checkpoints: Array<SavedScanDraft & { name: string }> = [];
+  const entries = (
+    await fs.readdir(checkpointRoot, { withFileTypes: true })
+  ).filter(
+    (entry) =>
+      entry.isFile() &&
+      entry.name.endsWith(".json") &&
+      entry.name !== excludedCheckpoint,
+  );
+  if (kind === "archived")
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const checkpointPath = join(checkpointRoot, entry.name);
     const checkpointMetadata = await fs.lstat(checkpointPath);
     if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
       throw new Error(
-        "scan checkpoint: current checkpoint is not a safe file.",
+        `scan checkpoint: ${kind} checkpoint is not a safe file.`,
       );
     }
-    const input = parsePersistedCheckpoint(
-      parseJsonObject(
-        await readArtifactText(
-          context,
-          ["checkpoints", entry.name],
-          "current scan checkpoint",
-        ),
-        "current scan checkpoint",
-      ),
+    const label = `${kind} scan checkpoint`;
+    const draft = parseJsonObject(
+      await readArtifactText(context, ["checkpoints", entry.name], label),
+      label,
     );
-    if (input.scanId !== context.scanId) {
+    const input =
+      kind === "current"
+        ? parsePersistedCheckpoint(draft)
+        : parsePersistedScanDraft(draft);
+    if (kind === "archived") requireMatchingScan(context, input);
+    else if (input.scanId !== context.scanId) {
       throw new Error(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
@@ -1041,7 +1051,7 @@ async function readCurrentCheckpoints(
         entry.name === checkpointHead
           ? head!.modifiedMs
           : Number(checkpointMetadata.mtimeMs),
-      head: entry.name === checkpointHead,
+      ...(kind === "current" ? { head: entry.name === checkpointHead } : {}),
       name: entry.name,
     });
   }
@@ -1052,12 +1062,13 @@ async function readCurrentCheckpoints(
   ) {
     throw new Error("scan checkpoint: current checkpoint head is missing.");
   }
-  checkpoints.sort(
-    (left, right) =>
-      right.modifiedMs - left.modifiedMs ||
-      Number(right.head) - Number(left.head) ||
-      right.name.localeCompare(left.name),
-  );
+  if (kind === "current")
+    checkpoints.sort(
+      (left, right) =>
+        right.modifiedMs - left.modifiedMs ||
+        Number(right.head) - Number(left.head) ||
+        right.name.localeCompare(left.name),
+    );
   return checkpoints;
 }
 
@@ -1231,55 +1242,11 @@ async function readArchivedWorkerCheckpoints(
         });
       }
     }
-    const checkpointRoot = join(attemptRoot, "checkpoints");
-    const checkpointMetadata = await lstatIfExists(checkpointRoot);
-    if (checkpointMetadata !== undefined) {
-      if (
-        checkpointMetadata.isSymbolicLink() ||
-        !checkpointMetadata.isDirectory()
-      ) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint set is not a safe directory.",
-        );
-      }
-      const checkpoints = (
-        await fs.readdir(checkpointRoot, { withFileTypes: true })
-      )
-        .filter(
-          (entry) =>
-            entry.isFile() &&
-            entry.name.endsWith(".json") &&
-            entry.name !== head?.checkpoint,
-        )
-        .sort((left, right) => left.name.localeCompare(right.name));
-      for (const checkpoint of checkpoints) {
-        const checkpointPath = join(checkpointRoot, checkpoint.name);
-        const checkpointMetadata = await fs.lstat(checkpointPath);
-        if (
-          checkpointMetadata.isSymbolicLink() ||
-          !checkpointMetadata.isFile()
-        ) {
-          throw new Error(
-            "scan checkpoint: archived checkpoint is not a safe file.",
-          );
-        }
-        const contents = await readArtifactText(
-          attemptContext,
-          ["checkpoints", checkpoint.name],
-          "archived scan checkpoint",
-        );
-        const draft = parsePersistedScanDraft(
-          parseJsonObject(contents, "archived scan checkpoint"),
-        );
-        requireMatchingScan(context, draft);
-        drafts.push({
-          input: draft,
-          modifiedMs: Number(checkpointMetadata.mtimeMs),
-          result: false,
-          name: checkpoint.name,
-        });
-      }
-    }
+    drafts.push(
+      ...(
+        await readSavedCheckpoints(attemptContext, "archived", head?.checkpoint)
+      ).map((draft) => ({ ...draft, result: false })),
+    );
     if (checkpointHead !== undefined) {
       drafts.push({
         input: checkpointHead,
@@ -2105,52 +2072,43 @@ function buildScope(
 }
 
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
-  const generatedIdentities = findings.map((finding, index) => {
-    if (finding.identity !== undefined) return undefined;
+  const anchorCounts = new Map<string, number>();
+  const anchors = findings.map((finding, index) => {
     const candidateId = (finding.extensions as JsonObject | undefined)
       ?.candidateId;
     const identitySource =
       typeof candidateId === "string" && candidateId.trim()
         ? candidateId
         : (finding.title as string);
-    const extensions = finding.extensions as JsonObject | undefined;
-    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
-    );
-    return {
-      anchor: semanticIdentifier(identitySource, `finding-${index + 1}`),
-      stableInstanceSource: siblingSource,
-      siblingSource: siblingSource ?? (finding.title as string),
-    };
-  });
-  const anchorCounts = new Map<string, number>();
-  for (const [index, finding] of findings.entries()) {
-    const generatedIdentity = generatedIdentities[index];
-    const authoredIdentity = finding.identity as JsonObject | undefined;
     const anchor =
-      generatedIdentity?.anchor ?? (authoredIdentity?.anchor as string);
+      finding.identity === undefined
+        ? semanticIdentifier(identitySource, `finding-${index + 1}`)
+        : ((finding.identity as JsonObject).anchor as string);
     const ruleScopedAnchor = `${finding.ruleId}\0${anchor}`;
     anchorCounts.set(
       ruleScopedAnchor,
       (anchorCounts.get(ruleScopedAnchor) ?? 0) + 1,
     );
-  }
+    return anchor;
+  });
 
   const identified: JsonObject[] = findings.map((finding, index) => {
-    const generatedIdentity = generatedIdentities[index];
-    if (generatedIdentity === undefined) return { ...finding };
-    const identity: JsonObject = { anchor: generatedIdentity.anchor };
-    const ruleScopedAnchor = `${finding.ruleId}\0${generatedIdentity.anchor}`;
+    if (finding.identity !== undefined) return { ...finding };
+    const identity: JsonObject = { anchor: anchors[index] };
+    const extensions = finding.extensions as JsonObject | undefined;
+    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
+      (value): value is string =>
+        typeof value === "string" && Boolean(value.trim()),
+    );
+    const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
     if (
-      generatedIdentity.stableInstanceSource !== undefined ||
+      siblingSource !== undefined ||
       (anchorCounts.get(ruleScopedAnchor) ?? 0) > 1
     ) {
-      const baseInstance = semanticIdentifier(
-        generatedIdentity.siblingSource,
+      identity.instance = semanticIdentifier(
+        siblingSource ?? (finding.title as string),
         `finding-${index + 1}`,
       );
-      identity.instance = baseInstance;
     }
     return {
       ...finding,

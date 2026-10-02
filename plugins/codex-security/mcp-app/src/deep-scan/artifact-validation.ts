@@ -184,44 +184,28 @@ export function reconcileDeepReduction(
     }
   }
   retainSourceFindings(result, { discoveries, previous });
-  if (result.threatModel === undefined) {
-    const sourceModels = [
-      ...discoveries.map((discovery) => discovery.result.threatModel),
-      previous?.threatModel,
-    ].filter((model): model is Record<string, unknown> => model !== undefined);
-    const distinctModels = sourceModels.filter(
-      (model, index) =>
-        sourceModels.findIndex((candidate) =>
-          isDeepStrictEqual(candidate, model),
+  for (const [field, label] of [
+    ["threatModel", "threat models"],
+    ["scope", "scopes"],
+  ] as const) {
+    if (result[field] !== undefined) continue;
+    const sourceValues = [
+      ...discoveries.map((discovery) => discovery.result[field]),
+      previous?.[field],
+    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    const distinctValues = sourceValues.filter(
+      (value, index) =>
+        sourceValues.findIndex((candidate) =>
+          isDeepStrictEqual(candidate, value),
         ) === index,
     );
-    if (distinctModels.length > 1) {
+    if (distinctValues.length > 1) {
       throw new Error(
-        "Deep reduction has ambiguous threat models; provide the reconciled threatModel explicitly.",
+        `Deep reduction has ambiguous ${label}; provide the reconciled ${field} explicitly.`,
       );
     }
-    if (distinctModels[0] !== undefined) {
-      result.threatModel = structuredClone(distinctModels[0]);
-    }
-  }
-  if (result.scope === undefined) {
-    const sourceScopes = [
-      ...discoveries.map((discovery) => discovery.result.scope),
-      previous?.scope,
-    ].filter((scope): scope is Record<string, unknown> => scope !== undefined);
-    const distinctScopes = sourceScopes.filter(
-      (scope, index) =>
-        sourceScopes.findIndex((candidate) =>
-          isDeepStrictEqual(candidate, scope),
-        ) === index,
-    );
-    if (distinctScopes.length > 1) {
-      throw new Error(
-        "Deep reduction has ambiguous scopes; provide the reconciled scope explicitly.",
-      );
-    }
-    if (distinctScopes[0] !== undefined) {
-      result.scope = structuredClone(distinctScopes[0]);
+    if (distinctValues[0] !== undefined) {
+      result[field] = structuredClone(distinctValues[0]);
     }
   }
   return result;
@@ -300,13 +284,11 @@ function retainSourceFindings(
         );
       claimed.add(id);
     }
-    if (refs.length) {
-      provenance.sourceFindingIds = refs;
-      provenance.sourceFindings = refs.map((id) => ({
-        id,
-        finding: structuredClone(sources.get(id)!),
-      }));
-    }
+    provenance.sourceFindingIds = refs;
+    provenance.sourceFindings = refs.map((id) => ({
+      id,
+      finding: structuredClone(sources.get(id)!),
+    }));
   }
   const missing = [...sources.keys()].filter((id) => !claimed.has(id));
   if (missing.length)

@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { buildTestEntrypoint } from "./build-test-entrypoint.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -36,19 +37,13 @@ const temporaryDirectories = [];
 
 await fs.mkdir(repository);
 await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
-await build({
-  bundle: true,
+await buildTestEntrypoint({
   define: {
     __dirname: JSON.stringify(applicationRoot),
     "import.meta.url": "__filename",
   },
   entryPoints: [path.join(applicationRoot, "main.ts")],
-  external: ["fsevents"],
-  format: "cjs",
-  loader: { ".md": "text" },
-  logLevel: "silent",
   outfile: bundle,
-  platform: "node",
 });
 await build({
   bundle: true,

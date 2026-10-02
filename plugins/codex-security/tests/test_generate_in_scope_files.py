@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -73,7 +73,18 @@ def run_inventory(
 
 def standard_inventory(repository: Path, scope: str) -> bytes:
     files = subprocess.run(
-        ["rg", "--files", "--hidden", "--glob", "!.git/**", "--path-separator=/", "--", scope],
+        [
+            "rg",
+            "--files",
+            "--hidden",
+            "--glob",
+            "!**/.git",
+            "--glob",
+            "!**/.git/**",
+            "--path-separator=/",
+            "--",
+            scope,
+        ],
         cwd=repository,
         capture_output=True,
         check=False,
@@ -146,6 +157,101 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./ignored/tracked.py" in paths
     assert "./ignored/secret.py" not in paths
     assert "./app/ignored.skip" not in paths
+
+
+@pytest.mark.parametrize(
+    ("scope", "absolute"),
+    [
+        (".", False),
+        ("ignored", False),
+        ("./ignored", False),
+        ("ignored/tracked.py", False),
+        ("./ignored/tracked.py", False),
+        ("ignored", True),
+        ("ignored/tracked.py", True),
+    ],
+)
+def test_inventory_lists_ignored_tracked_files_once(
+    tmp_path: Path, scope: str, absolute: bool
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, str(repository / scope) if absolute else scope, output)
+
+    assert result.returncode == 0, result.stderr
+    rows = output.read_bytes().splitlines()
+    prefix = b"./" if scope == "." or scope.startswith("./") else b""
+    assert rows.count(prefix + b"ignored/tracked.py") == 1
+    assert rows == sorted(set(rows))
+    assert result.stdout == f"Recorded {len(rows)} in-scope files.\n"
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [(".", "./vendor/lib/handler.py"), ("vendor", "vendor/lib/handler.py")],
+)
+def test_inventory_excludes_git_metadata_from_a_nested_repository(
+    tmp_path: Path, scope: str, expected: str
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "vendor/lib/handler.py")
+    write_file(repository, "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n")
+    write_file(repository, "vendor/lib/.git/config", b"[core]\n\tbare = false\n")
+    write_file(repository, "vendor/lib/.git/objects/ab/cdef", b"blob")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert expected in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        ".git",
+        "./.git",
+        ".git/hooks",
+        "vendor/lib/.git",
+        "./vendor/lib/.git",
+        "vendor/lib/.git/hooks",
+    ],
+)
+def test_inventory_excludes_metadata_when_scoped_inside_a_git_directory(
+    tmp_path: Path, scope: str
+) -> None:
+    repository = make_repository(tmp_path)
+    for prefix in (".git", "vendor/lib/.git"):
+        write_file(repository, f"{prefix}/hooks/example.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b""
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path, nested: bool) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    worktree = repository / "vendor" / "lib" if nested else tmp_path / "worktree"
+    git(repository, "worktree", "add", "-q", str(worktree), "HEAD")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository if nested else worktree, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    prefix = "./vendor/lib" if nested else "."
+    assert f"{prefix}/app/routes.py" in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")
@@ -461,6 +567,39 @@ def test_diff_inventory_includes_changed_objective_c(tmp_path: Path, mode: str) 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == sorted(sources)
+
+
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_includes_changed_cpp_headers(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    names = [
+        "include/base.h",
+        "include/base.hpp",
+        "include/lower.hh",
+        "include/lower.hxx",
+        "include/upper.HH",
+        "include/upper.HXX",
+    ]
+    for name in names:
+        write_file(repository, name, b"inline int answer() { return 1; }\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    for name in names:
+        write_file(repository, name, b"inline int answer() { return 2; }\n")
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "change")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == sorted(names)
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])

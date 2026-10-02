@@ -687,6 +687,10 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         [
           "patch",
+          "--model",
+          "gpt-6.1-sol",
+          "--effort",
+          "max",
           "--auth",
           "chatgpt",
           "--scan",
@@ -698,6 +702,8 @@ describe("scan and patch workflow", () => {
           result,
           onWorkbench: () => savedScan(result),
           onCodex: (args, output) => {
+            expect(args).toContain('model="gpt-6.1-sol"');
+            expect(args).toContain('model_reasoning_effort="max"');
             expect(output?.auth).toBe("chatgpt");
             completePatches(args, output);
             return 0;
@@ -705,13 +711,13 @@ describe("scan and patch workflow", () => {
         },
         {
           configure: (current) => {
-            Object.assign(current, {
-              assessPatchRisk: async (request: { auth?: string }) => {
-                expect(request.auth).toBe("chatgpt");
-                assessments += 1;
-                return patchRiskAssessment();
-              },
-            });
+            current.assessPatchRisk = async (request) => {
+              expect(request.auth).toBe("chatgpt");
+              expect(request.configuration.model).toBe("gpt-6.1-sol");
+              expect(request.configuration.effort).toBe("max");
+              assessments += 1;
+              return patchRiskAssessment();
+            };
           },
         },
       );
@@ -726,6 +732,72 @@ describe("scan and patch workflow", () => {
           report: patchRiskReport(),
         });
       }
+    }
+  });
+
+  test("preserves patch-risk details in display and publication summaries", async () => {
+    const result = resultWithFindings(["high"]);
+    const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
+    const report = patchRiskAssessment().report.replace(
+      patchRiskSummary(),
+      `${patchRiskSummary()}\n\n${detail}`,
+    );
+    const repositoryCommands: Array<{
+      command: string;
+      args: readonly string[];
+    }> = [];
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--assess-patch-risk",
+        "--create-pr",
+        "--json",
+      ],
+      {
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (command, args) => {
+          repositoryCommands.push({ command, args });
+          if (command === "git") {
+            if (args[0] === "remote") {
+              return "https://github.example.test/example/repository.git";
+            }
+            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+          }
+          return args[1] === "create"
+            ? "https://github.example.test/example/repository/pull/15"
+            : "";
+        },
+      },
+      {
+        configure: (current) => {
+          Object.assign(current, {
+            assessPatchRisk: async () => ({ report }),
+          });
+        },
+      },
+    );
+
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(outcome.stderr).toContain("Patch risk assessment:");
+    expect(outcome.stderr).toContain(patchRiskSummary());
+    expect(outcome.stderr).toContain(detail);
+    expect(JSON.parse(outcome.stdout).patchRisk.report).toContain(detail);
+    const published = repositoryCommands.find(
+      ({ command, args }) => command === "gh" && args[1] === "create",
+    )?.args;
+    const persisted = repositoryCommands.find(
+      ({ command, args }) =>
+        command === "git" &&
+        args[0] === "config" &&
+        args[2]?.endsWith(".codexSecurityPatchPullRequestBody"),
+    )?.args;
+    expect(published).toBeDefined();
+    expect(persisted).toBeDefined();
+    for (const body of [published?.at(-1), persisted?.at(-1)]) {
+      expect(body).toContain(patchRiskSummary());
+      expect(body).toContain(detail);
     }
   });
 
@@ -754,15 +826,39 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         [
           "patch",
+          "--model",
+          "gpt-6.1-sol",
+          "--effort",
+          "max",
           "Synthetic issue",
           "--assess-patch-risk",
           "--codex",
           "analytics.enabled=false",
+          "--codex",
+          'model_provider="synthetic.gateway"',
+          "--codex",
+          'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
         ],
         {
           currentDirectory: repository,
           onCodex: async (args, output) => {
+            expect(args).toContain('model="gpt-6.1-sol"');
+            expect(args).toContain('model_reasoning_effort="max"');
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain('model_provider="synthetic.gateway"');
+            expect(output?.modelProvider).toBe("synthetic.gateway");
+            expect(output?.providerConfiguration?.["env_key"]).toBe(
+              "SYNTHETIC_KEY",
+            );
+            expect(
+              parseToml(
+                args.find((arg) => arg.startsWith("model_providers="))!,
+              ),
+            ).toMatchObject({
+              model_providers: {
+                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+              },
+            });
             if (
               output?.appServer?.prompt.includes(
                 "$codex-security:assess-patch-risk",
@@ -1215,6 +1311,8 @@ describe("scan and patch workflow", () => {
         "api-key",
         "--safety-identifier",
         "synthetic-user",
+        "--codex",
+        'model_reasoning_effort="ultra"',
         "--json",
       ],
       {
@@ -1229,6 +1327,7 @@ describe("scan and patch workflow", () => {
     );
     expect(attributed.exitCode).toBe(0);
     expect(invocation).toContain('safety_identifier="synthetic-user"');
+    expect(invocation).toContain('model_reasoning_effort="ultra"');
 
     for (const selection of [
       ["--provider", "fireworks"],
@@ -1610,6 +1709,7 @@ describe("scan and patch workflow", () => {
   test("rejects new patch inputs when resuming publication", async () => {
     for (const input of [
       ["--scan", "scan-1"],
+      ["--model", "gpt-6-astra"],
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
       ["--assess-patch-risk"],
@@ -2169,22 +2269,32 @@ describe("scan and patch workflow", () => {
     },
   );
 
-  test("redacts credentials when saved-finding pull request creation fails", async () => {
-    const result = resultWithFindings(["high"]);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr"],
-      {
-        onWorkbench: () => savedScan(result),
-        onRepositoryCommand: () => {
-          throw new Error("GitHub rejected github_pat_SYNTHETIC_SECRET_123");
+  test.each(["patch", "scan"])(
+    "escapes controls in %s pull request failures while preserving error details",
+    async (command) => {
+      const result = resultWithFindings(["high"]);
+      const outcome = await runWorkflow(
+        command === "patch"
+          ? ["patch", "--scan", "scan-1", "--create-pr"]
+          : ["scan", ".", "--patch", "--create-pr"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: () => {
+            throw new Error(
+              "GitHub rejected github_pat_SYNTHETIC_SECRET_123\u001b[2J\ncontinued",
+            );
+          },
         },
-      },
-    );
+      );
 
-    expect(outcome.exitCode).toBe(2);
-    expect(outcome.stderr).toContain("[redacted]");
-    expect(outcome.stderr).not.toContain("SYNTHETIC_SECRET_123");
-  });
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(
+        "GitHub rejected github_pat_SYNTHETIC_SECRET_123 [2J continued\n",
+      );
+      expect(outcome.stderr).not.toContain("\u001b");
+    },
+  );
 
   test("resolves a finding identifier to its saved scan and checkout", async () => {
     const result = resultWithFindings(["high"]);

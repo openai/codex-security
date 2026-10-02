@@ -15,10 +15,12 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-
-const bundle = await build({
-  bundle: true,
+import { importTestModule } from "./import-test-module.mjs";
+const {
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  deepScanPermissionProfileFallbackError,
+  preflightDeepScanWorkerPermissionProfile,
+} = await importTestModule({
   entryPoints: [
     fileURLToPath(
       new URL(
@@ -27,17 +29,7 @@ const bundle = await build({
       ),
     ),
   ],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-  deepScanPermissionProfileFallbackError,
-  preflightDeepScanWorkerPermissionProfile,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
 
 const profileId = DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
 const expectedProfile = {

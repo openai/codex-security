@@ -43,7 +43,7 @@ const failureReasons: Record<string, string> = {
   "bad-request-turn": "Invalid model configuration",
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
-  "credential-error": "[redacted]",
+  "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -379,19 +379,17 @@ for (const {
               : 1) * sessions,
           reason: refused
             ? "The model refused the deduplication review."
-            : scenario === "credential-error"
-              ? "[redacted]"
-              : scenario === "invalid-submission"
-                ? "The submitted review failed semantic validation."
-                : scenario === "text-only"
-                  ? "Codex did not submit a validated review."
-                  : modelFailures.has(scenario)
-                    ? "Codex review turn failed."
-                    : reportsBlocker
-                      ? "A required review check could not be completed."
-                      : scenario === "request-error"
-                        ? "Codex rejected the review request."
-                        : "Codex review transport failed.",
+            : scenario === "invalid-submission"
+              ? "The submitted review failed semantic validation."
+              : scenario === "text-only"
+                ? "Codex did not submit a validated review."
+                : modelFailures.has(scenario)
+                  ? "Codex review turn failed."
+                  : reportsBlocker
+                    ? "A required review check could not be completed."
+                    : ["request-error", "credential-error"].includes(scenario)
+                      ? "Codex rejected the review request."
+                      : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");

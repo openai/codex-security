@@ -425,14 +425,11 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
     wrapper = tmp_path / "fail_index.py"
     wrapper.write_text(
         "import sys\n"
-        "from dataclasses import replace\n"
         f"sys.path.insert(0, {str(scripts_dir)!r})\n"
         "import workbench_db\n"
         "def fail_index(*args, **kwargs):\n"
         "    raise RuntimeError('injected indexing failure')\n"
-        "workbench_db._WORKBENCH_DB_CONTEXT = replace(\n"
-        "    workbench_db._WORKBENCH_DB_CONTEXT, index_findings=fail_index\n"
-        ")\n"
+        "workbench_db._WORKBENCH_DB_CONTEXT.index_findings = fail_index\n"
         "raise SystemExit(workbench_db.main())\n"
     )
 

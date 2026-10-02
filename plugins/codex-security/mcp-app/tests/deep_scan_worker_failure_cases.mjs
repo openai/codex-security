@@ -5,7 +5,7 @@ export function createDeepScanWorkerFailureCases({
   fixtureRun,
   FakeStore,
   FakeExecutor,
-  DeepScanCoordinator,
+  createCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
   deferred,
@@ -45,10 +45,10 @@ export function createDeepScanWorkerFailureCases({
       const normalExecutor = new FakeExecutor();
       const attempts = [];
       const events = [];
-      const coordinator = new DeepScanCoordinator({
-        run: fixture.run,
+      const coordinator = createCoordinator(
+        fixture,
         store,
-        executor: {
+        {
           async run(request) {
             if (
               request.kind === "discovery" &&
@@ -64,11 +64,8 @@ export function createDeepScanWorkerFailureCases({
             return normalExecutor.run(request);
           },
         },
-        pluginRoot: fixture.pluginRoot,
-        retryDelaysMs: [1, 3, 9],
-        clock: immediateClock,
-        log: (event) => events.push(event),
-      });
+        { retryDelaysMs: [1, 3, 9], log: (event) => events.push(event) },
+      );
       coordinator.start();
 
       const terminal = await coordinator.wait(undefined, 5_000);
@@ -128,10 +125,10 @@ export function createDeepScanWorkerFailureCases({
     let committedResultPath;
     let committedContent;
     const failedAttempts = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: {
+      {
         async run(request) {
           if (request.kind === "dedup") {
             const label = (await promptContext(request.promptPath))
@@ -164,10 +161,8 @@ export function createDeepScanWorkerFailureCases({
           return normalExecutor.run(request);
         },
       },
-      pluginRoot: fixture.pluginRoot,
-      retryDelaysMs: [1, 3, 9],
-      clock: immediateClock,
-    });
+      { retryDelaysMs: [1, 3, 9] },
+    );
     coordinator.start();
     await store.dedupCommitted.promise;
     committedResultPath = store.dedupCommits[0].resultManifestPath;
@@ -213,10 +208,10 @@ export function createDeepScanWorkerFailureCases({
     const normalExecutor = new FakeExecutor({ blockDiscoveryAfterCalls: 2 });
     const attempts = [];
     const sleeps = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: {
+      {
         async run(request) {
           if (request.kind === "dedup") {
             attempts.push(request.resumeThreadId);
@@ -225,12 +220,13 @@ export function createDeepScanWorkerFailureCases({
           return normalExecutor.run(request);
         },
       },
-      pluginRoot: fixture.pluginRoot,
-      clock: {
-        now: immediateClock.now,
-        sleep: async (delayMs) => sleeps.push(delayMs),
+      {
+        clock: {
+          now: immediateClock.now,
+          sleep: async (delayMs) => sleeps.push(delayMs),
+        },
       },
-    });
+    );
     coordinator.start();
 
     const terminal = await coordinator.wait(undefined, 5_000);

@@ -10,26 +10,17 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
-
-const bundled = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
+import { importTestModule } from "./import-test-module.mjs";
 const {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
   getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
-} = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundled.outputFiles[0].contents).toString("base64")
-);
+} = await importTestModule({
+  entryPoints: [
+    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+  ],
+});
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const validReduction = reduction([]);

@@ -32,18 +32,37 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
-def saved_draft(scan_id: str, *, deferred=(), surfaces=(), closures=(), complete=False):
+def saved_draft(
+    scan_id: str,
+    *,
+    deferred=(),
+    surfaces=(),
+    closures=(),
+    complete=False,
+    findings=(),
+    completeness=None,
+):
     return {
         "scanId": scan_id,
         "complete": complete,
-        "findings": [],
+        "findings": list(findings),
         "coverage": {
-            "completeness": "partial" if deferred else "complete",
+            "completeness": completeness or ("partial" if deferred else "complete"),
             "surfaces": list(surfaces),
             "explicitExclusions": [],
             "deferred": list(deferred),
             **({"resolvedDeferred": list(closures)} if closures else {}),
         },
+    }
+
+
+def saved_binding(coverage_mode="repository", *, repository="test", status="interrupted"):
+    return {
+        "status": status,
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": repository, "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": coverage_mode,
     }
 
 
@@ -144,6 +163,19 @@ def run_workbench(
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    return run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        message,
+        *(["--deep-status", deep_status] if deep_status is not None else []),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
 
 
 def start_delivered_scan(

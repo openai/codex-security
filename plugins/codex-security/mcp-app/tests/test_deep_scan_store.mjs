@@ -3,18 +3,10 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { build } from "esbuild";
-
-const bundle = await build({
-  bundle: true,
+import { importTestModule } from "./import-test-module.mjs";
+const { WorkbenchDeepScanStore, parseDeepScan } = await importTestModule({
   entryPoints: [new URL("../src/deep-scan/store.ts", import.meta.url).pathname],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const { WorkbenchDeepScanStore, parseDeepScan } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
 
 await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();

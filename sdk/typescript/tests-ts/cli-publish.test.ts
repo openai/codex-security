@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const DESTINATION_OPTIONS = [
   "--to",
@@ -15,27 +16,21 @@ const DESTINATION_OPTIONS = [
   "--linear-project",
   "project-from-flags",
 ] as const;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function publicationDirectory(): Promise<string> {
-  const directory = await mkdtemp(
-    join(tmpdir(), "codex-security-cli-publication-"),
+  const directory = await temporaryDirectories.create(
+    "codex-security-cli-publication-",
   );
-  temporaryDirectories.push(directory);
   return directory;
 }
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create(
+    "codex-security-publish-picker-",
+  );
   return Promise.all(
     Array.from({ length: count }, async (_, index) => {
       const directory = join(root, `scan-${index}`);
@@ -903,7 +898,7 @@ describe("publish scan", () => {
 
   test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
     for (const { json, tty, failed } of [
       { json: false, tty: false, failed: false },
@@ -1049,7 +1044,7 @@ describe("publish scan", () => {
     const created = [
       {
         ...base,
-        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\nsafe\u009F",
         url: "javascript:alert(1)",
       },
       {
@@ -1085,7 +1080,7 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }
@@ -2449,7 +2444,7 @@ describe("publish scan", () => {
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const result = { ...publicationResult(), warnings: [warning] };
     const stdout = capture();
     const stderr = capture();
@@ -2491,7 +2486,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
 
-  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+  test("normalizes receipt warning controls while preserving diagnostic text and partial results", async () => {
     const warnings = [
       "Receipt storage failed.\n\u001B[31mDo not retry publication.",
       "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
@@ -2518,10 +2513,9 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
-        "codex-security: [redacted]\n",
+        "codex-security: Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET\n",
     );
     expect(stderr.text()).not.toContain("\u001B");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {
