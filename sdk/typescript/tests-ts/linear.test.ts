@@ -156,13 +156,13 @@ describe("Linear issue intake", () => {
     }
   });
 
-  test("reports SDK failures without exposing credentials", async () => {
+  test("reports SDK failures with original diagnostic details", async () => {
     for (const [error, message] of [
       [new AuthenticationLinearError(), "Linear authentication failed."],
       [new RatelimitedLinearError(), "Linear request was rate limited."],
       [
         new Error("Invalid lin_api_SYNTHETIC_SECRET"),
-        "Linear request failed: [redacted]",
+        "Linear request failed: Invalid lin_api_SYNTHETIC_SECRET",
       ],
     ] as const) {
       await expect(

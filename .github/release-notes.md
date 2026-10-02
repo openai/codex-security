@@ -34,6 +34,7 @@
 - share model options across commands ([#1143](https://github.com/openai/codex-security/pull/1143))
 - add Invoice Desk fixture and OpenAI PR scans ([#1144](https://github.com/openai/codex-security/pull/1144))
 - prohibit reintroducing CLI secret and log redaction ([#1178](https://github.com/openai/codex-security/pull/1178))
+- preserve diagnostic text without secret redaction ([#1179](https://github.com/openai/codex-security/pull/1179))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
