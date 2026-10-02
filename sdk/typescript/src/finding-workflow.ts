@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
 import {
   bundledPluginRoot,
@@ -108,7 +108,7 @@ export class FindingWorkflow {
     await this.command({
       action: "fail",
       stage,
-      error: safeErrorMessage(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
   }
 

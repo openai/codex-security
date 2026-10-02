@@ -6,8 +6,12 @@ import {
   type OwnerEvidence,
   type OwnerIdentity,
 } from "./owner-evidence.js";
-import { mergedCodexConfig, scanModelConfiguration } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import {
+  mergedCodexConfig,
+  scanModelConfiguration,
+  type ScanModelConfiguration,
+} from "./config.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
@@ -53,11 +57,9 @@ export interface OwnerSuggestion {
   limitations: string[];
 }
 
-export interface OwnerSuggestions {
+export interface OwnerSuggestions extends ScanModelConfiguration {
   schemaVersion: 1;
   revision: string;
-  model: string;
-  reasoningEffort: string;
   results: OwnerSuggestion[];
 }
 
@@ -175,7 +177,7 @@ export async function suggestOwnersInternal(
     } catch (error) {
       options.signal?.throwIfAborted();
       result.status = "error";
-      result.reason = safeErrorMessage(error);
+      result.reason = errorMessage(error);
     }
   }
   options.signal?.throwIfAborted();

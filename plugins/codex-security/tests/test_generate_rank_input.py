@@ -173,6 +173,35 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     )
 
 
+def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    source = "value = " + " + ".join(["x"] * 10000) + "\n"
+    (repo / "src" / "generated.py").write_text(source, encoding="utf-8")
+    (repo / "src" / "normal.py").write_text("value = 1\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli(
+        "make-repo-rank-input",
+        "--repo",
+        str(repo),
+        "--scope",
+        "src",
+        "--preview-bytes",
+        "128",
+        "--out",
+        str(output),
+    )
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["src/generated.py", "src/normal.py"]
+    preview = rows[0]["preview"]
+    assert preview
+    assert source.startswith(preview)
+    assert len(preview.encode("utf-8")) <= 128
+    assert rows[1]["preview"] == "value = 1"
+
+
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
 def test_rank_input_bounds_large_text_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str

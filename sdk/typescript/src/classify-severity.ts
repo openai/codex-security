@@ -1,7 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
-import type { CodexSecurityConfig } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { prepareKnowledgeBase } from "./knowledge-base.js";
@@ -20,18 +19,19 @@ export type SeverityClassificationFinding = Pick<
   Partial<Pick<Finding, "occurrenceId" | "severity">> &
   Record<string, unknown>;
 
-export interface ClassifySeverityOptions {
+export interface ClassifySeverityOptions extends Pick<
+  ReadOnlyCodexOptions,
+  | "config"
+  | "environment"
+  | "model"
+  | "reasoningEffort"
+  | "signal"
+  | "workingDirectory"
+> {
   /** Classification policy. Omit to inherit existing severity without a model call. */
   rubricPath?: string;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
-  config?: CodexSecurityConfig;
-  environment?: NodeJS.ProcessEnv;
-  model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
-  signal?: AbortSignal;
-  workingDirectory?: string;
   /** @internal Test client for the shared read-only runtime. */
   codex?: ReadOnlyCodexOptions["codex"];
 }

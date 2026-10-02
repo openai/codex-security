@@ -10,7 +10,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { normalizePersistedFindings, requireScanFile } from "./contract.js";
-import { IncompleteScanError, safeErrorMessage } from "./errors.js";
+import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
@@ -363,7 +363,7 @@ export async function runCustomValidation(options: {
     for (const [index, name] of DOCUMENTS.entries())
       await writeJson(scanDir, name, documents[index]);
     throw new IncompleteScanError(
-      `Custom validation is incomplete: ${safeErrorMessage(error)}`,
+      `Custom validation is incomplete: ${errorMessage(error)}`,
       { cause: error },
     );
   }
