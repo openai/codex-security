@@ -162,6 +162,8 @@ describe("built SECURITY.md helper", () => {
         ],
         [{ HOMEDRIVE: drive, HOMEPATH: "current" }, "~/project", root],
         [{ USERPROFILE: `${drive}current` }, "~/project", root],
+        [{ USERPROFILE: drive }, "~/project", home],
+        [{ HOMEDRIVE: drive, HOMEPATH: "" }, "~/project", home],
         [{ USERPROFILE: "" }, "~", join(home, "project")],
         [{ HOMEDRIVE: drive, HOMEPATH: "" }, "~", join(home, "project")],
       ];
@@ -175,8 +177,18 @@ describe("built SECURITY.md helper", () => {
         expect(result.stdout).toContain("home-variable policy");
       }
       expect(run(["--repo", root, "--scope", "~"], homeEnv({})).status).toBe(1);
-      const other = homeEnv({ USERPROFILE: `${home}\\`, USERNAME: "current" });
+      const other = homeEnv({ USERPROFILE: home, USERNAME: "different" });
       expect(run(["--repo", "~other", "--scope", "."], other).status).toBe(1);
+      for (const profile of [
+        "\\\\host\\share\\",
+        "\\\\?\\UNC\\host\\share\\",
+        "\\\\?\\unc\\host\\share",
+      ]) {
+        const shareRoot = homeEnv({ USERPROFILE: profile, USERNAME: "share" });
+        const result = run(["--repo", "~other", "--scope", "."], shareRoot);
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain("Could not determine home directory.");
+      }
     },
   );
 
@@ -736,13 +748,23 @@ describe("built SECURITY.md helper", () => {
       const profiles = join(root, "profiles");
       write(profiles, "current/SECURITY.md", "current policy\n");
       write(profiles, "sibling/SECURITY.md", "sibling policy\n");
-      const result = run(["--repo", "~sibling", "--scope", "~sibling"], {
-        ...process.env,
-        USERPROFILE: join(profiles, "current"),
-        USERNAME: "current",
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain("sibling policy\n");
+      for (const [home, cwd, scope] of [
+        [join(profiles, "current"), undefined, "~sibling"],
+        [`${join(profiles, "current")}\\`, undefined, "~sibling"],
+        [`${root.slice(0, 2)}current`, profiles, "."],
+      ] as const) {
+        const result = run(
+          ["--repo", "~sibling", "--scope", scope],
+          {
+            ...process.env,
+            USERPROFILE: home,
+            USERNAME: "current",
+          },
+          cwd,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("sibling policy\n");
+      }
     },
   );
 
@@ -787,15 +809,26 @@ describe("built SECURITY.md helper", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "resolves drive-relative and rooted scopes using the repository drive",
+    "resolves Windows scopes using the repository drive and native normalization",
     () => {
       const { root } = fixture("İrepository");
       write(root, "src/SECURITY.md", "component policy\n");
       write(root, "src/app.ts", "export {};\n");
+      const literalRoot = win32.toNamespacedPath(join(root, "src."));
+      write(literalRoot, "SECURITY.md", "literal directory policy\n");
       const drive = root.slice(0, 2);
       for (const scope of [
         `${drive}src\\app.ts`,
+        "src/app.ts",
+        "src/../src/app.ts",
+        "src.",
+        "src ",
+        `${drive}src.`,
+        `${drive}src `,
+        win32.toNamespacedPath(join(root, "src", "app.ts")),
         join(root, "src", "app.ts").slice(2),
+        `${join(root, "src")}.`,
+        `${join(root, "src").slice(2)}.`,
       ]) {
         const result = run(
           ["--repo", root, "--scope", scope],
@@ -806,6 +839,14 @@ describe("built SECURITY.md helper", () => {
         expectGuidance(result.stdout, [
           ["src/SECURITY.md", "component policy"],
         ]);
+      }
+      for (const [repo, scope, source] of [
+        [literalRoot, ".", "SECURITY.md"],
+        [win32.toNamespacedPath(root), "src.", "src./SECURITY.md"],
+      ] as const) {
+        const result = run(["--repo", repo, "--scope", scope]);
+        expect(result.status, result.stderr).toBe(0);
+        expectGuidance(result.stdout, [[source, "literal directory policy"]]);
       }
     },
   );

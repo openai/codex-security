@@ -58,6 +58,8 @@ fn main() -> std::io::Result<()> {
             std::os::windows::fs::symlink_file(&names[0], cwd.join("file-link"))
         })?;
         if symlinks {
+            std::os::windows::fs::symlink_file(raw("missing-", 0xdfff), cwd.join("missing-link"))?;
+            std::os::windows::fs::symlink_file("loop-link", cwd.join("loop-link"))?;
             std::os::windows::fs::symlink_dir("empty", cwd.join("directory-link"))?;
             std::os::windows::fs::symlink_dir(
                 raw("missing-", 0xdfff),
@@ -202,6 +204,15 @@ fn main() -> std::io::Result<()> {
                 ));
             }
             fs::remove_file(&output)?;
+        }
+        for scope in [PathBuf::from("."), PathBuf::from(&scopes[0]).join("..")] {
+            let child = invoke(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
+            let expected = b"## SECURITY.md source: \"SECURITY.md\"\n\nroot raw\n";
+            if !child.status.success() || !child.stderr.is_empty() || child.stdout != expected {
+                return Err(io::Error::other(
+                    "Windows policy helper did not resolve the root scope",
+                ));
+            }
         }
         let listing = invoke(&["--repo".into(), "~".into(), "--list".into()])?;
         let expected =

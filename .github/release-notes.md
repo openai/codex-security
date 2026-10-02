@@ -37,6 +37,7 @@
 - preserve diagnostic text without secret redaction ([#1179](https://github.com/openai/codex-security/pull/1179))
 - scope sample behavior concurrency to each revision ([#1182](https://github.com/openai/codex-security/pull/1182))
 - update Codex for per-turn Cyber selection ([#1184](https://github.com/openai/codex-security/pull/1184))
+- add wide Windows candidate file operations ([#836](https://github.com/openai/codex-security/pull/836))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
