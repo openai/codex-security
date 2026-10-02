@@ -71,6 +71,7 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
+  environmentEntry,
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
@@ -1429,23 +1430,23 @@ export async function runCodexSkillCommand(
                 Record<string, JsonObject> | undefined
             )?.[provider]
           : undefined;
-      const requiresOpenAiAuth =
-        provider === undefined ||
-        provider === "openai" ||
-        providerConfiguration?.["requires_openai_auth"] === true;
-      modelProvider = output.modelProvider;
-      let credentialConfig: JsonObject | undefined;
       const providerEnvKey =
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
+      const requiresOpenAiAuth =
+        providerEnvKey === undefined &&
+        (provider === undefined ||
+          provider === "openai" ||
+          providerConfiguration?.["requires_openai_auth"] === true);
+      modelProvider = output.modelProvider;
+      let credentialConfig: JsonObject | undefined;
       if (
-        !requiresOpenAiAuth &&
         providerEnvKey !== undefined &&
         !hasCommandAuth(config) &&
         (output.auth !== "chatgpt" || isExternalModelProvider(provider))
       ) {
-        const key = environmentValue(
+        const key = environmentEntry(
           processEnvironment,
           providerEnvKey,
         )?.trim();
@@ -1565,7 +1566,7 @@ export async function runCodexSkillCommand(
         }
       }
       if (authentication.method === "api_key" && providerEnvKey !== undefined) {
-        const providerKey = environmentValue(
+        const providerKey = environmentEntry(
           processEnvironment,
           providerEnvKey,
         );

@@ -1452,13 +1452,41 @@ describe("skill authentication", () => {
   );
 
   test.each([
-    ["patch", "OPENAI_API_KEY"],
-    ["patch", "CODEX_API_KEY"],
-    ["verify-fix", "OPENAI_API_KEY"],
-    ["verify-fix", "CODEX_API_KEY"],
+    ["patch", "auto"],
+    ["patch", "api-key"],
+    ["verify-fix", "auto"],
+    ["verify-fix", "api-key"],
   ] as const)(
-    "%s preserves provider key %s during OpenAI authentication",
-    async (command, envKey) => {
+    "%s uses the custom provider key before OpenAI login with %s auth",
+    async (command, auth) => {
+      const result = await runProviderSkill({
+        command,
+        auth,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s rejects a missing custom provider key despite an available OpenAI key",
+    async (command) => {
       const result = await runProviderSkill({
         command,
         overrides: ['model_provider="gateway"'],
@@ -1468,7 +1496,37 @@ describe("skill authentication", () => {
           'name="Synthetic gateway"',
           'base_url="https://gateway.example.test/v1"',
           'wire_api="responses"',
-          `env_key=${JSON.stringify(envKey)}`,
+          'env_key="GATEWAY_API_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_UNRELATED_OPENAI_KEY" },
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toMatch(/\bGATEWAY_API_KEY\b/u);
+      expect(result.launch).toBeUndefined();
+    },
+  );
+
+  test.each([
+    ["patch", "OPENAI_API_KEY"],
+    ["patch", "CODEX_API_KEY"],
+    ["verify-fix", "OPENAI_API_KEY"],
+    ["verify-fix", "CODEX_API_KEY"],
+  ] as const)(
+    "%s preserves provider key %s without OpenAI login",
+    async (command, envKey) => {
+      const configuredEnvKey =
+        process.platform === "win32" ? envKey.toLowerCase() : envKey;
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          `env_key=${JSON.stringify(configuredEnvKey)}`,
           "requires_openai_auth=true",
         ].join("\n"),
         environment: {
@@ -1477,24 +1535,36 @@ describe("skill authentication", () => {
         },
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(
-        result.requests
-          .filter((request) => request.method === "account/login/start")
-          .map((request) => request.params),
-      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
-      expect(result.launch.environment).toEqual(
-        envKey === "OPENAI_API_KEY"
-          ? {
-              OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
-              CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
-            }
-          : { CODEX_API_KEY: "SYNTHETIC_CODEX_KEY" },
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
       );
-      expect(result.launch.args).toContain(
-        'cli_auth_credentials_store="ephemeral"',
+      expect(result.launch.environment[envKey]).toBe(
+        envKey === "OPENAI_API_KEY"
+          ? "SYNTHETIC_OPENAI_KEY"
+          : "SYNTHETIC_CODEX_KEY",
       );
     },
   );
+
+  test("resolves custom provider key casing according to the platform", async () => {
+    const result = await runProviderSkill({
+      overrides: [
+        'model_provider="gateway"',
+        'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+      ],
+      environment: { gateway_api_key: "SYNTHETIC_GATEWAY_KEY" },
+    });
+    if (process.platform === "win32") {
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment.GATEWAY_API_KEY).toBe(
+        "SYNTHETIC_GATEWAY_KEY",
+      );
+    } else {
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("GATEWAY_API_KEY");
+      expect(result.launch).toBeUndefined();
+    }
+  });
 
   test.each(["openrouter", "fireworks"] as const)(
     "preserves OPENAI_API_KEY when configured as the %s provider key",
