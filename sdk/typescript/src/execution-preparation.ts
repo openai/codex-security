@@ -151,8 +151,6 @@ export interface PreparedRuntime {
   preserveCodexHomeConfig?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
-  /** Legacy coordinator configuration, retained until joint activation. */
-  deepScanConfigPath?: string;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
@@ -307,17 +305,8 @@ export function createExecutionCodex(
     async runStreamed(input, options) {
       return {
         events: (async function* () {
-          if (
-            session.runtimeConfig !== undefined &&
-            session.releaseCredentialHome !== null
-          )
-            await writeCodexConfig(
-              join(runtime.codexHome, "config.toml"),
-              sdkCodexConfig,
-            );
           let release: (() => Promise<void>) | undefined =
-            session.runtimeConfig === undefined ||
-            session.releaseCredentialHome !== null
+            session.runtimeConfig === undefined
               ? undefined
               : await lockExecutionConfiguration(
                   runtime.codexHome,

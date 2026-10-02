@@ -2,41 +2,37 @@ import {
   prepareSemanticScanDraft,
   type SemanticScan,
 } from "./scan-semantics.js";
-import type { ScanArtifactRestorer } from "./runtime.js";
 import {
   loadContract,
   readScanFile,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
-import { IncompleteScanError, OutputDirectoryError } from "./errors.js";
+import { IncompleteScanError } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
-import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
-import type { SavedScanRecord } from "./workbench-types.js";
-import { throwIfAborted } from "./scan-events.js";
-import type { JsonObject } from "./config.js";
+import type { DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import { findScanSession } from "./scan-logs.js";
+import { throwIfAborted } from "./scan-events.js";
+import type { SavedScanRecord } from "./workbench-types.js";
+import type { JsonObject } from "./config.js";
 
 export interface CompletedScanTurn {
   threadId: string | null;
   turnResult: TurnResultMetadata;
 }
 
-interface ScanResultContext {
+export interface ScanPublicationContext {
+  scanId: string;
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
   signal: AbortSignal;
-}
-
-export interface ScanPublicationContext extends ScanResultContext {
-  scanId: string;
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }
 
-/** This is only a read-path hint; the workbench still validates the complete seal and binding. */
+/** Only a read-path hint; the workbench validates the complete seal and binding. */
 export async function hasSealedScanArtifacts(
   scanDir: string,
   signal?: AbortSignal,
@@ -157,12 +153,13 @@ export async function publishScan(
   context: ScanPublicationContext,
   turn: CompletedScanTurn,
   cost: ScanCost | null,
-  sealed = false,
+  sealed: boolean,
 ): Promise<{
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const { scanId, scanDir, expectation, signal, workbench } = context;
+  const { scanId, scanDir, pluginRoot, expectation, signal, workbench } =
+    context;
   let preparation: JsonObject = {};
   if (!sealed) {
     try {
@@ -235,44 +232,36 @@ export async function publishScan(
       throw error;
     }
   }
-  const result = await collectResult(context, turn, true, cost);
+  const result = await collectResult(
+    turn.turnResult,
+    turn.threadId,
+    scanDir,
+    pluginRoot,
+    expectation,
+    signal,
+    true,
+    cost,
+  );
   const completion = await workbench([
     "complete-scan",
     "--scan-id",
     scanId,
     ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
   ]);
-  return { result, warnings: publicationWarnings(completion, preparation) };
-}
-
-/** Load a result that the workbench has already completed, without completing it again. */
-export async function loadPublishedScanResult(
-  context: ScanResultContext,
-  turn: CompletedScanTurn,
-  completion: JsonObject,
-): Promise<{
-  result: ScanResult;
-  warnings: { message: string; targetChanged: boolean }[];
-}> {
-  const result = await collectResult(context, turn, true);
-  return { result, warnings: publicationWarnings(completion) };
-}
-
-function publicationWarnings(
-  completion: JsonObject,
-  preparation: JsonObject = {},
-) {
   const targetWarnings = new Set([
     ...strings(preparation["targetWarnings"]),
     ...strings(completion["targetWarnings"]),
   ]);
   const scan = completion["scan"];
-  return strings(isRecord(scan) ? scan["warnings"] : undefined).map(
-    (message) => ({
-      message,
-      targetChanged: targetWarnings.has(message),
-    }),
-  );
+  return {
+    result,
+    warnings: strings(isRecord(scan) ? scan["warnings"] : undefined).map(
+      (message) => ({
+        message,
+        targetChanged: targetWarnings.has(message),
+      }),
+    ),
+  };
 }
 
 function strings(value: unknown): string[] {
@@ -286,33 +275,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function collectResult(
-  context: ScanResultContext,
-  turn: CompletedScanTurn,
+  turnResult: TurnResultMetadata,
+  threadId: string | null,
+  scanDir: string,
+  pluginRoot: string,
+  expectation: ScanExpectation,
+  signal: AbortSignal,
   workbenchValidated = false,
   cost?: Readonly<ScanCost> | null,
 ): Promise<ScanResult> {
-  const { scanDir, pluginRoot, expectation, signal } = context;
-  const { threadId, turnResult } = turn;
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
-  const missing: string[] = [];
-  for (const name of required) {
-    try {
-      await requireScanFile(scanDir, name, name, signal);
-    } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      missing.push(name);
-    }
-  }
-  if (missing.length > 0) {
-    throw new IncompleteScanError(
-      `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
-    );
-  }
+  await requireScanFile(scanDir, "report.md", "report.md", signal);
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,
@@ -340,58 +312,6 @@ export async function collectResult(
     cost,
     sarifPath,
   });
-}
-
-/** Optional post-scan work may fail, but cannot replace the completed artifacts. */
-export async function preservePublishedArtifacts(
-  context: {
-    result: ScanResult;
-    pluginRoot: string;
-    expectation: ScanExpectation;
-    signal: AbortSignal;
-  },
-  prepareRestorer: () => Promise<ScanArtifactRestorer>,
-  run: () => Promise<void>,
-): Promise<{ error: unknown } | undefined> {
-  const { result, signal } = context;
-  const scanDir = result.scanDir;
-  const artifacts = await Promise.all(
-    [
-      ...new Set([
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-        "report.md",
-        ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
-      ]),
-    ].map(async (name) => ({
-      name,
-      contents: await readScanFile(scanDir, name, name, signal),
-    })),
-  );
-  let restorer: ScanArtifactRestorer | null = null;
-  try {
-    restorer = await prepareRestorer();
-    await run();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    if (restorer !== null) {
-      for (const artifact of artifacts) {
-        try {
-          await restorer.restore(artifact.name, artifact.contents);
-        } catch (cause) {
-          if (signal.aborted) throw cause;
-          const failure = new OutputDirectoryError(
-            "Cannot restore an artifact outside the scan directory.",
-            { cause },
-          );
-          throw failure;
-        }
-      }
-    }
-    await collectResult({ ...context, scanDir }, result, true);
-    return { error };
-  }
 }
 
 /** Let the workbench own the committed snapshot and canonical documents. */

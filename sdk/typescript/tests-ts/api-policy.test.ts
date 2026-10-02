@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   link,
   mkdir,
@@ -27,7 +27,11 @@ import {
   type SecurityPolicyStage,
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
-import type { PluginPythonOptions } from "../src/runtime.js";
+import {
+  resolveCodexCommand,
+  type PluginPythonOptions,
+} from "../src/runtime.js";
+import { codexConfigOverrides, type JsonObject } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -65,7 +69,7 @@ async function setup(
   const f = await policyFixture();
   fixtures.push(f);
   const codexHome = join(f.root, "codex-home");
-  await mkdir(codexHome);
+  await mkdir(codexHome, { mode: 0o700 });
   const runtime = preparedRuntime(codexHome);
   let configuration: CodexOptions | undefined;
   const threads: ThreadOptions[] = [];
@@ -1481,27 +1485,63 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("preserves quoted model-provider names in policy settings", async () => {
+  test("keeps quoted policy provider definitions through native startup", async () => {
     const provider = "synthetic.provider";
+    const definition = {
+      name: "Synthetic provider",
+      base_url: "https://example.invalid/v1",
+      wire_api: "responses",
+    };
     const f = await setup({
+      stream: async function* (stage) {
+        if (stage === "architecture") {
+          const config = f.configuration()!.config as JsonObject;
+          const result = spawnSync(
+            resolveCodexCommand({}).command,
+            [
+              ...codexConfigOverrides(config).flatMap((value) => [
+                "--config",
+                value,
+              ]),
+              "debug",
+              "prompt-input",
+              "Synthetic policy request",
+            ],
+            {
+              cwd: f.outputDir,
+              env: {
+                PATH: process.env["PATH"],
+                SystemRoot: process.env["SystemRoot"],
+                CODEX_HOME: f.runtime.codexHome,
+              },
+              encoding: "utf8",
+            },
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            parseToml(
+              await readFile(join(f.runtime.codexHome, "config.toml"), "utf8"),
+            ),
+          ).toMatchObject({
+            model_provider: provider,
+            model_providers: { [provider]: definition },
+          });
+        }
+        yield* events(stage);
+      },
       config: {
         codexOverrides: {
           model_provider: provider,
-          model_providers: {
-            [provider]: {
-              name: "Synthetic provider",
-              base_url: "https://example.invalid/v1",
-              wire_api: "responses",
-            },
-          },
+          model_providers: { [provider]: definition },
         },
       },
     });
+    f.runtime.configPath = join(f.root, "preflight.toml");
     await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
     expect(f.configuration()?.config?.["model_provider"]).toBe(provider);
-    expect<unknown>(f.configuration()?.config?.["model_providers"]).toEqual(
-      f.security.config.codexOverrides?.["model_providers"],
-    );
+    expect(f.configuration()?.config?.["model_providers"]).toEqual({
+      [provider]: definition,
+    });
     await f.security.close();
   });
 

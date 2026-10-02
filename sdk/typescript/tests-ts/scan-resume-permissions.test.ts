@@ -112,9 +112,6 @@ await new Promise(() => {});
         }),
         resolvePluginPython: async () => process.env["PYTHON"] ?? "python",
         runWorkbench: async (options, args, input) => {
-          // Leave the fixture running as an abruptly stopped host would. Child
-          // passes take over this recovery behavior with the batch executor.
-          if (args[0] === "fail-scan") throw new Error("Synthetic host exit");
           const result = await runWorkbench(options, args, input);
           if (args[0] === "register-cli-scan") {
             registration = result;

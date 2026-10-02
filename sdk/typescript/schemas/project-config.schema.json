@@ -150,7 +150,8 @@
       "properties": {
         "model": { "type": "string", "minLength": 1 },
         "model_reasoning_effort": { "type": "string", "minLength": 1 },
-        "model_provider": { "type": "string", "minLength": 1 }
+        "model_provider": { "type": "string", "minLength": 1 },
+        "cyber_access_program": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": { "$ref": "#/definitions/__schema0" }
     },
