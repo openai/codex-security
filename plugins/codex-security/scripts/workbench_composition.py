@@ -51,11 +51,18 @@ class _CheckpointState(TypedDict):
     consecutiveErrors: int
 
 
+class PendingCompositionStop(TypedDict):
+    reason: Literal["capped", "failed", "canceled"]
+    message: str
+    costs: dict[str, dict[str, Any]]
+
+
 class CompositionCheckpoint(_CheckpointState, total=False):
     mergeFailures: int
     mergeStarted: bool
     costUnavailable: Literal[True]
     legacy: LegacyComposition
+    pendingStop: PendingCompositionStop
     terminalReason: Literal["saturated", "capped", "failed", "canceled"]
 
 
