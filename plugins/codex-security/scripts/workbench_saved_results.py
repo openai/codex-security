@@ -41,6 +41,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
+from workbench_composition import CompositionView, load_composition
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -2517,6 +2518,26 @@ def _scan_draft_digest(scan_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def stop_composition_children(db: Any, connection: Any, composition: CompositionView) -> None:
+    merged = set(composition.checkpoint["mergedScanIds"]) if composition.checkpoint else set()
+    for child in composition.children:
+        if child["id"] not in merged and child["status"] == "running":
+            with db.scan_completion_lock(child["id"]):
+                current = db.require_scan(connection, child["id"])
+                if current["status"] != "running":
+                    continue
+                fail_scan_locked(
+                    db,
+                    connection,
+                    argparse.Namespace(
+                        scan_id=child["id"],
+                        claim_token=current["handoff_claim_token"],
+                        cost_json=None,
+                        message="Parent Deep Scan stopped.",
+                    ),
+                )
+
+
 def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     with db.scan_completion_lock(db.require_uuid(args.scan_id, "scan-id")):
         return fail_scan_locked(db, connection, args)
@@ -2531,6 +2552,9 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         scan = db.require_scan(connection, scan_id)
         if scan["status"] == "failed":
             connection.commit()
+            stop_composition_children(
+                db, connection, load_composition(connection, scan, checkpoint=False)
+            )
             return db.scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
@@ -2584,6 +2608,9 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
+            stop_composition_children(
+                db, connection, load_composition(connection, scan, checkpoint=False)
+            )
             return db.workspace_state(connection, scan["workspace_id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
@@ -2613,6 +2640,8 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
+    scan = db.require_scan(connection, scan_id)
+    stop_composition_children(db, connection, load_composition(connection, scan, checkpoint=False))
     try:
         published = preserve_scan_results_locked(db, connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:

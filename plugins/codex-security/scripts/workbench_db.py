@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import hashlib
 import json
 import math
@@ -16,21 +15,11 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
-
-try:
-    import fcntl as posix_file_lock
-except ModuleNotFoundError:  # pragma: no cover
-    posix_file_lock = None
-
-try:
-    import msvcrt as windows_file_lock
-except ModuleNotFoundError:  # pragma: no cover
-    windows_file_lock = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
@@ -61,8 +50,14 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.storage import create_private_directory, resolve_scan_root, state_dir
+from workbench.storage import (
+    create_private_directory,
+    resolve_scan_root,
+    scan_completion_lock,
+    state_dir,
+)
 from workbench_cli import parse_args
+from workbench_composition import load_composition
 from workbench_constants import (
     ARTIFACTS,
     CLAIM_LEASE_SECONDS,
@@ -168,70 +163,6 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
 
 def database_path() -> Path:
     return state_dir() / "workbench.sqlite3"
-
-
-@contextmanager
-def scan_completion_lock(scan_id: str) -> Any:
-    lock_dir = state_dir() / "completion-locks"
-    create_private_directory(lock_dir)
-    lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
-    descriptor = os.open(
-        lock_path,
-        os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
-        0o600,
-    )
-    locked = False
-    try:
-        acquire_completion_file_lock(descriptor)
-        locked = True
-        yield
-    finally:
-        try:
-            if locked:
-                release_completion_file_lock(descriptor)
-        finally:
-            os.close(descriptor)
-
-
-def is_file_lock_contention(error: OSError) -> bool:
-    return error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
-
-
-def acquire_completion_file_lock(descriptor: int) -> None:
-    if posix_file_lock is not None:
-        posix_file_lock.flock(descriptor, posix_file_lock.LOCK_EX)
-        return
-    if windows_file_lock is None:
-        raise SystemExit("Scan completion requires operating-system file locking support.")
-
-    while os.fstat(descriptor).st_size == 0:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            os.write(descriptor, b"\0")
-        except OSError as exc:
-            if not is_file_lock_contention(exc):
-                raise
-            time.sleep(0.05)
-
-    while True:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            windows_file_lock.locking(descriptor, windows_file_lock.LK_NBLCK, 1)
-            return
-        except OSError as exc:
-            if not is_file_lock_contention(exc):
-                raise
-            time.sleep(0.05)
-
-
-def release_completion_file_lock(descriptor: int) -> None:
-    if posix_file_lock is not None:
-        posix_file_lock.flock(descriptor, posix_file_lock.LOCK_UN)
-        return
-    if windows_file_lock is None:
-        return
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
 
 
 def connect() -> sqlite3.Connection:
@@ -1638,6 +1569,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
     user_context = None
+    registration = {}
     workflow_id = None
     if args.registration_json_stdin:
         registration = json.load(sys.stdin)
@@ -1681,6 +1613,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         if args.parent_scan_id is not None
         else None
     )
+    parent_scan_role = registration.get("parentScanRole")
+    if parent_scan_role not in (None, "deep_pass"):
+        raise SystemExit("Unsupported scan parent role.")
+    if parent_scan_role == "deep_pass" and (parent_scan_id is None or mode != "standard"):
+        raise SystemExit("A Deep Scan pass must be a Standard scan with a parent.")
     timestamp = now()
     scan_id = str(uuid.uuid4())
     workspace_id = str(uuid.uuid4())
@@ -1693,6 +1630,16 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             parent = require_scan(connection, parent_scan_id)
             if parent["target_id"] != target_id:
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+            if parent_scan_role == "deep_pass":
+                if parent["mode"] != "deep":
+                    raise SystemExit("A Deep Scan pass must belong to a Deep Scan parent.")
+                if parent["status"] != "running" or parent["canceled_at"] is not None:
+                    raise SystemExit("A Deep Scan pass requires a running parent.")
+                if target_identity[:2] != (
+                    parent["target_revision"],
+                    parent["target_snapshot_digest"],
+                ):
+                    raise SystemExit("A Deep Scan pass must use its parent's target snapshot.")
 
         connection.execute(
             """
@@ -1731,10 +1678,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scan_dir=scan_dir,
         )
         connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, parent_scan_role = ?, "
+            "user_context = ? WHERE id = ?",
             (
                 json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
                 parent_scan_id,
+                parent_scan_role,
                 user_context,
                 scan_id,
             ),
@@ -1759,6 +1708,10 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
 def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     with connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id) VALUES (?, ?)",
+            (scan["id"], args.thread_id),
+        )
         connection.execute(
             "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
             (args.thread_id, now(), scan["id"]),
@@ -2751,8 +2704,13 @@ def scan_result(
         )
     }
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
+    composition = load_composition(connection, scan, checkpoint=False)
     independent_reviews = (
-        deep_scan.independent_review_progress(connection, scan["id"])
+        (
+            deep_scan.independent_review_progress(connection, scan["id"])
+            if composition.legacy_run is not None and not composition.children
+            else scan_history.independent_review_progress(scan, composition)
+        )
         if scan["mode"] == "deep"
         else None
     )
@@ -2795,8 +2753,10 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        "threadIds": scan_usage._scan_root_thread_ids(
+            connection, scan, None, composition=composition
+        ),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan, composition),
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))

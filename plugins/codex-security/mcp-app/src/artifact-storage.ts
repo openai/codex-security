@@ -175,6 +175,16 @@ export async function saveCodexSecurityArtifact(
     input.path === undefined
       ? undefined
       : supplementalPath(input, context, true);
+  // Deep Scan runtime state belongs to the host.
+  if (
+    context.scanId !== undefined &&
+    input.storage === "persistent" &&
+    parts?.slice(0, 2).join("/").toLowerCase() === "artifacts/deep-scan"
+  ) {
+    throw new Error(
+      "Use the existing scan tools for canonical artifacts, ledgers and checkpoints.",
+    );
+  }
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

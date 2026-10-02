@@ -1266,6 +1266,27 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...withoutCodexHome(environmentWithGit(git.environment, git)),
+          CODEX_HOME: runtime.codexHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the Codex Security scan",
+      };
+      if (
+        options.archiveExisting &&
+        requestedOutput !== null &&
+        options.resumeScanId === undefined
+      ) {
+        await requireStoppedArchiveOutput(
+          (args) => workbench(workbenchOptions, args),
+          requestedOutput,
+        );
+      }
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
@@ -1416,17 +1437,6 @@ export class CodexSecurity {
         recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot: runtime.plugin.pluginRoot,
-        environment: {
-          ...withoutCodexHome(environmentWithGit(git.environment, git)),
-          CODEX_HOME: runtime.codexHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the Codex Security scan",
-      };
       const {
         registration,
         scanId,
@@ -2682,6 +2692,22 @@ export class CodexSecurity {
         );
         await knowledgeBase.cleanup();
       }
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot,
+        environment: {
+          ...this.#dependencies.environment,
+          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the mock scan",
+      };
+      if (options.archiveExisting && local.outputDir !== null) {
+        await requireStoppedArchiveOutput(
+          (args) => workbench(workbenchOptions, args),
+          local.outputDir,
+        );
+      }
       const outputRoot =
         local.outputDir === null
           ? await preparePersistentOutputRoot(
@@ -2711,16 +2737,6 @@ export class CodexSecurity {
         ...DEFAULT_CODEX_CONFIG,
         ...this.config.codexOverrides,
       });
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot,
-        environment: {
-          ...this.#dependencies.environment,
-          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the mock scan",
-      };
       const registration = await workbench(
         workbenchOptions,
         [
@@ -3647,4 +3663,23 @@ async function pluginSupportsIsolatedDeepScanConfig(
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
   );
+}
+
+async function requireStoppedArchiveOutput(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  output: string,
+): Promise<void> {
+  const saved = await workbench([
+    "list-scans",
+    "--scan-root",
+    output,
+    "--status",
+    "running",
+    "--limit",
+    "1",
+  ]);
+  if ((saved["scans"] as JsonObject[]).length > 0)
+    throw new OutputDirectoryError(
+      "Cannot archive output while a scan in that directory is running.",
+    );
 }

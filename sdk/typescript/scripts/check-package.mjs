@@ -168,6 +168,7 @@ const allowedFiles = new Set([
     "custom-publish",
     "deep-progress",
     "deep-config",
+    "deep-scan-checkpoint",
     "deep-scan-defaults",
     "scan-execution",
     "execution-auth",

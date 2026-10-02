@@ -2053,64 +2053,112 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("archives existing output before starting a fresh scan", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const output = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(output, { mode: 0o700 });
-    await writeFile(join(output, "previous.txt"), "previous scan\n");
-    let archived: string | undefined;
-    let registration: readonly string[] | undefined;
-    const observerErrors: Array<[ScanObserverName, string]> = [];
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          if (args[0] !== "register-cli-scan")
-            return mockWorkbench(args, input);
-          registration = args;
-          return mockScanRegistration(args, input);
+  test.each([false, true])(
+    "checks child state before archiving output (running child: %p)",
+    async (runningChild) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const output = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      let archived: string | undefined;
+      let registration: readonly string[] | undefined;
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> => {
+            if (args[0] === "list-scans") {
+              expect(args).toEqual([
+                "list-scans",
+                "--scan-root",
+                output,
+                "--status",
+                "running",
+                "--limit",
+                "1",
+              ]);
+              return {
+                scans: runningChild
+                  ? [{ progress: { status: "running" } }]
+                  : [],
+              };
+            }
+            if (args[0] === "get-scan-feedback") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                falsePositives: [],
+              };
+            }
+            if (args[0] !== "register-cli-scan") return {};
+            registration = args;
+            return mockScanRegistration(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("scan did not start");
+              },
+            }),
+          }),
         },
-        createCodex: codexFactory(scanDidNotStart),
-      },
-    );
+      );
 
-    await expect(
-      client.run(repository, {
+      const result = client.run(repository, {
         outputDir: output,
         archiveExisting: true,
         onOutputArchived: (archiveDir) => {
           archived = archiveDir;
           throw new Error("archive observer exploded");
         },
-        onObserverError: collectObserverErrors(observerErrors),
-      }),
-    ).rejects.toThrow("scan did not start");
-    expect(observerErrors).toEqual([
-      ["onOutputArchived", "archive observer exploded"],
-    ]);
-    expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
-    expect(registration).toContain("--archive-existing");
-    expect(
-      registration?.[registration.indexOf("--archived-scan-dir") + 1],
-    ).toBe(archived);
-    expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
-      "previous scan\n",
-    );
-    await expect(stat(output)).resolves.toBeDefined();
-    await client.close();
-  });
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
+        },
+      });
+      if (runningChild) {
+        await expect(result).rejects.toThrow("Cannot archive output");
+        expect(archived).toBeUndefined();
+        expect(registration).toBeUndefined();
+        expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+          "previous scan\n",
+        );
+        expect(
+          (await readdir(root)).some((name) =>
+            name.startsWith("scan.previous-"),
+          ),
+        ).toBe(false);
+        await client.close();
+        return;
+      }
+      await expect(result).rejects.toThrow("scan did not start");
+      expect(observerErrors).toEqual([
+        ["onOutputArchived", "archive observer exploded"],
+      ]);
+      expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+      expect(registration).toContain("--archive-existing");
+      expect(
+        registration?.[registration.indexOf("--archived-scan-dir") + 1],
+      ).toBe(archived);
+      expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      await expect(stat(output)).resolves.toBeDefined();
+      await client.close();
+    },
+  );
 
   test("reports the real scan failure when scan cleanup also fails", async () => {
     const root = await temporaryDirectory();
