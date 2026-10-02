@@ -35,6 +35,7 @@
 - add Invoice Desk fixture and OpenAI PR scans ([#1144](https://github.com/openai/codex-security/pull/1144))
 - prohibit reintroducing CLI secret and log redaction ([#1178](https://github.com/openai/codex-security/pull/1178))
 - preserve diagnostic text without secret redaction ([#1179](https://github.com/openai/codex-security/pull/1179))
+- scope sample behavior concurrency to each revision ([#1182](https://github.com/openai/codex-security/pull/1182))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
