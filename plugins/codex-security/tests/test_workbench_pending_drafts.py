@@ -324,8 +324,8 @@ def test_capped_completion_retains_parent_only_and_unmerged_child_findings(pendi
     }
 
 
-@pytest.mark.parametrize("staged", [False, True, "legacy"])
-def test_checkpoint_copy_failure_retains_pending_evidence(pending_scan, monkeypatch, staged):
+@pytest.mark.parametrize("storage", ["stdin", "staged", "legacy_staged", "changed_legacy_staged"])
+def test_checkpoint_copy_failure_retains_pending_evidence(pending_scan, monkeypatch, storage):
     fixture = pending_scan
     fixture.publish(fixture.empty)
     write = fixture.saved.write_scan_local_bytes
@@ -338,22 +338,34 @@ def test_checkpoint_copy_failure_retains_pending_evidence(pending_scan, monkeypa
     with monkeypatch.context() as patch:
         patch.setattr(fixture.saved, "write_scan_local_bytes", fail_history_copy)
         with pytest.raises(OSError, match="history copy interruption"):
-            fixture.publish(fixture.documents, staged=staged)
+            fixture.publish(fixture.documents, staged=storage != "stdin")
     markers = list((fixture.directory / "checkpoints/pending").glob("*.json"))
     assert len(markers) == 1
     evidence = markers[0].read_bytes()
     assert fixture.expected["title"] in evidence.decode()
-    if staged == "legacy":
-        staged_path = next((fixture.directory / "drafts").glob("*.checkpoint.json"))
+    staged_path = None
+    if "legacy" in storage:
+        staged_path = fixture.directory / "drafts" / f"{fixture.scan_id}.checkpoint.json"
+        assert staged_path.read_bytes() == evidence
         markers[0].write_text(staged_path.relative_to(fixture.directory).as_posix())
+        if storage == "changed_legacy_staged":
+            staged_path.write_bytes(evidence + b" ")
+    marker = markers[0].read_bytes()
     run_workbench(
         fixture.state, "fail-scan", "--scan-id", fixture.scan_id, "--message", "Synthetic stop"
     )
     findings = json.loads((fixture.directory / "findings.json").read_text())["findings"]
-    assert [finding["title"] for finding in findings] == [fixture.expected["title"]]
-    if staged != "legacy":
-        assert markers[0].read_bytes() == evidence
-    assert (fixture.directory / "checkpoints" / markers[0].name).read_bytes() == evidence
+    expected = [] if storage == "changed_legacy_staged" else [fixture.expected["title"]]
+    assert [finding["title"] for finding in findings] == expected
+    assert markers[0].read_bytes() == marker
+    immutable = fixture.directory / "checkpoints" / markers[0].name
+    if storage == "changed_legacy_staged":
+        assert not immutable.exists()
+        assert staged_path.read_bytes() == evidence + b" "
+    else:
+        assert immutable.read_bytes() == evidence
+        if staged_path is not None:
+            assert staged_path.read_bytes() == evidence
 
 
 @pytest.mark.parametrize("pending_scan", ["deep"], indirect=True)
