@@ -3,7 +3,7 @@ import {
   createWorkerArtifactContext,
   type DeepReducerContext,
 } from "./src/artifact-context.js";
-import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/deep-scan/parent-sandbox.js";
+import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/native-permissions.js";
 import { registerCompactWorkerArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { MCP_APP_VERSION } from "./src/version.js";
 
