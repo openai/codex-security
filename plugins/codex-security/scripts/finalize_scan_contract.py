@@ -74,6 +74,12 @@ EXPORT_PATHS = {
     "sarif": "exports/results.sarif",
 }
 THREAT_MODEL_EXPORT_PATH = "exports/threatmodel.md"
+_LEGACY_THREAT_MODEL_PATHS = (
+    "threatmodel.md",
+    "THREAT_MODEL.md",
+    "artifacts/01_context/threat_model.md",
+    "threat_model.md",
+)
 WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
     r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
     re.IGNORECASE,
@@ -210,6 +216,19 @@ def _read_saved_threat_model(
             and filename == "scan-manifest.json"
             and (scan.get("sealedAt") is not None or scan.get("artifacts"))
         ):
+            if "threatModel" not in scan:
+                _validate_manifest(manifest)
+                recorded_paths = {
+                    _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                    for artifact in scan["artifacts"]
+                }
+                if recorded_paths.isdisjoint(_LEGACY_THREAT_MODEL_PATHS):
+                    validate_against_schema(
+                        manifest,
+                        (schema_dir or Path(__file__).resolve().parent.parent / "schemas")
+                        / "scan-manifest.schema.json",
+                    )
+                    return None
             manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
             scan = manifest["scan"]
             sealed_artifact_paths = {
@@ -242,12 +261,7 @@ def _read_saved_threat_model(
                 "provenance": provenance,
                 "path": current_path,
             }, contents
-    for filename in (
-        "threatmodel.md",
-        "THREAT_MODEL.md",
-        "artifacts/01_context/threat_model.md",
-        "threat_model.md",
-    ):
+    for filename in _LEGACY_THREAT_MODEL_PATHS:
         if sealed_artifact_paths is not None and filename not in sealed_artifact_paths:
             continue
         path = scan_dir / filename

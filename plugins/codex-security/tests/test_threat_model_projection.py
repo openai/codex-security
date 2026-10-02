@@ -185,8 +185,27 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
         self.assertFalse((self.scan_dir / "threatmodel.md").exists())
-        with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
-            FINALIZER.build_threat_model_export(self.scan_dir)
+        with unittest.mock.patch.object(
+            FINALIZER, "_read_sealed_scan", wraps=FINALIZER._read_sealed_scan
+        ) as read_sealed:
+            for read_model in (
+                FINALIZER.describe_threat_model,
+                FINALIZER.build_threat_model_export,
+            ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
+                    read_model(self.scan_dir)
+            read_sealed.assert_not_called()
+
+        manifest = self.read_json("scan-manifest.json")
+        original_record = manifest["scan"]["artifacts"][0]
+        for record in (None, {"path": "findings.json"}, {**original_record, "sha256": "invalid"}):
+            with self.subTest(record=record):
+                manifest["scan"]["artifacts"][0] = record
+                self.write_json("scan-manifest.json", manifest)
+                before = (self.scan_dir / "scan-manifest.json").read_bytes()
+                with self.assertRaises(FINALIZER.ContractError):
+                    FINALIZER.build_threat_model_export(self.scan_dir)
+                self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), before)
 
     def test_blank_legacy_summary_keeps_assets_and_remains_exportable(self) -> None:
         self.manifest["scan"]["threatModel"] = {
@@ -543,7 +562,11 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.write_json("scan-manifest.json", manifest)
         unrecorded_path = self.scan_dir / "threatmodel.md"
         unrecorded_path.write_text("# Unrecorded convenience document\n")
-        description = FINALIZER.describe_threat_model(self.scan_dir)
+        with unittest.mock.patch.object(
+            FINALIZER, "_read_sealed_scan", wraps=FINALIZER._read_sealed_scan
+        ) as read_sealed:
+            description = FINALIZER.describe_threat_model(self.scan_dir)
+            read_sealed.assert_called_once()
         self.assertEqual(description["provenance"]["source"], "scan")
         self.assertEqual(description["provenance"]["scanId"], self.manifest["scan"]["id"])
         self.assertEqual(description["provenance"]["scanScope"], self.manifest["scan"]["scope"])
