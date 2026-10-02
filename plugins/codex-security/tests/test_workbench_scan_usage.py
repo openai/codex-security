@@ -34,6 +34,46 @@ class ScanFixture:
     diff_target: dict[str, Any] | None = None
 
 
+@pytest.mark.parametrize("include_cost", [False, True])
+def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "warnings": ["scan_thread_unavailable"],
+    }
+    measured = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(0, 0, 0),
+        "threadCount": 1,
+    }
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0,
+    }
+    merge = workbench_api["scan_usage"].merge_scan_cost
+    stored = json.dumps({"usage": usage, "cost": cost})
+    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
+    assert json.loads(merge(stored, incoming)) == json.loads(incoming)
+    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
+    assert json.loads(merge(None, json.dumps(cost))) == cost
+    assert merge(None, None) is None
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
+        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
+        connection.commit()
+        workbench_api["scan_usage"].reconcile_completed_scan_cost(
+            connection, {"id": "scan", "cost_json": stored}, incoming
+        )
+        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
+        assert json.loads(receipt) == json.loads(incoming)
+
+
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     state_dir = tmp_path / "workbench-state"
     target = tmp_path / "target"
@@ -227,7 +267,7 @@ def _counts(
     }
 
 
-def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
+def _complete_scan(fixture: ScanFixture, *, cost: dict[str, Any] | None = None) -> dict[str, Any]:
     options: dict[str, Any] = {"relative_path": "app.py"}
     if fixture.mode == "diff":
         assert fixture.diff_target is not None
@@ -251,6 +291,7 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
         "complete-scan",
         "--scan-id",
         fixture.scan_id,
+        *(["--cost-json", json.dumps(cost)] if cost is not None else []),
         environment=fixture.environment,
     )
 
@@ -684,3 +725,46 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed
+
+
+@pytest.mark.parametrize("include_current_cost", [False, True])
+def test_completion_refreshes_usage_preserved_before_more_work(
+    tmp_path: Path, include_current_cost: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 15,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    prior_usage = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(5, 0, 1),
+        "threadCount": 1,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ?, deep_scan_owner_thread_id = NULL WHERE id = ?",
+            (json.dumps({"usage": prior_usage, "cost": cost}), fixture.scan_id),
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(
+                tmp_path,
+                "scan-parent",
+                [_token_event(fixture.started_at + timedelta(microseconds=1), 15, 6)],
+            )
+        },
+        [],
+    )
+    completed = _complete_scan(fixture, cost=cost if include_current_cost else None)["scan"]
+    assert completed["cost"] == cost
+    assert completed["usage"] == {
+        **prior_usage,
+        **_counts(15, 0, 6),
+    }
