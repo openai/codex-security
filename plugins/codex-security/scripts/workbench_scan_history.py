@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
-from workbench_scan_start import scan_target_identity
+from workbench_scan_start import requested_scan_paths, scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
@@ -260,13 +260,30 @@ def list_scans(
     if args is not None and args.query:
         query = args.query.strip().casefold()
         if query:
+            connection.create_function(
+                "requested_scan_paths_match",
+                4,
+                lambda include_paths_json, recipe_json, scope, query: any(
+                    query in path.casefold()
+                    for path in requested_scan_paths(
+                        {
+                            "include_paths_json": include_paths_json,
+                            "recipe_json": recipe_json,
+                            "scope": scope,
+                        }
+                    )
+                ),
+                deterministic=True,
+            )
             clauses.append(
                 "(instr(lower(scans.target_path), ?) > 0 "
                 "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
                 "OR instr(lower(scans.scope), ?) > 0 "
+                "OR requested_scan_paths_match("
+                "scans.include_paths_json, scans.recipe_json, scans.scope, ?) "
                 "OR instr(lower(scans.mode), ?) > 0)"
             )
-            values.extend((query, query, query, query))
+            values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
     limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
@@ -307,6 +324,7 @@ def list_scans(
                 **stored_scan_cost_fields(row["cost_json"]),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
+                "includePaths": requested_scan_paths(row),
                 "mode": row["mode"],
                 "model": row["model"],
                 "parentScanId": row["parent_scan_id"],

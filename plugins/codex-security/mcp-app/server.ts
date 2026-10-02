@@ -260,6 +260,13 @@ const startHeadlessStandardScanSchema = {
     .min(1)
     .max(4096)
     .describe("Resolved local target path."),
+  include_paths: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      "Nonempty list of repository-relative directories to scan, with no directory-count limit. Mutually exclusive with scope. Omit both for the whole repository.",
+    ),
   scope: z
     .string()
     .trim()
@@ -718,7 +725,13 @@ export function createCodexSecurityServer(): McpServer {
       },
       _meta: modelActionMeta,
     },
-    async ({ targetPath, scope, targetSummary, userContext }, extra) => {
+    async (
+      { targetPath, scope, include_paths, targetSummary, userContext },
+      extra,
+    ) => {
+      if (scope !== undefined && include_paths !== undefined) {
+        return toolErrorResult("Provide include_paths or scope, not both.");
+      }
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
@@ -726,7 +739,7 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const started = await startHeadlessStandardScan(
-        { targetPath, scope, targetSummary, userContext },
+        { targetPath, scope, include_paths, targetSummary, userContext },
         threadId,
         codexModelSettingsFromExtra(extra),
       );
@@ -1387,7 +1400,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "List Codex Security Scans",
       description:
-        "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
+        "App-only. Read persisted plugin-owned scan summaries for native Security navigation. Each summary includes the selected directories in includePaths.",
       inputSchema: scanListSchema,
       annotations: {
         readOnlyHint: true,
@@ -2219,6 +2232,7 @@ async function startHeadlessStandardScan(
   input: {
     targetPath: string;
     scope?: string;
+    include_paths?: string[];
     targetSummary?: string;
     userContext?: string;
   },
@@ -2232,8 +2246,9 @@ async function startHeadlessStandardScan(
       threadId,
       "--target-path",
       input.targetPath,
-      "--scope",
-      input.scope ?? ".",
+      ...(input.include_paths !== undefined
+        ? ["--include-paths-json", JSON.stringify(input.include_paths)]
+        : ["--scope", input.scope ?? "."]),
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", input.targetSummary),
@@ -2592,46 +2607,54 @@ async function executeWorkbench(
   if (userContextIndex !== -1) {
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
-  const workbenchInput = input ?? userContext;
-  const execution = execFileAsync(
-    pythonCommand,
-    [workbenchScriptPath(), ...workbenchArgs],
-    {
-      cwd: PLUGIN_ROOT,
-      env: stateDir
-        ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
-        : process.env,
-      encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: [
-        "begin-deep-scan",
-        "claim-deep-scan-dedup",
-        "commit-deep-scan-dedup",
-        "complete-scan",
-        "export-findings",
-        "finish-deep-scan",
-        "get-scan",
-        "get-deep-scan",
-        "get-workspace",
-        "inspect-setup",
-        "list-findings",
-        "preserve-scan-results",
-        "recover-scan-results",
-        "request-finding-remediation",
-        "request-finding-remediation-action",
-        "save-workspace",
-        "set-finding-triage",
-        "set-finding-remediation",
-        "start-headless-standard-scan",
-        "start-prompt-only-scan",
-        "start-scan",
-        "upsert-deep-scan-worker",
-      ].includes(args[0] ?? "")
-        ? 300_000
-        : 30_000,
-    },
-  );
+  let workbenchInput = input ?? userContext;
+  let pythonArgs = [workbenchScriptPath(), ...workbenchArgs];
+  if (workbenchArgs.includes("--include-paths-json")) {
+    // Directory selections can exceed argv limits; preserve the remaining stdin for user context.
+    pythonArgs = [
+      "-c",
+      "import json, runpy, sys; sys.argv = [sys.argv[1], *json.loads(sys.stdin.buffer.readline())]; runpy.run_path(sys.argv[0], run_name='__main__')",
+      workbenchScriptPath(),
+    ];
+    workbenchInput = Buffer.concat([
+      Buffer.from(JSON.stringify(workbenchArgs) + "\n"),
+      Buffer.from(workbenchInput ?? ""),
+    ]);
+  }
+  const execution = execFileAsync(pythonCommand, pythonArgs, {
+    cwd: PLUGIN_ROOT,
+    env: stateDir
+      ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
+      : process.env,
+    encoding: "utf8" as const,
+    maxBuffer: Infinity,
+    timeout: [
+      "begin-deep-scan",
+      "claim-deep-scan-dedup",
+      "commit-deep-scan-dedup",
+      "complete-scan",
+      "export-findings",
+      "finish-deep-scan",
+      "get-scan",
+      "get-deep-scan",
+      "get-workspace",
+      "inspect-setup",
+      "list-findings",
+      "preserve-scan-results",
+      "recover-scan-results",
+      "request-finding-remediation",
+      "request-finding-remediation-action",
+      "save-workspace",
+      "set-finding-triage",
+      "set-finding-remediation",
+      "start-headless-standard-scan",
+      "start-prompt-only-scan",
+      "start-scan",
+      "upsert-deep-scan-worker",
+    ].includes(args[0] ?? "")
+      ? 300_000
+      : 30_000,
+  });
   if (workbenchInput !== undefined) {
     execution.child.stdin!.on("error", () => {
       // The workbench may exit before consuming stdin; surface its process error.

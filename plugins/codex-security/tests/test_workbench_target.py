@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import runpy
+import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any, Callable, cast
 
@@ -141,6 +143,222 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
     cached_source.unlink()
 
     assert directory_content_digest(target) == original_digest
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_selected_git_directory_count_reuses_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_alias: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    for directory in ("service", "library", "other"):
+        (target / directory).mkdir()
+        (target / directory / "tracked.py").write_text("pass\n")
+    (target / ".gitignore").write_text("*.ignored\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    (target / "service" / "untracked.py").write_text("pass\n")
+    (target / "service" / "cache.ignored").write_text("ignored\n")
+    nested = target / "service" / "nested"
+    initialize_git_repository(nested)
+    (nested / ".gitignore").write_text("*.ignored\n")
+    (nested / "code.py").write_text("pass\n")
+    (nested / "cache.ignored").write_text("ignored\n")
+    if os.name != "nt":
+        (target / "library" / "linked.py").symlink_to(target / "service" / "tracked.py")
+
+    selected = ["service", "library"]
+    if case_alias:
+        native_stat = Path.stat
+
+        def alias_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            if path == target / "SERVICE":
+                path = target / "service"
+            return native_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", alias_stat)
+        selected[0] = "SERVICE"
+
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    git_command = count_files.__globals__["git_command"]
+    listings = []
+
+    def record_git(repository: Path, *args: str, **kwargs: Any) -> Any:
+        if "ls-files" in args:
+            listings.append(repository)
+        return git_command(repository, *args, **kwargs)
+
+    monkeypatch.setitem(count_files.__globals__, "git_command", record_git)
+    assert count_files(target, include_paths=selected) == 6
+    assert listings == [target, nested]
+
+
+def test_selected_non_git_directory_count_walks_only_selected_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", "library", "other"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    native_rglob = Path.rglob
+    walked = []
+
+    def record_walk(path: Path, *args: Any, **kwargs: Any) -> Any:
+        walked.append(path)
+        return native_rglob(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rglob", record_walk)
+    assert (
+        WORKBENCH_TARGET["directory_snapshot_regular_file_count"](
+            target, include_paths=["service", "library"]
+        )
+        == 2
+    )
+    assert walked == [target / "service", target / "library"]
+
+
+def test_selected_non_git_parent_preserves_checkout_inventory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    for directory in ("service", "library"):
+        checkout = target / directory
+        initialize_git_repository(checkout)
+        (checkout / ".gitignore").write_text("*.ignored\n")
+        (checkout / "cache.ignored").write_text("ignored\n")
+        (checkout / ".git" / "runtime-cache").write_text("runtime metadata\n")
+    for directory in ("plain", "other"):
+        (target / directory).mkdir()
+        (target / directory / "code.py").write_text("pass\n")
+
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target / "service") == 2
+    assert count_files(target / "library") == 2
+    assert count_files(target, include_paths=["service", "library"]) == 4
+    assert count_files(target, include_paths=["service", "library", "plain"]) == 5
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["src", "SRC"],
+        ["SRC", "src"],
+        ["src", "SRC/nested"],
+        ["SRC/nested", "src"],
+        ["SRC", "src/nested"],
+        ["src/nested", "SRC"],
+    ],
+)
+def test_selected_non_git_case_aliases_count_each_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths: list[str]
+) -> None:
+    target = tmp_path / "target"
+    (target / "src" / "nested").mkdir(parents=True)
+    (target / "src" / "code.py").write_text("pass\n")
+    (target / "src" / "nested" / "code.py").write_text("pass\n")
+    native_stat = Path.stat
+    native_is_dir = Path.is_dir
+    native_rglob = Path.rglob
+
+    def physical_path(path: Path) -> Path:
+        try:
+            relative = path.relative_to(target)
+        except ValueError:
+            return path
+        return target.joinpath(*(part.casefold() for part in relative.parts))
+
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: native_stat(physical_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path, *args, **kwargs: native_is_dir(physical_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda path, *args, **kwargs: native_rglob(physical_path(path), *args, **kwargs),
+    )
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    monkeypatch.setitem(count_files.__globals__, "git_directory_snapshot_paths", lambda _: None)
+
+    selected = WORKBENCH_TARGET["require_include_paths"](json.dumps(paths), target)
+
+    assert count_files(target, include_paths=selected) == 2
+    assert len(selected) == 1
+    assert selected[0] in {"src", "SRC"}
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [".git", "src/.git", "src/.git/objects", ".GIT", "src/.GIT", "src/.GIT/objects"],
+)
+def test_selected_directory_rejects_git_metadata_case_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    target = tmp_path / "target"
+    for directory in (".git/objects", "src/.git/objects"):
+        (target / directory).mkdir(parents=True)
+    if not (target / selection).exists():
+        native_stat = Path.stat
+        native_is_dir = Path.is_dir
+
+        def physical_path(path: Path) -> Path:
+            return Path(*(".git" if part == ".GIT" else part for part in path.parts))
+
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            lambda path, *args, **kwargs: native_stat(physical_path(path), *args, **kwargs),
+        )
+        monkeypatch.setattr(
+            Path,
+            "is_dir",
+            lambda path, *args, **kwargs: native_is_dir(physical_path(path), *args, **kwargs),
+        )
+
+    expected = (
+        "include_paths must not select Git metadata"
+        if ".GIT" in selection.split("/")
+        else "include_paths must contain literal repository-relative directories"
+    )
+    with pytest.raises(SystemExit, match=expected):
+        WORKBENCH_TARGET["require_include_paths"](json.dumps([selection]), target)
+
+
+def test_selected_directory_count_distinguishes_case_sensitive_windows_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WindowsPath(PureWindowsPath):
+        def resolve(self) -> WindowsPath:
+            return self
+
+        def is_dir(self) -> bool:
+            return True
+
+        def stat(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                st_dev=1, st_ino={"repository": 0, "SRC": 1, "src": 2, "library": 3}[self.name]
+            )
+
+        def lstat(self) -> SimpleNamespace:
+            return SimpleNamespace(st_mode=stat.S_IFREG)
+
+    target = WindowsPath("C:/repository")
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    monkeypatch.setitem(count_files.__globals__, "Path", WindowsPath)
+    monkeypatch.setitem(
+        count_files.__globals__,
+        "git_directory_snapshot_paths",
+        lambda _: [target / "SRC" / "one.py", target / "src" / "two.py"],
+    )
+    selected = WORKBENCH_TARGET["require_include_paths"]('["SRC", "library"]', target)
+    assert selected == ["SRC", "library"]
+    assert count_files(target, include_paths=selected) == 1
+    selected = WORKBENCH_TARGET["require_include_paths"]('["SRC", "src", "library"]', target)
+    assert selected == ["SRC", "library", "src"]
+    assert count_files(target, include_paths=selected) == 2
 
 
 def test_worktree_content_digest_streams_tracked_binary_patch(

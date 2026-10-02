@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -659,18 +660,50 @@ def directory_content_digest(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def directory_snapshot_regular_file_count(target: Path) -> int:
+def directory_snapshot_regular_file_count(
+    target: Path, *, include_paths: list[str] | None = None
+) -> int:
+    if include_paths is not None and len(include_paths) == 1:
+        return directory_snapshot_regular_file_count(target / include_paths[0])
     paths = git_directory_snapshot_paths(target)
+    selected_identities: set[tuple[int, int]] = set()
     if paths is None:
+        if include_paths:
+            return sum(
+                directory_snapshot_regular_file_count(target / selected)
+                for selected in include_paths
+            )
         paths = sorted(target.rglob("*"))
+    elif include_paths:
+        for selected in include_paths:
+            metadata = (target / selected).stat()
+            selected_identities.add((metadata.st_dev, metadata.st_ino))
+    matching_directories: dict[str, bool] = {}
     count = 0
     for path in paths:
         try:
             metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            if selected_identities:
+                for parent in path.parents:
+                    if parent == target:
+                        break
+                    key = str(parent)
+                    if key not in matching_directories:
+                        metadata = parent.stat()
+                        # Match case aliases using the same identity as Path.samefile().
+                        matching_directories[key] = (
+                            metadata.st_dev,
+                            metadata.st_ino,
+                        ) in selected_identities
+                    if matching_directories[key]:
+                        count += 1
+                        break
+            else:
+                count += 1
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
-        if stat.S_ISREG(metadata.st_mode):
-            count += 1
     return count
 
 
@@ -781,6 +814,85 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
             }
         )
     return metadata
+
+
+def require_scope(scope: str, mode: str, target: Path, *, strip_whitespace: bool = True) -> str:
+    value = (scope.strip() if strip_whitespace else scope) or "."
+    requested_scope = Path(value)
+    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
+        raise SystemExit("Scan scope must use repository-relative POSIX paths.")
+    if ".." in requested_scope.parts:
+        raise SystemExit("Scan scope must stay inside the scanned target.")
+    try:
+        resolved_scope = (
+            requested_scope if requested_scope.is_absolute() else target / requested_scope
+        ).resolve()
+        relative_scope = resolved_scope.relative_to(target)
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit("Scan scope must stay inside the scanned target.") from exc
+    normalized = relative_scope.as_posix() or "."
+    if mode == "deep" and normalized != ".":
+        raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
+    if not resolved_scope.is_dir():
+        raise SystemExit("Scan scope must reference an existing directory inside the target.")
+    return normalized
+
+
+def require_include_paths(value: str, target: Path) -> list[str]:
+    try:
+        paths = json.loads(value)
+    except ValueError as exc:
+        raise SystemExit("include_paths must be a JSON array of directories.") from exc
+    if not isinstance(paths, list) or not paths:
+        raise SystemExit("include_paths must be a nonempty JSON array of directories.")
+    normalized: set[str] = set()
+    for path in paths:
+        if not isinstance(path, str) or not path:
+            raise SystemExit("include_paths must contain literal repository-relative directories.")
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise SystemExit("include_paths must contain UTF-8 directory paths.") from exc
+        canonical = "/".join(part for part in path.split("/") if part not in {"", "."}) or "."
+        if (
+            not canonical.strip()
+            or path.startswith("/")
+            or (len(canonical) > 1 and canonical[0].isalpha() and canonical[1] == ":")
+            or "\\" in path
+            or any(ord(character) < 32 for character in path)
+            or ".." in path.split("/")
+            or ".git" in path.split("/")
+        ):
+            raise SystemExit("include_paths must contain literal repository-relative directories.")
+        resolved = require_scope(canonical, "standard", target, strip_whitespace=False)
+        if Path(resolved) != Path(canonical):
+            raise SystemExit("include_paths must not resolve through a directory symlink.")
+        directory = target
+        for part in Path(resolved).parts:
+            directory = directory / part
+            if part.casefold() == ".git":
+                git_directory = directory.with_name(".git")
+                if git_directory.exists() and directory.samefile(git_directory):
+                    raise SystemExit("include_paths must not select Git metadata.")
+        normalized.add(resolved)
+    if "." in normalized:
+        return ["."]
+    directory_identities: dict[str, tuple[int, int]] = {}
+    selected_identities: set[tuple[int, int]] = set()
+    result: list[str] = []
+    for path in sorted(normalized, key=lambda value: (value.count("/"), value)):
+        relative = Path(path)
+        for ancestor in (relative, *relative.parents):
+            key = ancestor.as_posix()
+            if key not in directory_identities:
+                metadata = (target / ancestor).stat()
+                directory_identities[key] = (metadata.st_dev, metadata.st_ino)
+            if directory_identities[key] in selected_identities:
+                break
+        else:
+            result.append(path)
+            selected_identities.add(directory_identities[path])
+    return sorted(result)
 
 
 def require_remediation_target(value: str) -> Path:

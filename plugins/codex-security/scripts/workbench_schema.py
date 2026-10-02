@@ -867,6 +867,13 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "persist headless scan directory selection",
+        """
+        ALTER TABLE scans ADD COLUMN include_paths_json TEXT;
+        """,
+    ),
 )
 
 

@@ -97,6 +97,7 @@ from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
     insert_running_scan,
+    requested_scan_paths,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -128,8 +129,10 @@ from workbench_target import (
     git_worktree_context,
     remediation_checkout_snapshot,
     require_git_worktree_head,
+    require_include_paths,
     require_remediation_target,
     require_scan_target_identity,
+    require_scope,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -438,15 +441,6 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     return ["git_worktree"]
 
 
-def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
-    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
-        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-        target = recipe["target"]
-        if target["kind"] == "paths":
-            return target["paths"]
-    return [scan["scope"]]
-
-
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -488,7 +482,7 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
         if mode is None:
             raise SystemExit("This migrated diff scan does not have a validated change set.")
         return mode
-    if scan["scope"] != "." or (
+    if requested_scan_paths(scan) != ["."] or (
         "recipe_json" in scan.keys()
         and scan["recipe_json"] is not None
         and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
@@ -610,28 +604,6 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             include_path, requested_scope
         ):
             raise SystemExit("scan-manifest.json scope must stay inside the workbench scan scope.")
-
-
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope.strip() or "."
-    requested_scope = Path(value)
-    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
-        raise SystemExit("Scan scope must use repository-relative POSIX paths.")
-    if ".." in requested_scope.parts:
-        raise SystemExit("Scan scope must stay inside the scanned target.")
-    try:
-        resolved_scope = (
-            requested_scope if requested_scope.is_absolute() else target / requested_scope
-        ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
-    except (RuntimeError, ValueError) as exc:
-        raise SystemExit("Scan scope must stay inside the scanned target.") from exc
-    normalized = relative_scope.as_posix() or "."
-    if mode == "deep" and normalized != ".":
-        raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
-    if not resolved_scope.is_dir():
-        raise SystemExit("Scan scope must reference an existing directory inside the target.")
-    return normalized
 
 
 def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqlite3.Row:
@@ -832,7 +804,20 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         target = require_target(workspace["target_path"])
         require_scannable_target(target)
         target_metadata = target.stat()
-        scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        previous = (
+            require_scan(connection, workspace["active_scan_id"])
+            if workspace["active_scan_id"] is not None
+            else None
+        )
+        include_paths = (
+            require_include_paths(previous["include_paths_json"], target)
+            if previous is not None and previous["include_paths_json"] is not None
+            else None
+        )
+        if include_paths is None:
+            scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        else:
+            scope = include_paths[0] if len(include_paths) == 1 else "."
         diff_target = None
         if workspace["default_mode"] == "diff":
             diff_target = require_diff_target(
@@ -847,8 +832,10 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
-        scope_file_count = directory_snapshot_regular_file_count(
-            target if scope == "." else target / scope
+        scope_file_count = (
+            directory_snapshot_regular_file_count(target, include_paths=include_paths)
+            if include_paths is not None
+            else directory_snapshot_regular_file_count(target if scope == "." else target / scope)
         )
         target_identity = scan_target_identity(
             target,
@@ -909,6 +896,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             timestamp=timestamp,
             model=args.model,
             reasoning_effort=args.reasoning_effort,
+            include_paths=include_paths,
         )
         if manages_transaction:
             connection.commit()
@@ -939,7 +927,7 @@ def _start_prompt_driven_scan(
         raise SystemExit("thread-id is required.")
     inspected = inspect_setup_values(
         args.target_path,
-        args.scope,
+        args.scope or ".",
         args.mode,
         args.diff_target_kind,
         args.diff_base_revision,
@@ -948,15 +936,21 @@ def _start_prompt_driven_scan(
     )
     target = Path(inspected["target"]["targetPath"])
     target_path = str(target)
-    scope = inspected["scope"]
+    include_paths_json = getattr(args, "include_paths_json", None)
+    if include_paths_json is not None and args.scope is not None:
+        raise SystemExit("Provide include_paths or scope, not both.")
+    include_paths = (
+        require_include_paths(include_paths_json, target)
+        if include_paths_json is not None
+        else [inspected["scope"]]
+    )
+    scope = include_paths[0] if len(include_paths) == 1 else "."
     diff_target = inspected["diffTarget"]
     user_context = user_context_argument(args)
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = directory_snapshot_regular_file_count(
-        target if scope == "." else target / scope
-    )
+    scope_file_count = directory_snapshot_regular_file_count(target, include_paths=include_paths)
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
@@ -982,7 +976,7 @@ def _start_prompt_driven_scan(
             raise SystemExit(
                 "The selected scan target changed while the scan was starting. Try again."
             )
-        existing = connection.execute(
+        candidates = connection.execute(
             """
             SELECT scans.* FROM scans
             JOIN workspaces ON workspaces.active_scan_id = scans.id
@@ -1002,7 +996,7 @@ def _start_prompt_driven_scan(
                         AND scans.continuation_thread_id = ?
                     )
                 )
-            ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
+            ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id
             """,
             (
                 thread_id,
@@ -1017,7 +1011,10 @@ def _start_prompt_driven_scan(
                 int(headless_standard),
                 thread_id,
             ),
-        ).fetchone()
+        )
+        existing = next(
+            (scan for scan in candidates if requested_scan_paths(scan) == include_paths), None
+        )
         if existing is not None:
             connection.commit()
             return {
@@ -1068,6 +1065,7 @@ def _start_prompt_driven_scan(
             handoff_status="delivered",
             model=args.model,
             reasoning_effort=args.reasoning_effort,
+            include_paths=include_paths if include_paths_json is not None else None,
         )
         if headless_standard:
             claimed = connection.execute(

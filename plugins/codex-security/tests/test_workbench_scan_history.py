@@ -276,7 +276,112 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     }
     assert any(scan["progress"]["status"] == "failed" for scan in history["scans"])
     assert all(scan["recipeAvailable"] for scan in history["scans"])
+    assert {scan["scanId"]: scan["includePaths"] for scan in history["scans"]} == {
+        first["scanId"]: ["."],
+        rerun["scanId"]: ["src", "tests"],
+        failed["scanId"]: ["."],
+    }
     assert len(run_workbench(state_dir, "list-scans", "--repository", str(other))["scans"]) == 1
+
+
+@pytest.mark.parametrize("storage", ["explicit", "recipe", "legacy"])
+def test_scan_history_search_casefolds_selected_paths(tmp_path: Path, storage: str) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    paths = ["ÉTUDES"] if storage == "legacy" else ["ÉTUDES", "Straße"]
+    for path in paths:
+        (repository / path).mkdir(parents=True)
+    if storage == "explicit":
+        scan = run_workbench(
+            state_dir,
+            "start-headless-standard-scan",
+            "--thread-id",
+            "history-owner",
+            "--target-path",
+            str(repository),
+            "--include-paths-json",
+            json.dumps(paths),
+            "--scan-root",
+            str(tmp_path / "results"),
+        )["scan"]
+    else:
+        scan = create_cli_scan(
+            state_dir, tmp_path / "results", repository, complete=False, paths=paths
+        )
+        if storage == "legacy":
+            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+                connection.execute(
+                    "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
+                )
+
+    queries = ["études", "ÉtuDES"]
+    if storage != "legacy":
+        queries.extend(["strasse", "STRASSE"])
+    for query in queries:
+        scans = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+        assert [row["scanId"] for row in scans] == [scan["scanId"]]
+        assert sorted(scans[0]["includePaths"]) == sorted(paths)
+    assert run_workbench(state_dir, "list-scans", "--query", "absent-directory")["scans"] == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux non-UTF-8 directory name")
+def test_scan_history_search_handles_surrogate_escaped_recipe_paths(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    paths = ["bad-\udcff", "library"]
+    for path in [*paths, "other"]:
+        (repository / path).mkdir(parents=True)
+        (repository / path / "code.py").write_text("pass\n")
+    selected = create_cli_scan(
+        state_dir, tmp_path / "results", repository, complete=False, paths=paths
+    )
+    other = create_cli_scan(
+        state_dir, tmp_path / "results", repository, complete=False, paths=["other"]
+    )
+
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    assert (
+        next(scan for scan in history if scan["scanId"] == selected["scanId"])["includePaths"]
+        == paths
+    )
+    for query, expected in (
+        ("other", [other["scanId"]]),
+        ("absent-directory", []),
+        ("bad-", [selected["scanId"]]),
+        ("LIBRARY", [selected["scanId"]]),
+    ):
+        scans = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+        assert [scan["scanId"] for scan in scans] == expected
+
+
+def test_scan_history_filters_recipe_paths_before_pagination(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    for path in ("src", "tests", "other"):
+        (repository / path).mkdir(parents=True)
+    matching_ids = set()
+    for paths in (["src", "tests"], ["other"], ["src", "tests"], ["other"]):
+        scan = create_cli_scan(
+            state_dir, tmp_path / "results", repository, complete=False, paths=paths
+        )
+        if "tests" in paths:
+            matching_ids.add(scan["scanId"])
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    expected_ids = [scan["scanId"] for scan in history if scan["scanId"] in matching_ids]
+    for offset in range(3):
+        page = run_workbench(
+            state_dir,
+            "list-scans",
+            "--query",
+            "tESts",
+            "--limit",
+            "1",
+            "--offset",
+            str(offset),
+        )
+        assert [scan["scanId"] for scan in page["scans"]] == expected_ids[offset : offset + 1]
+        assert all(scan["includePaths"] == ["src", "tests"] for scan in page["scans"])
+        assert page["nextOffset"] == (1 if offset == 0 else None)
 
 
 def test_cli_scan_persists_its_continuation_thread(tmp_path: Path) -> None:

@@ -2826,7 +2826,7 @@ try {
 
   const scopedContext = {
     ...context,
-    scope: "src",
+    scope: ".",
     targetContract: {
       ...context.targetContract,
       scope: {

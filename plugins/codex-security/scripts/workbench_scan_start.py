@@ -22,7 +22,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, user_text
+from workbench_validation import optional_text, reject_non_finite_json, user_text
 
 
 def safe_segment(value: str) -> str:
@@ -34,6 +34,17 @@ def safe_segment(value: str) -> str:
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    if "include_paths_json" in scan.keys() and scan["include_paths_json"] is not None:
+        return json.loads(scan["include_paths_json"], parse_constant=reject_non_finite_json)
+    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        target = recipe["target"]
+        if target["kind"] == "paths":
+            return target["paths"]
+    return [scan["scope"]]
 
 
 def scan_target_identity(
@@ -165,6 +176,7 @@ def insert_running_scan(
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    include_paths: list[str] | None = None,
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
@@ -180,11 +192,11 @@ def insert_running_scan(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, scope, mode, user_context,
+            target_device, target_inode, scope, include_paths_json, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -194,6 +206,7 @@ def insert_running_scan(
             str(target),
             *target_identity,
             scope,
+            json.dumps(include_paths, separators=(",", ":")) if include_paths is not None else None,
             workspace["default_mode"],
             user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,

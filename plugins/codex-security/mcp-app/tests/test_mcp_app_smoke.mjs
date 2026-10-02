@@ -607,6 +607,74 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const headlessContext =
     `Review https://example.test/internal. ${"Assess the HTTP boundary. ".repeat(44_000)}`.trim();
   assert.ok(headlessContext.length > 1_000_000);
+  const scopedTarget = await mkdtemp(
+    path.join(tmpdir(), "codex-security-scoped-target-"),
+  );
+  const distinctTarget = await mkdtemp(
+    path.join(tmpdir(), "codex-security-distinct-target-"),
+  );
+  // Other supported platforms cannot consistently create paths this long.
+  const longDirectory =
+    process.platform === "linux"
+      ? Array.from({ length: 12 }, () => "é".repeat(90)).join("/")
+      : "library";
+  if (process.platform === "linux") assert.ok(longDirectory.length > 1024);
+  const selectedDirectories = [
+    "service",
+    "CAFÉ",
+    longDirectory,
+    " leading",
+    process.platform === "win32" ? "trailing" : "trailing ",
+    "name-\u007f",
+    process.platform === "linux" ? ".GIT" : "git-case",
+    process.platform === "linux" ? "src/.GIT" : "git-nested",
+    ...Array.from({ length: 25 }, (_, index) => `directory-${index}`),
+  ].sort();
+  const largeSelection = Array.from(
+    { length: 512 },
+    () => selectedDirectories,
+  ).flat();
+  assert.ok(Buffer.byteLength(JSON.stringify(largeSelection)) > 128 * 1024);
+  const scopedContext = headlessContext + "\nUnicode context: café.";
+  for (const directory of [...selectedDirectories, "other"]) {
+    await mkdir(path.join(scopedTarget, directory), { recursive: true });
+    await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
+  }
+  const distinctParent = "é".repeat(120);
+  const distinctDirectories = Array.from(
+    { length: 3000 },
+    (_, index) => distinctParent + "/" + String(index).padStart(4, "0"),
+  );
+  for (const directory of distinctDirectories) {
+    await mkdir(path.join(distinctTarget, directory), { recursive: true });
+    await writeFile(path.join(distinctTarget, directory, "code.py"), "pass\n");
+  }
+  for (const gitTarget of [scopedTarget, distinctTarget]) {
+    execFileSync("git", ["init", "--quiet", gitTarget]);
+    // Git inventories these ordinary directories but refuses them in its index.
+    execFileSync("git", [
+      "-C",
+      gitTarget,
+      "add",
+      "--",
+      ".",
+      ":(exclude).GIT",
+      ":(exclude)src/.GIT",
+    ]);
+    execFileSync("git", [
+      "-C",
+      gitTarget,
+      "-c",
+      "user.name=Test Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "Add selected directory fixtures",
+    ]);
+  }
+
   try {
     assertNoError(
       await headlessServer.requestAndWait(1, "initialize", {
@@ -661,6 +729,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: target,
+        include_paths: ["src", ".", "src"],
         userContext: headlessContext,
       },
       _meta: { "openai/threadId": ownerThread },
@@ -671,6 +740,260 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(
       joined.result.structuredContent.handoffClaimToken,
       result.handoffClaimToken,
+    );
+
+    const scoped = await headlessServer.requestAndWait(40, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        include_paths: largeSelection,
+        userContext: scopedContext,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(scoped);
+    const scopedResult = scoped.result.structuredContent;
+    assert.deepEqual(
+      scopedResult.scan.contract.scope.requiredIncludePaths,
+      selectedDirectories,
+    );
+    assert.equal(
+      scopedResult.scan.progress.coverage.filesTotal,
+      selectedDirectories.length,
+    );
+    assert.deepEqual(scopedResult.scan.executionThreadIds, []);
+    assert.equal(scopedResult.scan.userContext, scopedContext);
+    assert.equal(scopedResult.workspace.userContext, scopedContext);
+    const invalidSelection = await headlessServer.requestAndWait(
+      54,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: scopedTarget,
+          include_paths: ["service", "bad-\udcff"],
+        },
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assert.equal(invalidSelection.result.isError, true);
+    assert.match(
+      invalidSelection.result.content[0].text,
+      /UTF-8 directory paths/,
+    );
+    const scopedHistory = await headlessServer.requestAndWait(
+      50,
+      "tools/call",
+      {
+        name: "list_codex_security_scans",
+        arguments: { query: "café" },
+      },
+    );
+    assertNoError(scopedHistory);
+    const [scopedSummary] = scopedHistory.result.structuredContent.scans;
+    assert.equal(scopedHistory.result.structuredContent.scans.length, 1);
+    assert.equal(scopedSummary.scanId, scopedResult.scanId);
+    assert.equal(scopedSummary.scope, ".");
+    assert.deepEqual(scopedSummary.includePaths, selectedDirectories);
+    const scopedJoined = await headlessServer.requestAndWait(46, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        include_paths: largeSelection.toReversed(),
+        userContext: scopedContext,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(scopedJoined);
+    assert.equal(
+      scopedJoined.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      scopedJoined.result.structuredContent.scanId,
+      scopedResult.scanId,
+    );
+    assert.equal(
+      scopedJoined.result.structuredContent.scan.userContext,
+      scopedContext,
+    );
+    const conflict = await headlessServer.requestAndWait(41, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        scope: ".",
+        include_paths: ["service"],
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assert.equal(conflict.result.isError, true);
+
+    const scopedClaim = {
+      scanId: scopedResult.scanId,
+      handoffClaimToken: scopedResult.handoffClaimToken,
+    };
+    assertNoError(
+      await headlessServer.requestAndWait(42, "tools/call", {
+        name: "update_codex_security_scan_progress",
+        arguments: { ...scopedClaim, preflightChecks: [] },
+        _meta: { "openai/threadId": ownerThread },
+      }),
+    );
+    assertNoError(
+      await headlessServer.requestAndWait(43, "tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          ...scopedClaim,
+          complete: true,
+          findings: [],
+          coverage: {
+            completeness: "complete",
+            surfaces: [
+              { label: "Selected directories", disposition: "rejected" },
+            ],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        },
+        _meta: { "openai/threadId": ownerThread },
+      }),
+    );
+    const scopedCompletion = await headlessServer.requestAndWait(
+      44,
+      "tools/call",
+      {
+        name: "complete_codex_security_scan",
+        arguments: scopedClaim,
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(scopedCompletion);
+    assert.equal(
+      scopedCompletion.result.structuredContent.scan.progress.status,
+      "complete",
+    );
+    const scopedCompleted = await headlessServer.requestAndWait(
+      45,
+      "tools/call",
+      {
+        name: "get_codex_security_completed_scan",
+        arguments: scopedClaim,
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(scopedCompleted);
+    const scopedArtifacts = scopedCompleted.result.structuredContent;
+    assert.deepEqual(
+      scopedArtifacts.manifest.scan.scope.includePaths,
+      selectedDirectories,
+    );
+    assert.deepEqual(
+      scopedArtifacts.coverage.includePaths,
+      selectedDirectories,
+    );
+    assert.equal(scopedArtifacts.coverage.mode, "scoped_path");
+    assert.equal(scopedArtifacts.coverage.inventoryStrategy, "scoped_path");
+    assert.ok(scopedArtifacts.manifest.scan.sealedAt);
+
+    let previousScopedScanId = scopedResult.scanId;
+    for (const requestId of [51, 53]) {
+      const restarted = await headlessServer.requestAndWait(
+        requestId,
+        "tools/call",
+        {
+          name: "start_codex_security_scan",
+          arguments: { sessionId: scopedResult.workspace.id },
+        },
+      );
+      assertNoError(restarted);
+      const restartedScan =
+        restarted.result.structuredContent.workspace.results;
+      assert.notEqual(restartedScan.scanId, previousScopedScanId);
+      assert.deepEqual(
+        restartedScan.contract.scope.requiredIncludePaths,
+        selectedDirectories,
+      );
+      assert.equal(
+        restartedScan.progress.coverage.filesTotal,
+        selectedDirectories.length,
+      );
+      previousScopedScanId = restartedScan.scanId;
+      if (requestId === 51) {
+        const canceled = await headlessServer.requestAndWait(52, "tools/call", {
+          name: "cancel_codex_security_scan",
+          arguments: { scanId: restartedScan.scanId },
+          _meta: { "openai/threadId": ownerThread },
+        });
+        assertNoError(canceled);
+        assert.equal(
+          canceled.result.structuredContent.workspace.results.progress.status,
+          "canceled",
+        );
+      }
+    }
+
+    const distinct = await headlessServer.requestAndWait(47, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: distinctTarget,
+        include_paths: distinctDirectories,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(distinct);
+    const distinctResult = distinct.result.structuredContent;
+    assert.equal(distinctResult.startDisposition, "created");
+    assert.deepEqual(
+      distinctResult.scan.contract.scope.requiredIncludePaths,
+      distinctDirectories,
+    );
+    assert.equal(
+      distinctResult.scan.progress.coverage.filesTotal,
+      distinctDirectories.length,
+    );
+    // Python escapes these Unicode paths in stdout; the distinct selection exceeds 4 MiB.
+    assert.ok(
+      JSON.stringify(distinctResult).replaceAll("é", "\\u00e9").length >
+        4 * 1024 * 1024,
+    );
+    const distinctJoined = await headlessServer.requestAndWait(
+      48,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: distinctTarget,
+          include_paths: distinctDirectories.toReversed(),
+        },
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(distinctJoined);
+    assert.equal(
+      distinctJoined.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      distinctJoined.result.structuredContent.scanId,
+      distinctResult.scanId,
+    );
+    assert.equal(
+      distinctJoined.result.structuredContent.scan.progress.coverage.filesTotal,
+      distinctDirectories.length,
+    );
+    const distinctLoaded = await headlessServer.requestAndWait(
+      49,
+      "tools/call",
+      {
+        name: "get_codex_security_scan",
+        arguments: { scanId: distinctResult.scanId },
+      },
+    );
+    assertNoError(distinctLoaded);
+    assert.deepEqual(
+      distinctLoaded.result.structuredContent.scan.contract.scope
+        .requiredIncludePaths,
+      distinctDirectories,
     );
 
     const wrongThread = await headlessServer.requestAndWait(6, "tools/call", {
@@ -767,6 +1090,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
     await rm(headlessScanRoot, { recursive: true, force: true });
+    await rm(scopedTarget, { recursive: true, force: true });
+    await rm(distinctTarget, { recursive: true, force: true });
   }
 }
 
