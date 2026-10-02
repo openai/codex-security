@@ -68,7 +68,8 @@ selection overrides the project setting. Omission preserves Codex defaults;
 
 The selection applies to Deep Scan discovery and reducer workers, resumed
 workers, custom validation, and post-scan turns. Saved scan recipes retain it
-for resume and rerun. API-key selection enables Codex's experimental Cyber
+for resume and rerun. Automatic component planning and finding matching also
+use the selected program. API-key selection enables Codex's experimental Cyber
 support unless the effective native configuration explicitly disables
 `features.api_key_cyber_access_programs`.
 Explicit disables and API entitlement failures remain errors. Selecting a

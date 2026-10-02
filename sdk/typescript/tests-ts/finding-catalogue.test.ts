@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { TurnOptions } from "@openai/codex-sdk";
 import { describe, expect, test } from "bun:test";
 import {
   compactFinding,
@@ -51,20 +52,22 @@ function conversation(
   respond: (prompt: string, index: number) => unknown | Promise<unknown>,
 ) {
   const prompts: string[] = [];
+  const turns: TurnOptions[] = [];
   let threads = 0;
   const codex: NonNullable<ScanComparisonOptions["codex"]> = {
     startThread() {
       threads += 1;
       return {
-        async run(prompt) {
+        async run(prompt, options) {
           prompts.push(prompt);
+          turns.push(options);
           const response = await respond(prompt, prompts.length - 1);
           return { finalResponse: JSON.stringify(response) };
         },
       };
     },
   };
-  return { codex, prompts, threads: () => threads };
+  return { codex, prompts, turns, threads: () => threads };
 }
 
 describe("finding catalogue", () => {
@@ -457,6 +460,7 @@ describe("finding catalogue", () => {
         { before, after, knownFindingGroups: [["identity-a", "identity-b"]] },
         {
           codex: observed.codex,
+          cyberAccessProgram: "daybreak_blue",
           onProgress(progress) {
             phases.push(progress.phase);
             const error = new Error("Optional observer");
@@ -471,6 +475,10 @@ describe("finding catalogue", () => {
       ]);
       expect(observed.threads()).toBe(1);
       expect(observed.prompts).toHaveLength(2);
+      expect(observed.turns.map((turn) => turn.cyberAccessProgram)).toEqual([
+        "daybreak_blue",
+        "daybreak_blue",
+      ]);
       expect(phases).toEqual(["catalogue", "evidence", "complete"]);
     },
   );
@@ -557,9 +565,17 @@ describe("finding catalogue", () => {
           ? { ...empty, request: { kind: "catalogue", page: 2 } }
           : empty,
       );
-      expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
-        empty,
-      );
+      expect(
+        await matchScanFindings(input, {
+          codex: observed.codex,
+          cyberAccessProgram: "daybreak_red",
+        }),
+      ).toEqual(empty);
+      expect(observed.turns.map((turn) => turn.cyberAccessProgram)).toEqual([
+        "daybreak_red",
+        "daybreak_red",
+        "daybreak_red",
+      ]);
       expect(observed.threads()).toBe(1);
       expect(
         observed.prompts.map((prompt) => data<CatalogueData>(prompt).page),

@@ -43,6 +43,8 @@ export interface ComponentPlan {
 export interface ComponentPlanningOptions {
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
+  /** @internal Cyber access program already selected by the calling scan. */
+  cyberAccessProgram?: ReadOnlyCodexOptions["cyberAccessProgram"];
   config?: CodexSecurityConfig;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
@@ -200,6 +201,26 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
+}
+
+/** @internal */
+export function scanCyberAccessConfig(
+  config: JsonObject,
+  program: CyberAccessProgram | undefined,
+): JsonObject {
+  if (program === undefined) return config;
+  const resolved = resolveCodexProfile(config);
+  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  return {
+    ...config,
+    features: {
+      ...(isObject(config["features"]) ? config["features"] : {}),
+      // Explicit selections opt in to upstream API-key support. Keep a user's
+      // explicit disable so Codex can report it instead of silently dropping it.
+      api_key_cyber_access_programs:
+        features["api_key_cyber_access_programs"] ?? true,
+    },
+  };
 }
 
 export async function mergedCodexConfig(

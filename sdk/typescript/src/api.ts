@@ -56,6 +56,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanApprovalPolicy,
+  scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -2260,6 +2261,7 @@ export class CodexSecurity {
               ),
             environment,
             model,
+            cyberAccessProgram: options.cyberAccessProgram,
             signal,
           });
           result.repositoryFindings = (await listRepositoryFindings(
@@ -4683,25 +4685,6 @@ function sharedCredentialCodexConfig(
     }
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
-}
-
-function scanCyberAccessConfig(
-  config: JsonObject,
-  program: ScanSettings["cyberAccessProgram"],
-): JsonObject {
-  if (program === undefined) return config;
-  const resolved = resolveCodexProfile(config);
-  const features = isRecord(resolved["features"]) ? resolved["features"] : {};
-  return {
-    ...config,
-    features: {
-      ...(isRecord(config["features"]) ? config["features"] : {}),
-      // Explicit selections opt in to upstream API-key support. Keep a user's
-      // explicit disable so Codex can report it instead of silently dropping it.
-      api_key_cyber_access_programs:
-        features["api_key_cyber_access_programs"] ?? true,
-    },
-  };
 }
 
 export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
