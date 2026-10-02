@@ -867,6 +867,44 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "preserve severity assessments per scan",
+        """
+        CREATE TABLE scan_severity_assessments (
+            scan_id TEXT NOT NULL REFERENCES scan_severity_classifications(scan_id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+            occurrence_id TEXT,
+            input_sha256 TEXT NOT NULL,
+            rubric_sha256 TEXT,
+            knowledge_base_sha256 TEXT,
+            assessed_at TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),
+            decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),
+            level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),
+            rubric_label TEXT,
+            rationale TEXT NOT NULL,
+            confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),
+            review_trigger TEXT,
+            PRIMARY KEY (scan_id, finding_id),
+            CHECK ((decision = 'assessed' AND level IS NOT NULL)
+                OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))
+        );
+
+        INSERT INTO scan_severity_assessments
+        SELECT classification.scan_id, assessment.*
+        FROM scan_severity_classifications AS classification
+        JOIN json_each(classification.finding_ids_json) AS selected
+        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
+        WHERE assessment.rubric_sha256 IS classification.rubric_sha256
+          AND assessment.knowledge_base_sha256 IS classification.knowledge_base_sha256
+          AND EXISTS (
+              SELECT 1 FROM finding_occurrences AS occurrence
+              WHERE occurrence.id = assessment.occurrence_id
+                AND occurrence.scan_id = classification.scan_id
+          );
+        """,
+    ),
 )
 
 

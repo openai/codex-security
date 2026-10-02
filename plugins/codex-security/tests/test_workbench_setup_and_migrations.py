@@ -405,7 +405,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -467,6 +467,73 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
         assert set(indexes) == {"finding_occurrences_by_finding", "scan_comparisons_by_after_scan"}
         if previous_indexes:
             assert indexes == previous_indexes
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
+    indexed: bool,
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    previous = tuple(item for item in namespace["MIGRATIONS"] if item[0] < 42)
+    timestamp = "2026-09-01T00:00:00Z"
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        namespace["apply_schema_migrations"](
+            connection, previous, namespace["now"], namespace["backfill_security_targets"]
+        )
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("workspace", timestamp, timestamp),
+        )
+        for scan_id in ("first-scan", "second-scan"):
+            connection.execute(
+                """INSERT INTO scans (
+                    id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+                    status, phase, started_at, created_at, updated_at
+                ) VALUES (?, 'workspace', '/target', 'revision', '.', 'standard', ?,
+                    'complete', 'reporting', ?, ?, ?)""",
+                (scan_id, f"/scans/{scan_id}", timestamp, timestamp, timestamp),
+            )
+            connection.execute(
+                """INSERT INTO scan_severity_classifications
+                    (scan_id, finding_ids_json, assessed_at) VALUES (?, '["finding"]', ?)""",
+                (scan_id, timestamp),
+            )
+        connection.execute(
+            """INSERT INTO findings
+                (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """INSERT INTO finding_severity_assessments
+                (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
+                    level, rationale)
+                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
+                    'assessed', 'high', 'Saved severity')""",
+            (timestamp,),
+        )
+        if indexed:
+            connection.execute(
+                """INSERT INTO finding_occurrences
+                    (id, finding_id, scan_id, title, summary, severity, confidence,
+                        remediation, created_at)
+                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
+                        'high', 'high', 'Remediation', ?)""",
+                (timestamp,),
+            )
+
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+
+        migrated = connection.execute(
+            "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
+        ).fetchall()
+        assert [tuple(row) for row in migrated] == (
+            [("second-scan", "second-occurrence")] if indexed else []
+        )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -867,6 +934,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "preserve severity assessments per scan"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
@@ -969,7 +1037,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1996,6 +2064,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "preserve severity assessments per scan"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2079,6 +2148,7 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "preserve severity assessments per scan"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2170,6 +2240,7 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (39, "store dedupe checkpoint bindings in columns"),
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
+            (42, "preserve severity assessments per scan"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

@@ -53,6 +53,7 @@ export class SeverityStore {
       save: async (finding, assessment, result) => {
         await this.run(["severity-classification"], {
           action: "save",
+          scanId,
           finding,
           assessment: {
             ...assessment,
