@@ -88,13 +88,19 @@ describe("CLI diagnostics", () => {
   );
 
   test.each([
-    new CodexSecurityError("token budget exceeded"),
-    new CodexSecurityError("basic validation failed"),
-    new OutputDirectoryError(
-      "Could not write results: token=SYNTHETIC_LOCAL_VALUE",
-    ),
-    new CodexSecurityError("request timed out token=SYNTHETIC_TIMEOUT_VALUE"),
-  ])("preserves scan failure details for %s", async (failure) => {
+    ["budget exhaustion", new CodexSecurityError("token budget exceeded")],
+    ["validation failure", new CodexSecurityError("basic validation failed")],
+    [
+      "output directory failure",
+      new OutputDirectoryError(
+        "Could not write results: token=SYNTHETIC_LOCAL_VALUE",
+      ),
+    ],
+    [
+      "request timeout",
+      new CodexSecurityError("request timed out token=SYNTHETIC_TIMEOUT_VALUE"),
+    ],
+  ])("preserves scan failure details for %s", async (_name, failure) => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
