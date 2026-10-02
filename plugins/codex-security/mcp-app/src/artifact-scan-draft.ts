@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
@@ -454,7 +454,7 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...dispositions.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
@@ -734,6 +734,7 @@ async function readArchivedWorkerCheckpoints(
   }
 
   const archived: ScanDraftInput[] = [];
+  const archivePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/attempts/`;
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
@@ -883,8 +884,22 @@ async function readArchivedWorkerCheckpoints(
         Number(right.result) - Number(left.result) ||
         right.name.localeCompare(left.name),
     );
-    if (checkpointHead !== undefined) archived.push(checkpointHead);
-    archived.push(...drafts.map((draft) => draft.input));
+    const inputs = [
+      ...(checkpointHead ? [checkpointHead] : []),
+      ...drafts.map((draft) => draft.input),
+    ];
+    for (const input of inputs) {
+      // Archive moves receipts with their attempt; preserve the checkpoint bytes.
+      for (const surface of input.coverage.surfaces as JsonObject[]) {
+        if (!Array.isArray(surface.receiptRefs)) continue;
+        surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) =>
+          ref.startsWith(archivePrefix)
+            ? ref
+            : `${archivePrefix}${attempt.name}/${ref}`,
+        );
+      }
+      archived.push(input);
+    }
   }
   return archived;
 }
@@ -1056,6 +1071,13 @@ function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
         ? { question: previous.trim() }
         : structuredClone(previous);
     if (isObject(current) && isObject(original)) {
+      // Distinct records can describe the same candidate's separate proof gaps.
+      if (
+        typeof current.id === "string" &&
+        typeof original.id === "string" &&
+        current.id !== original.id
+      )
+        return false;
       const currentIdentities = coverageEntryIdentities(current);
       if (
         coverageEntryIdentities(original).some((identity) =>
@@ -1269,6 +1291,7 @@ function parsePersistedCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
+  delete compatible.previousParentCheckpoints;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;

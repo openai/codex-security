@@ -108,6 +108,7 @@ try {
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
+    await testReducerAttemptContext();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -1458,6 +1459,67 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
       ),
       true,
     );
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
+async function testReducerAttemptContext() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    const deepReducer = {
+      scanRoot: path.join(fixture.root, "scans"),
+      claimedWorkers: [
+        {
+          id: "worker-1",
+          resultPath: path.join(fixture.root, "worker", "result.json"),
+          attempt: 2,
+        },
+      ],
+    };
+    for (const resume of [false, true]) {
+      await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: deepReducer.scanRoot,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan-id",
+        },
+      }).run({
+        kind: "dedup",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal,
+        ...(resume
+          ? {
+              resumeThreadId: "fixture-existing-thread",
+              continuationPrompt: "continue the reducer\n",
+            }
+          : {}),
+        artifactContext: {
+          root: workingDirectory,
+          layout: "reducer",
+          deepReducer,
+        },
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      const prefix =
+        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
+      const encoded = invocation.argv.find((arg) => arg.startsWith(prefix));
+      assert.ok(encoded);
+      assert.deepEqual(
+        JSON.parse(JSON.parse(encoded.slice(prefix.length))),
+        deepReducer,
+      );
+    }
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
-import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
@@ -105,6 +105,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  previousSourceCoverage?: DeepReductionInput["sourceCoverage"];
 }
 
 export interface DeepScanWorkerRunnerOptions {
@@ -330,6 +331,7 @@ export class DeepScanWorkerRunner {
       label: reducerLabel,
       consumed,
       previousReducerResultPath,
+      previousSourceCoverage,
     } = request;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
@@ -370,13 +372,17 @@ export class DeepScanWorkerRunner {
         claimedWorkers: consumed.map((worker) => ({
           id: worker.id,
           resultPath: worker.resultPath,
+          attempt: worker.attempt,
         })),
         previousReducerResultPath,
       },
     };
     // Snapshot inputs before execution: direct file output has the same
     // conservation checks as the MCP writer without rereading consumed sources.
-    const sources = await getCodexSecurityDeepReducerInputs(artifactContext);
+    const sources = await readDeepReductionSources(artifactContext);
+    if (sources.previous && previousSourceCoverage !== undefined) {
+      sources.previous.sourceCoverage = structuredClone(previousSourceCoverage);
+    }
     let reducerValidation: ReducerArtifactValidation | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId: reducerId,

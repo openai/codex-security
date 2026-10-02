@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -312,17 +315,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
-              completeness: "complete",
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [],
-            },
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -900,6 +893,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -1148,6 +1142,24 @@ export class DeepScanCoordinator {
           previousReducerResultPath: outcomes.at(-1)?.resultPath,
         },
         this.state.scanId,
+      );
+      const sources = await readDeepReductionSources({
+        root: worker.artifactDir,
+        repoRoot: this.state.targetPath,
+        scanId: this.state.scanId,
+        layout: "reducer",
+        deepReducer: {
+          scanRoot: this.artifacts.scanDir,
+          claimedWorkers: accepted.map((source) => ({
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
+          })),
+        },
+      });
+      result.sourceCoverage = aggregateSourceCoverage(
+        sources.discoveries,
+        latestResult ?? null,
       );
       latestResult = result;
       noNewStreak = newFindings > 0 ? 0 : noNewStreak + accepted.length;
