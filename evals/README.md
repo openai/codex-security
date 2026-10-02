@@ -9,5 +9,8 @@ being embedded in its source tree or shipped npm runtime.
   size-limit recovery, pagination, and finding retention. It reuses the MCP
   test helpers and dependencies.
 
+- [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
+  synthetic grouping quality checks and negative controls.
+
 Model runs are opt-in. CI still runs the deterministic triage helper checks and
 the real-IPC reducer regression through the normal MCP test suite.
