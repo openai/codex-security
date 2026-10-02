@@ -842,7 +842,22 @@ def merge_saved_results(
         ):
             continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
-            manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
+            model = draft["threatModel"]
+            checkpoint_dir = Path(relative).parent
+            if worker_id is not None and checkpoint_dir.name == "checkpoints":
+                try:
+                    head = _read_scan_local_json(
+                        scan_dir,
+                        (checkpoint_dir.parent / "checkpoint-head.json").as_posix(),
+                        "Saved worker checkpoint head",
+                    ).get("checkpoint")
+                    if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{64}\.json", head):
+                        current = drafts_by_path.get((checkpoint_dir / head).as_posix(), {})
+                        if isinstance(current.get("threatModel"), dict):
+                            model = current["threatModel"]
+                except (ContractError, OSError, ValueError):
+                    pass
+            manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
         for value in draft["findings"]:

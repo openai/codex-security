@@ -48,7 +48,14 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
             ],
         },
     }
-    write_checkpoint(result_path.parent / "checkpoints", checkpoint)
+    checkpoint_dir = result_path.parent / "checkpoints"
+    write_checkpoint(checkpoint_dir, checkpoint)
+    revised = copy.deepcopy(checkpoint)
+    revised["threatModel"]["summary"] = "Queue consumers cross a service boundary."
+    write_checkpoint(checkpoint_dir, revised)
+    head = max(checkpoint_dir.glob("*.json"))
+    latest_model = json.loads(head.read_text())["threatModel"]
+    (result_path.parent / "checkpoint-head.json").write_text(json.dumps({"checkpoint": head.name}))
     # The latest incomplete attempt need not be parseable for a saved checkpoint to survive.
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -83,12 +90,12 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert stopped["progress"]["status"] == ("canceled" if termination == "canceled" else "failed")
     assert "threatModel" not in stopped
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == {
-        **checkpoint["threatModel"],
+        **latest_model,
         "origin": "recovered",
     }
     assert stopped["threatModelProvenance"]["provisional"] is True
     model_document = (scan_dir / "threatmodel.md").read_text()
-    assert "Queue producers cross a service boundary." in model_document
+    assert latest_model["summary"] in model_document
     assert "Model scope: app.py" in model_document
     assert "Model origin: recovered" in model_document
     assert stopped["findingCount"] == 1

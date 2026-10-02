@@ -253,17 +253,29 @@ const ordinaryRestorationCases: ReadonlyArray<
 ];
 
 describe("completed scan follow-up instructions", () => {
-  test.each(["removed", "rewritten", "unchanged"])(
+  test.each(["removed", "rewritten", "updated model", "unchanged"])(
     "refreshes the model path after a successful follow-up leaves the document %s",
     async (change) => {
       const fixture = await startPostScan({
         artifact: "threatmodel.md",
         initialContents: "# Saved model\n",
         threatModel: { summary: "Saved component boundaries." },
-        mutate: async ({ artifactPath }) => {
+        mutate: async ({ artifactPath, scanDir }) => {
           if (change === "removed") await rm(artifactPath);
           else if (change === "rewritten")
             await writeFile(artifactPath, "# Unrelated replacement\n");
+          else if (change === "updated model") {
+            const manifestPath = join(scanDir, "scan-manifest.json");
+            const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+            manifest.scan.threatModel = {
+              summary: "Updated component boundaries.",
+            };
+            await writeFile(manifestPath, JSON.stringify(manifest));
+            await writeThreatModel(scanDir, { pluginRoot: PLUGIN_ROOT });
+            expect(await readFile(artifactPath, "utf8")).toContain(
+              "Updated component boundaries.",
+            );
+          }
         },
         async *followUpEvents() {
           yield {
@@ -292,6 +304,9 @@ describe("completed scan follow-up instructions", () => {
         expect(result.threatModelPath).toBe(
           change === "unchanged" ? fixture.artifactPath : null,
         );
+        expect(result.threatModel).toEqual({
+          summary: "Saved component boundaries.",
+        });
         expect(result.turnResult.finalResponse).toBe("scan complete");
         expect(result.turnResult.usage).toMatchObject({ input_tokens: 10 });
         expect(result.cost?.inputTokens).toBe(10);

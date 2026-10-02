@@ -62,6 +62,26 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     FINALIZER.finalize_scan(self.scan_dir)
                 self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
+    def test_provenance_is_plain_text_while_authored_markdown_is_unchanged(self) -> None:
+        body = "# Authored [model]\n\nKeep **this** formatting.\n"
+        document = FINALIZER._render_threat_model(
+            {
+                "format": "markdown",
+                "content": body,
+                "scope": {
+                    "includePaths": ["src/[queue]"],
+                    "excludePaths": ["tmp/*"],
+                    "summary": "Service\nboundaries.",
+                },
+            },
+            {"target": "Sample [workspace]\nwith details"},
+        )
+        self.assertTrue(document.startswith(body.encode()))
+        self.assertIn(b"Sample \\[workspace\\] with details", document)
+        self.assertIn(b"src/\\[queue\\]", document)
+        self.assertIn(b"tmp/\\*", document)
+        self.assertIn(b"Service boundaries.", document)
+
     def test_exports_legacy_structured_model_extensions(self) -> None:
         for extensions in (
             {"format": "markdown"},
@@ -292,19 +312,44 @@ class ThreatModelProjectionTest(unittest.TestCase):
         )
 
     def test_malformed_model_is_reported_without_discarding_saved_content(self) -> None:
-        for assets in (None, "Stored records", {}, [None]):
-            with self.subTest(assets=assets):
-                self.manifest["scan"]["threatModel"] = {
-                    "summary": "Queue boundaries.",
-                    "assets": assets,
-                }
+        cases = [
+            (
+                {"summary": "Queue boundaries.", "assets": assets},
+                "threatModel.assets[0]" if isinstance(assets, list) else "threatModel.assets",
+            )
+            for assets in (None, "Stored records", {}, [None])
+        ]
+        cases.extend(
+            (
+                {
+                    "format": "markdown",
+                    "content": "# Queue boundaries\n",
+                    "summary": "A legacy summary extension.",
+                    **metadata,
+                },
+                expected,
+            )
+            for metadata, expected in (
+                ({"origin": {"tool": "legacy"}}, "threatModel.origin"),
+                ({"scope": None}, "threatModel.scope"),
+                ({"scope": {}}, "threatModel.scope"),
+                ({"scope": {"includePaths": 42}}, "threatModel.scope.includePaths"),
+                ({"scope": {"includePaths": [""]}}, "threatModel.scope.includePaths"),
+                (
+                    {"scope": {"includePaths": [], "excludePaths": [None]}},
+                    "threatModel.scope.excludePaths",
+                ),
+                (
+                    {"scope": {"includePaths": [], "summary": ""}},
+                    "threatModel.scope.summary",
+                ),
+            )
+        )
+        for model, expected in cases:
+            with self.subTest(model=model):
+                self.manifest["scan"]["threatModel"] = model
                 self.write_scan()
                 original = (self.scan_dir / "scan-manifest.json").read_bytes()
-                expected = (
-                    "threatModel.assets[0]: expected a string"
-                    if isinstance(assets, list)
-                    else "threatModel.assets: expected an array"
-                )
                 with self.assertRaises(FINALIZER.ContractError) as failure:
                     FINALIZER.build_threat_model_export(self.scan_dir)
                 self.assertIn(expected, str(failure.exception))

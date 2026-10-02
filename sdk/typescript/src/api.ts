@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import {
   basename,
   delimiter,
@@ -2213,7 +2214,12 @@ export class CodexSecurity {
           checkOpen();
           result = new ScanResult({
             ...result,
-            threatModelPath: followUpResult.threatModelPath,
+            threatModelPath: isDeepStrictEqual(
+              result.threatModel,
+              followUpResult.threatModel,
+            )
+              ? followUpResult.threatModelPath
+              : null,
           });
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
