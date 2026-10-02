@@ -66,11 +66,15 @@ function normalizeSourcePath(path) {
   return process.platform === "win32" ? normalized?.toLowerCase() : normalized;
 }
 
-function validSourceRange(location, fixture) {
-  const source = Object.entries(fixture.files).find(
-    ([path]) =>
-      normalizeSourcePath(path) === normalizeSourcePath(location.path),
+function sourceText(path, fixture) {
+  return Object.entries(fixture.files).find(
+    ([sourcePath]) =>
+      normalizeSourcePath(sourcePath) === normalizeSourcePath(path),
   )?.[1];
+}
+
+function validSourceRange(location, fixture) {
+  const source = sourceText(location.path, fixture);
   const end = location.endLine ?? location.startLine;
   return (
     typeof source === "string" &&
@@ -129,16 +133,26 @@ function matchesConsumer(location, expected) {
 }
 
 function validEvidence(finding, fixture) {
-  const evidence = (finding.codeEvidence ?? []).map((entry) => ({
-    ...entry,
-    endLine:
-      entry.startLine + (entry.code?.trimEnd().split(/\r?\n/u).length ?? 0) - 1,
-  }));
+  const evidence = (finding.codeEvidence ?? []).map((entry) => {
+    const code = entry.code?.replaceAll("\r\n", "\n").replace(/\n$/u, "");
+    return {
+      ...entry,
+      code,
+      endLine: entry.startLine + (code?.split("\n").length ?? 0) - 1,
+    };
+  });
   return (
     evidence.length > 0 &&
     evidence.every(
       (entry) =>
-        Boolean(entry.code?.trim()) && validSourceRange(entry, fixture),
+        Boolean(entry.code?.trim()) &&
+        validSourceRange(entry, fixture) &&
+        entry.code ===
+          sourceText(entry.path, fixture)
+            .replaceAll("\r\n", "\n")
+            .split("\n")
+            .slice(entry.startLine - 1, entry.endLine)
+            .join("\n"),
     ) &&
     fixture.positives
       .filter((expected) => matches(finding, expected))
@@ -162,12 +176,15 @@ export function gradeResult(result, fixture, repo) {
     found: findings.some((finding) => matches(finding, expected)),
   }));
   const falsePositives = findings.flatMap((finding, index) => {
+    const matchedCases = fixture.positives.filter((expected) =>
+      matches(finding, expected),
+    );
     const unexpectedLocations = (finding.locations ?? [])
       .filter(
         (location) =>
           !validSourceRange(location, fixture) ||
           (!supportingLocation(location) &&
-            !fixture.positives.some(
+            !matchedCases.some(
               (expected) =>
                 matchesLocation(location, expected) ||
                 (location.role === "sink" &&

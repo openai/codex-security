@@ -20,8 +20,9 @@ when the category names credential, secret, hardcoding, or private-key exposure.
 Mentions in resolved questions, intermediate responses, or deferred coverage
 do not count.
 
-Every location must cite a fixture file and an in-bounds line range. The grader
-rejects unrelated non-supporting locations and incomplete coverage.
+Every location must cite a fixture file and an in-bounds line range. Each
+non-supporting location must match an exposure classified by that finding's
+taxonomy. The grader rejects unrelated locations and incomplete coverage.
 Deferred work, surfaces needing follow-up, or exclusions that match fixture
 files make coverage incomplete. Exclusions outside the generated repository
 are allowed. Supporting locations, including the production `expected_control`
@@ -31,8 +32,9 @@ sites may be cited as sinks; they cannot replace the exposed source location.
 Each finding must also include nonempty `codeEvidence`. Every snippet must cite
 a fixture file and stay within its line bounds. For each exposure reported in a
 finding, at least one snippet must cover the credential declaration or a known
-use site. Additional snippets may show benign context. The grader checks paths
-and line ranges, not exact snippet text.
+use site. Additional snippets may show benign context. Snippet text must match
+the cited source lines, allowing CRLF or LF line endings and a trailing newline.
+Credential values remain part of the source evidence.
 
 ## Run
 

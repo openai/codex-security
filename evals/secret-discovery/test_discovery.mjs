@@ -431,6 +431,33 @@ for (const [name, location] of [
   });
 }
 
+for (const role of ["root_control", "sink"]) {
+  test(`rejects a ${role} citation classified only by a different finding`, () => {
+    const fixture = createFixture();
+    const result = retainedResult(fixture);
+    const finding = result.findings[0];
+    finding.taxonomy.cwe = ["CWE-522"];
+    const key = fixture.positives.find(
+      (expected) => expected.id === "private-key",
+    );
+    const location = {
+      path: key.path,
+      startLine: role === "sink" ? key.consumerLine : key.line,
+      role: "supporting",
+    };
+    finding.locations.push(location);
+    assert.equal(gradeResult(result, fixture).passed, true);
+
+    location.role = role;
+    const report = gradeResult(result, fixture);
+    assert.equal(report.recall, 1);
+    assert.equal(report.falsePositiveCount, 1);
+    assert.deepEqual(report.errors, [
+      "false positives or incorrect taxonomy/locations",
+    ]);
+  });
+}
+
 test("correct finding locations cannot hide missing or unrelated code evidence", () => {
   const fixture = createFixture();
   for (const evidence of [
@@ -447,6 +474,34 @@ test("correct finding locations cannot hide missing or unrelated code evidence",
     assert.equal(report.passed, false);
     assert.deepEqual(report.errors, ["missing or invalid code evidence"]);
   }
+});
+
+test("rejects fabricated source text at otherwise valid evidence locations", () => {
+  const fixture = createFixture();
+  for (const code of [
+    "invented source",
+    sourceEvidence(fixture, "src/client.py", 1).code,
+    sourceEvidence(fixture, "src/client.py", 3).code.replace(
+      "SERVICE_TOKEN",
+      "OTHER_TOKEN",
+    ),
+  ]) {
+    const result = retainedResult(fixture);
+    result.findings[0].codeEvidence[0].code = code;
+    const report = gradeResult(result, fixture);
+    assert.equal(report.recall, 1);
+    assert.equal(report.falsePositiveCount, 0);
+    assert.deepEqual(report.errors, ["missing or invalid code evidence"]);
+  }
+
+  const result = retainedResult(fixture);
+  result.findings[0].codeEvidence.push({
+    ...sourceEvidence(fixture, "README.md", 1),
+    code: "invented supporting context",
+  });
+  assert.deepEqual(gradeResult(result, fixture).errors, [
+    "missing or invalid code evidence",
+  ]);
 });
 
 test("rejects invented and out-of-bounds citations alongside valid evidence", () => {
