@@ -39,7 +39,7 @@ function windowsJoin(left: string, right: string): string {
   const namespaced = left.startsWith("\\\\?\\");
   const base = left.startsWith("\\\\?\\UNC\\")
     ? `\\\\${left.slice(8)}`
-    : namespaced && win32.isAbsolute(left.slice(4))
+    : namespaced
       ? left.slice(4)
       : left;
   const drive = win32.parse(right).root;
@@ -317,12 +317,16 @@ function resolveSecurityMd(
   let requestedScope: Buffer;
   if (windows) {
     const files = windowsFiles();
-    // Preserve the requested namespace semantics when joining relative scopes.
-    const requestedRoot = files.absolute(
-      encodePath(parsedPath(expandHome(repo, posixHome))),
+    const requestedRoot = decodePath(
+      files.absolute(encodePath(parsedPath(expandHome(repo, posixHome)))),
     );
+    // Keep ordinary paths for OS normalization; canonicalize explicit device roots.
+    const scopeRoot =
+      requestedRoot.startsWith("\\\\?\\") || requestedRoot.startsWith("\\\\.\\")
+        ? decodePath(root)
+        : requestedRoot;
     requestedScope = files.absolute(
-      encodePath(windowsJoin(decodePath(requestedRoot), expandedScope)),
+      encodePath(windowsJoin(scopeRoot, expandedScope)),
     );
   } else {
     requestedScope = expandedScope.startsWith("/")

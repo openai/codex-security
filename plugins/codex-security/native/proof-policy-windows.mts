@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { binaryPath, output, root } from "./binding.mjs";
 import { nativeTarget } from "./platform.mjs";
 import {
@@ -59,22 +59,24 @@ if (process.argv[2] === "build") {
     } finally {
       assert.equal(opened.handle.close(), 0);
     }
-    assert.equal(
-      execFileSync(
-        process.execPath,
-        [
-          helper,
-          "--helper",
-          "resolve-security-md",
-          "--repo",
-          volumePath,
-          "--scope",
-          ".",
-        ],
-        { encoding: "utf8" },
-      ),
-      '## SECURITY.md source: "SECURITY.md"\n\nvolume policy\n',
-    );
+    for (const scope of [".", repo.slice(win32.parse(repo).root.length - 1)]) {
+      assert.equal(
+        execFileSync(
+          process.execPath,
+          [
+            helper,
+            "--helper",
+            "resolve-security-md",
+            "--repo",
+            volumePath,
+            "--scope",
+            scope,
+          ],
+          { encoding: "utf8" },
+        ),
+        '## SECURITY.md source: "SECURITY.md"\n\nvolume policy\n',
+      );
+    }
     const proof: unknown = JSON.parse(
       execFileSync(
         join(output, "windows-wide-launcher.exe"),
