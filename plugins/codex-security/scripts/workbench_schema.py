@@ -919,6 +919,14 @@ MIGRATIONS = (
         """,
     ),
     (
+        44,
+        "reuse scan severity assessments",
+        """
+        CREATE INDEX scan_severity_reuse ON scan_severity_assessments
+            (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);
+        """,
+    ),
+    (
         45,
         "persist scan execution sessions",
         """
