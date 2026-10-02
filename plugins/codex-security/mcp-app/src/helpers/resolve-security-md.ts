@@ -106,15 +106,22 @@ function expandHome(path: string, posixHome: string | undefined): string {
     }
     if (home === undefined)
       throw new HomeExpansionError("Could not determine home directory.");
+    // node:path recognizes share roots in ordinary UNC paths, not extended UNC.
+    const namespacedUnc = home.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\";
+    if (namespacedUnc) home = `\\\\${home.slice(8)}`;
     if (username !== "" && username !== currentUsername) {
-      if (currentUsername !== win32.basename(home)) {
+      if (currentUsername !== win32.parse(home).base) {
         throw new HomeExpansionError("Could not determine home directory.");
       }
       home = joinHome(win32.dirname(home), username);
     }
     if (home.startsWith("~"))
       throw new HomeExpansionError("Could not determine home directory.");
-    return joinHome(home, separator === -1 ? "" : path.slice(end + 1));
+    const expanded = joinHome(
+      home,
+      separator === -1 ? "" : path.slice(end + 1),
+    );
+    return namespacedUnc ? win32.toNamespacedPath(expanded) : expanded;
   }
   if (path === "~" || path.startsWith("~/")) {
     const home = posixHome ?? homedir();
