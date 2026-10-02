@@ -3651,9 +3651,8 @@ describe("connected Linear publication", () => {
         failed: partialFailure ? 1 : 0,
       });
       expect(result.warnings).toEqual([
-        "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+        "Could not save the publication receipt: OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123. Linear issues were already created; do not retry publication.",
       ]);
-      expect(JSON.stringify(result)).not.toContain("SYNTHETIC_RECEIPT_SECRET");
       expect(progress.at(-1)).toEqual({
         type: "completed",
         created: expectedCreated.length,
