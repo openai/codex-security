@@ -716,6 +716,77 @@ def test_frozen_observations_survive_live_head_changes(
         merge(frozen)
 
 
+def test_composed_pending_sources_replay_the_frozen_accepted_head(
+    tmp_path: Path, checkpoint_scan
+) -> None:
+    scan_id, pending, closed, binding = checkpoint_scan
+    completed = write_checkpoint(tmp_path / "checkpoints", closed)
+    reopened = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(completed, ns=(100, 100))
+    os.utime(reopened, ns=(200, 200))
+    # The accepted head can reselect older immutable content after a newer attempt.
+    select(tmp_path, completed, 300)
+
+    def merge(frozen=None):
+        return saved.merge_saved_results(
+            tmp_path,
+            scan_id,
+            binding,
+            [],
+            stopped=True,
+            reason="interrupted",
+            frozen_source_digests=frozen,
+        )
+
+    first = merge()
+    frozen = first[0]["scan"]["preservedSources"]
+    assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
+    # Acknowledging a checkpoint and changing the live head cannot rewrite a receipt.
+    (tmp_path / "checkpoints" / "pending" / completed.name).unlink()
+    select(tmp_path, reopened, 400)
+    replay = merge(frozen)
+    assert replay[2] == first[2]
+    assert replay[0]["scan"]["preservedSources"] == frozen
+
+
+def test_composed_recovery_retains_accepted_findings_after_file_authored_omission(
+    tmp_path: Path, checkpoint_scan
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    fixture = Path(__file__).parent / "fixtures/scan-projection/canonical-child.json"
+    finding = json.loads(fixture.read_text())["findings"][0]
+    accepted = write_checkpoint(
+        tmp_path / "checkpoints", saved_draft(scan_id, findings=[finding], complete=True)
+    )
+    os.utime(accepted, ns=(100, 100))
+    select(tmp_path, accepted, 200)
+    (tmp_path / "checkpoints/pending" / accepted.name).unlink()
+    accepted_bytes = accepted.read_bytes()
+    # A file-authored progress update can omit a finding without rejecting it.
+    write_saved_parent(tmp_path, saved_draft(scan_id), 300)
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(tmp_path / name, ns=(300, 300))
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], stopped=True, reason="interrupted"
+    )
+    assert len(first[1]["findings"]) == 1
+    assert first[1]["findings"][0]["title"] == finding["title"]
+    frozen = first[0]["scan"]["preservedSources"]
+    assert accepted.relative_to(tmp_path).as_posix() in frozen
+    assert accepted.read_bytes() == accepted_bytes
+    replay = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    assert replay[1] == first[1]
+    assert replay[0]["scan"]["preservedSources"] == frozen
+
+
 def test_multiple_parent_observations_keep_latest_selection_and_pending_ties(
     tmp_path: Path, checkpoint_scan
 ) -> None:

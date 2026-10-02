@@ -10,12 +10,14 @@ import {
   validateCoverageSemantics,
   validateFindingSemantics,
   type SemanticScan,
+  type PreparedScanDraft as SharedPreparedScanDraft,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
 export {
   preserveFindingDetails,
   scanFindingIdentity,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draft-publication.js";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -30,6 +32,7 @@ import {
   readArtifactText,
   readArtifactTextWithMetadata,
   replaceArtifactJson,
+  replaceArtifactText,
 } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
@@ -85,6 +88,7 @@ type PublishScanDraft = (
   draft: PreparedScanDraft,
   expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
+  reconciledCheckpointIds: readonly string[],
 ) => Promise<string[] | void>;
 
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
@@ -124,7 +128,10 @@ export async function recordCodexSecurityScanDraft(
     // Deep results replace findings and coverage while retaining an omitted model.
     // Do not merge older review work into them.
     const preserved = finalDeepDraft
-      ? await preserveDeepThreatModel(context, parsed)
+      ? {
+          ...(await preserveDeepThreatModel(context, parsed)),
+          checkpointIds: [],
+        }
       : await preserveScanDraft(context, parsed, !publishDraft);
     const reconciled = preserved.input;
     if (finalDeepDraft && !publishDraft && reconciled !== parsed)
@@ -146,6 +153,7 @@ export async function recordCodexSecurityScanDraft(
           draft,
           preserved.previousDigest,
           finalDeepDraft ? reconciled : parsed,
+          preserved.checkpointIds,
         );
       } else {
         const destinations = await Promise.all([
@@ -200,59 +208,45 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   return recordCodexSecurityScanDraft(
     context,
     input,
-    async (draft, expectedDigest, checkpoint) => {
-      const checkpointPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.checkpoint.json`],
-        "staged scan checkpoint",
-      );
-      const draftPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.json`],
-        "staged scan draft",
-      );
+    async (draft, expectedDigest, checkpoint, reconciledCheckpointIds) => {
       try {
-        const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-        await Promise.all([
-          replaceArtifactJson(checkpointPath, snapshot),
-          replaceArtifactJson(draftPath, draft),
-        ]);
-        const arguments_ = [
-          "write-scan-draft",
-          "--scan-id",
-          input.scanId,
-          "--draft-path",
-          draftPath,
-          "--checkpoint-path",
-          checkpointPath,
-        ];
-        if (expectedDigest !== undefined) {
-          arguments_.push("--expected-draft-digest", expectedDigest);
-        }
-        if (context.handoffClaimToken) {
-          arguments_.push("--claim-token", context.handoffClaimToken);
-        }
-        try {
-          const result = await runWorkbench(arguments_);
-          return Array.isArray(result?.warnings)
-            ? result.warnings.filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : undefined;
-        } catch (error) {
-          if (!workbenchScanDraftConflict(error)) throw error;
-          throw Object.assign(
-            new Error(
-              "The canonical scan draft changed while this checkpoint was being reconciled.",
-            ),
-            { code: "scan_draft_conflict" },
-          );
-        }
-      } finally {
-        await Promise.all([
-          fs.rm(checkpointPath, { force: true }),
-          fs.rm(draftPath, { force: true }),
-        ]);
+        const result = await writePreparedScanDraft(
+          {
+            scanDir: context.root,
+            expectedDigest,
+            reconciledCheckpointIds,
+            claimToken: context.handoffClaimToken,
+            writer: {
+              restore: async (relative, contents) => {
+                const path = await artifactDestination(
+                  context,
+                  relative.split("/"),
+                  "staged scan draft",
+                );
+                await replaceArtifactText(
+                  path,
+                  Buffer.from(contents).toString("utf8"),
+                );
+              },
+            },
+            workbench: (args) => runWorkbench([...args]),
+          },
+          checkpoint as SemanticScan,
+          draft as SharedPreparedScanDraft,
+        );
+        return isObject(result) && Array.isArray(result.warnings)
+          ? result.warnings.filter(
+              (warning): warning is string => typeof warning === "string",
+            )
+          : undefined;
+      } catch (error) {
+        if (!workbenchScanDraftConflict(error)) throw error;
+        throw Object.assign(
+          new Error(
+            "The canonical scan draft changed while this checkpoint was being reconciled.",
+          ),
+          { code: "scan_draft_conflict" },
+        );
       }
     },
     signal,
@@ -319,22 +313,44 @@ export async function saveScanDraftCheckpoint(
   updateHead = true,
 ): Promise<void> {
   const { handoffClaimToken: _claim, ...snapshot } = input;
-  const contents = JSON.stringify(snapshot, null, 2) + "\n";
+  const contents =
+    context.layout === "worker"
+      ? JSON.stringify(snapshot, null, 2) + "\n"
+      : JSON.stringify(snapshot);
   const name = scanDraftCheckpointName(input);
   const destination = await artifactDestination(
     context,
     ["checkpoints", name],
     "scan checkpoint",
   );
+  if (context.layout !== "worker") {
+    const historyRoot = dirname(destination);
+    const pending = await lstatIfExists(join(historyRoot, "pending"));
+    // Pre-index scans still need their unpublished history on retries.
+    const legacyHistory =
+      pending === undefined &&
+      (await fs.readdir(historyRoot)).some((entry) => entry.endsWith(".json"));
+    if (!legacyHistory) {
+      const marker = await artifactDestination(
+        context,
+        ["checkpoints", "pending", name],
+        "scan checkpoint marker",
+      );
+      await replaceArtifactText(marker, "");
+    }
+  }
   try {
     const existing = await fs.readFile(destination, "utf8");
-    if (existing !== contents)
+    if (
+      existing !== contents &&
+      existing !== JSON.stringify(snapshot, null, 2) + "\n"
+    )
       throw new Error(
         "scan checkpoint: existing content does not match its digest.",
       );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await replaceArtifactJson(destination, snapshot);
+    await replaceArtifactText(destination, contents);
   }
   if (context.layout === "worker" && updateHead) {
     const head = await artifactDestination(
@@ -350,7 +366,11 @@ async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
   saveCheckpoint = true,
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  checkpointIds: string[];
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -362,11 +382,9 @@ async function preserveScanDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  const current: SavedScanDraft[] = await readSavedCheckpoints(
-    context,
-    "current",
-    currentCheckpointName,
-  );
+  const pending = await readCurrentCheckpoints(context, currentCheckpointName);
+  const checkpointIds = pending.map(({ name }) => name);
+  const current: SavedScanDraft[] = [...pending];
   const archived =
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
@@ -532,8 +550,48 @@ async function preserveScanDraft(
       sources.unshift(progress);
     }
   }
+  if (input.complete === false && !retainedFinal && previous) {
+    // Accepted candidate decisions remain authoritative across progress heads.
+    const dispositions = (previous.coverage.surfaces as JsonObject[]).filter(
+      (surface) =>
+        (surface.disposition === "rejected" ||
+          surface.disposition === "not_applicable") &&
+        typeof surface.candidateId === "string",
+    );
+    const candidateIds = new Set(dispositions.map((row) => row.candidateId));
+    result.findings = result.findings.filter(
+      (finding) => !candidateIds.has(findingCandidateId(finding)),
+    );
+    for (const field of ["surfaces", "deferred"] as const) {
+      result.coverage[field] = (result.coverage[field] as JsonObject[]).filter(
+        (row) =>
+          keepsGenericWork(row) || !candidateIds.has(row.candidateId ?? row.id),
+      );
+    }
+    (result.coverage.surfaces as JsonObject[]).push(
+      ...structuredClone(dispositions),
+    );
+  }
   const currentCandidateIds = completedCandidateIds(result);
   const resolvedCandidateIds = completedCandidateIds(result, sources);
+  const reopenedGenericIds = new Set(
+    [result, ...sources]
+      .flatMap((source) => source.coverage.deferred as JsonObject[])
+      .filter(genericDeferred)
+      .map((row) => row.id),
+  );
+  // Acknowledged history supplies the earlier surface state, not active work.
+  const surfaceHistory =
+    context.layout !== "worker" &&
+    sources.some((source) =>
+      resolvedDeferred(source.coverage).some((row) =>
+        reopenedGenericIds.has(row.id),
+      ),
+    )
+      ? (
+          await readSavedCheckpoints(context, "current", currentCheckpointName)
+        ).map(({ input }) => input)
+      : [];
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
     result,
     resolvedDeferred(input.coverage),
@@ -542,6 +600,8 @@ async function preserveScanDraft(
     resolvedCandidateIds,
     ambiguousDeferredIds,
     retainedFinal?.input,
+    surfaceHistory,
+    previous,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
   if (saveCheckpoint && requiresClosureValidation)
@@ -575,7 +635,15 @@ async function preserveScanDraft(
         typeof surface.candidateId === "string",
     );
     const candidateRows = [...deferred, ...dispositions];
-    for (const pending of source.coverage.deferred as JsonObject[]) {
+    const savedCandidateRows = [
+      ...(source.coverage.deferred as JsonObject[]),
+      ...(source.coverage.surfaces as JsonObject[]).filter(
+        (surface) =>
+          surface.disposition === "rejected" ||
+          surface.disposition === "not_applicable",
+      ),
+    ];
+    for (const pending of savedCandidateRows) {
       const candidateId = pending.candidateId ?? pending.id;
       if (typeof candidateId !== "string") continue;
       const finding = result.findings.find(
@@ -590,8 +658,14 @@ async function preserveScanDraft(
               : [],
             [pending.candidate],
           );
-        if (isObject(pending.finding))
-          preserveFindingDetails(finding, pending.finding);
+        for (const previous of [
+          pending.finding,
+          ...(Array.isArray(pending.previousFindings)
+            ? pending.previousFindings
+            : []),
+        ]) {
+          if (isObject(previous)) preserveFindingDetails(finding, previous);
+        }
       } else {
         const candidateRow = candidateRows.find(
           (item) =>
@@ -599,6 +673,13 @@ async function preserveScanDraft(
             (item.candidateId === candidateId || item.id === candidateId),
         );
         if (candidateRow) {
+          if (Array.isArray(pending.previousFindings))
+            candidateRow.previousFindings = exactUnion(
+              Array.isArray(candidateRow.previousFindings)
+                ? candidateRow.previousFindings
+                : [],
+              pending.previousFindings,
+            );
           for (const field of ["candidate", "finding"] as const) {
             if (pending[field] !== undefined)
               candidateRow[field] ??= structuredClone(pending[field]);
@@ -617,6 +698,12 @@ async function preserveScanDraft(
             );
       if (disposition) {
         disposition.finding ??= structuredClone(finding);
+        disposition.previousFindings = exactUnion(
+          Array.isArray(disposition.previousFindings)
+            ? disposition.previousFindings
+            : [],
+          [structuredClone(finding)],
+        );
         continue;
       }
       const matches = result.findings.filter((current) =>
@@ -702,7 +789,11 @@ async function preserveScanDraft(
     result.coverage.surfaces as JsonObject[],
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    checkpointIds,
+  };
 }
 
 function completedCandidateIds(
@@ -793,6 +884,8 @@ function reconcileResolvedDeferred(
   resolvedCandidateIds: Set<string>,
   ambiguousIds: Set<string>,
   retainedFinal?: ScanDraftInput,
+  surfaceHistory: ScanDraftInput[] = [],
+  previous?: ScanDraftInput,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
   const activeDeferred = result.coverage.deferred as JsonObject[];
   // Legacy aliases cannot identify which independent task was completed.
@@ -845,13 +938,18 @@ function reconcileResolvedDeferred(
   const closures = new Map<string, JsonObject>();
   const previouslyClosed = new Set<string>();
   const closureSources = new Map<string, ScanDraftInput>();
+  const acceptedSources = new Set(
+    savedSources.filter(({ head }) => head).map(({ input }) => input),
+  );
+  if (previous) acceptedSources.add(previous);
   for (const source of sources) {
     // Keep the first saved state for each ID so reopened work stays pending.
     for (const row of source.coverage.deferred as JsonObject[]) {
       observedIds.add(row.id as string);
       if (typeof row.candidateId === "string") observedIds.add(row.candidateId);
     }
-    if (source.complete === false) continue;
+    // Accepted progress can carry closures inherited from a terminal draft.
+    if (source.complete === false && !acceptedSources.has(source)) continue;
     for (const closure of resolvedDeferred(source.coverage)) {
       const id = closure.id as string;
       previouslyClosed.add(id);
@@ -928,7 +1026,7 @@ function reconcileResolvedDeferred(
   const inherited = [
     ...new Set([
       ...closureSources.values(),
-      ...sources.filter((source) =>
+      ...[...sources, ...surfaceHistory].filter((source) =>
         (source.coverage.deferred as JsonObject[]).some((row) =>
           reopenedIds.has(row.id as string),
         ),
@@ -945,6 +1043,7 @@ function reconcileResolvedDeferred(
     savedSources,
     retainedFinal,
     reopenedIds,
+    surfaceHistory,
   );
   return { closedDeferredIds, resolvedSurfaces };
 }
@@ -959,6 +1058,7 @@ function reconcileDeferredSurfaces(
   savedSources: SavedScanDraft[] = [],
   retainedFinal?: ScanDraftInput,
   reopenedIds: Set<string> = new Set(),
+  surfaceHistory: ScanDraftInput[] = [],
 ): Set<JsonObject> {
   const resolved = new Set<JsonObject>();
   const workIds = new Set([...closedDeferredIds, ...reopenedIds]);
@@ -1003,7 +1103,7 @@ function reconcileDeferredSurfaces(
     const currentMatches = current.filter(sameSurface);
     if (saved ? currentMatches.length > 0 : currentMatches.length !== 1)
       continue;
-    const matches = sources.map((source) => ({
+    const matches = [...sources, ...surfaceHistory].map((source) => ({
       source,
       surfaces: (source.coverage.surfaces as JsonObject[]).filter(sameSurface),
       deferred: source.coverage.deferred as JsonObject[],
@@ -1076,6 +1176,104 @@ function reconcileDeferredSurfaces(
     }
   }
   return resolved;
+}
+
+async function readCurrentCheckpoints(
+  context: ArtifactContext,
+  excludedCheckpoint: string,
+): Promise<Array<SavedScanDraft & { name: string }>> {
+  const root = join(context.root, "checkpoints", "pending");
+  const metadata = await lstatIfExists(root);
+  if (context.layout === "worker" || metadata === undefined) {
+    return readSavedCheckpoints(context, "current", excludedCheckpoint);
+  }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error(
+      "scan checkpoint: current checkpoint set is not a safe directory.",
+    );
+  }
+  const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
+    fs.realpath(context.root),
+    fs.realpath(root),
+  ]);
+  if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
+    throw new Error(
+      "scan checkpoint: current checkpoint set escaped its artifact directory.",
+    );
+  }
+  const head = await readCheckpointHead(context, "current");
+  const names = new Set(
+    (await fs.readdir(root)).filter((name) => name.endsWith(".json")),
+  );
+  if (head) names.add(head.checkpoint);
+  const checkpoints: Array<SavedScanDraft & { name: string }> = [];
+  for (const name of names) {
+    if (name === excludedCheckpoint) continue;
+    // Markers precede history writes and can be acknowledged while we read.
+    let saved = await readOptionalArtifactTextWithMetadata(
+      context,
+      ["checkpoints", name],
+      "current scan checkpoint",
+    );
+    if (saved === undefined) {
+      const marker = await readOptionalArtifactTextWithMetadata(
+        context,
+        ["checkpoints", "pending", name],
+        "current scan checkpoint marker",
+      );
+      if (marker?.contents) {
+        const stagedPath = marker.contents;
+        if (!/^drafts\/[0-9a-fA-F-]+\.checkpoint\.json$/u.test(stagedPath))
+          throw new Error("scan checkpoint: invalid staged checkpoint path.");
+        saved = await readOptionalArtifactTextWithMetadata(
+          context,
+          stagedPath.split("/"),
+          "staged scan checkpoint",
+        );
+        if (
+          saved !== undefined &&
+          createHash("sha256").update(saved.contents).digest("hex") +
+            ".json" !==
+            name
+        )
+          throw new Error("scan checkpoint: staged checkpoint digest changed.");
+        if (saved) saved.modifiedMs = marker.modifiedMs;
+      }
+      // Publication can move the staged checkpoint into history while we read.
+      saved ??= await readOptionalArtifactTextWithMetadata(
+        context,
+        ["checkpoints", name],
+        "current scan checkpoint",
+      );
+    }
+    if (saved === undefined) {
+      if (name === head?.checkpoint)
+        throw new Error("scan checkpoint: current checkpoint head is missing.");
+      continue;
+    }
+    const input = parsePersistedCheckpoint(
+      parseJsonObject(saved.contents, "current scan checkpoint"),
+    );
+    if (input.scanId !== context.scanId)
+      throw new Error(
+        "scan checkpoint: current checkpoint belongs to a different scan.",
+      );
+    checkpoints.push({
+      name: name,
+      input,
+      modifiedMs:
+        name === head?.checkpoint ? head.modifiedMs : saved.modifiedMs,
+      head: name === head?.checkpoint,
+    });
+  }
+  // An incomplete retry adopts the first final draft, so newer decisions win.
+  checkpoints.sort(
+    (left, right) =>
+      right.modifiedMs - left.modifiedMs ||
+      Number(right.head ?? false) - Number(left.head ?? false) ||
+      right.name.localeCompare(left.name),
+  );
+  return checkpoints;
 }
 
 async function readCheckpointHead(
@@ -1443,18 +1641,15 @@ async function lstatIfExists(
 async function readOptionalArtifactTextWithMetadata(
   context: ArtifactContext,
   components: readonly string[],
+  label = "previous scan draft",
 ): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactTextWithMetadata(
-      context,
-      components,
-      "previous scan draft",
-    );
+    return await readArtifactTextWithMetadata(context, components, label);
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message ===
-        "previous scan draft: the requested artifact is unavailable."
+      (error.message === `${label}: the requested artifact is unavailable.` ||
+        (error.cause as NodeJS.ErrnoException | undefined)?.code === "ENOENT")
     ) {
       return undefined;
     }

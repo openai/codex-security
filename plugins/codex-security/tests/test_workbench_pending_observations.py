@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import uuid
+from pathlib import Path
+
+import pytest
+from test_workbench_checkpoint_heads import saved, select
+from workbench_test_support import (
+    register,
+    run_workbench,
+    saved_binding,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
+
+
+@pytest.mark.parametrize("history_written", [False, True])
+def test_pending_recovery_uses_publication_time_after_earlier_staging(
+    tmp_path: Path, history_written: bool
+) -> None:
+    scan_id = "pending-observation"
+    pending = {"id": "review", "reason": "New evidence reopened the review."}
+    reopened = saved_draft(scan_id, deferred=[pending])
+    closed = saved_draft(
+        scan_id,
+        complete=True,
+        closures=[{"id": "review", "reason": "Earlier review completed."}],
+    )
+    accepted = write_checkpoint(tmp_path / "checkpoints", closed)
+    os.utime(accepted, ns=(200, 200))
+    select(tmp_path, accepted, 200)
+    (tmp_path / "checkpoints/pending" / accepted.name).unlink()
+    stage = tmp_path / "drafts" / f"{uuid.uuid4()}.checkpoint.json"
+    stage.parent.mkdir()
+    contents = json.dumps(reopened).encode()
+    stage.write_bytes(contents)
+    os.utime(stage, ns=(100, 100))
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    marker = tmp_path / "checkpoints/pending" / name
+    marker.write_text(stage.relative_to(tmp_path).as_posix())
+    os.utime(marker, ns=(300, 300))
+    if history_written:
+        history = tmp_path / "checkpoints" / name
+        history.write_bytes(contents)
+        os.utime(history, ns=(300, 300))
+    documents = saved.merge_saved_results(
+        tmp_path, scan_id, saved_binding(), [], stopped=True, reason="interrupted"
+    )
+    assert pending in documents[2]["deferred"]
+    assert not documents[2].get("resolvedDeferred")
+
+
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize("indexed_history", [False, True])
+def test_conflicted_terminal_decision_is_not_admitted_to_pending_history(
+    tmp_path: Path, disposition: str, indexed_history: bool
+) -> None:
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
+    documents = {
+        key: json.loads((scan_dir / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["findings"]["findings"][0]["provenance"]["candidateId"] = "accepted-candidate"
+    stages = scan_dir / "drafts"
+    stages.mkdir()
+    draft = stages / f"{uuid.uuid4()}.json"
+    draft.write_text(json.dumps(documents))
+    run_workbench(
+        state, "write-scan-draft", "--scan-id", scan["scanId"], "--draft-path", str(draft)
+    )
+    accepted_head = (scan_dir / "checkpoint-head.json").read_bytes()
+    if indexed_history:
+        (scan_dir / "checkpoints/pending").mkdir(exist_ok=True)
+    else:
+        (scan_dir / "checkpoints/pending").rmdir()
+    decision = {
+        "id": "accepted-candidate",
+        "candidateId": "accepted-candidate",
+        "label": "Candidate review",
+        "disposition": disposition,
+    }
+    incoming = copy.deepcopy(documents)
+    incoming["findings"]["findings"] = []
+    incoming["coverage"]["surfaces"] = [decision]
+    draft.write_text(json.dumps(incoming))
+    checkpoint = stages / f"{uuid.uuid4()}.checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(saved_draft(scan["scanId"], complete=True, surfaces=[decision]))
+    )
+    checkpoint_bytes = checkpoint.read_bytes()
+    name = hashlib.sha256(checkpoint_bytes).hexdigest() + ".json"
+    arguments = [
+        "write-scan-draft",
+        "--scan-id",
+        scan["scanId"],
+        "--draft-path",
+        str(draft),
+        "--checkpoint-path",
+        str(checkpoint),
+    ]
+    conflict = run_workbench(state, *arguments, "--expected-draft-digest", "0" * 64, check=False)
+    assert "scan_draft_conflict" in conflict["stderr"]
+    assert (scan_dir / "checkpoint-head.json").read_bytes() == accepted_head
+    assert checkpoint.read_bytes() == checkpoint_bytes
+    assert not (scan_dir / "checkpoints/pending" / name).exists()
+    assert not (scan_dir / "checkpoints" / name).exists()
+    run_workbench(state, *arguments)
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == []
+    assert (scan_dir / "checkpoints" / name).read_bytes() == checkpoint_bytes
+    assert not checkpoint.exists()
+
+
+@pytest.mark.parametrize("layout", ["canonical", "head", "tied", "unaccepted"])
+@pytest.mark.parametrize("coverage_mode", ["repository", "diff"])
+def test_indexed_recovery_retains_closures_in_accepted_progress(
+    tmp_path: Path, layout: str, coverage_mode: str
+) -> None:
+    from test_workbench_standard_deep_results import write_saved_parent
+
+    scan_id = "accepted-progress"
+    closure = {"id": "review", "reason": "Review completed."}
+    remaining = {"id": "other", "reason": "Other work remains."}
+    progress = saved_draft(scan_id, deferred=[remaining], closures=[closure])
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", progress)
+    os.utime(checkpoint, ns=(200, 200))
+    if layout != "unaccepted":
+        (tmp_path / "checkpoints/pending" / checkpoint.name).unlink()
+    if layout in {"head", "tied"}:
+        select(tmp_path, checkpoint, 200)
+    if layout in {"canonical", "tied"}:
+        canonical = copy.deepcopy(progress)
+        canonical["coverage"]["openQuestions"] = ["Separate saved observation"]
+        write_saved_parent(tmp_path, canonical, 200)
+    documents = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        saved_binding(coverage_mode),
+        [],
+        stopped=True,
+        reason="interrupted",
+    )
+    assert documents[2].get("resolvedDeferred", []) == ([] if layout == "unaccepted" else [closure])
+    assert remaining in documents[2]["deferred"]
+
+
+@pytest.mark.parametrize("action", ["fail-scan", "cancel-scan"])
+def test_stopping_after_acknowledged_progress_retains_completed_tasks(
+    tmp_path: Path, action: str
+) -> None:
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
+    documents = {
+        key: json.loads((scan_dir / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    closure = {"id": "review", "reason": "Review completed."}
+    remaining = {"id": "other", "reason": "Other work remains."}
+    documents["coverage"].update(
+        completeness="partial", deferred=[remaining], resolvedDeferred=[closure]
+    )
+    stages = scan_dir / "drafts"
+    stages.mkdir()
+    for index, complete in enumerate((True, False, False)):
+        documents["manifest"]["scan"]["complete"] = complete
+        documents["coverage"]["openQuestions"] = [f"Progress update {index}"]
+        stage = stages / f"{uuid.uuid4()}.json"
+        stage.write_text(json.dumps(documents))
+        run_workbench(
+            state, "write-scan-draft", "--scan-id", scan["scanId"], "--draft-path", str(stage)
+        )
+    assert not list((scan_dir / "checkpoints/pending").iterdir())
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "Synthetic interruption") if action == "fail-scan" else ()),
+    )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert coverage["resolvedDeferred"] == [closure]
+    assert remaining in coverage["deferred"]
