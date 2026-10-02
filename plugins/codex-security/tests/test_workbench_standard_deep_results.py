@@ -1187,7 +1187,11 @@ def test_stopped_deep_scan_recovers_when_parent_manifest_has_no_scan(tmp_path: P
 
 
 def deep_scan_fixture(
-    tmp_path: Path, *, budget: bool = False, workers: int = 1
+    tmp_path: Path,
+    *,
+    budget: bool = False,
+    workers: int = 1,
+    stop_after_no_new: int | None = None,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -1196,7 +1200,14 @@ def deep_scan_fixture(
     (target / "app.py").write_text("value = request.args['value']\n")
     config_path = codex_home / "codex-security" / "config.toml"
     config_path.parent.mkdir(parents=True)
-    config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
+    config_path.write_text(
+        f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n"
+        + (
+            f"stop_after_no_new = {stop_after_no_new}\n"
+            if stop_after_no_new is not None
+            else ""
+        )
+    )
     environment = {"CODEX_HOME": str(codex_home)}
 
     if budget:
@@ -1380,6 +1391,306 @@ def committed_standard_reducer(
         environment=environment,
     )["deepScan"]
     return reducer_id, result_path, committed
+
+
+def synthetic_saved_result_finding(
+    template: dict[str, object], label: str
+) -> dict[str, object]:
+    finding = copy.deepcopy(template)
+    finding["ruleId"] = f"synthetic.finding-{label.lower()}"
+    finding["identity"] = {"anchor": f"finding-{label.lower()}"}
+    finding["title"] = f"Synthetic finding {label}"
+    finding["summary"] = f"Deterministic synthetic finding {label}."
+    return finding
+
+
+def deep_scan_with_unconsumed_partial(
+    tmp_path: Path,
+    artifact_class: str,
+    *,
+    include_represented_evidence: bool = False,
+) -> tuple[Path, Path, Path, str, str]:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(
+        tmp_path,
+        workers=3,
+        stop_after_no_new=2,
+    )
+    environment = {"CODEX_HOME": str(codex_home)}
+    contract_dir = tmp_path / "synthetic-contract"
+    contract_dir.mkdir()
+    write_completed_contract(
+        contract_dir,
+        scan_id,
+        target,
+        relative_path="app.py",
+        coverage_mode="deep_repository",
+    )
+    template = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding_a = synthetic_saved_result_finding(template, "A")
+    finding_b = synthetic_saved_result_finding(template, "B")
+    finding_c = synthetic_saved_result_finding(template, "C")
+
+    accepted_id, accepted_result = accepted_standard_worker(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        name="accepted-discovery",
+    )
+    accepted_document = json.loads(accepted_result.read_text())
+    accepted_document["findings"] = [finding_a, finding_b]
+    accepted_result.write_text(json.dumps(accepted_document))
+    empty_id, _ = accepted_standard_worker(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        name="accepted-empty-discovery",
+    )
+    _, reducer_result, _ = committed_standard_reducer(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        accepted_id,
+        accepted_result,
+        additional_worker_ids=(empty_id,),
+    )
+    assert {
+        finding["title"]
+        for finding in json.loads(reducer_result.read_text())["findings"]
+    } == {"Synthetic finding A", "Synthetic finding B"}
+
+    worker_id = str(uuid.uuid4())
+    worker_root = scan_dir / "artifacts" / "deep_discovery" / "workers" / "discovery-c"
+    artifact_dir = worker_root / "output"
+    artifact_dir.mkdir(parents=True)
+    prompt_path = worker_root / "prompt.md"
+    prompt_path.write_text("Synthetic canceled discovery worker.\n")
+    worker_args = (
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--kind",
+        "discovery",
+        "--prompt-path",
+        str(prompt_path),
+        "--artifact-dir",
+        str(artifact_dir),
+        "--attempt",
+        "1",
+    )
+    run_workbench(state_dir, *worker_args, "--status", "running", environment=environment)
+    partial_findings = [finding_c]
+    if include_represented_evidence:
+        represented_a = copy.deepcopy(finding_a)
+        represented_a["summary"] = "Additional synthetic evidence for finding A."
+        partial_findings.insert(0, represented_a)
+    checkpoint = {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": partial_findings,
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        },
+    }
+    if artifact_class == "current-checkpoint":
+        write_checkpoint(artifact_dir / "checkpoints", checkpoint)
+    elif artifact_class == "archived-checkpoint":
+        write_checkpoint(worker_root / "attempts" / "attempt-01" / "checkpoints", checkpoint)
+    elif artifact_class == "archived-result":
+        archived = worker_root / "attempts" / "attempt-01"
+        archived.mkdir(parents=True)
+        (archived / "result.json").write_text(json.dumps(checkpoint))
+    elif artifact_class == "current-result":
+        current = copy.deepcopy(checkpoint)
+        current["complete"] = True
+        current["coverage"]["completeness"] = "complete"
+        (artifact_dir / "result.json").write_text(json.dumps(current))
+    else:
+        raise AssertionError(artifact_class)
+    if artifact_class == "current-result":
+        persisted = run_workbench(
+            state_dir,
+            *worker_args,
+            "--status",
+            "succeeded",
+            "--result-manifest-path",
+            str(artifact_dir / "result.json"),
+            environment=environment,
+        )["deepScan"]
+        worker = next(item for item in persisted["workers"] if item["id"] == worker_id)
+        assert (worker["status"], worker["mergeState"]) == ("succeeded", "buffered")
+    else:
+        assert not (artifact_dir / "result.json").exists()
+        persisted = run_workbench(
+            state_dir,
+            *worker_args,
+            "--status",
+            "canceled",
+            "--error-message",
+            "policy_refusal: synthetic replaceable failure",
+            "--replaceable-failure-kind",
+            "policy_refusal",
+            environment=environment,
+        )["deepScan"]
+        worker = next(item for item in persisted["workers"] if item["id"] == worker_id)
+        assert (worker["status"], worker["mergeState"], worker["resultManifestPath"]) == (
+            "canceled",
+            "none",
+            None,
+        )
+
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="app.py",
+        coverage_mode="deep_repository",
+    )
+    parent_findings_path = scan_dir / "findings.json"
+    parent_findings = json.loads(parent_findings_path.read_text())
+    parent_findings["findings"] = [finding_a, finding_b]
+    parent_findings_path.write_text(json.dumps(parent_findings))
+    return state_dir, codex_home, scan_dir, scan_id, worker_id
+
+
+@pytest.mark.parametrize(
+    "artifact_class",
+    ("current-checkpoint", "archived-checkpoint", "archived-result"),
+)
+def test_successful_parent_does_not_promote_unconsumed_partial_findings(
+    tmp_path: Path,
+    artifact_class: str,
+) -> None:
+    state_dir, codex_home, scan_dir, scan_id, _ = deep_scan_with_unconsumed_partial(
+        tmp_path,
+        artifact_class,
+    )
+    run_workbench(
+        state_dir,
+        "finish-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        str(scan_dir / "scan-manifest.json"),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert {finding["title"] for finding in completed["findings"]} == {
+        "Synthetic finding A",
+        "Synthetic finding B",
+    }
+    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
+
+
+def test_successful_parent_does_not_promote_omitted_worker_result(tmp_path: Path) -> None:
+    state_dir, codex_home, scan_dir, scan_id, worker_id = deep_scan_with_unconsumed_partial(
+        tmp_path,
+        "current-result",
+    )
+    run_workbench(
+        state_dir,
+        "finish-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--terminal-reason",
+        "saturated",
+        "--manifest-path",
+        str(scan_dir / "scan-manifest.json"),
+        "--omitted-worker-id",
+        worker_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert {finding["title"] for finding in completed["findings"]} == {
+        "Synthetic finding A",
+        "Synthetic finding B",
+    }
+
+
+def test_successful_parent_retains_represented_unconsumed_worker_evidence(
+    tmp_path: Path,
+) -> None:
+    state_dir, codex_home, scan_dir, scan_id, _ = deep_scan_with_unconsumed_partial(
+        tmp_path,
+        "current-checkpoint",
+        include_represented_evidence=True,
+    )
+    run_workbench(
+        state_dir,
+        "finish-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        str(scan_dir / "scan-manifest.json"),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert {finding["title"] for finding in completed["findings"]} == {
+        "Synthetic finding A",
+        "Synthetic finding B",
+    }
+    finding_a = next(
+        finding for finding in completed["findings"] if finding["title"] == "Synthetic finding A"
+    )
+    assert any(
+        previous.get("summary") == "Additional synthetic evidence for finding A."
+        for previous in finding_a["provenance"]["previousFindings"]
+    )
+
+
+@pytest.mark.parametrize("termination", ("failed", "interrupted", "canceled"))
+def test_stopped_parent_preserves_unconsumed_partial_findings(
+    tmp_path: Path,
+    termination: str,
+) -> None:
+    state_dir, codex_home, scan_dir, scan_id, _ = deep_scan_with_unconsumed_partial(
+        tmp_path,
+        "current-checkpoint",
+    )
+    environment = {"CODEX_HOME": str(codex_home)}
+    if termination == "canceled":
+        run_workbench(
+            state_dir,
+            "cancel-scan",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment=environment,
+        )
+    else:
+        run_workbench(
+            state_dir,
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Synthetic parent termination.",
+            "--deep-status",
+            termination,
+            environment=environment,
+        )
+
+    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert {finding["title"] for finding in stopped["findings"]} == {
+        "Synthetic finding A",
+        "Synthetic finding B",
+        "Synthetic finding C",
+    }
 
 
 def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path: Path) -> None:
