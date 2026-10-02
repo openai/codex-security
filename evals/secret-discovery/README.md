@@ -59,6 +59,10 @@ The pinned CLI writes token refreshes through that link, so updated credentials
 remain available after the eval. Cleanup removes the temporary home and link;
 it leaves the saved login in place. If another login replaces the original file
 during the run, the eval's existing link does not overwrite that replacement.
+Before selecting an `OPENAI_API_KEY` fallback, the native account preflight
+checks whether Codex has an account. Saved accounts retain precedence; an empty
+or malformed auth file does not suppress the fallback. An explicit
+`CODEX_API_KEY` retains its native precedence.
 
 On SIGINT or SIGTERM, the eval waits for the SDK turn to stop before removing
 temporary state. Only runtime, proxy/certificate, and model-authentication

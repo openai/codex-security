@@ -766,54 +766,6 @@ for (const footerLocation of [true, false]) {
   });
 }
 
-test("OpenAI environment auth is a fallback for missing file login and Codex key", () => {
-  const env = { OPENAI_API_KEY: "synthetic-openai-key" };
-  assert.equal(
-    codexSettings("/tmp/home", "/tmp/bin/codex", env).apiKey,
-    env.OPENAI_API_KEY,
-  );
-  assert.equal(
-    codexSettings("/tmp/home", "/tmp/bin/codex", env, true).apiKey,
-    undefined,
-  );
-  const settings = codexSettings("/tmp/home", "/tmp/bin/codex", {
-    ...env,
-    CODEX_API_KEY: "synthetic-codex-key",
-  });
-  assert.equal(settings.apiKey, undefined);
-  assert.equal(settings.env.CODEX_API_KEY, "synthetic-codex-key");
-});
-
-test("authentication fallback ignores blank keys and trims the OpenAI key", () => {
-  for (const codexApiKey of [undefined, "", " \t\n "]) {
-    const env = {
-      CODEX_API_KEY: codexApiKey,
-      OPENAI_API_KEY: " synthetic-openai-key ",
-    };
-    assert.equal(
-      codexSettings("/tmp/home", "/tmp/bin/codex", env).apiKey,
-      "synthetic-openai-key",
-    );
-    assert.equal(
-      codexSettings("/tmp/home", "/tmp/bin/codex", env, true).apiKey,
-      undefined,
-    );
-  }
-  assert.equal(
-    codexSettings("/tmp/home", "/tmp/bin/codex", {
-      OPENAI_API_KEY: " \t ",
-    }).apiKey,
-    undefined,
-  );
-  assert.equal(
-    codexSettings("/tmp/home", "/tmp/bin/codex", {
-      CODEX_API_KEY: " synthetic-codex-key ",
-      OPENAI_API_KEY: "synthetic-openai-key",
-    }).apiKey,
-    undefined,
-  );
-});
-
 test("accepts public-key context alongside credential evidence", () => {
   const fixture = createFixture();
   const result = retainedResult(fixture);

@@ -148,14 +148,7 @@ export function threadSettings(prepared, model) {
   };
 }
 
-export function codexSettings(
-  home,
-  codexPath,
-  environment = process.env,
-  hasLogin = false,
-) {
-  const codexApiKey = environment.CODEX_API_KEY?.trim();
-  const openAiApiKey = environment.OPENAI_API_KEY?.trim();
+export function codexSettings(home, codexPath, environment = process.env) {
   // Keep unrelated service credentials out of the eval process entirely.
   const inherited = new Set([
     "PATH",
@@ -181,10 +174,6 @@ export function codexSettings(
   ]);
   return {
     codexPathOverride: executablePathForSpawn(codexPath),
-    // Native exec reads CODEX_API_KEY; let the SDK map the OpenAI fallback.
-    ...(!hasLogin && !codexApiKey && openAiApiKey
-      ? { apiKey: openAiApiKey }
-      : {}),
     env: bundledCodexSdkEnvironment(codexPath, {
       ...Object.fromEntries(
         Object.entries(environment).filter(
@@ -230,21 +219,35 @@ function permissionProfile(home, codexPath) {
 }
 
 export async function preflightEval(prepared, settings, signal) {
-  await preflightDeepScanWorkerPermissionProfile({
+  const openAiApiKey = environmentEntry(settings.env, "OPENAI_API_KEY")?.trim();
+  const codexApiKey = environmentEntry(settings.env, "CODEX_API_KEY")?.trim();
+  const { useOpenAiApiKey } = await preflightDeepScanWorkerPermissionProfile({
     codexPath: settings.codexPathOverride,
     cwd: prepared.repo,
     profileId: "discovery_eval",
     configOverrides: settings.configOverrides,
-    env: {
-      ...settings.env,
-      ...(settings.apiKey ? { CODEX_API_KEY: settings.apiKey } : {}),
-    },
+    env: settings.env,
+    allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
     expectedProfile: permissionProfile(
       settings.env.CODEX_HOME,
       settings.env.CODEX_CLI_PATH,
     ),
     signal,
   });
+  return {
+    ...settings,
+    // Native exec reads CODEX_API_KEY; preserve native accounts before mapping the fallback.
+    ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
+  };
+}
+
+function environmentEntry(environment, requested) {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  // Plain snapshots need the same case-insensitive lookup as Windows process.env.
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === requested,
+  )?.[1];
 }
 
 export async function runPreparedEval(prepared, codex, { model, signal } = {}) {

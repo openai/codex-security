@@ -62,7 +62,6 @@ test("saved login refresh survives cleanup without importing config or changing 
     () => createEvalHome(createHome, ambient),
     async (state) => {
       home = state.home;
-      assert.equal(state.hasLogin, true);
       assert.equal(dirname(home), await realpath(ambient));
       assert.deepEqual(await readdir(home), ["auth.json"]);
       assert.equal(
@@ -72,18 +71,13 @@ test("saved login refresh survives cleanup without importing config or changing 
       assert.equal((await stat(auth)).mode, originalMode);
       const env = { OPENAI_API_KEY: "synthetic-env-key" };
       assert.equal(
-        codexSettings(home, "/tmp/bin/codex", env, state.hasLogin).apiKey,
+        codexSettings(home, "/tmp/bin/codex", env).apiKey,
         undefined,
       );
-      const explicit = codexSettings(
-        home,
-        "/tmp/bin/codex",
-        {
-          ...env,
-          CODEX_API_KEY: "synthetic-explicit-key",
-        },
-        state.hasLogin,
-      );
+      const explicit = codexSettings(home, "/tmp/bin/codex", {
+        ...env,
+        CODEX_API_KEY: "synthetic-explicit-key",
+      });
       assert.equal(explicit.env.CODEX_API_KEY, "synthetic-explicit-key");
       // The pinned native file store truncates and writes the existing auth file.
       await writeFile(
@@ -104,25 +98,13 @@ test("saved login refresh survives cleanup without importing config or changing 
   );
 });
 
-test("missing file login keeps the temporary-home API-key fallback", async (t) => {
+test("missing file login creates an empty temporary home", async (t) => {
   const ambient = await mkdtemp(join(tmpdir(), "eval-login-test-"));
   t.after(() => rm(ambient, { recursive: true, force: true }));
   await withEvalState(
     () => createEvalHome(createHome, ambient),
-    async ({ home, hasLogin }) => {
-      assert.equal(hasLogin, false);
+    async ({ home }) => {
       assert.deepEqual(await readdir(home), []);
-      assert.equal(
-        codexSettings(
-          home,
-          "/tmp/bin/codex",
-          {
-            OPENAI_API_KEY: "synthetic-env-key",
-          },
-          hasLogin,
-        ).apiKey,
-        "synthetic-env-key",
-      );
     },
   );
 });
@@ -292,7 +274,11 @@ async function waitForFile(path) {
   throw new Error(`Timed out waiting for ${path}`);
 }
 
-async function nativeFixture(t, mode = "complete") {
+async function nativeFixture(
+  t,
+  mode = "complete",
+  accountResult = { account: null, requiresOpenaiAuth: true },
+) {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), "eval-runtime-test-")),
   );
@@ -336,9 +322,11 @@ async function nativeFixture(t, mode = "complete") {
       deferred: [],
     },
   };
-  await writeFile(executable, fakeNativeSource({ directory, mode, result }), {
-    mode: 0o755,
-  });
+  await writeFile(
+    executable,
+    fakeNativeSource({ directory, mode, result, accountResult }),
+    { mode: 0o755 },
+  );
   const settings = codexSettings(home, executable, {
     PATH: dirname(process.execPath),
     Path: join(directory, "unrelated alias"),
@@ -386,12 +374,17 @@ if (kind === "preflight") {
     const request = JSON.parse(line);
     appendFileSync(join(scenario.directory, "rpc.jsonl"), JSON.stringify(request) + "\\n");
     if (request.method === "initialized") return;
+    if (request.method === "account/read" && scenario.mode === "account-error") {
+      send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "Synthetic account lookup failure" } });
+      return;
+    }
     let result = {};
     if (request.method === "config/read") result = { config };
     if (request.method === "permissionProfile/list") result = {
       data: [{ id: "discovery_eval", allowed: scenario.mode !== "managed-rejection" }], nextCursor: null,
     };
     if (request.method === "configRequirements/read") result = { requirements: null };
+    if (request.method === "account/read") result = scenario.accountResult;
     send({ jsonrpc: "2.0", id: request.id, result });
   });
 } else {
@@ -423,8 +416,17 @@ test(
   "native preflight and SDK exec share effective settings and fallback auth",
   unixOnly,
   async (t) => {
-    const { directory, prepared, settings, result } = await nativeFixture(t);
-    await preflightEval(prepared, settings, new AbortController().signal);
+    const {
+      directory,
+      prepared,
+      settings: original,
+      result,
+    } = await nativeFixture(t);
+    const settings = await preflightEval(
+      prepared,
+      original,
+      new AbortController().signal,
+    );
     const { report, semanticResult } = await runPreparedEval(
       prepared,
       new Codex(settings),
@@ -473,12 +475,18 @@ test(
     );
     for (const entry of [preflight, exec]) {
       assert.equal(entry.bundledTool, "synthetic rg");
-      assert.equal(entry.env.CODEX_API_KEY, "synthetic-env-key");
       assert.equal(entry.env.CODEX_HOME, settings.env.CODEX_HOME);
       assert.equal(entry.env.CODEX_SQLITE_HOME, settings.env.CODEX_HOME);
       assert.equal(entry.env.DATABASE_URL, undefined);
     }
-    const { CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...execEnvironment } = exec.env;
+    assert.equal(preflight.env.CODEX_API_KEY, undefined);
+    assert.equal(exec.env.CODEX_API_KEY, "synthetic-env-key");
+    assert.equal(original.apiKey, undefined);
+    const {
+      CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
+      CODEX_API_KEY,
+      ...execEnvironment
+    } = exec.env;
     assert.deepEqual(execEnvironment, preflight.env);
     const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
       .trim()
@@ -486,58 +494,217 @@ test(
       .map(JSON.parse);
     assert.deepEqual(
       calls.map((call) => call.method),
-      ["initialize", "initialized", "config/read", "permissionProfile/list"],
+      [
+        "initialize",
+        "initialized",
+        "config/read",
+        "permissionProfile/list",
+        "account/read",
+      ],
     );
-    for (const call of calls.slice(2))
+    for (const call of calls.slice(2, 4))
       assert.equal(call.params.cwd, prepared.repo);
+    assert.deepEqual(calls[4].params, { refreshToken: false });
   },
 );
 
-for (const [name, codexApiKey, hasLogin, expectedKey] of [
-  ["blank Codex key", " \t ", false, "synthetic-env-key"],
-  ["explicit Codex key", "synthetic-codex-key", false, "synthetic-codex-key"],
-  ["file login", undefined, true, undefined],
+for (const {
+  name,
+  authFile,
+  account,
+  codexApiKey,
+  openAiApiKey = " synthetic-env-key \n ",
+  expectedKey,
+} of [
+  {
+    name: "missing file login",
+    account: null,
+    expectedKey: "synthetic-env-key",
+  },
+  {
+    name: "empty auth file",
+    authFile: "",
+    account: null,
+    expectedKey: "synthetic-env-key",
+  },
+  {
+    name: "malformed auth file",
+    authFile: "{",
+    account: null,
+    expectedKey: "synthetic-env-key",
+  },
+  {
+    name: "auth file without an account",
+    authFile: "{}",
+    account: null,
+    expectedKey: "synthetic-env-key",
+  },
+  {
+    name: "native-recognized saved API key",
+    authFile: '{"OPENAI_API_KEY":"synthetic-file-key"}',
+    account: { type: "apiKey" },
+  },
+  {
+    name: "native-recognized saved ChatGPT login",
+    authFile: '{"tokens":{"refresh_token":"synthetic-saved"}}',
+    account: { type: "chatgpt" },
+  },
+  {
+    name: "blank Codex key",
+    account: null,
+    codexApiKey: " \t ",
+    expectedKey: "synthetic-env-key",
+  },
+  {
+    name: "explicit Codex key with a malformed auth file",
+    authFile: "{",
+    account: { type: "apiKey" },
+    codexApiKey: "synthetic-codex-key",
+    expectedKey: "synthetic-codex-key",
+  },
+  { name: "blank OpenAI key", account: null, openAiApiKey: " \t " },
 ]) {
   test(`native auth precedence with ${name}`, unixOnly, async (t) => {
-    const { directory, prepared, settings: original } = await nativeFixture(t);
-    const settings = codexSettings(
-      original.env.CODEX_HOME,
-      original.codexPathOverride,
-      {
-        ...original.env,
-        CODEX_API_KEY: codexApiKey,
-        OPENAI_API_KEY: " synthetic-env-key \n ",
+    const {
+      directory,
+      prepared,
+      settings: original,
+    } = await nativeFixture(t, "complete", {
+      account,
+      requiresOpenaiAuth: true,
+    });
+    const ambient = original.env.CODEX_HOME;
+    if (authFile !== undefined)
+      await writeFile(join(ambient, "auth.json"), authFile);
+    await withEvalState(
+      () => createEvalHome(createHome, ambient),
+      async ({ home }) => {
+        const initialSettings = codexSettings(
+          home,
+          original.codexPathOverride,
+          {
+            ...original.env,
+            CODEX_API_KEY: codexApiKey,
+            OPENAI_API_KEY: openAiApiKey,
+          },
+        );
+        const settings = await preflightEval(
+          prepared,
+          initialSettings,
+          new AbortController().signal,
+        );
+        const { report } = await runPreparedEval(prepared, new Codex(settings));
+        assert.equal(report.passed, true);
+        assert.equal(initialSettings.apiKey, undefined);
+        const preflight = await readJson(join(directory, "preflight.json"));
+        const exec = await readJson(join(directory, "exec.json"));
+        assert.equal(preflight.env.CODEX_API_KEY, codexApiKey);
+        assert.equal(exec.env.CODEX_API_KEY, expectedKey);
+        assert.equal(preflight.env.CODEX_HOME, home);
+        assert.equal(exec.env.CODEX_HOME, home);
+        const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
+          .trim()
+          .split("\n")
+          .map(JSON.parse);
+        const accountCalls = calls.filter(
+          (call) => call.method === "account/read",
+        );
+        assert.equal(
+          accountCalls.length,
+          openAiApiKey.trim() && !codexApiKey?.trim() ? 1 : 0,
+        );
+        if (accountCalls.length)
+          assert.deepEqual(accountCalls[0].params, { refreshToken: false });
+        if (authFile !== undefined) {
+          assert.equal(
+            await readFile(join(home, "auth.json"), "utf8"),
+            authFile,
+          );
+          assert.equal(
+            await readFile(join(ambient, "auth.json"), "utf8"),
+            authFile,
+          );
+        }
       },
-      hasLogin,
     );
-    await preflightEval(prepared, settings, new AbortController().signal);
-    const { report } = await runPreparedEval(prepared, new Codex(settings));
-    assert.equal(report.passed, true);
-    for (const processName of ["preflight", "exec"]) {
-      const { env } = await readJson(join(directory, `${processName}.json`));
-      assert.equal(env.CODEX_API_KEY, expectedKey);
-    }
   });
 }
 
-test(
-  "managed profile rejection prevents starting the SDK exec turn",
-  unixOnly,
-  async (t) => {
-    const { directory, prepared, settings } = await nativeFixture(
-      t,
-      "managed-rejection",
-    );
-    await assert.rejects(async () => {
-      await preflightEval(prepared, settings, new AbortController().signal);
+for (const codexApiKey of [undefined, "synthetic-explicit-key"]) {
+  test(
+    `Windows mixed-case auth snapshot with ${codexApiKey ? "explicit" : "fallback"} key`,
+    unixOnly,
+    async (t) => {
+      const {
+        directory,
+        prepared,
+        settings: original,
+      } = await nativeFixture(t);
+      const {
+        OPENAI_API_KEY,
+        Path: ignoredPathAlias,
+        ...environment
+      } = original.env;
+      environment.OpenAI_API_Key = " synthetic-fallback-key ";
+      if (codexApiKey) environment.CodeX_Api_Key = codexApiKey;
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      let settings;
+      try {
+        Object.defineProperty(process, "platform", { value: "win32" });
+        const snapshot = codexSettings(
+          original.env.CODEX_HOME,
+          original.codexPathOverride,
+          environment,
+        );
+        assert.equal(snapshot.env.OPENAI_API_KEY, undefined);
+        assert.equal(snapshot.env.OpenAI_API_Key, environment.OpenAI_API_Key);
+        settings = await preflightEval(
+          prepared,
+          snapshot,
+          new AbortController().signal,
+        );
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
       await runPreparedEval(prepared, new Codex(settings));
-    }, /managed Codex policy rejected/);
+      const exec = await readJson(join(directory, "exec.json"));
+      assert.equal(
+        exec.env.CODEX_API_KEY,
+        codexApiKey ? undefined : "synthetic-fallback-key",
+      );
+      assert.equal(exec.env.CodeX_Api_Key, codexApiKey);
+      const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      assert.equal(
+        calls.filter((call) => call.method === "account/read").length,
+        codexApiKey ? 0 : 1,
+      );
+    },
+  );
+}
+
+for (const [mode, expectedError] of [
+  ["managed-rejection", /managed Codex policy rejected/],
+  ["account-error", /account\/read/],
+]) {
+  test(`${mode} prevents starting the SDK exec turn`, unixOnly, async (t) => {
+    const { directory, prepared, settings } = await nativeFixture(t, mode);
+    await assert.rejects(async () => {
+      const resolved = await preflightEval(
+        prepared,
+        settings,
+        new AbortController().signal,
+      );
+      await runPreparedEval(prepared, new Codex(resolved));
+    }, expectedError);
     await assert.rejects(access(join(directory, "exec.json")), {
       code: "ENOENT",
     });
     await access(join(directory, "preflight-stopped.json"));
-  },
-);
+  });
+}
 
 for (const mode of ["fallback-item", "fallback-error"]) {
   test(
@@ -545,9 +712,13 @@ for (const mode of ["fallback-item", "fallback-error"]) {
     unixOnly,
     async (t) => {
       const { directory, prepared, settings } = await nativeFixture(t, mode);
-      await preflightEval(prepared, settings, new AbortController().signal);
+      const resolved = await preflightEval(
+        prepared,
+        settings,
+        new AbortController().signal,
+      );
       await assert.rejects(
-        runPreparedEval(prepared, new Codex(settings)),
+        runPreparedEval(prepared, new Codex(resolved)),
         /results were discarded/,
       );
       await access(join(directory, "exec-stopped.json"));
@@ -582,11 +753,11 @@ import { createEvalHome, withEvalState } from ${JSON.stringify(runtimeUrl)};
 await withEvalState(() => createEvalHome(
   (base) => mkdtemp(join(base, "signal-home-")),
   ${JSON.stringify(ambient)},
-), async ({ root, home, hasLogin, signal }) => {
+), async ({ root, home, signal }) => {
   await writeFile(join(${JSON.stringify(directory)}, "state.json"), JSON.stringify({ root, home }));
   const prepared = await prepareEval(root);
-  const settings = codexSettings(home, ${JSON.stringify(executable)}, { PATH: ${JSON.stringify(dirname(process.execPath))}, HOME: home }, hasLogin);
-  await preflightEval(prepared, settings, signal);
+  const settings = await preflightEval(prepared,
+    codexSettings(home, ${JSON.stringify(executable)}, { PATH: ${JSON.stringify(dirname(process.execPath))}, HOME: home }), signal);
   await runPreparedEval(prepared, new Codex(settings), { signal });
 });
 `,

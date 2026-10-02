@@ -21,11 +21,14 @@ const reportDirectory = await mkdtemp(join(reports, "run-"));
 console.log(`Eval artifacts: ${reportDirectory}`);
 await withEvalState(
   () => createEvalHome(createIsolatedHome, configuredCodexHome(process.env)),
-  async ({ root, home, hasLogin, signal }) => {
+  async ({ root, home, signal }) => {
     const prepared = await prepareEval(root);
     const codexPath = await realpath(resolveCodexCommand({}).command);
-    const settings = codexSettings(home, codexPath, process.env, hasLogin);
-    await preflightEval(prepared, settings, signal);
+    const settings = await preflightEval(
+      prepared,
+      codexSettings(home, codexPath),
+      signal,
+    );
     const codex = new Codex(settings);
     const { report, semanticResult } = await runPreparedEval(prepared, codex, {
       model: process.argv[2],

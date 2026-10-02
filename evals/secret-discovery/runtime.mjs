@@ -43,7 +43,7 @@ export async function createEvalHome(createHome, ambientHome) {
   const home = await createHome(auth ? dirname(auth) : undefined);
   try {
     if (auth) await link(auth, join(home, "auth.json"));
-    return { home, hasLogin: Boolean(auth) };
+    return { home };
   } catch (error) {
     await rm(home, { recursive: true, force: true });
     throw error;
