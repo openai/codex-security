@@ -86,8 +86,8 @@ def threat_model_body(model: dict[str, Any]) -> str:
         if not values:
             continue
         for index, value in enumerate(values):
-            if not isinstance(value, str):
-                raise ValueError(f"threatModel.{key}[{index}]: expected a string")
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"threatModel.{key}[{index}]: expected a non-empty string")
         sections.append(f"## {heading}")
         sections.append("\n".join("- " + value.replace("\n", "\n  ") for value in values))
     return "\n\n".join(sections)

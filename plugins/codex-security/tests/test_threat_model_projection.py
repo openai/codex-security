@@ -346,7 +346,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 {"summary": "Queue boundaries.", "assets": assets},
                 "threatModel.assets[0]" if isinstance(assets, list) else "threatModel.assets",
             )
-            for assets in (None, "Stored records", {}, [None])
+            for assets in (None, "Stored records", {}, [None], [""])
         ]
         cases.extend(
             (
