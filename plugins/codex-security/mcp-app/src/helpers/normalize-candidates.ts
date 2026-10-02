@@ -10,7 +10,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import {
@@ -405,7 +405,7 @@ export function normalizeCandidatesCommand(
     const temporary = fsPath(
       join(
         dirname(output),
-        `.${basename(output)}.${randomBytes(6).toString("base64url")}.tmp`,
+        `.candidates-${randomBytes(6).toString("base64url")}.tmp`,
       ),
     );
     let created = false;

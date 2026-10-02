@@ -489,7 +489,7 @@ describe("built candidate normalizer", () => {
 
   test("writes valid long output basenames through a short exclusive temporary name", () => {
     const f = fixture();
-    f.output = join(f.root, `${"x".repeat(220)}.jsonl`);
+    f.output = join(f.root, `${"x".repeat(249)}.jsonl`);
     const result = run(f, [[candidate()]]);
     expect(result.status, result.stderr).toBe(0);
     expect(ledger(f)).toHaveLength(1);
