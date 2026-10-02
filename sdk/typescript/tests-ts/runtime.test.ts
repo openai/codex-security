@@ -2718,14 +2718,10 @@ describe("runtime directories and plugin Python boundary", () => {
       let separateDatabaseCreates = 0;
       let observedMode: number | undefined;
       let paused = false;
-      let reportPaused!: () => void;
-      let resumeCreator!: () => void;
-      const creatorPaused = new Promise<void>((resolve) => {
-        reportPaused = resolve;
-      });
-      const creatorResumed = new Promise<void>((resolve) => {
-        resumeCreator = resolve;
-      });
+      const { promise: creatorPaused, resolve: reportPaused } =
+        Promise.withResolvers<void>();
+      const { promise: creatorResumed, resolve: resumeCreator } =
+        Promise.withResolvers<void>();
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
         lstat: async (...args: Parameters<typeof originalLstat>) => {
@@ -3339,14 +3335,10 @@ describe("runtime directories and plugin Python boundary", () => {
           kill: () => true,
         });
       const first = makeChild();
-      let enterCallback!: () => void;
-      const callbackEntered = new Promise<void>((resolve) => {
-        enterCallback = resolve;
-      });
-      let releaseCallback!: () => void;
-      const callbackReleased = new Promise<void>((resolve) => {
-        releaseCallback = resolve;
-      });
+      const { promise: callbackEntered, resolve: enterCallback } =
+        Promise.withResolvers<void>();
+      const { promise: callbackReleased, resolve: releaseCallback } =
+        Promise.withResolvers<void>();
       let paused = false;
       let callbackFinished = false;
       let attempts = 0;

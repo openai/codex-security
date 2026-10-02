@@ -21,6 +21,7 @@ import { ContractValidationError, loadContract } from "../src/index.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { propertyOptions } from "./support/property.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
@@ -43,13 +44,7 @@ async function copyExample(): Promise<string> {
   return scanDir;
 }
 
-async function readJson(path: string): Promise<Record<string, any>> {
-  return JSON.parse(await readFile(path, "utf8"));
-}
-
-async function writeJson(path: string, payload: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`);
-}
+const readJson = readJsonFile<Record<string, any>>;
 
 async function reseal(scanDir: string): Promise<void> {
   const manifestPath = join(scanDir, "scan-manifest.json");

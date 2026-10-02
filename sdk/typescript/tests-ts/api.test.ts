@@ -71,6 +71,7 @@ import {
 import {
   completedEvents,
   createApiTestFixtures,
+  failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -1781,10 +1782,8 @@ describe("CodexSecurity orchestration", () => {
       ],
     ];
     let started = 0;
-    let release!: () => void;
-    const allStarted = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: allStarted, resolve: release } =
+      Promise.withResolvers<void>();
     const configPaths = new Set<string>();
     const deepConfigPaths = new Set<string>();
     const manifest = JSON.parse(
@@ -4417,13 +4416,7 @@ describe("CodexSecurity orchestration", () => {
                 if (setupFails) {
                   throw new Error("post-scan turn started after setup failed");
                 }
-                async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-                  yield {
-                    type: "turn.failed",
-                    error: { message: "Could not draft fixes." },
-                  };
-                }
-                return { events: failedEvents() };
+                return { events: failedPostScanEvents() };
               },
             }),
           }),
@@ -4665,18 +4658,12 @@ describe("CodexSecurity orchestration", () => {
       const codexHome = join(root, "codex-home");
       const scanDir = join(root, "scan");
       await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
-      let requested!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        requested = resolve;
-      });
-      let observed!: () => void;
-      const nextCost = new Promise<void>((resolve) => {
-        observed = resolve;
-      });
-      let answer!: (limit: number) => void;
-      const lateAnswer = new Promise<number>((resolve) => {
-        answer = resolve;
-      });
+      const { promise: requestStarted, resolve: requested } =
+        Promise.withResolvers<void>();
+      const { promise: nextCost, resolve: observed } =
+        Promise.withResolvers<void>();
+      const { promise: lateAnswer, resolve: answer } =
+        Promise.withResolvers<number>();
       const controller = new AbortController();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
@@ -5703,10 +5690,8 @@ describe("CodexSecurity orchestration", () => {
     const codexHome = join(stateDirectory, "codex-home");
     await mkdir(repository);
     let scansStarted = 0;
-    let releaseScans!: () => void;
-    const concurrentScans = new Promise<void>((resolve) => {
-      releaseScans = resolve;
-    });
+    const { promise: concurrentScans, resolve: releaseScans } =
+      Promise.withResolvers<void>();
 
     const clients = await Promise.all(
       (
@@ -7167,16 +7152,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const codexHome = join(root, "codex-home");
     await mkdir(repository);
     await mkdir(codexHome);
-    let releaseRuntime!: (runtime: ReturnType<typeof preparedRuntime>) => void;
-    let preparationStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      preparationStarted = resolve;
-    });
-    const prepared = new Promise<ReturnType<typeof preparedRuntime>>(
-      (resolve) => {
-        releaseRuntime = resolve;
-      },
-    );
+    const { promise: started, resolve: preparationStarted } =
+      Promise.withResolvers<void>();
+    const { promise: prepared, resolve: releaseRuntime } =
+      Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
     let createCodexCalled = false;
     const client = new TestClient(
       {},
@@ -7221,16 +7200,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
-    let releaseRuntime!: (runtime: ReturnType<typeof preparedRuntime>) => void;
-    let preparationStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      preparationStarted = resolve;
-    });
-    const prepared = new Promise<ReturnType<typeof preparedRuntime>>(
-      (resolve) => {
-        releaseRuntime = resolve;
-      },
-    );
+    const { promise: started, resolve: preparationStarted } =
+      Promise.withResolvers<void>();
+    const { promise: prepared, resolve: releaseRuntime } =
+      Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
     const client = new TestClient(
       {},
       {
@@ -7284,14 +7257,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const scanDir = await copyCompletedScan(root);
     await mkdir(repository);
     await mkdir(codexHome);
-    let revisionStarted!: () => void;
-    let releaseRevision!: () => void;
-    const started = new Promise<void>((resolve) => {
-      revisionStarted = resolve;
-    });
-    const blocked = new Promise<void>((resolve) => {
-      releaseRevision = resolve;
-    });
+    const { promise: started, resolve: revisionStarted } =
+      Promise.withResolvers<void>();
+    const { promise: blocked, resolve: releaseRevision } =
+      Promise.withResolvers<void>();
     let createCodexCalled = false;
     const client = new TestClient(
       {},

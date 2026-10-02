@@ -1,3 +1,5 @@
+import { isRecord } from "./record.js";
+
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
 const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
@@ -423,8 +425,4 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
   return [...paths];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

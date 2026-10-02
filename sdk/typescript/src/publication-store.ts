@@ -1,6 +1,7 @@
 import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
 import type { PreparedScanPublication } from "./publication.js";
 import type { PublishedScanIssue } from "./publish.js";
@@ -234,8 +235,4 @@ function invalidPublicationRecords(): CodexSecurityError {
   return new CodexSecurityError(
     "The workbench returned invalid persisted Linear publication records.",
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

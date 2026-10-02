@@ -12,7 +12,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   prepareScanArtifactRestorer,
@@ -23,6 +22,7 @@ import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
   createApiTestFixtures,
+  failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
 
@@ -46,13 +46,6 @@ interface FailedPostScanScenario {
     restorer: ScanArtifactRestorer,
     context: FailedPostScanContext,
   ): ScanArtifactRestorer;
-}
-
-async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-  yield {
-    type: "turn.failed",
-    error: { message: "Could not draft fixes." },
-  };
 }
 
 async function startFailedPostScan(scenario: FailedPostScanScenario) {
@@ -125,7 +118,7 @@ async function startFailedPostScan(scenario: FailedPostScanScenario) {
               return { events: completedEvents() };
             }
             await scenario.mutate(context);
-            return { events: failedEvents() };
+            return { events: failedPostScanEvents() };
           },
         }),
       }),

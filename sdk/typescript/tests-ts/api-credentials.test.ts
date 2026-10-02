@@ -395,10 +395,8 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
-    let releaseScans!: () => void;
-    const concurrentScans = new Promise<void>((resolve) => {
-      releaseScans = resolve;
-    });
+    const { promise: concurrentScans, resolve: releaseScans } =
+      Promise.withResolvers<void>();
 
     const clients = await Promise.all(
       [0, 1].map(async (index) => {

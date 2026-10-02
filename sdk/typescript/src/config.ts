@@ -133,7 +133,7 @@ export function resolveCommandAuthConfig(
   config: JsonObject,
   home: string,
 ): JsonObject {
-  const resolved = cloneJson(config);
+  const resolved = structuredClone(config);
   const providers = resolved["model_providers"];
   if (isObject(providers)) {
     for (const provider of Object.values(providers)) {
@@ -194,7 +194,7 @@ function selectedScanProfile(
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
   const resolved = deepMerge(
-    cloneJson(config),
+    structuredClone(config),
     selectedScanProfile(config) ?? {},
   );
   delete resolved["profile"];
@@ -209,7 +209,7 @@ export async function mergedCodexConfig(
     throw new ConfigurationError("codexOverrides must be an object.");
   }
   validateOverrideKeys(config.codexOverrides ?? {});
-  const overrides = cloneJson(config.codexOverrides ?? {});
+  const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
@@ -221,7 +221,7 @@ export async function mergedCodexConfig(
       }
     }
   }
-  const defaults: JsonObject = cloneJson(DEFAULT_CODEX_CONFIG);
+  const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
   if (scanModelProvider(overrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
@@ -360,14 +360,8 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
         "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
     );
   }
-  if ("features" in overrides) {
-    const features = overrides["features"];
-    if (!isObject(features)) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features must remain a table containing features.multi_agent_v2.",
-      );
-    }
+  const features = overrides["features"];
+  if (isObject(features)) {
     if ("multi_agent_v2" in features) {
       const multiAgentV2 = features["multi_agent_v2"];
       if (!isObject(multiAgentV2)) {
@@ -421,7 +415,7 @@ export function mergeCodexOverrides(
 ): JsonObject {
   validateOverrideKeys(base);
   validateOverrideKeys(overrides);
-  return deepMerge(cloneJson(base), overrides);
+  return deepMerge(structuredClone(base), overrides);
 }
 
 /** @internal */
@@ -431,13 +425,9 @@ export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
     base[key] =
       isObject(value) && isObject(existing)
         ? deepMerge({ ...existing }, value)
-        : cloneJson(value);
+        : structuredClone(value);
   }
   return base;
-}
-
-function cloneJson<T extends JsonValue>(value: T): T {
-  return structuredClone(value);
 }
 
 function deepFreezeJson(value: JsonValue): void {

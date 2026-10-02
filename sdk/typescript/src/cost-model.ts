@@ -1,3 +1,5 @@
+import { isRecord } from "./record.js";
+
 export interface ScanCost {
   model: string;
   inputTokens: number;
@@ -292,8 +294,4 @@ export function formatUsd(value: number): string {
 
 function isTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

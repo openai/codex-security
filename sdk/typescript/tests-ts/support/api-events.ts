@@ -80,6 +80,13 @@ export function createApiTestFixtures() {
   };
 }
 
+export async function* failedPostScanEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
+  };
+}
+
 export async function* completedEvents(
   threadId = "thread-1",
 ): AsyncGenerator<ThreadEvent> {

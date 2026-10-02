@@ -26,6 +26,7 @@ import {
   runWorkbench,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson as json } from "./support/json.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
@@ -36,10 +37,6 @@ import {
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
 afterEach(cleanup);
-
-async function json<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
 
 async function save(path: string, value: unknown) {
   await writeFile(path, JSON.stringify(value));

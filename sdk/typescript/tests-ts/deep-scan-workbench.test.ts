@@ -1285,31 +1285,7 @@ describe("deep scan workbench ownership", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const command = (args: string[]): Record<string, unknown> => {
-      const result = Bun.spawnSync(
-        [
-          python!,
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
-          ...args,
-        ],
-        {
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: stateDir,
-            CODEX_HOME: codexHome,
-          },
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      );
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
-        string,
-        unknown
-      >;
-    };
+    const command = workbenchCommand(python, stateDir, codexHome);
     const registration = command([
       "register-cli-scan",
       "--repository",
@@ -1471,31 +1447,7 @@ describe("deep scan workbench ownership", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const command = (args: string[]): Record<string, unknown> => {
-      const result = Bun.spawnSync(
-        [
-          python!,
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
-          ...args,
-        ],
-        {
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: stateDir,
-            CODEX_HOME: codexHome,
-          },
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      );
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
-        string,
-        unknown
-      >;
-    };
+    const command = workbenchCommand(python, stateDir, codexHome);
     const state = (result: Record<string, unknown>) =>
       result["deepScan"] as Record<string, unknown>;
     const initial = state(
@@ -1775,3 +1727,35 @@ describe("deep scan workbench ownership", () => {
     expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });
+
+function workbenchCommand(
+  python: string | null,
+  stateDir: string,
+  codexHome: string,
+) {
+  return (args: string[]): Record<string, unknown> => {
+    const result = Bun.spawnSync(
+      [
+        python!,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        ...args,
+      ],
+      {
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: stateDir,
+          CODEX_HOME: codexHome,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+      string,
+      unknown
+    >;
+  };
+}
