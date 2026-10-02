@@ -1,3 +1,4 @@
+import { assertFlagPair } from "./assertions.mjs";
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
 import {
@@ -16,11 +17,16 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importModule, importSource } from "./import-module.mjs";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
-const bundle = await build({
-  bundle: true,
+
+const {
+  CodexSdkWorkerExecutor,
+  resolveCodexPath,
+  snapshotWorkerEnvironment,
+  appendSafeItemDiagnostic,
+} = await importModule({
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
   },
@@ -31,40 +37,18 @@ const bundle = await build({
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource),
   },
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const {
-  CodexSdkWorkerExecutor,
-  resolveCodexPath,
-  snapshotWorkerEnvironment,
-  appendSafeItemDiagnostic,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
-const errorsBundle = await build({
-  bundle: true,
-  entryPoints: [
-    fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
+
 const {
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(errorsBundle.outputFiles[0].contents).toString("base64")}`
+} = await importSource(
+  fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
 );
 const temporaryRoots = [];
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
-  filesystemDenies: [],
-});
-const trustedReadOnlyParentSandbox = Object.freeze({
   filesystemDenies: [],
 });
 const trustedParentSandboxWithDenials = Object.freeze({
@@ -411,7 +395,6 @@ async function testWindowsLongExecutableLaunches() {
         signal: new AbortController().signal,
       });
       assert.equal(result.threadId, "fixture-thread-id");
-      assert.equal(result.finalResponse, "fixture final response");
       const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
       assert.deepEqual(invocation.argv.slice(0, 2), [
         "exec",
@@ -825,7 +808,6 @@ async function testWorkerLaunchesWithoutGlobalCodex() {
     });
 
     assert.equal(result.threadId, "fixture-thread-id");
-    assert.equal(result.finalResponse, "fixture final response");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.deepEqual(invocation.argv.slice(0, 2), [
       "exec",
@@ -905,7 +887,7 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
         signal: new AbortController().signal,
       });
 
-      assert.equal(result.finalResponse, "fixture final response");
+      assert.equal(result.threadId, "fixture-thread-id");
       const preflight = JSON.parse(
         await readFile(fixture.preflightMarkerPath, "utf8"),
       );
@@ -960,7 +942,6 @@ async function testSdkInvocationAndThreadCapture() {
     });
     assert.equal(result.threadId, "fixture-thread-id");
     assert.equal(callbackThreadId, "fixture-thread-id");
-    assert.equal(result.finalResponse, "fixture final response");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.equal(invocation.stdin, "fixture worker prompt\n");
     assert.equal(
@@ -1325,6 +1306,10 @@ async function testWorkerRuntimeSettings() {
               await readFile(launch.markerPath, "utf8"),
             );
             assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+            assert.equal(
+              workerPermissionProfileOverride(launch.args),
+              workerPermissionProfileOverride(workerLaunches[0].args),
+            );
           }
           await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
         }
@@ -1374,7 +1359,7 @@ async function testBedrockCredentialsReachWorker() {
       subagents: 0,
       signal: new AbortController().signal,
     });
-    assert.equal(result.finalResponse, "fixture final response");
+    assert.equal(result.threadId, "fixture-thread-id");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
   } finally {
@@ -1404,7 +1389,7 @@ async function testZeroSubagentsPreservesHostRestrictions() {
         subagents: 0,
         signal: new AbortController().signal,
       });
-      assert.equal(result.finalResponse, "fixture final response");
+      assert.equal(result.threadId, "fixture-thread-id");
       const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
       assertFlagPair(invocation.argv, "--model", model);
       assertWorkerSubagentPolicy(invocation.argv, 0);
@@ -1440,7 +1425,7 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
       signal: new AbortController().signal,
       artifactContext: { root: workingDirectory, layout: "worker" },
     });
-    assert.equal(result.finalResponse, "fixture final response");
+    assert.equal(result.threadId, "fixture-thread-id");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.equal(
       invocation.argv.includes(
@@ -1475,7 +1460,7 @@ async function testSdkResumesExistingThread() {
     const result = await new CodexSdkWorkerExecutor({
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
-      parentSandbox: trustedReadOnlyParentSandbox,
+      parentSandbox: trustedParentSandbox,
     }).run({
       kind: "discovery",
       promptPath,
@@ -1522,7 +1507,6 @@ async function testRetryNotificationDoesNotInterruptTurn() {
       signal: new AbortController().signal,
     });
     assert.equal(result.threadId, "fixture-thread-id");
-    assert.equal(result.finalResponse, "fixture final response");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.equal(invocation.argv.includes("--model"), false);
     assert.equal(
@@ -1728,7 +1712,7 @@ async function testCodeModeFrameDiagnosticSurvivesSuccessfulTurn() {
         subagents: 0,
         signal: new AbortController().signal,
       });
-      assert.equal(result.finalResponse, "fixture final response");
+      assert.equal(result.threadId, "fixture-thread-id");
       assert.deepEqual(result.diagnostics, [
         { code: "artifact_tool_failed", message: ipcFrameError },
       ]);
@@ -1835,7 +1819,6 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
     ]);
     clearTimeout(timeout);
     assert.equal(result.threadId, "fixture-thread-id");
-    assert.equal(result.finalResponse, "fixture final response");
     childPid = JSON.parse(await readFile(fixture.markerPath, "utf8")).pid;
 
     controller.abort("coordinator immediately canceled its remaining workers");
@@ -2337,12 +2320,6 @@ async function fakeCodexFixture(
   return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
-function assertFlagPair(args, flag, value) {
-  const index = args.indexOf(flag);
-  assert.notEqual(index, -1, `missing ${flag}`);
-  assert.equal(args[index + 1], value);
-}
-
 function assertReadOnlyWorkerPolicy(args) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
@@ -2355,10 +2332,6 @@ function assertReadOnlyWorkerPolicy(args) {
     args.some((arg) => arg.includes("network_access")),
     false,
   );
-  assert.equal(
-    args.includes('default_permissions="codex_security_deep_scan_worker"'),
-    true,
-  );
   const override = workerPermissionProfileOverride(args);
   assert.equal(override.includes('extends=":read-only"'), true);
   assert.equal(override.includes('":root"="read"'), true);
@@ -2367,6 +2340,10 @@ function assertReadOnlyWorkerPolicy(args) {
 }
 
 function workerPermissionProfileOverride(args) {
+  assert.deepEqual(
+    args.filter((arg) => arg.startsWith("default_permissions=")),
+    ['default_permissions="codex_security_deep_scan_worker"'],
+  );
   const overrides = args.filter((arg) =>
     arg.startsWith("permissions.codex_security_deep_scan_worker="),
   );

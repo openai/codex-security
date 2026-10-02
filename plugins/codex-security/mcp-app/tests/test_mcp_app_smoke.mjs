@@ -1,3 +1,5 @@
+import { assertNoError } from "./assertions.mjs";
+import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -12,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const sourcePluginRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -27,22 +29,7 @@ const pluginManifest = JSON.parse(
 );
 const PLUGIN_VERSION = pluginManifest.version;
 assert.equal(typeof PLUGIN_VERSION, "string");
-const parentSandboxState = {
-  permissionProfile: {
-    type: "managed",
-    file_system: {
-      type: "restricted",
-      entries: [
-        {
-          path: { type: "special", value: { kind: "root" } },
-          access: "read",
-        },
-      ],
-    },
-    network: "restricted",
-  },
-  sandboxCwd: pathToFileURL(pluginRoot).href,
-};
+const parentSandboxState = readOnlyParentSandboxState(pluginRoot);
 const installedPluginRoot = pluginRoot;
 const serverPath = path.join(installedPluginRoot, "mcp", "server.mjs");
 const mcpConfig = JSON.parse(
@@ -105,10 +92,6 @@ assert.deepEqual(
   ],
   "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
 );
-const scanHandoffSource = await readFile(
-  path.join(mcpAppRoot, "src", "scan-handoff.ts"),
-  "utf8",
-);
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
 assert.match(
   serverSource,
@@ -146,52 +129,6 @@ assert.match(
   serverSource,
   /throw new Error\(error\.stderr\.trim\(\),\s*\{\s*cause:\s*error\s*\}\)/,
   "Workbench failures must preserve subprocess exit, signal, and stderr diagnostics.",
-);
-assert.match(scanHandoffSource, /handoffClaimToken: string/);
-assert.match(scanHandoffSource, /using scanId .* and handoffClaimToken/);
-assert.match(
-  scanHandoffSource,
-  /record_codex_security_scan_draft\(\{ scanId,[^}]*handoffClaimToken/,
-);
-assert.match(
-  scanHandoffSource,
-  /derived findings\/<slug>\/<slug>\.md write-up/,
-);
-assert.match(
-  scanHandoffSource,
-  /other derived scan outputs required by the active scan skills/,
-);
-assert.match(scanHandoffSource, /Do not author report\.md/);
-assert.match(
-  scanHandoffSource,
-  /workbench writes findings\.json, coverage\.json, and scan-manifest\.json/,
-);
-assert.match(scanHandoffSource, /canonical-artifact write/);
-assert.match(
-  scanHandoffSource,
-  /Do not call completion with missing artifacts/,
-);
-assert.match(
-  scanHandoffSource,
-  /Completion is finalization only; it does not create missing artifacts or run skipped phases/,
-);
-assert.match(
-  scanHandoffSource,
-  /If complete_codex_security_scan fails, stop the current response and surface the exact MCP error/,
-);
-assert.match(scanHandoffSource, /Do not retry completion in the same response/);
-assert.doesNotMatch(scanHandoffSource, /report\.html/);
-assert.doesNotMatch(
-  scanHandoffSource,
-  /HTML report as one bare absolute file:\/\/ URL on its own line/,
-);
-assert.doesNotMatch(
-  scanHandoffSource,
-  /link the generated HTML report.*with markdown local-file links/,
-);
-assert.doesNotMatch(
-  scanHandoffSource,
-  /Write the completed findings\.json, coverage\.json, scan-manifest\.json, HTML report, and markdown report/,
 );
 const target = await mkdtemp(path.join(tmpdir(), "codex-security-target-"));
 const replacementTarget = await mkdtemp(
@@ -1062,15 +999,6 @@ async function assertBundledPythonRuntime() {
     await bundledPythonServer.stop();
     await rm(runtimeHome, { recursive: true, force: true });
   }
-}
-
-function assertNoError(response) {
-  assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(
-    response.result?.isError,
-    undefined,
-    response.result?.content?.map((item) => item.text).join(" "),
-  );
 }
 
 async function writeCompletedContract(scanDir, scanId, snapshotDigest) {

@@ -43,12 +43,6 @@ interface CandidateValidationUpdates {
 }
 
 /** The nested validation record used by compact Deep candidate validation. */
-export const candidateValidationRecordSchema = loadArtifactZodSchema(
-  documents,
-  validationSchema.$id,
-  "validationRecord",
-) as z.ZodType<CandidateValidationRecord>;
-
 const candidateValidationUpdatesSchema = loadArtifactZodSchema(
   documents,
   validationSchema.$id,

@@ -23,7 +23,7 @@ import {
 
 const MAX_SECURITY_MD_BYTES = 1024 * 1024;
 const windows = process.platform === "win32";
-const windowsFiles = () => windowsFileSystem(windowsBinding());
+export const windowsFiles = () => windowsFileSystem(windowsBinding());
 const encodePath = (path: string) =>
   windows ? Buffer.from(path, "utf16le") : encodePosixPath(path);
 const decodePath = (path: Buffer) =>

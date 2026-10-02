@@ -9,22 +9,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-attack-path.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+} = await importSource(
+  new URL("../src/artifact-attack-path.ts", import.meta.url).pathname,
 );
 
 const scanId = "11111111-1111-4111-8111-111111111111";

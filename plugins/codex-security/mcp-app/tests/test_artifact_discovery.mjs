@@ -14,27 +14,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
   compactDiscoveryCandidateSchema,
   discoveryCandidatesInputSchema,
   listCodexSecurityCandidates,
   listCodexSecurityCandidatesInputSchema,
-  rawDiscoveryCandidateSchema,
   recordCodexSecurityDiscoveryCandidates,
   workbenchDiscoveryCandidatesInputSchema,
   workbenchListCodexSecurityCandidatesInputSchema,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+} = await importSource(
+  new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
 );
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -147,52 +138,54 @@ try {
 }
 
 async function verifyInputSchema() {
+  const parseCandidate = (value) =>
+    discoveryCandidatesInputSchema.safeParse({ candidates: [value] });
   const candidate = rawCandidate();
-  assert.equal(rawDiscoveryCandidateSchema.safeParse(candidate).success, true);
+  assert.equal(parseCandidate(candidate).success, true);
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       cwe_ids: [" cwe-089 "],
     }).success,
     true,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       cwe_ids: [],
     }).success,
     true,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       candidate_id: "candidate-model-invented",
     }).success,
     false,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       locations: [],
     }).success,
     false,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       locations: [{ path: "src/routes.ts", start_line: 1, role: "invented" }],
     }).success,
     false,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       locations: [{ path: "src/routes.ts", start_line: 0, role: "sink" }],
     }).success,
     false,
   );
   assert.equal(
-    rawDiscoveryCandidateSchema.safeParse({
+    parseCandidate({
       ...candidate,
       evidence: "  ",
     }).success,
