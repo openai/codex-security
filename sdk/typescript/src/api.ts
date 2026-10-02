@@ -105,6 +105,7 @@ import {
   writeCodexConfig,
 } from "./config.js";
 import {
+  scanCostUsage,
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
@@ -508,7 +509,7 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+      "threadId" | "turnResult" | "cost" | "sarifPath" | "repositoryFindings"
     >;
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -519,11 +520,18 @@ export class CodexSecurity {
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
-        if (completed)
+        if (completed) {
+          const cost = (scan["cost"] as ScanCost | null) ?? null;
           metadata = {
-            threadId: (scan["continuationThreadId"] as string) ?? "",
-            turnResult: { status: "completed" },
+            threadId: (scan["continuationThreadId"] as string | null) ?? null,
+            turnResult: {
+              status: "completed",
+              usage:
+                scan["usage"] ?? (cost === null ? null : scanCostUsage(cost)),
+            },
+            cost,
           };
+        }
       }
       if (completed) {
         const contract = await loadContract(state.scanDir, {
@@ -532,7 +540,7 @@ export class CodexSecurity {
           signal,
         });
         await workflow.bind({ artifactDigest: workflowDigest(contract) });
-        metadata ??= { threadId: "", turnResult: { status: "completed" } };
+        metadata ??= { threadId: null, turnResult: { status: "completed" } };
         await workflow.complete("scan", metadata);
         return new ScanResult({
           ...contract,
@@ -557,6 +565,7 @@ export class CodexSecurity {
       await workflow.complete("scan", {
         threadId: result.threadId,
         turnResult: result.turnResult,
+        cost: result.cost,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
       } satisfies ScanMetadata);

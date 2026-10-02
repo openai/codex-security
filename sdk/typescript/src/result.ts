@@ -39,8 +39,10 @@ export interface ScanResultOptions {
   findings: FindingsDocument;
   coverage: CoverageDocument;
   scanDir: string;
-  threadId: string;
+  threadId: string | null;
   turnResult: TurnResultMetadata;
+  /** An authoritative saved or aggregated receipt, when one was measured. */
+  cost?: Readonly<ScanCost> | null;
   sarifPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
 }
@@ -50,7 +52,8 @@ export class ScanResult {
   public readonly findings: FindingsDocument;
   public readonly coverage: CoverageDocument;
   public readonly scanDir: string;
-  public readonly threadId: string;
+  /** Null when an empty capped composition completed without a model session. */
+  public readonly threadId: string | null;
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
@@ -64,10 +67,10 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
-    this.cost = estimateScanCost(
-      options.turnResult.model,
-      options.turnResult.usage,
-    );
+    this.cost =
+      options.cost === undefined
+        ? estimateScanCost(options.turnResult.model, options.turnResult.usage)
+        : options.cost;
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

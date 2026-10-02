@@ -68,6 +68,7 @@ interface ScanCostTrackerOptions {
   model: string;
   repository?: string;
   scanDirectory?: string;
+  includeArchivedSessions?: boolean;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
@@ -235,9 +236,7 @@ export class ScanCostTracker {
       if (unknown) throw unknown.error;
     };
     try {
-      for await (const path of sessionFiles(
-        join(this.#options.codexHome, "sessions"),
-      )) {
+      for await (const path of this.#sessionFiles()) {
         let session = this.#sessions.get(path);
         if (session === undefined) {
           session = createSessionUsage();
@@ -380,6 +379,12 @@ export class ScanCostTracker {
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
     this.#reportCost(cost);
+  }
+
+  async *#sessionFiles(): AsyncGenerator<string> {
+    yield* sessionFiles(join(this.#options.codexHome, "sessions"));
+    if (this.#options.includeArchivedSessions)
+      yield* sessionFiles(join(this.#options.codexHome, "archived_sessions"));
   }
 
   #reportWorkerProgress(session: SessionUsage): void {

@@ -87,7 +87,13 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
+test.each([
+  "completed",
+  "receipt-lost",
+  "receipt-lost-no-thread",
+  "scan-interrupted",
+  "prompt-files",
+])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -106,9 +112,14 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
+    const savedUsage = { input_tokens: 10, output_tokens: 3 };
+    const savedCost = {
+      ...estimateScanCost("gpt-5.6-sol", savedUsage)!,
+      estimatedUsd: 123,
+    };
     let modelCalls = 0;
     let completed = false;
-    let loseReceipt = scenario === "receipt-lost";
+    let loseReceipt = scenario.startsWith("receipt-lost");
     const makeClient = async (attempt: number) => {
       const codexHome = join(root, `codex-home-${attempt}`);
       await mkdir(codexHome);
@@ -140,7 +151,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
               return {
                 scan: {
                   progress: { status: completed ? "complete" : "failed" },
-                  continuationThreadId: "thread-1",
+                  continuationThreadId:
+                    scenario === "receipt-lost-no-thread" ? null : "thread-1",
+                  cost: JSON.parse(JSON.stringify(savedCost)) as JsonObject,
+                  usage: savedUsage,
                 },
               };
             if (args[0] === "register-cli-scan") {
@@ -200,7 +214,17 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
+      if (scenario === "receipt-lost-no-thread")
+        expect(result.threadId).toBeNull();
       if (original) expect(result.toJSON()).toEqual(original);
+      const persisted = (
+        await new FindingWorkflow(workflowId, environment).get()
+      )?.stages.scan.result as { cost?: unknown };
+      expect(persisted.cost).toEqual(result.cost);
+      if (scenario.startsWith("receipt-lost")) {
+        expect(result.cost).toEqual(savedCost);
+        expect(result.turnResult.usage).toEqual(savedUsage);
+      }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan

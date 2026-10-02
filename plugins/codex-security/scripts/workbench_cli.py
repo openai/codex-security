@@ -161,6 +161,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--claim-token")
     set_scan_thread.add_argument("--thread-id", required=True)
 
     set_scan_cost_limit = subparsers.add_parser("set-scan-cost-limit")
@@ -172,6 +173,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
     get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--claim-token")
     get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
 
     compare_scans = subparsers.add_parser("compare-scans")
@@ -242,6 +244,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
     complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--claim-token")
     complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
     complete_budget_exhausted_scan.add_argument("--message")
 
