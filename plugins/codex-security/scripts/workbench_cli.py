@@ -245,21 +245,37 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
     complete_budget_exhausted_scan.add_argument("--message")
 
+    defer_publication_help = (
+        "Record the stop without publishing; after workers stop, run "
+        "preserve-scan-results --after-stop (default: publish immediately)."
+    )
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument(
+        "--defer-publication", action="store_true", help=defer_publication_help
+    )
 
     fail_scan = subparsers.add_parser("fail-scan")
     fail_scan.add_argument("--scan-id", required=True)
     fail_scan.add_argument("--message", required=True)
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    fail_scan.add_argument("--defer-publication", action="store_true", help=defer_publication_help)
 
     preserve_scan = subparsers.add_parser("preserve-scan-results")
     preserve_scan.add_argument("--scan-id", required=True)
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
     preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+    preserve_scan.add_argument(
+        "--cost-json", help="Save a JSON cost or {usage, cost} receipt with the retained results."
+    )
+    preserve_scan.add_argument(
+        "--after-stop",
+        action="store_true",
+        help="After workers stop, stop remaining child records and publish the saved results.",
+    )
 
     recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
     recover_scan = subparsers.add_parser(

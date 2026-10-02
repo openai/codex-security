@@ -37,6 +37,12 @@ A sealed manifest records the terminal timestamp and hashes for the canonical do
 
 Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
 
+### Stopping before publication
+
+By default, `cancel-scan` and `fail-scan` record the stop, stop unfinished child scan records, and publish retained results. A host that still has workers running can pass `--defer-publication` to record the stop first. The host must then stop and wait for its workers before calling `preserve-scan-results --after-stop` to stop the remaining child records and publish the retained results. Omitting this follow-up leaves publication unfinished.
+
+`preserve-scan-results --cost-json` accepts the existing cost JSON object or an envelope containing `usage` and optional `cost`. It records accounting alongside retained results; omitting it leaves stored accounting unchanged. Use the scan's existing `--claim-token` or owning `--thread-id` where the continuation requires it. `--after-stop` is off by default and does not terminate worker processes itself.
+
 ### Stopped Result Recovery
 
 To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run:
