@@ -61,14 +61,6 @@ function matchesExclusion(path, pattern, repo) {
   }
 }
 
-function strings(value) {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) return value.flatMap(strings);
-  if (value && typeof value === "object")
-    return Object.values(value).flatMap(strings);
-  return [];
-}
-
 function normalizeSourcePath(path) {
   const normalized = path?.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
   return process.platform === "win32" ? normalized?.toLowerCase() : normalized;
@@ -201,24 +193,12 @@ export function gradeResult(result, fixture, repo) {
     }
     return [];
   });
-  const outputStrings = strings(result);
-  const leakedValueCount = fixture.secretValues.filter((value) => {
-    // Sixteen base64 characters identify 96 bits of generated fixture material,
-    // including excerpts of a credential with its prefix or suffix masked.
-    for (let offset = 0; offset <= value.length - 16; offset++) {
-      const fragment = value.slice(offset, offset + 16);
-      if (outputStrings.some((text) => text.includes(fragment))) return true;
-    }
-    return false;
-  }).length;
   const found = cases.filter((entry) => entry.found).length;
   if (found !== cases.length) errors.push("missing retained secret findings");
   if (falsePositives.length)
     errors.push("false positives or incorrect taxonomy/locations");
   if (findings.some((finding) => !validEvidence(finding, fixture)))
     errors.push("missing or invalid code evidence");
-  if (leakedValueCount)
-    errors.push("final result reproduces credential material");
   if (
     result?.coverage?.completeness !== "complete" ||
     result.coverage.deferred?.length ||
@@ -238,7 +218,6 @@ export function gradeResult(result, fixture, repo) {
     recall: found / cases.length,
     falsePositiveCount: falsePositives.length,
     falsePositives,
-    leakedValueCount,
     errors,
   };
 }

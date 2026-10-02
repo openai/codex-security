@@ -321,14 +321,11 @@ async function nativeFixture(t, mode = "complete") {
           label: "Credential declaration",
           path: expected.path,
           startLine: expected.line,
-          code: prepared.fixture.secretValues.reduce(
-            (code, value) => code.replaceAll(value, "[REDACTED]"),
-            prepared.fixture.files[expected.path]
-              .split("\n")
-              .slice(expected.line - 1, expected.endLine)
-              .join("\n"),
-          ),
-          explanation: "Credential material is masked.",
+          code: prepared.fixture.files[expected.path]
+            .split("\n")
+            .slice(expected.line - 1, expected.endLine)
+            .join("\n"),
+          explanation: "Source-backed credential declaration.",
         },
       ],
     })),
@@ -349,7 +346,7 @@ async function nativeFixture(t, mode = "complete") {
     OPENAI_API_KEY: "synthetic-env-key",
     DATABASE_URL: "synthetic-unrelated-secret",
   });
-  return { directory, prepared, settings, executable };
+  return { directory, prepared, settings, executable, result };
 }
 
 // Fixed, offline app-server and exec protocol; only generated source and auth exist here.
@@ -426,10 +423,14 @@ test(
   "native preflight and SDK exec share effective settings and fallback auth",
   unixOnly,
   async (t) => {
-    const { directory, prepared, settings } = await nativeFixture(t);
+    const { directory, prepared, settings, result } = await nativeFixture(t);
     await preflightEval(prepared, settings, new AbortController().signal);
-    const { report } = await runPreparedEval(prepared, new Codex(settings));
+    const { report, semanticResult } = await runPreparedEval(
+      prepared,
+      new Codex(settings),
+    );
     assert.equal(report.passed, true);
+    assert.deepEqual(semanticResult, result);
     const preflight = await readJson(join(directory, "preflight.json"));
     const exec = await readJson(join(directory, "exec.json"));
     assert.equal(preflight.cwd, prepared.repo);

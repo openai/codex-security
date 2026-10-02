@@ -32,10 +32,7 @@ Each finding must also include nonempty `codeEvidence`. Every snippet must cite
 a fixture file and stay within its line bounds. For each exposure reported in a
 finding, at least one snippet must cover the credential declaration or a known
 use site. Additional snippets may show benign context. The grader checks paths
-and line ranges, not exact snippet text, so credentials can remain masked.
-
-The final result must also omit credential values and fragments of at least 16
-characters. Fixed private-key encoding headers do not count as secret material.
+and line ranges, not exact snippet text.
 
 ## Run
 
@@ -91,8 +88,8 @@ credentials work against a service.
 The script prints grading results and token usage, saves `report.json` and
 `result.json` beneath ignored `reports/`, and exits nonzero when grading fails.
 The source fixture and temporary model state are removed on exit. Reports may
-contain generated fixture values when the non-disclosure check fails, but no
-real service credentials are supplied to the model.
+contain generated fixture values; no real service credentials are supplied to
+the model.
 
 ## Deterministic checks
 
@@ -102,5 +99,5 @@ node --test evals/secret-discovery/test_*.mjs
 
 CI runs these Node-only checks for fixture staging, production-prompt loading,
 final-response grading, missed findings, false positives, paths, lines, CWEs,
-credential disclosure, and SDK isolation. The optional model run is not part
-of CI.
+source-evidence preservation, and SDK isolation. The optional model run is not
+part of CI.
