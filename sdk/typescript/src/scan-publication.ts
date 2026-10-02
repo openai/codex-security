@@ -1,3 +1,4 @@
+import type { SemanticScan } from "./scan-semantics.js";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ScanArtifactRestorer } from "./runtime.js";
@@ -36,7 +37,7 @@ interface ScanResultContext {
 
 export interface ScanPublicationContext extends ScanResultContext {
   scanId: string;
-  workbench: (args: readonly string[]) => Promise<JsonObject>;
+  workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }
 
 /** This is only a read-path hint; the workbench still validates the complete seal and binding. */
@@ -283,10 +284,56 @@ export async function publishScan(
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const { scanId, workbench } = context;
+  const { scanId, scanDir, expectation, signal, workbench } = context;
   let preparation: JsonObject = {};
   if (!sealed) {
     try {
+      // Ordinary SDK turns author canonical files after their last MCP checkpoint.
+      // Commit those final documents before completion reads the saved draft.
+      if (expectation.mode !== "deep") {
+        const read = async (name: string) =>
+          JSON.parse(
+            (await readScanFile(scanDir, name, name, signal)).toString("utf8"),
+          );
+        const committed = await read("artifacts/scan-draft.json").catch(
+          (error: unknown) => {
+            if (
+              error instanceof Error &&
+              isRecord(error.cause) &&
+              error.cause["code"] === "ENOENT"
+            )
+              return null;
+            throw error;
+          },
+        );
+        const manifest = await read("scan-manifest.json").catch(
+          (error: unknown) => {
+            if (
+              committed !== null &&
+              error instanceof Error &&
+              isRecord(error.cause) &&
+              error.cause["code"] === "ENOENT"
+            )
+              return null;
+            throw error;
+          },
+        );
+        // The workbench exports the manifest last. A different envelope means
+        // the root files can still be a mixture from an interrupted export.
+        if (
+          manifest !== null &&
+          manifest.scan?.sealedAt == null &&
+          (committed === null ||
+            manifest.scan?.completedAt ===
+              committed.manifest?.scan?.completedAt)
+        ) {
+          await writePreparedScanDraft(workbench, scanId, {
+            manifest,
+            findings: await read("findings.json"),
+            coverage: await read("coverage.json"),
+          });
+        }
+      }
       preparation = await workbench([
         "prepare-scan-completion",
         "--scan-id",
@@ -417,10 +464,7 @@ export async function collectResult(
   });
 }
 
-export {
-  writeSemanticScanDraft,
-  writePreparedScanDraft,
-} from "./scan-draft-publication.js";
+export { writeSemanticScanDraft } from "./scan-draft-publication.js";
 
 /** Optional post-scan work may fail, but cannot replace the completed artifacts. */
 export async function preservePublishedArtifacts(
@@ -472,4 +516,17 @@ export async function preservePublishedArtifacts(
     await collectResult({ ...context, scanDir }, result, true);
     return { error };
   }
+}
+
+/** Let the workbench own the committed snapshot and canonical documents. */
+export async function writePreparedScanDraft(
+  workbench: (args: readonly string[], input?: string) => Promise<unknown>,
+  scanId: string,
+  documents: { manifest: unknown; findings: unknown; coverage: unknown },
+  checkpoint?: SemanticScan,
+): Promise<void> {
+  await workbench(
+    ["write-scan-draft", "--scan-id", scanId],
+    JSON.stringify({ documents, checkpoint }),
+  );
 }

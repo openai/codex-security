@@ -263,7 +263,10 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert "User input reaches a SQL statement" in report
 
 
-def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("committed", [False, True])
+def test_budget_exhaustion_preserves_authored_validated_findings(
+    tmp_path: Path, committed: bool
+) -> None:
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     write_completed_contract(
         scan_dir,
@@ -272,6 +275,23 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         relative_path="app.py",
         coverage_mode="deep_repository",
     )
+
+    if committed:
+        documents = {
+            key: json.loads((scan_dir / filename).read_text())
+            for key, filename in (
+                ("manifest", "scan-manifest.json"),
+                ("findings", "findings.json"),
+                ("coverage", "coverage.json"),
+            )
+        }
+        run_workbench(
+            state_dir,
+            "write-scan-draft",
+            "--scan-id",
+            scan_id,
+            input_text=json.dumps({"documents": documents}),
+        )
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 

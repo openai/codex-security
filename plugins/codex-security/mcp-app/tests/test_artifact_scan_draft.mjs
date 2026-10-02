@@ -3461,6 +3461,44 @@ try {
     }),
     /safe regular file|regular file|symbolic link/,
   );
+  for (const storage of ["payload", "staged path"]) {
+    const pendingRoot = path.join(root, `pending-copy-${storage}`);
+    const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
+    await mkdir(pendingDirectory, { recursive: true });
+    const saved = { scanId, complete: false, findings: [finding], coverage };
+    const contents = JSON.stringify(saved);
+    const name = createHash("sha256").update(contents).digest("hex") + ".json";
+    const stagedPath =
+      "drafts/11111111-1111-4111-8111-111111111111.checkpoint.json";
+    if (storage === "staged path") {
+      await mkdir(path.join(pendingRoot, "drafts"));
+      await writeFile(path.join(pendingRoot, stagedPath), contents);
+    }
+    await writeFile(
+      path.join(pendingDirectory, name),
+      storage === "payload" ? contents : stagedPath,
+    );
+    let documents;
+    await recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      {
+        scanId,
+        handoffClaimToken: claimToken,
+        complete: false,
+        findings: [],
+        coverage: {
+          completeness: "partial",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      },
+      async (savedDocuments) => {
+        documents = savedDocuments;
+      },
+    );
+    assert.equal(documents.findings.findings[0].title, finding.title);
+  }
   for (const indexed of [false, true]) {
     const orderedRoot = path.join(root, `ordered-finals-${indexed}`);
     const checkpointDirectory = path.join(orderedRoot, "checkpoints");

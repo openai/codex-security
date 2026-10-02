@@ -288,7 +288,10 @@ def parse_args(description: str) -> argparse.Namespace:
 
     write_scan_draft = subparsers.add_parser("write-scan-draft")
     write_scan_draft.add_argument("--scan-id", required=True)
-    write_scan_draft.add_argument("--draft-path", required=True)
+    write_scan_draft.add_argument(
+        "--draft-path",
+        help="Staged documents JSON; omit to read {documents, checkpoint} from stdin.",
+    )
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")

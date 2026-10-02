@@ -567,13 +567,16 @@ async function readCurrentCheckpoints(
         "current scan checkpoint marker",
       );
       if (stagedPath) {
-        if (!/^drafts\/[0-9a-fA-F-]+\.checkpoint\.json$/u.test(stagedPath))
-          throw new Error("scan checkpoint: invalid staged checkpoint path.");
-        contents = await readOptionalArtifactText(
-          context,
-          stagedPath.split("/"),
-          "staged scan checkpoint",
-        );
+        if (stagedPath.trimStart().startsWith("{")) contents = stagedPath;
+        else {
+          if (!/^drafts\/[0-9a-fA-F-]+\.checkpoint\.json$/u.test(stagedPath))
+            throw new Error("scan checkpoint: invalid staged checkpoint path.");
+          contents = await readOptionalArtifactText(
+            context,
+            stagedPath.split("/"),
+            "staged scan checkpoint",
+          );
+        }
         if (
           contents !== undefined &&
           createHash("sha256").update(contents).digest("hex") + ".json" !==
@@ -753,12 +756,25 @@ async function readPreviousScanDraft(
     "findings.json",
     "coverage.json",
   ] as const;
-  const contents = await Promise.all(
-    names.map((name) => readOptionalArtifactText(context, [name])),
-  );
-  const digest = draftDigest(
-    names.map((name, index) => [name, contents[index]]),
-  );
+  const snapshot = await readOptionalArtifactText(context, [
+    "artifacts",
+    "scan-draft.json",
+  ]);
+  const committed =
+    snapshot === undefined
+      ? undefined
+      : parseJsonObject(snapshot, "committed scan draft");
+  const contents = committed
+    ? [committed.manifest, committed.findings, committed.coverage].map(
+        (document) => JSON.stringify(document),
+      )
+    : await Promise.all(
+        names.map((name) => readOptionalArtifactText(context, [name])),
+      );
+  const digest =
+    snapshot === undefined
+      ? draftDigest(names.map((name, index) => [name, contents[index]]))
+      : createHash("sha256").update(snapshot).digest("hex");
   if (contents.every((value) => value === undefined)) return { digest };
   if (contents.some((value) => value === undefined)) {
     throw new Error("previous scan draft: canonical documents are incomplete.");

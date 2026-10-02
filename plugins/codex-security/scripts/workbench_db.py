@@ -1281,24 +1281,32 @@ def complete_scan_locked(
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    current_manifest = None
-    if current_manifest_path is not None:
-        current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
+    current_manifest = (
+        read_json_object(current_manifest_path) if current_manifest_path is not None else None
+    )
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
         and (
             current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
+            or current_manifest["scan"].get("artifacts") not in (None, [])
         )
     )
+    documents = None
+    if not already_sealed:
+        committed_path = artifact_path(scan_dir, "artifacts/scan-draft.json", required=False)
+        if committed_path is not None:
+            draft = read_json_object(committed_path)
+            documents = draft["manifest"], draft["findings"], draft["coverage"]
+            current_manifest = documents[0]
+    if (
+        current_manifest is not None
+        and isinstance(current_manifest.get("scan"), dict)
+        and current_manifest["scan"].get("complete") is False
+    ):
+        raise SystemExit(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
         missing_drafts = []
@@ -1313,7 +1321,7 @@ def complete_scan_locked(
                 missing_drafts.append(file_name)
                 continue
             artifact_path(scan_dir, file_name, required=True)
-        if missing_drafts:
+        if missing_drafts and documents is None:
             raise SystemExit(
                 "Scan agent did not create required draft artifacts: "
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
@@ -1321,6 +1329,16 @@ def complete_scan_locked(
             )
     wrote = False
     try:
+        if scan["mode"] != "deep" and current_manifest is not None and not already_sealed:
+            documents = saved_results.merge_saved_results(
+                scan_dir,
+                scan["id"],
+                completion_binding,
+                warnings,
+                stopped=False,
+                reason="",
+                parent_documents=documents,
+            )
         prepared = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
@@ -1328,20 +1346,7 @@ def complete_scan_locked(
             # Save the finished Deep result as submitted. Worker drafts and
             # recovery repairs belong to the stopped-scan path.
             completion_warnings=warnings if scan["mode"] != "deep" else None,
-            draft_documents=saved_results.merge_saved_results(
-                scan_dir,
-                scan["id"],
-                completion_binding,
-                connection.execute(
-                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                    (scan["id"],),
-                ).fetchall(),
-                warnings,
-                stopped=False,
-                reason="",
-            )
-            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
-            else None,
+            draft_documents=documents,
         )
         add_warning()
         wrote = True

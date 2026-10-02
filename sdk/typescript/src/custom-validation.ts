@@ -14,6 +14,10 @@ import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
+import {
+  writePreparedScanDraft,
+  type ScanPublicationContext,
+} from "./scan-publication.js";
 
 type CanonicalFinding = FindingsDocument["findings"][number];
 type Finding = Pick<
@@ -68,6 +72,7 @@ interface Schema {
 interface DraftManifest {
   scan: {
     id: string;
+    complete?: boolean;
     threatModel?: unknown;
     scope: { validationMode?: string };
     sealedAt?: string;
@@ -195,6 +200,7 @@ export async function runCustomValidation(options: {
   prompt: string;
   falsePositives?: readonly unknown[];
   signal: AbortSignal;
+  workbench: ScanPublicationContext["workbench"];
   run(prompt: string, outputSchema: unknown): Promise<string>;
 }): Promise<void> {
   const { scanDir, scanId, signal } = options;
@@ -209,7 +215,7 @@ export async function runCustomValidation(options: {
       ),
     ),
   );
-  const [manifest, findingsDocument, coverage] = documents as [
+  const [manifest, findingsDocument, coverage] = structuredClone(documents) as [
     DraftManifest,
     { scanId: string; findings: Finding[] },
     CoverageDocument,
@@ -442,8 +448,18 @@ export async function runCustomValidation(options: {
   ];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
+  delete manifest.scan.complete;
   // Rewrite the captured draft, not any canonical-file edits made during validation.
-  for (const [index, name] of DOCUMENTS.entries())
-    await writeJson(scanDir, name, documents[index], signal);
+  try {
+    await writePreparedScanDraft(options.workbench, scanId, {
+      manifest,
+      findings: findingsDocument,
+      coverage,
+    });
+  } catch (error) {
+    for (const [index, name] of DOCUMENTS.entries())
+      await writeJson(scanDir, name, documents[index]);
+    throw error;
+  }
   await writeCustomValidationStatus(scanDir, { scanId, ...result }, signal);
 }

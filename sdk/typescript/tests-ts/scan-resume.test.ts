@@ -1,4 +1,13 @@
-import { readSealedScanTurn, publishScan } from "../src/scan-publication.js";
+import {
+  readSealedScanTurn,
+  publishScan,
+  writePreparedScanDraft,
+} from "../src/scan-publication.js";
+import type { JsonObject } from "../src/config.js";
+import {
+  prepareSemanticScanDraft,
+  type SemanticScan,
+} from "../src/scan-semantics.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -216,6 +225,126 @@ async function interruptedScan(
     input,
   };
 }
+
+async function writeDraft(
+  command: (args: readonly string[], input?: string) => Promise<JsonObject>,
+  registration: JsonObject,
+  mode: "deep" | "standard",
+  draft: SemanticScan,
+) {
+  await writePreparedScanDraft(
+    command,
+    draft.scanId,
+    prepareSemanticScanDraft(
+      {
+        targetContract: registration["contract"] as JsonObject,
+        mode,
+        targetRevision: registration["targetRevision"] as string,
+      },
+      draft,
+    ),
+    draft,
+  );
+}
+
+test.each([
+  "interrupted-export",
+  "first-export",
+  "partial-first-export",
+  "invalid-manifest",
+  "file-authored-result",
+] as const)(
+  "SDK completion preserves the latest committed or authored draft (%s)",
+  async (scenario) => {
+    const f = await interruptedScan("standard");
+    const provisional: SemanticScan = {
+      scanId: f.scanId,
+      complete: false,
+      findings: [],
+      coverage: {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [{ id: "unfinished", reason: "Synthetic unfinished work" }],
+      },
+    };
+    await writeDraft(f.command, f.registration, "standard", provisional);
+    const oldManifest = await readFile(join(f.scanDir, "scan-manifest.json"));
+    const oldCoverage = await readFile(join(f.scanDir, "coverage.json"));
+    if (scenario !== "file-authored-result") {
+      await writeDraft(f.command, f.registration, "standard", {
+        ...provisional,
+        complete: true,
+        coverage: {
+          ...provisional.coverage,
+          completeness: "complete",
+          deferred: [],
+        },
+      });
+      // Reproduce failure after findings export but before coverage and manifest.
+      await writeFile(join(f.scanDir, "coverage.json"), oldCoverage);
+      await writeFile(join(f.scanDir, "scan-manifest.json"), oldManifest);
+      if (scenario === "first-export" || scenario === "partial-first-export") {
+        for (const name of [
+          "scan-manifest.json",
+          "coverage.json",
+          ...(scenario === "first-export" ? ["findings.json"] : []),
+        ])
+          await rm(join(f.scanDir, name));
+      } else if (scenario === "invalid-manifest") {
+        await writeFile(join(f.scanDir, "scan-manifest.json"), "{invalid");
+      }
+    } else {
+      const manifest = JSON.parse(oldManifest.toString());
+      manifest.scan.complete = true;
+      const coverage = JSON.parse(oldCoverage.toString());
+      coverage.completeness = "complete";
+      coverage.deferred = [];
+      await writeFile(
+        join(f.scanDir, "coverage.json"),
+        JSON.stringify(coverage),
+      );
+      await writeFile(
+        join(f.scanDir, "scan-manifest.json"),
+        JSON.stringify(manifest),
+      );
+    }
+    const draft = JSON.parse(
+      await readFile(join(f.scanDir, "artifacts/scan-draft.json"), "utf8"),
+    );
+    const publication = publishScan(
+      {
+        scanId: f.scanId,
+        scanDir: f.scanDir,
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          repository: f.repository,
+          repositoryRevision: null,
+          target: { kind: "repository", paths: [] },
+          mode: "standard",
+          pluginVersion: draft.manifest.scan.producer.version,
+        },
+        signal: new AbortController().signal,
+        workbench: f.command,
+      },
+      { threadId: f.threadId, turnResult: { status: "completed" } },
+      null,
+      false,
+    );
+    if (scenario === "invalid-manifest") {
+      await expect(publication).rejects.toThrow();
+      return;
+    }
+    const published = await publication;
+    expect(published.result.coverage.completeness).toBe("complete");
+    expect(published.result.coverage.deferred).toEqual([]);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: "complete" },
+    });
+  },
+);
 
 test("resume resolves an interrupted scan without changing its ID, recipe, or completed workers", async () => {
   const f = await interruptedScan();

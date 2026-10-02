@@ -85,6 +85,10 @@ def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) 
             "coverage": {"openQuestions": ["Pending review"]},
         },
     )
+    pending = scan_dir / "checkpoints/pending"
+    pending.mkdir(mode=0o700)
+    for path in (earlier, concurrent):
+        (pending / path.name).write_bytes(b"")
     drafts = scan_dir / "drafts"
     drafts.mkdir(mode=0o700)
     staged = drafts / f"{uuid.uuid4()}.json"
@@ -92,7 +96,6 @@ def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) 
     run_workbench(
         state, "write-scan-draft", "--scan-id", scan["scanId"], "--draft-path", str(staged)
     )
-    pending = scan_dir / "checkpoints/pending"
     assert not (pending / earlier.name).exists()
     assert (pending / concurrent.name).read_bytes() == b""
     assert earlier.is_file()  # The immutable evidence is retained after acknowledgment.
@@ -233,19 +236,17 @@ def test_draft_publication_acknowledges_or_retains_stages(
     # The publisher keeps failed stages; only a validated pending marker authorizes recovery.
     assert draft.is_file()
     assert checkpoint.read_bytes() == checkpoint_bytes
-    assert (scan_dir / "checkpoints/pending" / name).read_text() == checkpoint.relative_to(
-        scan_dir
-    ).as_posix()
+    assert (scan_dir / "checkpoints/pending" / name).read_bytes() == checkpoint_bytes
+    # Recovery owns these accepted bytes even after the caller removes its stages.
+    draft.unlink()
+    checkpoint.unlink()
     stopped = run_workbench(
         state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
     )["scan"]
     assert stopped["findingCount"] == 1
     assert stopped["reportAvailable"] is True
     assert stopped["resultsRecoveryNeeded"] is False
-    if failure == "history":
-        assert not (scan_dir / "checkpoints" / name).exists()
-    else:
-        assert (scan_dir / "checkpoints" / name).read_bytes() == checkpoint_bytes
+    assert (scan_dir / "checkpoints" / name).read_bytes() == checkpoint_bytes
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
     assert f"checkpoints/{name}" in manifest["preservedSources"]
 
@@ -263,7 +264,10 @@ def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
     saved.write_scan_local_bytes(scan_dir, stage_path, contents)
     saved.write_scan_local_bytes(scan_dir, "checkpoints/" + "0" * 64 + ".json", b"old evidence")
     saved.write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", stage_path.encode())
-    assert list(saved._saved_result_paths(scan_dir)) == [f"checkpoints/{name}"]
+    assert set(saved._saved_result_paths(scan_dir, "fixture")) == {
+        f"checkpoints/{name}",
+        "checkpoints/" + "0" * 64 + ".json",
+    }
     assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload
     saved.write_scan_local_bytes(scan_dir, stage_path, contents + b"\n")
     with pytest.raises(saved.ContractError, match="changed after publication failed"):
