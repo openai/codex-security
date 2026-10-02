@@ -1384,7 +1384,7 @@ process.stdout.write(JSON.stringify({
     },
   );
 
-  test("forwards only completed skill output and redacts subprocess diagnostics", async () => {
+  test("forwards completed skill output and classifies authentication failures", async () => {
     const cases = [
       {
         source:
@@ -1649,7 +1649,7 @@ lines.on("line", (line) => {
     );
   });
 
-  test("redacts app-server patch failures", async () => {
+  test("classifies app-server patch authentication failures", async () => {
     const source = [
       'const readline=require("node:readline");',
       "const lines=readline.createInterface({input:process.stdin});",

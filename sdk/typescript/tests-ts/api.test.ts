@@ -60,7 +60,6 @@ import {
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 import {
   mockScanRegistration,
@@ -5420,7 +5419,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("keeps credential-bearing failures out of saved scan history", async () => {
+  test("preserves original failures in saved scan history", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -5439,8 +5438,7 @@ describe("CodexSecurity orchestration", () => {
     const quotedCredential = JSON.stringify({
       client_secret_value: "SYNTHETIC correct horse battery staple",
     });
-    const originalFailure = `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`;
-    const storedFailure = "[redacted]";
+    const originalFailure = `request failed: token=SYNTHETIC_TOKEN ${quotedCredential}`;
     const client = new TestClient(
       {},
       {
@@ -5478,12 +5476,12 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    await expect(client.run(repository)).rejects.toThrow(SYNTHETIC_CREDENTIALS);
+    await expect(client.run(repository)).rejects.toThrow(originalFailure);
     const failure = commands.find((args) => args[0] === "fail-scan");
     const scanId = failure?.[2] ?? "";
     expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
     expect(failure?.[3]).toBe("--message");
-    expect(failure?.[4]).toBe(storedFailure);
+    expect(failure?.[4]).toBe(originalFailure);
 
     // `scans show` reads the stored message back through get-scan.
     const context = await runWorkbench(
@@ -5493,11 +5491,9 @@ describe("CodexSecurity orchestration", () => {
     expect(context["scan"]).toMatchObject({
       continuationThreadId: "failed-thread",
       progress: { status: "failed" },
-      failureMessage: storedFailure,
+      failureMessage: originalFailure,
     });
 
-    const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
-    expect(database.toString("latin1")).not.toContain("SYNTHETIC");
     await client.close();
   });
 

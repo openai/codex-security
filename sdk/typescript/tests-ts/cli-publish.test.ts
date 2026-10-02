@@ -903,7 +903,7 @@ describe("publish scan", () => {
 
   test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
     for (const { json, tty, failed } of [
       { json: false, tty: false, failed: false },
@@ -2449,7 +2449,7 @@ describe("publish scan", () => {
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const result = { ...publicationResult(), warnings: [warning] };
     const stdout = capture();
     const stderr = capture();
@@ -2491,7 +2491,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
 
-  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+  test("normalizes receipt warning controls while preserving diagnostic text and partial results", async () => {
     const warnings = [
       "Receipt storage failed.\n\u001B[31mDo not retry publication.",
       "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
@@ -2518,10 +2518,9 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
-        "codex-security: [redacted]\n",
+        "codex-security: Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET\n",
     );
     expect(stderr.text()).not.toContain("\u001B");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {

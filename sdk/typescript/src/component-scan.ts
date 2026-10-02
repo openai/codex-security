@@ -20,7 +20,7 @@ import {
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
 import { readThreatModelPath } from "./artifact-export.js";
-import { safeErrorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
@@ -235,7 +235,7 @@ export async function runComponentScans(
               receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
             receipt.status = "failed";
-            receipt.error = safeErrorMessage(error);
+            receipt.error = errorMessage(error);
             if (!options.signal?.aborted) {
               const path = await readThreatModelPath(receipt.outputDir, {
                 pythonPath: options.config?.pythonPath,
@@ -404,7 +404,7 @@ async function deduplicateFindings(
   } catch (failure) {
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
-      : safeErrorMessage(failure);
+      : errorMessage(failure);
   }
   const remainSeparate = ({
     beforeOccurrenceId,

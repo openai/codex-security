@@ -455,13 +455,16 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   expect(await json(summary.summaryPath!)).toMatchObject({
     completeness: "partial",
     findingCount: 2,
+    components: expect.arrayContaining([
+      expect.objectContaining({
+        id: "component-1",
+        error: "Authorization: Bearer SYNTHETIC_SECRET_123",
+      }),
+    ]),
   });
   expect(await json(summary.retryPlanPath!)).toEqual({
     components: components.slice(0, 2),
   });
-  expect(await readFile(summary.summaryPath!, "utf8")).not.toContain(
-    "SYNTHETIC_SECRET_123",
-  );
   expect(
     await readFile(join(paths.outputDir, "component-2", "report.md"), "utf8"),
   ).toBe("Original report");
@@ -634,6 +637,42 @@ test.each([
     ).toBe(true);
   },
 );
+
+test("CLI escapes component failure controls while preserving the saved error", async () => {
+  const paths = await fixture();
+  const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      [
+        "scan-components",
+        paths.repository,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({ currentDirectory: paths.root }),
+        createSecurity: client(async () => {
+          throw new Error(failure);
+        }),
+      },
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain(
+    "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
+  );
+  expect(stderr.text()).not.toContain("\u001b");
+  const result = JSON.parse(stdout.text());
+  expect(await json(result.summaryPath)).toMatchObject({
+    components: [expect.objectContaining({ error: failure })],
+  });
+});
 
 test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
   const paths = await fixture();
@@ -1502,6 +1541,7 @@ test.each([false, true])(
   "CLI reports matching completion (failure: %j)",
   async (failMatching) => {
     const paths = await fixture();
+    const failure = "Authorization: Bearer SYNTHETIC_MATCH_SECRET_123";
     let calls = 0;
     const result = await cli(
       paths,
@@ -1523,8 +1563,7 @@ test.each([false, true])(
             model: "gpt-5.6-terra",
             model_reasoning_effort: "high",
           });
-          if (failMatching)
-            throw new Error("Authorization: Bearer SYNTHETIC_MATCH_SECRET_123");
+          if (failMatching) throw new Error(failure);
           return {
             matches: [
               match([before[0]!.occurrenceId], [after[0]!.occurrenceId]),
@@ -1545,8 +1584,11 @@ test.each([false, true])(
       failed: 0,
       deduplication: { status: failMatching ? "incomplete" : "completed" },
     });
-    expect(saved + result.stdout + result.stderr).not.toContain(
-      "SYNTHETIC_MATCH_SECRET_123",
+    expect(JSON.parse(saved).deduplication.error).toBe(
+      failMatching ? failure : undefined,
+    );
+    expect(JSON.parse(result.stdout).deduplication.error).toBe(
+      failMatching ? failure : undefined,
     );
   },
 );

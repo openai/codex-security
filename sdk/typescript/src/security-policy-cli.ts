@@ -2,7 +2,7 @@ import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { formatScanCost } from "./cost-model.js";
-import { logErrorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import {
   formatSecurityPolicyText as display,
   type SecurityPolicyOptions,
@@ -132,9 +132,7 @@ export async function runPolicyCommand(
       },
       onStage: (stage) => write(STAGES[stage]),
       onWarning: (warning) =>
-        write(
-          `codex-security: ${display(logErrorMessage(warning, dependencies.environment))}`,
-        ),
+        write(`codex-security: ${display(errorMessage(warning))}`),
       ...(interactive
         ? {
             answerQuestions: async (
@@ -173,7 +171,7 @@ export async function runPolicyCommand(
         controller.signal.throwIfAborted();
         diff = "Preview unavailable. Review the saved draft.";
         write(
-          `codex-security: Could not preview the policy: ${display(logErrorMessage(error, dependencies.environment))}`,
+          `codex-security: Could not preview the policy: ${display(errorMessage(error))}`,
         );
       }
       const preview = [
@@ -234,7 +232,7 @@ export async function runPolicyCommand(
         ? "Policy generation canceled by Ctrl-C."
         : signal === "SIGTERM"
           ? "Policy generation terminated by SIGTERM."
-          : display(logErrorMessage(error, dependencies.environment));
+          : display(errorMessage(error));
     write(`codex-security: ${message}`);
     if (outputDir !== undefined)
       write(`Saved artifacts: ${display(outputDir)}`);
@@ -248,7 +246,7 @@ export async function runPolicyCommand(
       await security?.close();
     } catch (error) {
       write(
-        `codex-security: Could not clean up the policy runtime: ${display(logErrorMessage(error, dependencies.environment))}`,
+        `codex-security: Could not clean up the policy runtime: ${display(errorMessage(error))}`,
       );
     }
   }
