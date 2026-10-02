@@ -157,6 +157,49 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     assert unchanged["updatedAt"] == recovered["updatedAt"]
 
 
+def test_draft_publication_preserves_pre_index_checkpoint_history(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": documents["coverage"]},
+    )
+    original = checkpoint.read_bytes()
+    shutil.rmtree(scan_dir / "checkpoints/pending")
+    documents["reconciledCheckpointIds"] = [checkpoint.name]
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    assert not (scan_dir / "checkpoints/pending").exists()
+    result = run_workbench(
+        state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)
+    )
+    assert result["status"] == "draft_written"
+    assert checkpoint.read_bytes() == original
+    assert not staged.exists()
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"]
+
+
 def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     tmp_path: Path,
 ) -> None:

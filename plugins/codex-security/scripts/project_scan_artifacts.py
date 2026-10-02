@@ -22,6 +22,7 @@ from finalize_scan_contract import (
     ContractError,
     _legacy_sealed_findings_for_validation,
     _prepare_scan_finalization,
+    finding_candidate_id,
     open_scan_local_file_descriptor,
     scan_root_identity,
 )
@@ -50,6 +51,10 @@ class ProjectedScan(TypedDict):
 def _scope_path(value: str) -> str:
     # Canonical paths use POSIX separators; scope matching keeps native case semantics.
     return normcase(value).replace("\\", "/")
+
+
+def _project_candidate_id(source_scan_id: str, candidate_id: str) -> str:
+    return f"{source_scan_id}:{hashlib.sha256(candidate_id.encode()).hexdigest()}"
 
 
 def merge_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -101,7 +106,11 @@ def project_scan_artifacts(
     for index, finding in enumerate(projected):
         for field in ("findingId", "occurrenceId", "fingerprints"):
             finding.pop(field, None)
-        finding.setdefault("provenance", {})["sourceFindingIds"] = [f"{source_scan_id}:{index}"]
+        candidate_id = finding_candidate_id(finding)
+        provenance = finding.setdefault("provenance", {})
+        provenance["sourceFindingIds"] = [f"{source_scan_id}:{index}"]
+        if candidate_id is not None:
+            provenance["candidateId"] = _project_candidate_id(source_scan_id, candidate_id)
         writeup = finding.get("writeup")
         if isinstance(writeup, dict):
             # The child is already beneath the parent. Retain its original tree and
@@ -134,9 +143,7 @@ def project_scan_artifacts(
             if isinstance(row.get("candidateId"), str):
                 candidate = row["candidateId"]
                 row["sourceCandidateId"] = candidate
-                row["candidateId"] = (
-                    f"{source_scan_id}:{hashlib.sha256(candidate.encode()).hexdigest()}"
-                )
+                row["candidateId"] = _project_candidate_id(source_scan_id, candidate)
             if isinstance(row.get("surfaceIds"), list):
                 row["surfaceIds"] = [f"{source_scan_id}/{value}" for value in row["surfaceIds"]]
             if isinstance(row.get("receiptRefs"), list):

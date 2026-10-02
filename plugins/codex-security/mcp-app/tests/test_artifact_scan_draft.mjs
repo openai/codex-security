@@ -1,3 +1,4 @@
+import "./test_checkpoint_serialization.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promises as fsPromises } from "node:fs";
@@ -648,6 +649,124 @@ try {
   );
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
 
+  {
+    const pendingRoot = path.join(root, "pending-only-checkpoints");
+    await mkdir(pendingRoot);
+    await recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      input,
+    );
+    const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
+    await mkdir(pendingDirectory, { recursive: true });
+    await writeFile(
+      path.join(pendingRoot, "checkpoints", "obsolete.json"),
+      "{old incompatible evidence",
+    );
+    const pendingInput = { ...input, findings: [interruptedFinding] };
+    await writeFile(path.join(pendingDirectory, "pending.json"), "");
+    await writeFile(
+      path.join(pendingRoot, "checkpoints", "pending.json"),
+      JSON.stringify(pendingInput),
+    );
+    // A stopped writer may leave its marker before publishing immutable history.
+    await writeFile(path.join(pendingDirectory, "interrupted.json"), "");
+    const originalReaddir = fsPromises.readdir;
+    fsPromises.readdir = async (...args) => {
+      const entries = await originalReaddir(...args);
+      if (args[0] === pendingDirectory)
+        await rm(path.join(pendingDirectory, "pending.json"));
+      return entries;
+    };
+    try {
+      await recordCodexSecurityScanDraft(
+        { ...context, root: pendingRoot },
+        { ...input, findings: [] },
+      );
+    } finally {
+      fsPromises.readdir = originalReaddir;
+    }
+    assert.deepEqual(
+      new Set(
+        (await readJson(pendingRoot, "findings.json")).findings.map(
+          (item) => item.provenance.candidateId,
+        ),
+      ),
+      new Set([
+        finding.provenance.candidateId,
+        interruptedFinding.provenance.candidateId,
+      ]),
+    );
+
+    await writeFile(
+      path.join(pendingRoot, "checkpoints", "interrupted.json"),
+      "{malformed saved history",
+    );
+    await assert.rejects(
+      recordCodexSecurityScanDraft(
+        { ...context, root: pendingRoot },
+        { ...input, findings: [] },
+      ),
+      /current scan checkpoint: stored JSON is malformed/,
+    );
+
+    const stagedRoot = path.join(root, "marked-staged-checkpoint");
+    const stagedContext = { ...context, root: stagedRoot };
+    const stagedDirectory = path.join(stagedRoot, "checkpoints", "pending");
+    await mkdir(stagedDirectory, { recursive: true });
+    await mkdir(path.join(stagedRoot, "drafts"));
+    const { handoffClaimToken: _stagedClaim, ...stagedInput } = input;
+    const stagedContents = JSON.stringify({
+      ...stagedInput,
+      findings: [interruptedFinding],
+      complete: false,
+    });
+    const stagedName =
+      createHash("sha256").update(stagedContents).digest("hex") + ".json";
+    const stagedRelative = `drafts/${scanId}.checkpoint.json`;
+    const stagedPath = path.join(stagedRoot, stagedRelative);
+    const markerPath = path.join(stagedDirectory, stagedName);
+    await writeFile(stagedPath, stagedContents);
+    const reconcileStaged = async () => {
+      let published;
+      await recordCodexSecurityScanDraft(
+        stagedContext,
+        { ...input, findings: [] },
+        async (draft, _digest, _checkpoint, names) => {
+          published = { findings: draft.findings.findings, names };
+        },
+      );
+      return published;
+    };
+    assert.deepEqual(await reconcileStaged(), { findings: [], names: [] });
+    await writeFile(markerPath, stagedRelative);
+    const retainedStage = await reconcileStaged();
+    assert.equal(retainedStage.findings.length, 1);
+    assert.equal(
+      retainedStage.findings[0].provenance.candidateId,
+      interruptedFinding.provenance.candidateId,
+    );
+    assert.deepEqual(retainedStage.names, [stagedName]);
+    await writeFile(stagedPath, stagedContents + "\n");
+    await assert.rejects(reconcileStaged(), /staged checkpoint digest changed/);
+    if (process.platform !== "win32") {
+      await rm(stagedPath);
+      await symlink(path.join(root, "scan-manifest.json"), stagedPath);
+      await assert.rejects(reconcileStaged(), /not a safe regular file/);
+      await rm(stagedPath);
+    }
+    await writeFile(markerPath, "../outside.json");
+    await assert.rejects(reconcileStaged(), /invalid staged checkpoint path/);
+    await writeFile(
+      path.join(stagedRoot, "checkpoints", stagedName),
+      stagedContents,
+    );
+    assert.deepEqual(
+      await reconcileStaged(),
+      retainedStage,
+      "immutable history takes precedence over its obsolete staging marker",
+    );
+  }
+
   const deepParentRoot = path.join(root, "accepted-deep-parent");
   await mkdir(deepParentRoot);
   const deepParentContext = {
@@ -719,12 +838,12 @@ try {
     "partial",
   );
   const savedDeepCheckpoints = await Promise.all(
-    (await readdir(path.join(deepParentRoot, "checkpoints"))).map(
-      async (name) => [
+    (await readdir(path.join(deepParentRoot, "checkpoints")))
+      .filter((name) => name.endsWith(".json"))
+      .map(async (name) => [
         name,
         await readFile(path.join(deepParentRoot, "checkpoints", name), "utf8"),
-      ],
-    ),
+      ]),
   );
   const acceptedDeepDraft = {
     ...input,
@@ -807,7 +926,7 @@ try {
     1,
     "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints",
   );
-  assert.deepEqual(await readdir(path.join(deepParentRoot, "drafts")), []);
+  assert.equal((await readdir(path.join(deepParentRoot, "drafts"))).length, 2);
 
   const pendingRoot = path.join(root, "pending-worker");
   await mkdir(pendingRoot);
@@ -923,11 +1042,13 @@ try {
       "opaque legacy metadata is not interpreted as finding history, but the original proof survives",
     );
     const snapshots = await Promise.all(
-      (await readdir(path.join(historyRoot, "checkpoints"))).map(async (name) =>
-        JSON.parse(
-          await readFile(path.join(historyRoot, "checkpoints", name), "utf8"),
+      (await readdir(path.join(historyRoot, "checkpoints")))
+        .filter((name) => name.endsWith(".json"))
+        .map(async (name) =>
+          JSON.parse(
+            await readFile(path.join(historyRoot, "checkpoints", name), "utf8"),
+          ),
         ),
-      ),
     );
     assert.deepEqual(
       snapshots.find(
@@ -1669,7 +1790,7 @@ try {
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     await assert.rejects(readFile(path.join(root, name)), { code: "ENOENT" });
   }
-  assert.deepEqual(await readdir(path.join(root, "drafts")), []);
+  assert.equal((await readdir(path.join(root, "drafts"))).length, 2);
 
   let conflictAttempts = 0;
   const retried = await recordCodexSecurityScanDraft(
@@ -3340,6 +3461,82 @@ try {
     }),
     /safe regular file|regular file|symbolic link/,
   );
+  for (const indexed of [false, true]) {
+    const orderedRoot = path.join(root, `ordered-finals-${indexed}`);
+    const checkpointDirectory = path.join(orderedRoot, "checkpoints");
+    await mkdir(checkpointDirectory, { recursive: true });
+    if (indexed) await mkdir(path.join(checkpointDirectory, "pending"));
+    const accepted = {
+      scanId,
+      scope: { summary: "Earlier final draft." },
+      complete: true,
+      findings: [finding],
+      coverage: {
+        completeness: "complete",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    const rejected = {
+      scanId,
+      findings: [],
+      coverage: {
+        completeness: "complete",
+        surfaces: [
+          {
+            label: "Reviewed candidate",
+            disposition: "rejected",
+            candidateId: "candidate-b5b7a3d14a148f6a",
+          },
+        ],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    const checkpoints = [accepted, rejected].map((draft) => {
+      const contents = JSON.stringify(draft);
+      return {
+        contents,
+        name: createHash("sha256").update(contents).digest("hex") + ".json",
+      };
+    });
+    assert.ok(
+      checkpoints[0].name < checkpoints[1].name,
+      "fixture hash order puts the older final first",
+    );
+    for (const [index, checkpoint] of checkpoints.entries()) {
+      for (const target of [
+        path.join(checkpointDirectory, checkpoint.name),
+        ...(indexed
+          ? [path.join(checkpointDirectory, "pending", checkpoint.name)]
+          : []),
+      ]) {
+        await writeFile(target, checkpoint.contents);
+        await utimes(target, 1700000000 + index * 10, 1700000000 + index * 10);
+      }
+    }
+    let documents;
+    await recordCodexSecurityScanDraft(
+      { ...context, root: orderedRoot },
+      {
+        ...rejected,
+        handoffClaimToken: claimToken,
+        complete: false,
+        coverage: { ...rejected.coverage, surfaces: [] },
+      },
+      async (saved) => {
+        documents = saved;
+      },
+    );
+    assert.deepEqual(documents.findings.findings, []);
+    assert.equal(documents.coverage.surfaces[0].disposition, "rejected");
+    for (const checkpoint of checkpoints)
+      assert.equal(
+        await readFile(path.join(checkpointDirectory, checkpoint.name), "utf8"),
+        checkpoint.contents,
+      );
+  }
 } finally {
   await rm(root, { recursive: true, force: true });
 }

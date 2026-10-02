@@ -9,7 +9,32 @@ import sys
 from pathlib import Path
 
 import pytest
-from workbench_test_support import register, run_workbench, write_completed_contract
+from workbench_test_support import checkpoint, register, run_workbench, write_completed_contract
+
+
+def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [{"id": "surface", "notes": "Earlier observation"}],
+    }
+    addition = {
+        "surfaces": [
+            {"notes": "Earlier observation", "id": "surface"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }
+    workbench_api["saved_results"].merge_coverage(coverage, addition)
+    assert coverage == {
+        "completeness": "partial",
+        "surfaces": [
+            {"id": "surface", "notes": "Earlier observation"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "explicitExclusions": [],
+        "deferred": [],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }
 
 
 @pytest.fixture
@@ -88,6 +113,54 @@ def completed_projection(
     )
 
 
+def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, monkeypatch):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    originals = json.loads((child_dir / "findings.json").read_text())["findings"]
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert completed.returncode == 0, completed.stderr
+    live = json.loads(completed.stdout)
+    assert live["scanId"] == child["scanId"]
+    assert live["scanDir"] == str(child_dir)
+    assert live["sourceFindings"] == [
+        originals[index] for index in fixture["expected"]["sourceFindingIndexes"]
+    ]
+    assert live["draft"]["coverage"] == fixture["expected"]["coverage"]
+    assert live["draft"]["scanId"] == parent["scanId"]
+    for finding, wanted in zip(
+        live["draft"]["findings"], fixture["expected"]["findings"], strict=True
+    ):
+        assert finding["identity"] == wanted["identity"]
+        assert finding["provenance"]["sourceFindingIds"] == wanted["sourceFindingIds"]
+        assert finding["provenance"]["extensions"] == {"fixture": "preserve-source-provenance"}
+        assert finding.get("writeup") == wanted.get("writeup")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, child["scanId"])
+        project = workbench_api["saved_results"]._stopped_child_draft
+        draft = project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir)
+        assert project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir) == draft
+    expected = fixture["expected"]
+    for actual, wanted, original_index in zip(
+        draft["findings"], expected["findings"], expected["sourceFindingIndexes"], strict=True
+    ):
+        assert actual["identity"]["anchor"] == wanted["identity"]["anchor"]
+        assert actual["identity"]["instance"] == f"{child['scanId']}-saved"
+        assert actual["locations"] == wanted["locations"]
+        assert actual.get("writeup") == wanted.get("writeup")
+        assert actual["extensions"] == {"fixture": "preserve-finding-extensions"}
+        assert actual["provenance"]["sourceFindingIds"] == wanted["sourceFindingIds"]
+        assert actual["provenance"]["sourceFindings"] == [
+            {"id": wanted["sourceFindingIds"][0], "finding": originals[original_index]}
+        ]
+        assert not {"findingId", "occurrenceId", "fingerprints"}.intersection(actual)
+    for key, wanted in expected["coverage"].items():
+        assert draft["coverage"][key] == wanted
+    for destination, source in expected["fileProjections"].items():
+        assert (parent_dir / destination).read_bytes() == (child_dir / source).read_bytes()
+    for name, contents in fixture["files"].items():
+        assert (child_dir / name).read_text() == contents
+
+
 @pytest.mark.parametrize("rewrite", ["findings", "legacy-binding"])
 def test_completed_projection_rejects_rewritten_saved_scan(
     projection_fixture, workbench_api, monkeypatch, rewrite
@@ -123,6 +196,13 @@ def test_completed_projection_rejects_rewritten_saved_scan(
     assert len(listed) == 1
     assert listed[0]["scanId"] == child["scanId"]
     assert listed[0]["progress"]["status"] == "complete"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, child["scanId"])
+        with pytest.raises(SystemExit, match=message):
+            workbench_api["saved_results"]._stopped_child_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir
+            )
     projected = completed_projection(state, parent_dir, parent, child_dir, child)
     assert projected.returncode != 0
     assert message in projected.stderr
@@ -164,6 +244,20 @@ def test_projection_preserves_long_report_references(tmp_path):
     assert (
         completed_projection(state, parent_dir, parent, child_dir, child).stdout == completed.stdout
     )
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    run_workbench(state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Stopped.")
+    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]["findings"][0]
+    assert saved["writeup"] == live["writeup"]
+    assert saved["artifactPaths"] == [
+        live["writeup"]["reportPath"],
+        (projected.parent / "poc/trace.txt").relative_to(parent_dir).as_posix(),
+    ]
 
 
 @pytest.mark.parametrize(
