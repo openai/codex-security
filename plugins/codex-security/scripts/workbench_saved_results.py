@@ -93,8 +93,10 @@ class WorkbenchDbContext:
     now: Callable[[], str]
     optional_text: Callable[..., str | None]
     parse_scan_cost: Callable[..., dict[str, Any] | None]
+    pin_legacy_manifest_digest: Callable[..., None]
     published_manifest_digest: Callable[..., str]
     read_json_object: Callable[[Path], dict[str, Any]]
+    reconcile_completed_scan_cost: Callable[..., None]
     require_canonical_scan_directory: Callable[[Path], Path]
     require_recorded_manifest_digest: Callable[..., None]
     require_scan: Callable[..., Any]
@@ -105,6 +107,38 @@ class WorkbenchDbContext:
     verify_manifest_binding: Callable[..., None]
     workbench_completion_binding: Callable[..., dict[str, Any]]
     workspace_state: Callable[..., dict[str, Any]]
+
+
+def refresh_completed_scan(
+    db: WorkbenchDbContext,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    cost_json: str | None,
+) -> dict[str, Any]:
+    warnings = json.loads(scan["completion_warnings_json"])
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    try:
+        manifest, _, _ = finalize_scan(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            projection_warnings=warnings,
+        )
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    manifest_digest = db.published_manifest_digest(scan_dir, manifest)
+    db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
+    if cost_json is not None and scan["recipe_json"] is not None:
+        db.reconcile_completed_scan_cost(connection, scan, cost_json)
+    if warnings != json.loads(scan["completion_warnings_json"]):
+        with connection:
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(warnings), scan["id"]),
+            )
+    return db.scan_context(connection, scan["id"])
 
 
 def _encoded(value: Any) -> bytes:

@@ -595,7 +595,7 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         f"sys.path.insert(0, {str(scripts_dir)!r})\n"
         "import workbench_db\n"
         "import workbench_saved_results\n"
-        "def fail_after_sources_are_frozen(prepared):\n"
+        "def fail_after_sources_are_frozen(prepared, *, projection_warnings=None):\n"
         "    raise OSError('injected late publication failure')\n"
         "workbench_saved_results._write_prepared_scan_finalization = "
         "fail_after_sources_are_frozen\n"
