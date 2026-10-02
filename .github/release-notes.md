@@ -40,6 +40,7 @@
 - add wide Windows candidate file operations ([#836](https://github.com/openai/codex-security/pull/836))
 - port candidate normalization to TypeScript ([#837](https://github.com/openai/codex-security/pull/837))
 - improve authentication and Blue/Red support ([#1188](https://github.com/openai/codex-security/pull/1188))
+- bump @linear/sdk from 95.2.0 to 96.0.0 in /sdk/typescript ([#1191](https://github.com/openai/codex-security/pull/1191))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
