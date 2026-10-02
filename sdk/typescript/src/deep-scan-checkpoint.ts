@@ -24,17 +24,11 @@ interface CompositionMetadata {
   consecutiveErrors: number;
   mergeFailures?: number;
   /** Set before the first paid merge request; deterministic grouping stays free. */
-  mergeStarted?: boolean;
+  mergeStarted?: true;
   /** Final total captured after all work drains, before artifact sealing. */
   finalCost?: ScanCost | null;
   /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
   costUnavailable?: true;
-  legacy?: {
-    discoveryRuns?: number;
-    cost?: ScanCost;
-    originThreadId?: string;
-    [extension: string]: unknown;
-  };
   /** A discovery stop decision. Sealing and publication belong to the parent. */
   terminalReason?: "saturated" | "capped" | "failed" | "canceled";
   [extension: string]: unknown;
