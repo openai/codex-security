@@ -59,6 +59,7 @@ new Function("require", "module", "exports", bundle.outputFiles[0].text)(
   module.exports,
 );
 const {
+  NativeScanHost,
   prepareNativeScan,
   nativeScanConfiguration,
   scanRuntimeCodexConfig,
@@ -322,6 +323,248 @@ test("native preparation excludes scan output and knowledge sources from executa
     restoreEnvironment();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("pre-aborted native waiters leave the accepted scan running", async () => {
+  const started = Promise.withResolvers();
+  const completed = Promise.withResolvers();
+  let preparations = 0;
+  let signal;
+  const host = new NativeScanHost(async () => {
+    preparations++;
+    return {
+      options: { mode: "deep" },
+      client: {
+        run(_repository, options) {
+          signal = options.signal;
+          started.resolve();
+          return completed.promise;
+        },
+        async close() {},
+      },
+    };
+  });
+  const reason = new Error("detached before waiting");
+  const waiter = AbortSignal.abort(reason);
+  assert.throws(
+    () => host.run(input(), waiter),
+    (error) => error === reason,
+  );
+  await started.promise;
+  const joined = host.run(input());
+  assert.throws(
+    () => host.run(input(), waiter),
+    (error) => error === reason,
+  );
+  assert.equal(preparations, 1);
+  assert.equal(signal.aborted, false);
+  completed.resolve({ scanDir: "sealed-parent" });
+  assert.deepEqual(await joined, { scanDir: "sealed-parent" });
+});
+
+test("native waiters join one ordinary scan and detaching leaves it running", async () => {
+  const started = Promise.withResolvers();
+  const completed = Promise.withResolvers();
+  let preparations = 0;
+  let closes = 0;
+  let signal;
+  const host = new NativeScanHost(async () => {
+    preparations++;
+    return {
+      options: { mode: "deep" },
+      client: {
+        run(_repository, options) {
+          signal = options.signal;
+          started.resolve();
+          return completed.promise;
+        },
+        async close() {
+          closes++;
+        },
+      },
+    };
+  });
+  const waiter = new AbortController();
+  const first = host.run(input(), waiter.signal);
+  const joined = host.run(input());
+  await started.promise;
+  const rejected = assert.rejects(first, /detached/);
+  waiter.abort(new Error("detached"));
+  await rejected;
+  assert.equal(signal.aborted, false);
+  completed.resolve({ scanDir: "sealed-parent" });
+  assert.deepEqual(await joined, { scanDir: "sealed-parent" });
+  assert.equal(preparations, 1);
+  assert.equal(closes, 1);
+});
+
+for (const outcome of ["completed", "failed"]) {
+  test(`native cleanup preserves the ${outcome} scan outcome and drains before rejoining`, async (t) => {
+    const closing = Promise.withResolvers();
+    const releaseClose = Promise.withResolvers();
+    const primaryError = new Error("Synthetic startup failure");
+    const cleanupError = new Error("Synthetic bootstrap cleanup failure");
+    const result = { scanDir: "sealed-parent" };
+    const warnings = [];
+    t.mock.method(console, "warn", (...args) => {
+      warnings.push(args);
+      if (warnings.length === 2) throw new Error("Synthetic warning failure");
+    });
+    let preparations = 0;
+    const host = new NativeScanHost(async () => {
+      preparations++;
+      return {
+        options: { mode: "deep" },
+        client: {
+          async run() {
+            if (outcome === "failed") throw primaryError;
+            return result;
+          },
+          async close() {
+            closing.resolve();
+            await releaseClose.promise;
+          },
+        },
+      };
+    });
+    const first = host.run(input());
+    const joined = host.run(input());
+    let settled = false;
+    void first.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await closing.promise;
+    assert.equal(settled, false);
+    assert.equal(preparations, 1);
+    releaseClose.reject(cleanupError);
+    for (const pending of [first, joined]) {
+      if (outcome === "failed")
+        await assert.rejects(pending, (error) => error === primaryError);
+      else assert.equal(await pending, result);
+    }
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0][1], cleanupError);
+    const next = host.run(input());
+    if (outcome === "failed")
+      await assert.rejects(next, (error) => error === primaryError);
+    else assert.equal(await next, result);
+    assert.equal(preparations, 2);
+    assert.equal(warnings.length, 2);
+  });
+}
+
+test("native cancellation drains only its parent; shutdown drains the rest", async () => {
+  const started = new Map();
+  const closed = [];
+  const closing = Promise.withResolvers();
+  const releaseClose = Promise.withResolvers();
+  const host = new NativeScanHost(async ({ scan }) => ({
+    options: { mode: "deep" },
+    client: {
+      run(_repository, { signal }) {
+        started.set(scan.scanId, signal);
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          }),
+        );
+      },
+      async close() {
+        if (scan.scanId === "second") {
+          closing.resolve();
+          await releaseClose.promise;
+        }
+        closed.push(scan.scanId);
+      },
+    },
+  }));
+  const first = host.run(input("first"));
+  const second = host.run(input("second"));
+  const firstRejected = assert.rejects(first, /user_canceled_scan/);
+  const secondRejected = assert.rejects(second, (error) => {
+    assert.equal(error.constructor.name, "ScanTransportClosedError");
+    assert.equal(error.message, "mcp_transport_closed");
+    return true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await host.cancel("first");
+  await firstRejected;
+  assert.equal(started.get("first").reason.constructor, Error);
+  assert.equal(started.get("second").aborted, false);
+  assert.deepEqual(closed, ["first"]);
+  let drained = false;
+  const shutdown = host.close().then(() => {
+    drained = true;
+  });
+  await closing.promise;
+  assert.equal(drained, false);
+  assert.deepEqual(closed, ["first"]);
+  releaseClose.resolve();
+  await shutdown;
+  await secondRejected;
+  assert.deepEqual(closed, ["first", "second"]);
+});
+
+for (const action of ["cancel", "close"]) {
+  test(`native ${action} during preparation closes the client without starting it`, async () => {
+    const preparing = Promise.withResolvers();
+    const ready = Promise.withResolvers();
+    let runs = 0;
+    let closes = 0;
+    const host = new NativeScanHost(async () => {
+      preparing.resolve();
+      await ready.promise;
+      return {
+        options: { mode: "deep" },
+        client: {
+          async run() {
+            runs++;
+          },
+          async close() {
+            closes++;
+          },
+        },
+      };
+    });
+    const request = host.run(input());
+    const rejected = assert.rejects(
+      request,
+      action === "cancel" ? /user_canceled_scan/ : /mcp_transport_closed/,
+    );
+    await preparing.promise;
+    const stopped =
+      action === "cancel" ? host.cancel(input().scan.scanId) : host.close();
+    ready.resolve();
+    await stopped;
+    await rejected;
+    assert.equal(runs, 0);
+    assert.equal(closes, 1);
+  });
+}
+
+test("native shutdown prevents an in-flight request from starting a new scan", async () => {
+  const registered = Promise.withResolvers();
+  let preparations = 0;
+  const host = new NativeScanHost(async () => {
+    preparations++;
+    throw new Error("A closed host must not prepare another scan.");
+  });
+  // A tool request can be registering its scan when the MCP transport closes.
+  const request = registered.promise.then(() => host.run(input()));
+  await host.close();
+  registered.resolve();
+  await assert.rejects(request, (error) => {
+    assert.equal(error.constructor.name, "ScanTransportClosedError");
+    assert.equal(error.message, "mcp_transport_closed");
+    return true;
+  });
+  assert.equal(preparations, 0);
 });
 
 test("native scans preserve selected Codex homes and saved settings", async () => {
