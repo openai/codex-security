@@ -92,7 +92,8 @@ async function startFailedPostScan(scenario: FailedPostScanScenario) {
       createCodex: () => ({
         startThread: () => ({
           id: "thread-1",
-          async runStreamed() {
+          async runStreamed(_input, options) {
+            expect(options.cyberAccessProgram).toBe("daybreak_blue");
             turns += 1;
             if (turns === 1) {
               await copyCompletedScan(root);
@@ -126,6 +127,7 @@ async function startFailedPostScan(scenario: FailedPostScanScenario) {
   );
   const scan = client.run(repository, {
     postScanPrompt: "Draft confirmed fixes.",
+    cyberAccessProgram: "daybreak_blue",
   });
   return {
     client,

@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -31,7 +32,7 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth"
+    "safetyIdentifier" | "postScanPrompt" | "auth" | "cyberAccessProgram"
   > = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -457,6 +458,7 @@ function resumeClient(
       environment: f.environment,
       prepareRuntime: async () => {
         const runtime = preparedRuntime(f.codexHome);
+        runtime.configPath = join(f.root, "resumed-runtime.toml");
         runtime.environment = Object.fromEntries(
           Object.entries(f.environment).filter(
             (entry): entry is [string, string] => entry[1] !== undefined,
@@ -888,6 +890,7 @@ test.each([
   async (auth, bulk) => {
     const settings = {
       auth,
+      cyberAccessProgram: "daybreak_blue" as const,
       safetyIdentifier:
         auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
@@ -927,6 +930,9 @@ test.each([
           );
           expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
           expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+          expect(options.config?.["features"]).toMatchObject({
+            api_key_cyber_access_programs: true,
+          });
           return {
             startThread() {
               throw new Error("Resume must use the original session.");
@@ -935,7 +941,10 @@ test.each([
               expect(threadId).toBe(f.threadId);
               return {
                 id: threadId,
-                async runStreamed(prompt) {
+                async runStreamed(prompt, turnOptions) {
+                  expect(turnOptions?.cyberAccessProgram).toBe(
+                    settings.cyberAccessProgram,
+                  );
                   prompts.push(prompt as string);
                   if (prompts.length === 1) {
                     expect(prompt).toContain(
@@ -948,6 +957,30 @@ test.each([
                     expect(deep).toContain("subagents = 0");
                     expect(deep).toContain("stop_after_consecutive_errors = 2");
                     expect(deep).toContain("max_time_hours = 1.5");
+                    const workerConfigPath =
+                      options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                    expect(workerConfigPath).toBe(
+                      join(f.root, "resumed-runtime.toml"),
+                    );
+                    const workerConfig = parseToml(
+                      await readFile(workerConfigPath!, "utf8"),
+                    );
+                    expect(workerConfig).toMatchObject({
+                      codex_security: {
+                        cyber_access_program: settings.cyberAccessProgram,
+                      },
+                      features: {
+                        api_key_cyber_access_programs: true,
+                      },
+                    });
+                    const saved = await f.command([
+                      "get-scan-recipe",
+                      "--scan-id",
+                      f.scanId,
+                    ]);
+                    expect(saved["recipe"]).toMatchObject({
+                      cyberAccessProgram: settings.cyberAccessProgram,
+                    });
                     await finishDiscovery(f);
                   }
                   return { events: completedEvents(threadId) };

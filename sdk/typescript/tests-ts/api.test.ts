@@ -4170,6 +4170,7 @@ describe("CodexSecurity orchestration", () => {
             return mockWorkbench(args, input);
           },
           async matchFindings(input, options, runtimeOptions) {
+            expect(options?.cyberAccessProgram).toBe("daybreak_blue");
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -4181,7 +4182,10 @@ describe("CodexSecurity orchestration", () => {
                   codex: {
                     startThread() {
                       return {
-                        async run() {
+                        async run(_input, turnOptions) {
+                          expect(turnOptions.cyberAccessProgram).toBe(
+                            "daybreak_blue",
+                          );
                           matchingTurns += 1;
                           return {
                             finalResponse: JSON.stringify({
@@ -4229,6 +4233,7 @@ describe("CodexSecurity orchestration", () => {
 
       const result = await client.run(repository, {
         ...(limited ? { maxCostUsd: 1 } : {}),
+        cyberAccessProgram: "daybreak_blue",
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");

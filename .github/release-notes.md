@@ -46,6 +46,7 @@
 - remove unused OS primitives and proofs ([#1192](https://github.com/openai/codex-security/pull/1192))
 - remove unused scan machinery and share fixtures ([#1193](https://github.com/openai/codex-security/pull/1193))
 - consolidate helpers and adjacent tooling ([#1194](https://github.com/openai/codex-security/pull/1194))
+- support per-scan Cyber access programs ([#1185](https://github.com/openai/codex-security/pull/1185))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

@@ -564,6 +564,9 @@ describe("custom validation", () => {
                       ? "thread-1"
                       : "validation-thread",
                   async runStreamed(prompt, turnOptions) {
+                    expect(turnOptions.cyberAccessProgram).toBe(
+                      "daybreak_blue",
+                    );
                     turns += 1;
                     if (turns === 1) {
                       expect(prompt).not.toContain(workflow);
@@ -687,6 +690,7 @@ describe("custom validation", () => {
       );
       try {
         const pending = client.run(repository, {
+          cyberAccessProgram: "daybreak_blue",
           ...(scenario === "standard"
             ? { validationPromptFile: workflowFile }
             : { validationPrompt: workflow }),

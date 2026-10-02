@@ -883,6 +883,7 @@ test("plans from a Git inventory without tools or ignored files", async () => {
   await mkdir(join(paths.repository, "ignored"));
   await writeFile(join(paths.repository, "ignored", "secret.txt"), "synthetic");
   const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_blue",
     codex: {
       startThread(options) {
         expect(options).toMatchObject({
@@ -896,6 +897,7 @@ test("plans from a Git inventory without tools or ignored files", async () => {
             expect(prompt).toContain("apps/api");
             expect(prompt).not.toContain("secret.txt");
             expect(options.outputSchema).toBeDefined();
+            expect(options.cyberAccessProgram).toBe("daybreak_blue");
             return {
               finalResponse: JSON.stringify({ components: [components[0]] }),
             };
@@ -966,11 +968,13 @@ test("plans large inventories in separate contexts and fills omissions within ea
   const batches: string[][] = [];
   let threads = 0;
   const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_red",
     codex: {
       startThread: () => {
         threads++;
         return {
-          run: async (prompt) => {
+          run: async (prompt, options) => {
+            expect(options.cyberAccessProgram).toBe("daybreak_red");
             expect(prompt.length).toBeLessThanOrEqual(1_048_576);
             const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
             batches.push(scopes);
@@ -1343,7 +1347,7 @@ test.each(["auto", "explicit", "file"])(
 );
 
 test.each(["auto", "chatgpt", "api-key"] as const)(
-  "CLI uses %s authentication for planning, scans, and matching",
+  "CLI uses %s authentication and the selected Cyber program for planning, scans, and matching",
   async (auth) => {
     const paths = await fixture();
     const environment = {
@@ -1357,21 +1361,29 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       matched = false;
     const result = await cli(
       paths,
-      ["--auto", ...(auth === "auto" ? [] : ["--auth", auth])],
+      [
+        "--auto",
+        "--cyber-access-program",
+        "daybreak_blue",
+        ...(auth === "auto" ? [] : ["--auth", auth]),
+      ],
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
           expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
           planned = true;
           return { components: components.slice(0, 2) };
         },
         createSecurity: client(async (_repository, options) => {
           expect(options.auth).toBe(auth);
+          expect(options.cyberAccessProgram).toBe("daybreak_blue");
           return completed(options);
         }),
         matchFindings: async (_input, options) => {
           expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
           matched = true;
           return noMatches;
