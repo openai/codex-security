@@ -21,10 +21,15 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
-import type { JsonObject } from "../src/config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  deepMerge,
+  type JsonObject,
+} from "../src/config.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
+  disabledMcpServers,
   matchCompletedScan,
   matchScanFindings,
   matchScanFindingsInternal,
@@ -55,6 +60,21 @@ afterEach(async () => {
     }),
   );
 });
+
+function launchConfig(overrides: readonly string[]): JsonObject {
+  return overrides.reduce(
+    (config, value) => deepMerge(config, parse(value) as JsonObject),
+    {},
+  );
+}
+
+function argvConfig(argv: readonly string[]): JsonObject {
+  return launchConfig(
+    argv.flatMap((value, index) =>
+      value === "--config" ? [argv[index + 1]!] : [],
+    ),
+  );
+}
 
 function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
@@ -87,6 +107,23 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test.each([{}, { codexOverrides: { model_reasoning_effort: "high" } }])(
+    "merges default model settings for an injected client with %j",
+    async (config) => {
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        { codex, config },
+      );
+      expect(calls.threadOptions).toMatchObject({
+        model: DEFAULT_CODEX_CONFIG["model"],
+        modelReasoningEffort:
+          config.codexOverrides?.model_reasoning_effort ??
+          DEFAULT_CODEX_CONFIG["model_reasoning_effort"],
+      });
+    },
+  );
+
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
@@ -289,6 +326,7 @@ process.exit(0);
                   }
                 : {
                     codexOverrides: {
+                      default_permissions: "native",
                       permissions: { native: constraints },
                       projects: {
                         [join(home, "literal.[private]")]: {
@@ -329,8 +367,10 @@ process.exit(0);
         'default_permissions="codex_security_comparison"',
       );
       expect(overrides).toContain('approval_policy="never"');
-      expect(overrides).toContain("features.shell_tool=false");
-      expect(overrides).toContain("features.plugins=false");
+      expect(launchConfig(overrides)["features"]).toMatchObject({
+        shell_tool: false,
+        plugins: false,
+      });
       expect(constrained).not.toContain("--sandbox");
       expect(
         overrides.some((value) => value.startsWith("permissions.native")),
@@ -359,12 +399,13 @@ process.exit(0);
   test.each([
     {
       name: "custom",
-      provider: { env_key: "OPENAI_API_KEY" },
+      provider: { name: "Synthetic", env_key: "OPENAI_API_KEY" },
       ambient: false,
     },
     {
       name: "custom",
       provider: {
+        name: "Synthetic",
         auth: { type: "command", command: "synthetic-auth-provider" },
       },
       ambient: false,
@@ -470,15 +511,17 @@ process.exit(0);
           expect(native.argv).toContain('model="synthetic-native-model"');
           expect(native.argv).toContain('model_reasoning_effort="ultra"');
           if (provider["env_key"] !== undefined) {
-            expect(native.argv).toContain(
-              `model_providers.${name}.env_key="${provider["env_key"]}"`,
-            );
+            expect(argvConfig(native.argv)["model_providers"]).toMatchObject({
+              [name]: { env_key: provider["env_key"] },
+            });
           }
         }
         for (const capture of [native, ordinary]) {
           expect(capture.argv).toContain("read-only");
-          expect(capture.argv).toContain("features.shell_tool=false");
-          expect(capture.argv).toContain("features.plugins=false");
+          expect(argvConfig(capture.argv)["features"]).toMatchObject({
+            shell_tool: false,
+            plugins: false,
+          });
         }
         if (name !== "custom") {
           for (const capture of [native, ordinary]) {
@@ -495,6 +538,7 @@ process.exit(0);
           expect(parse(override)).toEqual({
             model_providers: {
               custom: {
+                ...provider,
                 auth: { ...(provider["auth"] as JsonObject), cwd: home },
               },
             },
@@ -643,7 +687,10 @@ process.exit(0);
                       model_provider: "synthetic.provider",
                       model_providers: {
                         "synthetic.provider": {
-                          auth: { args: ["override"], cwd: "~/helpers" },
+                          auth: {
+                            args: ["override"],
+                            cwd: join(home, "helpers"),
+                          },
                         },
                       },
                     },
@@ -667,22 +714,24 @@ process.exit(0);
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
         if (selection === "profile") {
-          expect(captured?.config?.["profile"]).toBeUndefined();
-          expect(captured?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
+          expect(
+            launchConfig(captured!.configOverrides!)["profile"],
+          ).toBeUndefined();
+          expect(
+            launchConfig(captured!.configOverrides!)["model_provider"],
+          ).toBe("synthetic.provider");
         }
         if (commandAuth) {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(parse(captured!.configOverrides![0]!)).toEqual({
+          expect(launchConfig(captured!.configOverrides!)).toMatchObject({
             model_providers: {
               "synthetic.provider": {
                 ...provider,
                 auth: {
                   ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  cwd: selection === "overrides" ? join(home, "helpers") : home,
                   args: selection === "overrides" ? ["override"] : ["original"],
                 },
               },
@@ -692,7 +741,9 @@ process.exit(0);
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
-          expect(captured?.configOverrides).toBeUndefined();
+          expect(
+            launchConfig(captured!.configOverrides!)["model_provider"],
+          ).toBe("openai");
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
@@ -847,7 +898,10 @@ process.exit(0);
         Codex.prototype,
         "startThread",
       ).mockImplementation(function (this: Codex, options) {
-        config = (this as unknown as { options: CodexOptions }).options.config;
+        config = launchConfig(
+          (this as unknown as { options: CodexOptions }).options
+            .configOverrides!,
+        ) as CodexOptions["config"];
         codexPath = (this as unknown as { options: CodexOptions }).options
           .codexPathOverride;
         codexEnvironment = (this as unknown as { options: CodexOptions })
@@ -929,6 +983,44 @@ process.exit(0);
       }
     },
   );
+
+  test("enumerates project MCP servers with captured scan trust after shared-home changes", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-matcher-trust-"));
+    temporaryDirectories.push(home);
+    const repositoryPath = join(home, "repository");
+    await mkdir(join(repositoryPath, ".git"), { recursive: true });
+    const repository = await realpath(repositoryPath);
+    await mkdir(join(repository, ".codex"));
+    await writeFile(
+      join(repository, ".codex", "config.toml"),
+      stringify({ mcp_servers: { project: { command: "synthetic-project" } } }),
+    );
+    const capturedConfig = {
+      projects: { [repository]: { trust_level: "trusted" } },
+      features: { plugins: true },
+    };
+    const competingConfig = stringify({
+      projects: { [repository]: { trust_level: "untrusted" } },
+    });
+    await writeFile(join(home, "config.toml"), competingConfig);
+    const environment = {
+      PATH: process.env["PATH"] ?? "",
+      SystemRoot: process.env["SystemRoot"] ?? "",
+      TEMP: process.env["TEMP"] ?? "",
+      TMP: process.env["TMP"] ?? "",
+      CODEX_HOME: home,
+    };
+    const servers = await disabledMcpServers(
+      resolveCodexCommand(environment),
+      capturedConfig,
+      environment,
+      { workingDirectory: repository },
+    );
+    expect(servers).toEqual({ project: { enabled: false } });
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      competingConfig,
+    );
+  });
 
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -1270,6 +1362,7 @@ process.exit(0);
         preserveProviderEnvironment: true,
         config: {
           codexOverrides: {
+            model: "synthetic-model",
             model_reasoning_effort: "ultra",
             model_provider: "synthetic",
           },
@@ -1313,6 +1406,7 @@ process.exit(0);
             preserveProviderEnvironment: true,
             config: {
               codexOverrides: {
+                model: "synthetic-model",
                 model_reasoning_effort: "ultra",
                 model_provider: "synthetic",
               },
