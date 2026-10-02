@@ -348,7 +348,7 @@ fn main() -> std::io::Result<()> {
             if entry?
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".blocked-output.")
+                .starts_with(".candidates-")
             {
                 return Err(io::Error::other(
                     "Candidate temporary output was not removed",
