@@ -13,6 +13,8 @@ import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
 import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
+import { ScanTransportClosedError } from "../../../../sdk/typescript/src/scan-execution.js";
+import type { ScanResult } from "../../../../sdk/typescript/src/result.js";
 import {
   resolveCodexPath,
   resolveTrustedCodex,
@@ -41,6 +43,75 @@ export interface NativeScanInput {
 
 type NativeClient = Pick<CodexSecurity, "run" | "close">;
 type PreparedNativeScan = { client: NativeClient; options: ScanOptions };
+
+/** Native tools join the same ordinary scan operation until it finishes. */
+export class NativeScanHost {
+  private closed = false;
+  private readonly active = new Map<
+    string,
+    {
+      controller: AbortController;
+      promise: Promise<ScanResult>;
+    }
+  >();
+
+  constructor(private readonly prepare = prepareNativeScan) {}
+
+  run(input: NativeScanInput, waiterSignal?: AbortSignal): Promise<ScanResult> {
+    if (this.closed)
+      return Promise.reject(
+        new ScanTransportClosedError("mcp_transport_closed"),
+      );
+    let active = this.active.get(input.scan.scanId);
+    if (!active) {
+      const controller = new AbortController();
+      const promise = Promise.resolve()
+        .then(async () => {
+          const { client, options } = await this.prepare(
+            input,
+            controller.signal,
+          );
+          try {
+            controller.signal.throwIfAborted();
+            return await client.run(input.scan.targetPath, {
+              ...options,
+              signal: controller.signal,
+            });
+          } finally {
+            try {
+              await client.close();
+            } catch (error) {
+              try {
+                console.warn("Could not clean up the native scan:", error);
+              } catch {}
+            }
+          }
+        })
+        .finally(() => this.active.delete(input.scan.scanId));
+      active = { controller, promise };
+      this.active.set(input.scan.scanId, active);
+      void promise.catch(() => undefined);
+    }
+    return waitForScan(active.promise, waiterSignal);
+  }
+
+  async cancel(scanId: string, reason = "user_canceled_scan"): Promise<void> {
+    const active = this.active.get(scanId);
+    if (!active) return;
+    active.controller.abort(new Error(reason));
+    await active.promise.catch(() => undefined);
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    const active = [...this.active.values()];
+    for (const run of active)
+      run.controller.abort(
+        new ScanTransportClosedError("mcp_transport_closed"),
+      );
+    await Promise.allSettled(active.map((run) => run.promise));
+  }
+}
 
 export async function prepareNativeScan(
   input: NativeScanInput,
@@ -185,4 +256,20 @@ export async function prepareNativeScan(
       },
     },
   };
+}
+
+function waitForScan(
+  promise: Promise<ScanResult>,
+  signal?: AbortSignal,
+): Promise<ScanResult> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () =>
+      reject(signal.reason ?? new Error("Deep Scan waiter detached."));
+    signal.addEventListener("abort", abort, { once: true });
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
 }
