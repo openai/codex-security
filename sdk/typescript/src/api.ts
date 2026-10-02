@@ -154,6 +154,7 @@ import {
 import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
+  type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
@@ -264,6 +265,8 @@ export interface ScanOptions extends ScanSettings {
   preserveProviderEnvironment?: boolean;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
+  /** @internal Frozen inputs shared by ordinary passes of the same Deep Scan. */
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal A complete ordinary pass owned by a Deep Scan. */
   deepScanPass?: boolean;
   /** @internal Persist composition membership after normal registration. */
@@ -402,6 +405,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
   preparedExecution?: PreparedExecution;
+  preparedKnowledgeBase?: PreparedKnowledgeBase;
 }
 
 interface ClientDependencies {
@@ -441,6 +445,7 @@ export class CodexSecurity {
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
   readonly #preparedExecution: PreparedExecution | undefined;
+  readonly #preparedKnowledgeBase: PreparedKnowledgeBase | undefined;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -466,6 +471,7 @@ export class CodexSecurity {
     this.#dependencies = dependencies;
     this.#surface = runtimeOptions.surface;
     this.#preparedExecution = runtimeOptions.preparedExecution;
+    this.#preparedKnowledgeBase = runtimeOptions.preparedKnowledgeBase;
   }
 
   public async run(
@@ -1233,7 +1239,8 @@ export class CodexSecurity {
       if (
         requestedOutput === null ||
         this.#runtime === null ||
-        options.knowledgeBasePaths?.length
+        options.knowledgeBasePaths?.length ||
+        options.knowledgeBaseSnapshot !== undefined
       ) {
         temporaryRoot = await realpath(tmpdir());
         requireOutputOutsideRepository(
@@ -1242,11 +1249,13 @@ export class CodexSecurity {
           "temporary",
         );
       }
-      if (options.knowledgeBasePaths?.length) {
-        knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
-          signal,
-        );
+      if (options.knowledgeBasePaths?.length || options.knowledgeBaseSnapshot) {
+        knowledgeBase =
+          this.#preparedKnowledgeBase ??
+          (await prepareKnowledgeBase(
+            options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths!,
+            signal,
+          ));
       }
       checkOpen();
 
@@ -2140,7 +2149,9 @@ export class CodexSecurity {
       // throws synchronously, still cannot skip a pending startup-lock release below.
       try {
         for (const cleanup of await Promise.allSettled([
-          knowledgeBase?.cleanup(),
+          this.#preparedKnowledgeBase === undefined
+            ? knowledgeBase?.cleanup()
+            : undefined,
           removeTargetPathsFile(targetPathsFile),
         ])) {
           if (cleanup.status === "rejected") {
