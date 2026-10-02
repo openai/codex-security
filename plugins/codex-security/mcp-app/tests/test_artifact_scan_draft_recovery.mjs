@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { promises as fsPromises } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -37,6 +38,92 @@ const findingFor = (candidateId) => ({
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
 });
+
+for (const observation of ["checkpoint head", "worker result"]) {
+  test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
+    const f = await fixture(t, "worker");
+    const task = { id: "review", ...generic };
+    const headPath = path.join(f.root, "checkpoint-head.json");
+    const resultPath = path.join(f.root, "result.json");
+    await f.write(f.draft({ deferred: [task] }));
+    const reopenedHead = JSON.parse(await readFile(headPath, "utf8"));
+    await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
+    assert.deepEqual((await f.read()).deferred, []);
+    const checkpoints = path.join(f.root, "checkpoints");
+    for (const name of await readdir(checkpoints)) {
+      const checkpointPath = path.join(checkpoints, name);
+      const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+      const time = checkpoint.coverage.deferred.length ? 50 : 100;
+      await utimes(checkpointPath, time, time);
+    }
+
+    const replacementPath = path.join(f.root, "replacement.json");
+    if (observation === "checkpoint head") {
+      await utimes(headPath, 100, 100);
+      await utimes(resultPath, 200, 200);
+      await writeFile(replacementPath, JSON.stringify(reopenedHead));
+    } else {
+      await writeFile(headPath, JSON.stringify(reopenedHead));
+      await utimes(headPath, 200, 200);
+      await utimes(resultPath, 100, 100);
+      await writeFile(
+        replacementPath,
+        JSON.stringify(f.draft({ deferred: [task] }, true)),
+      );
+    }
+    await utimes(replacementPath, 300, 300);
+
+    let replaced = false;
+    const replaceOnce = async (destination) => {
+      if (replaced) return;
+      replaced = true;
+      await rename(replacementPath, destination);
+    };
+    const originalLstat = fsPromises.lstat;
+    const originalReadFile = fsPromises.readFile;
+    const originalOpen = fsPromises.open;
+    if (observation === "checkpoint head") {
+      fsPromises.lstat = async (filename, ...args) => {
+        const metadata = await originalLstat(filename, ...args);
+        if (filename === headPath) await replaceOnce(headPath);
+        return metadata;
+      };
+    } else {
+      // Replace after returning the old file's bytes, for both pathname and
+      // descriptor readers. Its observation time must still belong to those bytes.
+      fsPromises.readFile = async (filename, ...args) => {
+        const contents = await originalReadFile(filename, ...args);
+        if (filename === resultPath) await replaceOnce(resultPath);
+        return contents;
+      };
+      fsPromises.open = async (filename, ...args) => {
+        const handle = await originalOpen(filename, ...args);
+        if (filename === resultPath) {
+          const read = handle.readFile.bind(handle);
+          handle.readFile = async (...readArgs) => {
+            const contents = await read(...readArgs);
+            await replaceOnce(resultPath);
+            return contents;
+          };
+        }
+        return handle;
+      };
+    }
+    try {
+      const result = await f.write(f.draft({}, true));
+      assert.equal(replaced, true);
+      for (const coverage of [result.coverage, await f.read()]) {
+        assert.deepEqual(coverage.deferred, [task]);
+        assert.deepEqual(coverage.resolvedDeferred ?? [], []);
+        assert.equal(coverage.completeness, "partial");
+      }
+    } finally {
+      fsPromises.lstat = originalLstat;
+      fsPromises.readFile = originalReadFile;
+      fsPromises.open = originalOpen;
+    }
+  });
+}
 
 for (const headTime of [1, 2, 3]) {
   test(`worker: stopped recovery retains accepted coverage with head time ${headTime}`, async (t) => {

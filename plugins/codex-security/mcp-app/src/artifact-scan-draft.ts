@@ -11,6 +11,7 @@ import {
   artifactDestination,
   readArtifactJsonObject,
   readArtifactText,
+  readArtifactTextWithMetadata,
   replaceArtifactJson,
 } from "./artifact-io.js";
 import {
@@ -965,17 +966,19 @@ async function readCheckpointHead(
       `scan checkpoint: ${kind} checkpoint head is not a safe file.`,
     );
   const label = `${kind} scan checkpoint head`;
-  const head = parseJsonObject(
-    await readArtifactText(context, ["checkpoint-head.json"], label),
+  const saved = await readArtifactTextWithMetadata(
+    context,
+    ["checkpoint-head.json"],
     label,
   );
+  const head = parseJsonObject(saved.contents, label);
   if (
     typeof head.checkpoint !== "string" ||
     !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
   )
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
   // Reselecting an immutable checkpoint updates only the head file.
-  return { checkpoint: head.checkpoint, modifiedMs: Number(metadata.mtimeMs) };
+  return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
 }
 
 async function readSavedCheckpoints(
@@ -1086,18 +1089,18 @@ async function readPreviousScanDraft(
   context: ArtifactContext,
 ): Promise<{ input?: ScanDraftInput; digest: string; modifiedMs: number }> {
   if (context.layout === "worker") {
-    const contents = await readOptionalArtifactText(context, ["result.json"]);
+    const saved = await readOptionalArtifactTextWithMetadata(context, [
+      "result.json",
+    ]);
     return {
       input:
-        contents === undefined
+        saved === undefined
           ? undefined
           : parsePersistedScanDraft(
-              parseJsonObject(contents, "previous scan draft"),
+              parseJsonObject(saved.contents, "previous scan draft"),
             ),
-      digest: draftDigest([["result.json", contents]]),
-      modifiedMs: Number(
-        (await lstatIfExists(join(context.root, "result.json")))?.mtimeMs ?? 0,
-      ),
+      digest: draftDigest([["result.json", saved?.contents]]),
+      modifiedMs: saved?.modifiedMs ?? 0,
     };
   }
   const names = [
@@ -1105,9 +1108,10 @@ async function readPreviousScanDraft(
     "findings.json",
     "coverage.json",
   ] as const;
-  const contents = await Promise.all(
-    names.map((name) => readOptionalArtifactText(context, [name])),
+  const saved = await Promise.all(
+    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
   );
+  const contents = saved.map((record) => record?.contents);
   const digest = draftDigest(
     names.map((name, index) => [name, contents[index]]),
   );
@@ -1134,14 +1138,8 @@ async function readPreviousScanDraft(
     // File-authored coverage may leave its manifest unchanged; tool writes have a head.
     modifiedMs:
       (await readCheckpointHead(context, "current")) === undefined
-        ? Number((await fs.lstat(join(context.root, "coverage.json"))).mtimeMs)
-        : Math.min(
-            ...(await Promise.all(
-              names.map(async (name) =>
-                Number((await fs.lstat(join(context.root, name))).mtimeMs),
-              ),
-            )),
-          ),
+        ? saved[2]!.modifiedMs
+        : Math.min(...saved.map((record) => record!.modifiedMs)),
     input: parsePersistedCheckpoint({
       scanId: context.scanId,
       ...(scan.complete === false ? { complete: false } : {}),
@@ -1219,7 +1217,7 @@ async function readArchivedWorkerCheckpoints(
       if (resultMetadata.isSymbolicLink() || !resultMetadata.isFile()) {
         throw new Error("scan checkpoint: archived result is not a safe file.");
       }
-      const contents = await readArtifactText(
+      const saved = await readArtifactTextWithMetadata(
         attemptContext,
         ["result.json"],
         "archived scan result",
@@ -1227,7 +1225,7 @@ async function readArchivedWorkerCheckpoints(
       let result: ScanDraftInput | undefined;
       try {
         result = parsePersistedScanDraft(
-          parseJsonObject(contents, "archived scan result"),
+          parseJsonObject(saved.contents, "archived scan result"),
         );
       } catch {
         // A failed attempt may leave an invalid replaceable result after valid checkpoints.
@@ -1236,7 +1234,7 @@ async function readArchivedWorkerCheckpoints(
         requireMatchingScan(context, result);
         drafts.push({
           input: result,
-          modifiedMs: Number(resultMetadata.mtimeMs),
+          modifiedMs: saved.modifiedMs,
           result: true,
           name: "result.json",
         });
@@ -1286,12 +1284,16 @@ async function lstatIfExists(
   }
 }
 
-async function readOptionalArtifactText(
+async function readOptionalArtifactTextWithMetadata(
   context: ArtifactContext,
   components: readonly string[],
-): Promise<string | undefined> {
+): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactText(context, components, "previous scan draft");
+    return await readArtifactTextWithMetadata(
+      context,
+      components,
+      "previous scan draft",
+    );
   } catch (error) {
     if (
       error instanceof Error &&
