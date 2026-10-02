@@ -4019,6 +4019,11 @@ describe("CodexSecurity orchestration", () => {
 
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
+    [
+      "matching ends with partial output",
+      "partial",
+      "comparison ended before the turn completed",
+    ],
     ["the repository index fails", "index", "index unavailable"],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
@@ -4109,7 +4114,7 @@ describe("CodexSecurity orchestration", () => {
               }
               return {
                 findings:
-                  failure === "matcher"
+                  failure === "matcher" || failure === "partial"
                     ? [previous]
                     : [{ findingId: "another-open-finding" }],
               };
@@ -4124,6 +4129,13 @@ describe("CodexSecurity orchestration", () => {
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
+            if (failure === "partial") {
+              return await matchScanFindingsInternal(
+                input,
+                options,
+                runtimeOptions,
+              );
+            }
             if (failure === "budget-context") {
               return await matchScanFindingsInternal(
                 input,
@@ -4170,6 +4182,24 @@ describe("CodexSecurity orchestration", () => {
             startThread: () => ({
               id: null,
               async runStreamed() {
+                if (failure === "partial" && modelCalled) {
+                  return {
+                    events: (async function* () {
+                      yield {
+                        type: "thread.started",
+                        thread_id: "comparison-thread",
+                      };
+                      yield {
+                        type: "item.completed",
+                        item: {
+                          id: "partial-answer",
+                          type: "agent_message",
+                          text: JSON.stringify({ matches: [], uncertain: [] }),
+                        },
+                      };
+                    })(),
+                  };
+                }
                 await copyCompletedScan(root);
                 return { events: completedEvents() };
               },
@@ -4203,6 +4233,7 @@ describe("CodexSecurity orchestration", () => {
         expect(matchingTurns).toBe(1);
         expect(matched).toBe(false);
       }
+      if (failure === "partial") expect(matched).toBe(false);
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );
