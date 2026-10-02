@@ -345,11 +345,7 @@ export type ScanAuthentication =
   | { method: "command"; verified: false }
   | {
       method: "api_key";
-      source:
-        | "OPENAI_API_KEY"
-        | "CODEX_API_KEY"
-        | "OPENROUTER_API_KEY"
-        | "FIREWORKS_API_KEY";
+      source: string;
       verified: false;
     }
   | {

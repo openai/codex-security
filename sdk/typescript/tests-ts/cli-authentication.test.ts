@@ -1219,6 +1219,212 @@ describe("CLI authentication", () => {
 });
 
 describe("skill authentication", () => {
+  async function runProviderSkill({
+    command = "patch",
+    auth = "api-key",
+    overrides,
+    environment,
+    ambientConfig,
+  }: {
+    command?: "validate" | "patch" | "verify-fix";
+    auth?: "auto" | "api-key";
+    overrides: readonly string[];
+    environment?: NodeJS.ProcessEnv;
+    ambientConfig?: string;
+  }) {
+    const repository = join(stateDirectory, "repository");
+    const ambientHome = join(stateDirectory, "ambient");
+    const log = join(stateDirectory, "provider.jsonl");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    if (ambientConfig !== undefined) {
+      await writeFile(join(ambientHome, "config.toml"), ambientConfig);
+    }
+    const stdout = capture();
+    const stderr = capture();
+    const status = await main(
+      [
+        command,
+        "Synthetic issue",
+        "--auth",
+        auth,
+        ...overrides.flatMap((value) => ["--codex", value]),
+      ],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: repository,
+        environment: {
+          ...environment,
+          CODEX_HOME: ambientHome,
+          SYNTHETIC_PROVIDER_LOG: log,
+          SYNTHETIC_SKILL_COMMAND: command,
+        },
+        onCodex: (args, output, environment, input) =>
+          runCodexSkillCommand(
+            [
+              fileURLToPath(
+                new URL("./fixtures/skill-provider-auth.mjs", import.meta.url),
+              ),
+              ...args,
+            ],
+            output,
+            { command: process.execPath },
+            environment,
+            input,
+          ),
+      }),
+    );
+    const records = existsSync(log)
+      ? (await readFile(log, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+      : [];
+    return {
+      status,
+      stderr: stderr.text(),
+      launch: records[0],
+      requests: records.slice(1),
+    };
+  }
+
+  test.each([
+    ["validate", "auto", "gateway"],
+    ["validate", "api-key", "gateway"],
+    ["patch", "auto", "gateway"],
+    ["patch", "api-key", "gateway"],
+    ["verify-fix", "auto", "gateway"],
+    ["verify-fix", "api-key", "gateway"],
+    ["patch", "api-key", "openrouter"],
+  ] as const)(
+    "%s uses the custom provider env_key with %s auth (%s)",
+    async (command, auth, provider) => {
+      const result = await runProviderSkill({
+        command,
+        auth,
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `model_providers.${provider}.name="Synthetic gateway"`,
+          `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
+          `model_providers.${provider}.wire_api="responses"`,
+          `model_providers.${provider}.env_key="GATEWAY_API_KEY"`,
+        ],
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+      if (command !== "validate") {
+        expect(
+          result.requests.find((request) => request.method === "thread/start")
+            .params.modelProvider,
+        ).toBe(provider);
+      }
+    },
+  );
+
+  test("rejects a missing custom provider API key before launch", async () => {
+    const result = await runProviderSkill({
+      overrides: [
+        'model_provider="gateway"',
+        'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+      ],
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("GATEWAY_API_KEY");
+    expect(result.launch).toBeUndefined();
+  });
+
+  test.each([true, false])(
+    "patch uses a custom provider table override with ambient selection (new key present: %p)",
+    async (hasSelectedKey) => {
+      const result = await runProviderSkill({
+        overrides: ['model_providers.gateway.env_key="GATEWAY_API_KEY"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="OLD_GATEWAY_API_KEY"',
+        ].join("\n"),
+        environment: hasSelectedKey
+          ? { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" }
+          : { OLD_GATEWAY_API_KEY: "SYNTHETIC_OLD_KEY" },
+      });
+      if (hasSelectedKey) {
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.launch.environment).toEqual({
+          GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+        });
+      } else {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toMatch(/\bGATEWAY_API_KEY\b/u);
+        expect(result.launch).toBeUndefined();
+      }
+    },
+  );
+
+  test.each([
+    ["patch", false, false],
+    ["patch", true, false],
+    ["verify-fix", false, false],
+    ["verify-fix", true, false],
+    ["patch", true, true],
+  ] as const)(
+    "%s keeps ambient provider authentication with explicit selection (partial override: %p, profile: %p)",
+    async (command, partialOverride, profile) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: [
+          'model_provider="gateway"',
+          ...(partialOverride
+            ? [
+                'model_providers.gateway.base_url="https://alternate.example.test/v1"',
+              ]
+            : []),
+        ],
+        ambientConfig: [
+          ...(profile ? ['profile="ambient"'] : []),
+          'model_provider="gateway"',
+          ...(profile ? ["[profiles.ambient]", 'model_provider="other"'] : []),
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          "requires_openai_auth=true",
+          ...(profile
+            ? [
+                "[model_providers.other]",
+                'name="Other gateway"',
+                'base_url="https://other.example.test/v1"',
+                'wire_api="responses"',
+                'env_key="OTHER_API_KEY"',
+              ]
+            : []),
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.launch.args).toContain(
+        'cli_auth_credentials_store="ephemeral"',
+      );
+      expect(
+        result.requests
+          .filter((request) => request.method === "account/login/start")
+          .map((request) => request.params),
+      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
+    },
+  );
+
   test.each(["validate", "patch", "verify-fix"])(
     "%s advertises scan auth modes",
     async (command) => {

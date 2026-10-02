@@ -916,7 +916,9 @@ npx @openai/codex-security patch "Security issue" \
 ```
 
 Set the selected provider's API-key environment variable before running the
-command. Model, effort, and provider settings also apply to
+command; `--auth api-key` uses that configured variable. For `patch` and
+`verify-fix`, provider overrides preserve unspecified fields from the provider's
+existing Codex configuration. Model, effort, and provider settings also apply to
 `patch --assess-patch-risk`.
 Sandbox, approval, and plugin settings remain controlled by the command.
 

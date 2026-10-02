@@ -109,6 +109,7 @@ import {
   inlineToml,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
+  resolveCodexProfile,
   mergedCodexConfig,
   scanModel,
   scanModelConfiguration,
@@ -1059,6 +1060,7 @@ interface SkillCommandOutput {
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
   readonly providerConfiguration?: JsonObject;
+  readonly codexOverrides?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1399,7 +1401,12 @@ export async function runCodexSkillCommand(
     let modelProvider: string | undefined;
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
-      const config =
+      const ambientConfig =
+        output.appServer === undefined
+          ? {}
+          : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
+      const config = mergeCodexOverrides(
+        mergeCodexOverrides(ambientConfig, output.codexOverrides ?? {}),
         output.modelProvider !== undefined
           ? {
               model_provider: output.modelProvider,
@@ -1411,9 +1418,8 @@ export async function runCodexSkillCommand(
                     },
                   }),
             }
-          : output.appServer === undefined
-            ? {}
-            : await readCodexHomeConfig(processEnvironment);
+          : {},
+      );
       const provider = scanModelProvider(config);
       const providerConfiguration =
         typeof provider === "string"
@@ -1428,19 +1434,43 @@ export async function runCodexSkillCommand(
         providerConfiguration?.["requires_openai_auth"] === true;
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      authentication = scanAuthentication(
-        processEnvironment,
-        output.auth,
-        provider,
-        hasCommandAuth(config),
-      );
+      const providerEnvKey =
+        !requiresOpenAiAuth &&
+        typeof providerConfiguration?.["env_key"] === "string"
+          ? providerConfiguration["env_key"]
+          : undefined;
+      if (
+        providerEnvKey !== undefined &&
+        !hasCommandAuth(config) &&
+        (output.auth !== "chatgpt" || isExternalModelProvider(provider))
+      ) {
+        const key = environmentValue(
+          processEnvironment,
+          providerEnvKey,
+        )?.trim();
+        if (!key && output.auth === "api-key") {
+          throw new AuthenticationRequiredError(
+            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
+          );
+        }
+        authentication = key
+          ? { method: "api_key", source: providerEnvKey, verified: false }
+          : { method: "stored_credentials", verified: false };
+      } else {
+        authentication = scanAuthentication(
+          processEnvironment,
+          output.auth,
+          provider,
+          hasCommandAuth(config),
+        );
+      }
       if (
         authentication.method === "stored_credentials" &&
         isExternalModelProvider(provider)
       ) {
         const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
         throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
+          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
         );
       }
       let selected = selectedScanEnvironment(
@@ -1448,6 +1478,15 @@ export async function runCodexSkillCommand(
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
       );
+      if (authentication.method === "api_key" && !requiresOpenAiAuth) {
+        selected = {
+          ...selected,
+          [authentication.source]: environmentValue(
+            processEnvironment,
+            authentication.source,
+          ),
+        };
+      }
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -7653,6 +7692,7 @@ async function runSkill(
       directory,
       modelProvider: provider,
       providerConfiguration,
+      codexOverrides: overrides,
       stdout,
       stderr,
       ...(appServer
