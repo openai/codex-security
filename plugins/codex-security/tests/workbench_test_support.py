@@ -212,6 +212,27 @@ def create_saved_git_workspace(state_dir: Path, target: Path) -> dict[str, objec
     )
 
 
+def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
+    checkpoint = scan_dir / "artifacts" / "deep-scan" / "checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    document = (
+        json.loads(checkpoint.read_text())
+        if checkpoint.exists()
+        else {
+            "version": 3,
+            "startedAt": "2026-01-01T00:00:00Z",
+            "passes": [],
+            "mergedScanIds": [],
+            "aggregate": None,
+            "noNewStreak": 4,
+            "consecutiveErrors": 0,
+        }
+    )
+    document["terminalReason"] = "saturated"
+    checkpoint.write_text(json.dumps(document))
+    return checkpoint
+
+
 def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
     manifest.parent.mkdir(parents=True)
@@ -414,7 +435,7 @@ def register(
 
 def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
     value = {
-        "version": 2,
+        "version": 3,
         "startedAt": "2026-01-01T00:00:00Z",
         "passes": list(passes),
         "mergedScanIds": list(merged),
@@ -430,6 +451,19 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
         scan["scanId"],
         "--artifact-path",
         "artifacts/deep-scan/checkpoint.json",
-        input_text=json.dumps(value),
+        input_text=composition_payload(Path(scan["scanDir"]), value),
     )
     return value
+
+
+def composition_payload(scan_dir: Path, value: dict) -> str:
+    aggregate = value.get("aggregate")
+    value["aggregatePath"] = None
+    if aggregate is not None:
+        contents = json.dumps(aggregate).encode()
+        relative = f"artifacts/deep-scan/aggregates/{hashlib.sha256(contents).hexdigest()}.json"
+        path = scan_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(contents)
+        value["aggregatePath"] = relative
+    return json.dumps({key: item for key, item in value.items() if key != "aggregate"})

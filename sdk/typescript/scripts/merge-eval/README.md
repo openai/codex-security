@@ -1,21 +1,12 @@
 # Completed-report merge evaluation
 
-These synthetic fixtures measure grouping completed findings. They contain no
-source targets or reproduction steps. Cases cover independent findings with
-similar titles, duplicate procedures, accepted aliases, conflicting severity,
-and large fields with useful facts at the end and in nested history.
+These synthetic fixtures measure merging alone. They contain no source targets,
+discovery tasks, or reproduction steps. The oracle tests independent findings
+with similar titles, duplicates with distinct repairs, accepted aliases,
+conflicting severities, and a field larger than ordinary tool output with useful
+facts at its end and in retained sources.
 
-The model returns source groups and selects an existing canonical finding. The
-host retains exact originals and accepted history. This deliberately gives up
-synthesizing one narrative from complementary sources; their details remain in
-provenance. Previously accepted groups select their current canonical narrative;
-they cannot revert to an archived original. The host retains the first/prior
-scope and threat model, and records each child context under `scope.sourceScans`.
-The independent oracle checks grouping and evidence-supported
-canonical selection, while the production validator checks all-source
-accounting, indivisible accepted groups, and preservation.
-
-Run deterministic quality checks and negative controls:
+Run the deterministic oracle and its negative controls:
 
 ```sh
 bun test tests-ts/merge-eval.test.ts
@@ -27,10 +18,26 @@ An explicit model run uses the existing Codex login and incurs model usage:
 bun scripts/merge-eval/run.ts /absolute/path/to/results MODEL 3
 ```
 
-The runner disables inherited MCP servers, plugins, apps, subagents, web search
-and network access. Its temporary directory contains only synthetic inputs,
-without the oracle. Raw responses, usage, latency and thread IDs are retained for
-review. Compare baseline and candidate with the same held-out cases and runtime
-settings; alternate order and report raw samples and error rates. A failed
-quality gate disqualifies a speed improvement. These cases do not establish
-general scan precision or recall, and grouping quality still needs model evals.
+The runner uses the same scan matcher as Deep Scan, including full evidence for
+confirmed matches. It explicitly disables inherited MCP servers, plugins, apps,
+subagents, web search, and network access. Synthetic inputs reach the thread
+through the matcher's catalogue and evidence messages. The temporary working
+directory is empty. Results retain each turn's response and usage, the accepted
+combined decision, elapsed time, and thread ID. Failed merges retain their raw
+turns and error without an accepted decision. The fixture oracle is not included
+in the prompt or that directory.
+
+Two independent gates apply: the production validator checks structural source
+accounting and preservation, while `grade.ts` checks expected partitions,
+severity, and named repair facts in canonical fields. Full archived originals
+cannot hide an omitted canonical repair. Named facts are a closed-world rubric;
+inspect semantic paraphrases and unexpected outcomes independently rather than
+tuning the oracle to a candidate's output. These cases do not establish general
+scan precision or recall.
+
+For comparison, run the same held-out cases against baseline and candidate at
+identical model/runtime settings, alternate order, and report p50/p95, usage and
+error rate with raw samples. Any failed quality gate disqualifies a speed win.
+This runner times model merging and validation; it does **not** time parent
+publication. Measure completion-to-sealed-parent separately with real artifact
+and database operations before claiming end-to-end improvement.

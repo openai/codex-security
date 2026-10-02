@@ -26,6 +26,7 @@ import {
   deepMerge,
   type JsonObject,
 } from "../src/config.js";
+import { CodexSecurityError } from "../src/errors.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
@@ -33,6 +34,7 @@ import {
   matchCompletedScan,
   matchScanFindings,
   matchScanFindingsInternal,
+  unionFindingGroups,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -107,6 +109,25 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("keeps the first accepted identity when joining finding groups", () => {
+    expect(
+      unionFindingGroups([
+        ["accepted-a", "repeated-a"],
+        ["accepted-b", "repeated-b"],
+        ["separate"],
+        ["repeated-b", "repeated-a", "new-a", "new-a"],
+        ["", " ", "independent-a"],
+        ["", "independent-b"],
+      ]),
+    ).toEqual([
+      ["accepted-a", "repeated-a", "accepted-b", "repeated-b", "new-a"],
+      ["separate"],
+      ["independent-a"],
+      ["independent-b"],
+    ]);
+    expect(unionFindingGroups([])).toEqual([]);
+  });
+
   test.each([{}, { codexOverrides: { model_reasoning_effort: "high" } }])(
     "merges default model settings for an injected client with %j",
     async (config) => {
@@ -1774,6 +1795,223 @@ process.exit(0);
       ),
     ).rejects.toThrow("invalid JSON");
   });
+
+  test("corrects an unknown finding ID in the same matcher conversation", async () => {
+    const corrected: ScanComparisonResult = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high",
+          reason: "The same control is missing.",
+        },
+      ],
+      uncertain: [],
+    };
+    const prompts: string[] = [];
+    const errors: unknown[] = [];
+    let threads = 0;
+    const result = await matchScanFindingsInternal(
+      { before: [finding("before")], after: [finding("after")] },
+      {
+        codex: {
+          startThread() {
+            threads += 1;
+            return {
+              async run(prompt) {
+                prompts.push(prompt);
+                return {
+                  finalResponse: JSON.stringify(
+                    prompts.length === 1
+                      ? {
+                          ...corrected,
+                          matches: [
+                            {
+                              ...corrected.matches[0],
+                              beforeOccurrenceIds: ["unknown"],
+                            },
+                          ],
+                        }
+                      : corrected,
+                  ),
+                };
+              },
+            };
+          },
+        },
+      },
+      {
+        surface: "sdk",
+        async onInvalidResponse(error) {
+          errors.push(error);
+          return true;
+        },
+      },
+    );
+    expect(result).toEqual(corrected);
+    expect(threads).toBe(1);
+    expect(prompts).toHaveLength(2);
+    expect(errors).toHaveLength(1);
+    expect(prompts[1]).toContain("unknown before occurrence");
+    expect(prompts[1]).not.toContain(prompts[0]!);
+  });
+
+  test.each(["returned JSON", "injected parser"])(
+    "keeps complete paged evidence after malformed %s",
+    async (source) => {
+      const input = {
+        before: [
+          { ...finding("before"), rootCause: "🙂".repeat(1 << 20) + "x" },
+        ],
+        after: [finding("after")],
+      };
+      const result: ScanComparisonResult = {
+        matches: [
+          {
+            beforeOccurrenceIds: ["before"],
+            afterOccurrenceIds: ["after"],
+            confidence: "high",
+            reason: "The same control is missing.",
+          },
+        ],
+        uncertain: [],
+      };
+      const pieces: string[] = [];
+      let expectedOffset = 0;
+      let turns = 0;
+      let invalidResponses = 0;
+      let threads = 0;
+      expect(
+        await matchScanFindingsInternal(
+          input,
+          {
+            codex: {
+              startThread() {
+                threads += 1;
+                return {
+                  async run(prompt) {
+                    expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
+                    const index = turns++;
+                    if (index === 2) {
+                      expect(prompt).toContain("invalid JSON");
+                      expect(prompt).not.toContain('"content"');
+                    } else if (index > 0) {
+                      const page = JSON.parse(prompt.split("\n").at(-1)!) as {
+                        offset: number;
+                        nextOffset: number | null;
+                        content: string;
+                      };
+                      expect(page.offset).toBe(expectedOffset);
+                      expect(page.content.isWellFormed()).toBe(true);
+                      pieces.push(page.content);
+                      expectedOffset += [...page.content].length;
+                      if (page.nextOffset !== null)
+                        expect(page.nextOffset).toBe(expectedOffset);
+                      if (index === 1) {
+                        expect(page.nextOffset).not.toBeNull();
+                        if (source === "injected parser")
+                          JSON.parse("not-json");
+                        return { finalResponse: "not-json" };
+                      }
+                    }
+                    return { finalResponse: JSON.stringify(result) };
+                  },
+                };
+              },
+            },
+          },
+          {
+            surface: "sdk",
+            requireFullEvidence: true,
+            async onInvalidResponse() {
+              invalidResponses += 1;
+              return true;
+            },
+          },
+        ),
+      ).toEqual(result);
+      expect(threads).toBe(1);
+      expect(invalidResponses).toBe(1);
+      expect(pieces.length).toBeGreaterThan(1);
+      expect(
+        Buffer.from(pieces.join("")).equals(Buffer.from(JSON.stringify(input))),
+      ).toBe(true);
+    },
+  );
+
+  test("stops when the owning scan exhausts its invalid-response budget", async () => {
+    let turns = 0;
+    let original: unknown;
+    await expect(
+      matchScanFindingsInternal(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          codex: {
+            startThread: () => ({
+              async run() {
+                turns += 1;
+                return { finalResponse: "not-json" };
+              },
+            }),
+          },
+        },
+        {
+          surface: "sdk",
+          async onInvalidResponse(error) {
+            original = error;
+            return false;
+          },
+        },
+      ).catch((error: unknown) => {
+        expect(error).toBe(original);
+        throw error;
+      }),
+    ).rejects.toThrow("invalid JSON");
+    expect(turns).toBe(1);
+  });
+
+  test.each(["transport", "permission", "cancellation", "aborted JSON"])(
+    "does not charge an invalid-response retry for %s failures",
+    async (kind) => {
+      const controller = new AbortController();
+      const error =
+        kind === "transport"
+          ? new CodexSecurityError("The connection closed.")
+          : kind === "permission"
+            ? Object.assign(new Error("Permission denied."), { code: "EACCES" })
+            : kind === "cancellation"
+              ? new DOMException("Canceled.", "AbortError")
+              : new SyntaxError("Incomplete JSON.");
+      let retries = 0;
+      let turns = 0;
+      await expect(
+        matchScanFindingsInternal(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            signal: controller.signal,
+            codex: {
+              startThread: () => ({
+                async run() {
+                  turns += 1;
+                  if (kind === "aborted JSON") controller.abort();
+                  throw error;
+                },
+              }),
+            },
+          },
+          {
+            surface: "sdk",
+            async onInvalidResponse() {
+              retries += 1;
+              return false;
+            },
+          },
+        ),
+      ).rejects.toBe(error);
+      expect(turns).toBe(1);
+      expect(retries).toBe(0);
+    },
+  );
 
   test("does not start Codex when either scan has no findings", async () => {
     const codex: NonNullable<ScanComparisonOptions["codex"]> = {

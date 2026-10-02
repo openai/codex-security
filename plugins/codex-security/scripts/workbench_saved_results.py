@@ -39,12 +39,13 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
-from project_scan_artifacts import merge_coverage, project_scan_artifacts
+from project_scan_artifacts import project_scan_artifacts
 from report_projection import retained_findings
 from workbench_composition import (
     COMPOSITION_CHECKPOINT,
     CompositionView,
     load_composition,
+    read_composition_checkpoint,
 )
 from workbench_constants import PHASES
 from workbench_scan_usage import merge_scan_cost
@@ -1177,12 +1178,13 @@ def save_composed_checkpoint(
     warnings: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Retain accepted progress and unmerged ordinary child observations."""
-    checkpoint = composition.checkpoint
+    checkpoint = read_composition_checkpoint(scan) if composition.checkpoint is not None else None
     children = {child["scan_dir"]: child for child in composition.children}
     if checkpoint is None and not children:
         return None
     merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
-    aggregate = copy.deepcopy(checkpoint["aggregate"]) if checkpoint is not None else None
+    aggregate = checkpoint["aggregate"] if checkpoint is not None else None
+    aggregate = materialize_sources(aggregate) if isinstance(aggregate, dict) else None
     if not isinstance(aggregate, dict):
         aggregate = {"findings": [], "coverage": {}}
     represented = set()
@@ -1209,7 +1211,7 @@ def save_composed_checkpoint(
             for finding in draft["findings"]
             if not represented.intersection(finding["provenance"]["sourceFindingIds"])
         )
-        merge_coverage(aggregate.setdefault("coverage", {}), draft["coverage"])
+        union_coverage(aggregate.setdefault("coverage", {}), draft["coverage"])
     aggregate["scanId"] = scan["id"]
     aggregate["complete"] = False
     coverage = aggregate.setdefault("coverage", {})
@@ -1237,7 +1239,9 @@ def save_composed_checkpoint(
         if note not in deferred:
             deferred.append(note)
     payload = _encoded(aggregate)
-    save_pending_checkpoint(scan_dir, payload)
+    name = hashlib.sha256(payload).hexdigest() + ".json"
+    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", payload)
+    write_scan_local_bytes(scan_dir, f"checkpoints/{name}", payload)
     return aggregate
 
 
@@ -3174,3 +3178,21 @@ def union_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
             if key not in seen:
                 seen.add(key)
                 rows.append(copy.deepcopy(row))
+
+
+def materialize_sources(draft: dict[str, Any]) -> dict[str, Any]:
+    """Expand current flat provenance for the existing public report format."""
+    result = copy.deepcopy(draft)
+    sources = result.pop("sourceFindings", {})
+    revisions = result.pop("revisions", {})
+    for finding in result["findings"]:
+        provenance = finding.get("provenance", {})
+        revision_ids = provenance.pop("revisionIds", [])
+        if revision_ids:
+            provenance["previousFindings"] = [revisions[key] for key in revision_ids]
+        source_ids = provenance.get("sourceFindingIds", [])
+        if sources and source_ids:
+            provenance["sourceFindings"] = [
+                {"id": key, "finding": sources[key]} for key in source_ids
+            ]
+    return result

@@ -679,3 +679,66 @@ def test_checkpoint_recovery_retains_refinement_and_distinct_instances(
         assert {finding["identity"]["instance"] for finding in actual} == {"first", "second"}
     else:
         assert actual[0]["provenance"]["previousFindings"] == [original]
+
+
+def test_flat_source_materialization_retains_originals_and_accepted_revisions(workbench_api):
+    original = {"identity": {"anchor": "first"}, "remediation": "First repair"}
+    revision = {"identity": {"anchor": "accepted"}, "remediation": "Second repair"}
+    draft = {
+        "findings": [{"provenance": {"sourceFindingIds": ["source"], "revisionIds": ["revision"]}}],
+        "sourceFindings": {"source": original},
+        "revisions": {"revision": revision},
+    }
+    materialized = workbench_api["saved_results"].materialize_sources(draft)
+    assert materialized == {
+        "findings": [
+            {
+                "provenance": {
+                    "sourceFindingIds": ["source"],
+                    "sourceFindings": [{"id": "source", "finding": original}],
+                    "previousFindings": [revision],
+                }
+            }
+        ]
+    }
+    assert "sourceFindings" in draft
+
+
+def test_current_aggregate_hydrates_immutable_sources_only_when_requested(
+    tmp_path, workbench_api, monkeypatch
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan", mode="deep")
+    directory = Path(scan["scanDir"])
+    source = {"identity": {"anchor": "original"}, "remediation": "Original repair"}
+    source_id = "synthetic-child:0"
+    revision = {"identity": {"anchor": "accepted"}}
+    revision_id = hashlib.sha256(json.dumps(revision).encode()).hexdigest()
+    documents = {
+        f"sources/{hashlib.sha256(source_id.encode()).hexdigest()}": source,
+        f"revisions/{revision_id}": revision,
+        "aggregates/current": {
+            "findings": [],
+            "sourceFindingIds": [source_id],
+            "revisionIds": [revision_id],
+        },
+        "checkpoint": {
+            "version": 3,
+            "aggregatePath": "artifacts/deep-scan/aggregates/current.json",
+        },
+    }
+    for relative, document in documents.items():
+        path = directory / f"artifacts/deep-scan/{relative}.json"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(json.dumps(document))
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    row = {"id": scan["scanId"], "scan_dir": str(directory)}
+    read = workbench_api["load_composition"].__globals__["read_composition_checkpoint"]
+    assert read(row)["aggregate"] == {
+        "findings": [],
+        "sourceFindings": {source_id: source},
+        "revisions": {revision_id: revision},
+    }
+    assert "aggregate" not in read(row, load_aggregate=False)

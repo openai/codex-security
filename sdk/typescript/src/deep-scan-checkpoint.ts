@@ -1,32 +1,34 @@
 import { resolve } from "node:path";
 import { readScanFile } from "./contract.js";
-import type { SemanticScan } from "./semantic-models.js";
 import type { ScanCost } from "./cost.js";
+import type { ScanArtifactRestorer } from "./runtime.js";
+import type { SemanticCoverage } from "./semantic-models.js";
+import { hydrateScanAggregate, type ScanAggregate } from "./scan-merge.js";
 
 export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 
 export interface DeepScanPass {
   directory: string;
   scanId?: string;
-  failed?: true;
-  /** The success and its effect on the error streak have been observed. */
-  completed?: true;
+  /** Completion time for a consumed reservation that never acquired a SQL row. */
+  failedBeforeRegistration?: string;
   [extension: string]: unknown;
 }
 
 interface CompositionMetadata {
-  version: 2;
+  version: 3;
   startedAt: string;
   passes: DeepScanPass[];
   mergedScanIds: string[];
   noNewStreak: number;
   consecutiveErrors: number;
   mergeFailures?: number;
-  /** Missing in older checkpoints; false proves no model merge has started. */
+  /** Set before the first paid merge request; deterministic grouping stays free. */
   mergeStarted?: boolean;
+  /** Final total captured after all work drains, before artifact sealing. */
+  finalCost?: ScanCost | null;
   /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
   costUnavailable?: true;
-  /** Retained coordinator accounting is read-only; live continuation is retired. */
   legacy?: {
     discoveryRuns?: number;
     cost?: ScanCost;
@@ -38,30 +40,29 @@ interface CompositionMetadata {
   [extension: string]: unknown;
 }
 
-/** Version 2 is shared with workbench_composition.py; flags are not scan status. */
+/** Version 3 stores aggregates separately from polling metadata. */
 export interface DeepScanCheckpoint extends CompositionMetadata {
-  aggregate: SemanticScan | null;
+  aggregate: (ScanAggregate & { coverage: SemanticCoverage }) | null;
 }
 
-/** get-scan intentionally omits finding and coverage payloads from its response. */
+/** Resume metadata omits finding and coverage payloads. */
 export interface DeepScanCheckpointSummary extends CompositionMetadata {
   aggregate?: never;
 }
 
 export function newDeepScanCheckpoint(startedAt: string): DeepScanCheckpoint {
   return {
-    version: 2,
+    version: 3,
     startedAt,
     passes: [],
     mergedScanIds: [],
     aggregate: null,
-    mergeStarted: false,
     noNewStreak: 0,
     consecutiveErrors: 0,
   };
 }
 
-/** The local workbench owns this document; preserve historical extension fields. */
+/** The local workbench owns this document. */
 export function decodeDeepScanCheckpoint(value: unknown): DeepScanCheckpoint {
   const checkpoint = value as DeepScanCheckpoint;
   requireCheckpointVersion(checkpoint);
@@ -69,8 +70,10 @@ export function decodeDeepScanCheckpoint(value: unknown): DeepScanCheckpoint {
 }
 
 function requireCheckpointVersion(checkpoint: { version: unknown }): void {
-  if (checkpoint.version !== 2)
-    throw new Error("Unsupported saved Deep Scan checkpoint.");
+  if (checkpoint.version !== 3)
+    throw new Error(
+      "Unsupported saved Deep Scan checkpoint; use its original version or start a new scan.",
+    );
 }
 
 export function compositionCheckpointFromWorkbench(
@@ -79,25 +82,23 @@ export function compositionCheckpointFromWorkbench(
   const checkpoint = response["compositionCheckpoint"] as
     DeepScanCheckpointSummary | null | undefined;
   if (checkpoint == null) return null;
-  requireCheckpointVersion(checkpoint);
   return checkpoint;
 }
 
-export async function loadDeepScanCheckpoint(
+/** Read checkpoint metadata without loading aggregate findings or evidence. */
+export async function loadDeepScanCheckpointSummary(
   scanDir: string,
-): Promise<DeepScanCheckpoint | null> {
+): Promise<DeepScanCheckpointSummary | null> {
   try {
-    return decodeDeepScanCheckpoint(
-      JSON.parse(
-        (
-          await readScanFile(
-            scanDir,
-            DEEP_SCAN_CHECKPOINT,
-            "Deep Scan checkpoint",
-          )
-        ).toString("utf8"),
-      ),
-    );
+    return JSON.parse(
+      (
+        await readScanFile(
+          scanDir,
+          DEEP_SCAN_CHECKPOINT,
+          "Deep Scan checkpoint",
+        )
+      ).toString("utf8"),
+    ) as DeepScanCheckpointSummary;
   } catch (error) {
     // Only an absent checkpoint starts a new composition. Preserve read/parse
     // errors, including the artifact reader's existing path protections.
@@ -110,4 +111,47 @@ export async function loadDeepScanCheckpoint(
       return null;
     throw error;
   }
+}
+
+export async function loadDeepScanCheckpoint(
+  scanDir: string,
+): Promise<DeepScanCheckpoint | null> {
+  const saved = await loadDeepScanCheckpointSummary(scanDir);
+  if (saved === null) return null;
+  const checkpoint = decodeDeepScanCheckpoint(saved);
+  if (typeof checkpoint["aggregatePath"] === "string") {
+    checkpoint.aggregate = await hydrateScanAggregate(
+      scanDir,
+      JSON.parse(
+        (
+          await readScanFile(
+            scanDir,
+            checkpoint["aggregatePath"],
+            "Deep Scan aggregate",
+          )
+        ).toString("utf8"),
+      ),
+    );
+  } else {
+    checkpoint.aggregate = null;
+  }
+  return checkpoint;
+}
+
+/** Save a finalized total without reading the aggregate or its source evidence. */
+export async function finalizeDeepScanCost(
+  scanDir: string,
+  writer: ScanArtifactRestorer,
+  finalCost: ScanCost | null,
+): Promise<void> {
+  const checkpoint = JSON.parse(
+    (
+      await readScanFile(scanDir, DEEP_SCAN_CHECKPOINT, "Deep Scan checkpoint")
+    ).toString("utf8"),
+  ) as DeepScanCheckpointSummary;
+  requireCheckpointVersion(checkpoint);
+  await writer.restore(
+    DEEP_SCAN_CHECKPOINT,
+    Buffer.from(JSON.stringify({ ...checkpoint, finalCost })),
+  );
 }

@@ -1349,7 +1349,7 @@ test.each(["standard", "deep"] as const)(
       checkpoint:
         mode === "deep"
           ? {
-              version: 2 as const,
+              version: 3 as const,
               startedAt: "2026-10-01T00:00:00Z",
               passes: [],
               mergedScanIds: [],

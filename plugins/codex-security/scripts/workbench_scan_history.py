@@ -1354,3 +1354,13 @@ def independent_review_progress(
         "consolidating": False,
         "updatedAt": run["updated_at"],
     }
+
+
+def require_composition_complete(scan: sqlite3.Row, composition: CompositionView) -> None:
+    if scan["mode"] != "deep":
+        return
+    checkpoint = composition.checkpoint
+    if checkpoint is not None:
+        if checkpoint.get("terminalReason") in {"saturated", "capped"}:
+            return
+    raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
