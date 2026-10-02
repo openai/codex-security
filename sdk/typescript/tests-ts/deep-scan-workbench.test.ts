@@ -393,7 +393,7 @@ describe("deep scan workbench ownership", () => {
     const premature = command(["complete-scan", "--scan-id", scanId]);
     expect(premature.exitCode).not.toBe(0);
     expect(new TextDecoder().decode(premature.stderr)).toContain(
-      "orchestration must finish and persist its manifest",
+      "must finish and save its aggregate",
     );
   });
 
