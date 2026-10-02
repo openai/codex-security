@@ -38,7 +38,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     concurrency:
-      group: invoice-desk-behavior-${{ github.event.pull_request.number }}-${{ matrix.node }}
+      group: invoice-desk-behavior-${{ github.event.pull_request.number }}-${{ github.sha }}-${{ matrix.node }}
       cancel-in-progress: true
     strategy:
       matrix:
