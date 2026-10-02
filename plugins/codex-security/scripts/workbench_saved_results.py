@@ -856,6 +856,7 @@ def merge_saved_results(
                         if isinstance(current.get("threatModel"), dict):
                             model = current["threatModel"]
                 except (ContractError, OSError, ValueError):
+                    # If the optional head cannot be read, retain the admitted checkpoint model.
                     pass
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
