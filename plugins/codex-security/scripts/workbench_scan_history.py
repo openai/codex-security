@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
+from workbench_composition import CompositionView
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -205,6 +206,8 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
+    if args is None or not args.scan_root:
+        clauses.append("scans.parent_scan_role IS NOT 'deep_pass'")
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -370,7 +373,8 @@ def list_unmatched_scan_pairs(
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT * FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
         )
         if _same_repository(scan, requested)
     ]
@@ -955,30 +959,34 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
+        JOIN scans ON scans.id = matches.after_scan_id
         WHERE matches.before_occurrence_id = ?
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
+        JOIN scans ON scans.id = matches.before_scan_id
         WHERE matches.after_occurrence_id = ?
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
-        (occurrence_id, occurrence_id),
+        (occurrence_id, scan_id, occurrence_id, scan_id),
     ).fetchall()
     linked_rows = list(
-        _rows_for_ids(
-            connection,
+        connection.execute(
             f"""
-            {_LINKED_FINDINGS_SQL}
+            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
                 scans.started_at, scans.id AS scan_id
             FROM linked
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
+            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
             """,
-            (occurrence_id,),
+            (occurrence_id, scan_id),
         )
     )
     known_scans = sorted(
@@ -1224,3 +1232,33 @@ def _path_matches(path: str, pattern: str) -> bool:
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def independent_review_progress(
+    scan: sqlite3.Row,
+    composition: CompositionView,
+) -> dict[str, Any] | None:
+    run = composition.legacy_run
+    children = composition.children
+    if children or (run is None and scan["recipe_json"] is not None):
+        recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
+        return {
+            "active": sum(child["status"] == "running" for child in children),
+            "completed": sum(child["status"] == "complete" for child in children)
+            + (run["completion_sequence"] if run is not None else 0),
+            "maximum": recipe.get("deepScan", {}).get(
+                "maxDiscoveryRuns", run["max_discovery_runs"] if run is not None else len(children)
+            ),
+            "consolidating": scan["status"] == "running"
+            and scan["phase"] in {"validation", "reporting"},
+            "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
+        }
+    if run is None:
+        return None
+    return {
+        "active": 0,
+        "completed": run["completion_sequence"],
+        "maximum": run["max_discovery_runs"],
+        "consolidating": False,
+        "updatedAt": run["updated_at"],
+    }

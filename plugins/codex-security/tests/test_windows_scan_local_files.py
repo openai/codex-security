@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import importlib.util
 import os
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 import pytest
 
@@ -44,6 +46,42 @@ def test_accepts_normal_scan_local_path() -> None:
         "02_discovery",
         "work.jsonl",
     )
+
+
+@pytest.mark.parametrize("error_code", [2, 3, 5, errno.EINVAL])
+def test_read_preserves_missing_file_semantics(
+    tmp_path: Path, monkeypatch, error_code: int
+) -> None:
+    scan_dir = tmp_path / "scan"
+    missing_path = scan_dir / "artifacts" / "deep-scan"
+    error = WINDOWS_FILES.WindowsScanLocalFileError(
+        error_code, "synthetic error", str(missing_path)
+    )
+    monkeypatch.setattr(WINDOWS_FILES, "_locked_parent", mock.Mock(side_effect=error))
+    expected = (
+        FileNotFoundError if error_code in {2, 3} else WINDOWS_FILES.WindowsScanLocalFileError
+    )
+    with pytest.raises(expected) as caught:
+        WINDOWS_FILES.open_read_fd(scan_dir, "artifacts/deep-scan/checkpoint.json", "checkpoint")
+    assert caught.value.filename == str(missing_path)
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
+@pytest.mark.parametrize("parent_exists", [False, True])
+def test_native_windows_read_reports_missing_checkpoint(
+    tmp_path: Path, parent_exists: bool
+) -> None:
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    parent = scan_dir / "artifacts" / "deep-scan"
+    if parent_exists:
+        parent.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError) as caught:
+        WINDOWS_FILES.open_read_fd(scan_dir, "artifacts/deep-scan/checkpoint.json", "checkpoint")
+    expected = parent / "checkpoint.json" if parent_exists else scan_dir / "artifacts"
+    assert caught.value.filename == str(expected)
+    assert caught.value.errno == errno.ENOENT
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")

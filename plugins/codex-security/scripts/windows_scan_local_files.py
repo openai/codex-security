@@ -475,6 +475,12 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
                     _close_handle(raw_handle)
                     raise
     except WindowsScanLocalFileError as exc:
+        if exc.errno in _MISSING_ERRORS:
+            raise FileNotFoundError(
+                errno.ENOENT,
+                f"{context}: {exc.strerror}",
+                exc.filename,
+            ) from exc
         raise WindowsScanLocalFileError(
             exc.errno,
             f"{context}: {exc.strerror}",

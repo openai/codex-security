@@ -905,6 +905,16 @@ MIGRATIONS = (
           );
         """,
     ),
+    (
+        43,
+        "persist composition child membership",
+        """
+        ALTER TABLE scans ADD COLUMN parent_scan_role TEXT
+            CHECK (parent_scan_role IS NULL OR parent_scan_role = 'deep_pass');
+        CREATE INDEX scans_by_composition_parent ON scans(parent_scan_id)
+            WHERE parent_scan_role = 'deep_pass';
+        """,
+    ),
     (46, "recover unindexed severity assessments", ""),
 )
 
