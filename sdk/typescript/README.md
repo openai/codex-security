@@ -45,6 +45,35 @@ make extra model calls; see [Progress and cost](#progress-and-cost).
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
 
+### Select a Cyber access program
+
+For the built-in OpenAI provider, select `standard`, `daybreak_blue`, or
+`daybreak_red` per scan:
+
+```ts
+await security.run("/path/to/repository", {
+  auth: "api-key",
+  cyberAccessProgram: "daybreak_blue",
+});
+```
+
+```sh
+codex-security scan . --auth api-key --cyber-access-program daybreak_blue
+```
+
+`scan-components` accepts the same flag. Project files use
+`scan.cyber_access_program`, including for bulk scans. An explicit CLI or SDK
+selection overrides the project setting. Omission preserves Codex defaults;
+`standard` explicitly selects the standard program.
+
+The selection applies to Deep Scan discovery and reducer workers, resumed
+workers, custom validation, and post-scan turns. Saved scan recipes retain it
+for resume and rerun. API-key selection enables Codex's experimental Cyber
+support unless the effective native configuration explicitly disables
+`features.api_key_cyber_access_programs`.
+Explicit disables and API entitlement failures remain errors. Selecting a
+program does not grant access; the API verifies the key's entitlement.
+
 ### Validate an existing finding
 
 ```ts

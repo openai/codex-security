@@ -99,6 +99,7 @@ try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
+  await testWorkerCyberAccessSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -1328,6 +1329,171 @@ async function testWorkerRuntimeSettings() {
           }
           await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
         }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name, value);
+  }
+}
+
+async function testWorkerCyberAccessSettings() {
+  const cases = [
+    { name: "unset", configuration: "" },
+    {
+      name: "blue",
+      configuration:
+        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      program: "daybreak_blue",
+      features: {
+        api_key_cyber_access_programs: true,
+        api_key_model_discovery: true,
+      },
+    },
+    {
+      name: "explicit-false",
+      configuration:
+        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+      program: "daybreak_blue",
+      features: {
+        api_key_cyber_access_programs: false,
+        api_key_model_discovery: false,
+      },
+    },
+    {
+      name: "other-program",
+      configuration:
+        '[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+      program: "standard",
+      features: {
+        api_key_cyber_access_programs: true,
+        api_key_model_discovery: false,
+      },
+    },
+    {
+      name: "features-only",
+      configuration:
+        "[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n",
+      features: {
+        api_key_cyber_access_programs: false,
+        api_key_model_discovery: true,
+      },
+    },
+  ];
+  const saved = Object.fromEntries(
+    [
+      "CODEX_CLI_PATH",
+      "CODEX_HOME",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+    ].map((name) => [name, process.env[name]]),
+  );
+  const originalSpawn = childProcess.spawn;
+  const fixture = await fakeCodexFixture();
+  const promptPath = path.join(fixture.root, "prompt.md");
+  const launches = [];
+  try {
+    delete process.env.OPENAI_API_KEY;
+    process.env.CODEX_API_KEY = "synthetic-worker-api-key";
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = fixture.root;
+    await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH");
+    childProcess.spawn = (command, args, options) => {
+      const markerPath = path.join(
+        fixture.root,
+        `cyber-${launches.length}.json`,
+      );
+      const environment = {
+        ...options.env,
+        FAKE_CODEX_MARKER: markerPath,
+        FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+      };
+      launches.push({ args, markerPath });
+      return originalSpawn(command, [fixture.executablePath, ...args], {
+        ...options,
+        env: environment,
+      });
+    };
+    syncBuiltinESMExports();
+    for (const testCase of cases) {
+      testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
+      await writeFile(testCase.configPath, testCase.configuration);
+      testCase.executor = new CodexSdkWorkerExecutor({
+        model: testCase.name,
+        parentSandbox: trustedParentSandbox,
+      });
+    }
+    for (const kind of ["discovery", "dedup"]) {
+      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+        launches.length = 0;
+        await Promise.all(
+          cases.map((testCase) => {
+            // Each scan captures its own config before its asynchronous launch.
+            process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
+            return testCase.executor.run({
+              kind,
+              resumeThreadId,
+              promptPath,
+              workingDirectory: fixture.root,
+              subagents: 0,
+              signal: new AbortController().signal,
+            });
+          }),
+        );
+        const workerLaunches = launches.filter(
+          ({ args }) => args[0] === "exec",
+        );
+        assert.equal(workerLaunches.length, cases.length);
+        for (const { name, program, features = {} } of cases) {
+          const launch = workerLaunches.find(
+            ({ args }) => args[args.indexOf("--model") + 1] === name,
+          );
+          const invocation = JSON.parse(
+            await readFile(launch.markerPath, "utf8"),
+          );
+          if (program === undefined) {
+            assert.equal(
+              invocation.argv.includes("--cyber-access-program"),
+              false,
+            );
+          } else {
+            assertFlagPair(invocation.argv, "--cyber-access-program", program);
+          }
+          for (const feature of [
+            "api_key_cyber_access_programs",
+            "api_key_model_discovery",
+          ]) {
+            assert.deepEqual(
+              invocation.argv.filter((arg) =>
+                arg.startsWith(`features.${feature}=`),
+              ),
+              features[feature] === undefined
+                ? []
+                : [`features.${feature}=${features[feature]}`],
+            );
+          }
+          assert.equal(
+            invocation.openaiAuthentication.CODEX_API_KEY,
+            "synthetic-worker-api-key",
+          );
+          assert.equal(
+            invocation.argv.includes("resume"),
+            resumeThreadId !== undefined,
+          );
+          assertReadOnlyWorkerPolicy(invocation.argv);
+          assertWorkerSubagentPolicy(invocation.argv, 0);
+        }
+        // Running coordinators and their resumed workers retain their own settings.
+        await Promise.all(
+          cases.map(({ configPath }) =>
+            writeFile(
+              configPath,
+              '[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+            ),
+          ),
+        );
       }
     }
   } finally {

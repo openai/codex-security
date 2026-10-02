@@ -345,6 +345,7 @@ const VALUE_OPTIONS = new Set([
   "--concurrency",
   "--auth",
   "--safety-identifier",
+  "--cyber-access-program",
   "--path",
   "--component",
   "--components-file",
@@ -3528,6 +3529,7 @@ export async function main(
             .describe(
               "Reuse completed work in the named local findings workflow.",
             ),
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
@@ -3691,6 +3693,7 @@ export async function main(
             {
               auth: options.auth,
               target: scope.target,
+              cyberAccessProgram: options.cyberAccessProgram,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
               validationPromptFile: options.validationPromptFile,
@@ -4170,6 +4173,7 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
@@ -4281,6 +4285,7 @@ export async function main(
             project,
             {
               auth: options.auth,
+              cyberAccessProgram: options.cyberAccessProgram,
               outputDir: options.outputDir,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
@@ -6225,6 +6230,15 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
+  const cyberAccessProgram =
+    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
+      recipe["cyberAccessProgram"],
+    );
+  if (!cyberAccessProgram.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid Cyber access program.",
+    );
+  }
   if (!auth.success)
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid authentication choice.",
@@ -6261,6 +6275,7 @@ async function prepareScanArgumentsFromRecipe(
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: cyberAccessProgram.data,
     target:
       paths.length > 0
         ? paths

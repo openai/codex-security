@@ -33,6 +33,16 @@ async function temporaryDirectory() {
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
   [
+    "Cyber selection",
+    { scan: { cyber_access_program: "daybreak_blue" } },
+    true,
+  ],
+  [
+    "unknown Cyber selection",
+    { scan: { cyber_access_program: "unknown" } },
+    false,
+  ],
+  [
     "standard path scope",
     { scan: { mode: "standard", scope: { paths: ["src"] } } },
     true,
