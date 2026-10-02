@@ -21,7 +21,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import deep_scan_workbench as deep_scan  # noqa: F401 - removed with legacy engine tests
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_publication as publication
@@ -98,9 +97,6 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
-)
-from workbench_scan_start import (
-    compact_timestamp as compact_timestamp,
 )
 from workbench_schema import (
     MIGRATIONS,
