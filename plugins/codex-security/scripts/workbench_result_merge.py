@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
+    _read_scan_local_json,
     _read_scan_local_json_with_metadata,
     _validate_schema_node,
     finding_candidate_id,
@@ -292,6 +294,47 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     if not was_sealed or manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
     return coverage
+
+
+def _children(scan_dir: Path, relative: str) -> list[str]:
+    cursor = scan_dir
+    for part in Path(relative).parts:
+        if part in {"..", "."}:
+            return []
+        cursor = cursor / part
+        try:
+            if not stat.S_ISDIR(cursor.lstat().st_mode):
+                return []
+        except FileNotFoundError:
+            return []
+    return sorted(child.name for child in cursor.iterdir())
+
+
+def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
+    directory = (
+        "checkpoints/pending" if (scan_dir / "checkpoints/pending").exists() else "checkpoints"
+    )
+    for name in _children(scan_dir, directory):
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name):
+            yield f"checkpoints/{name}"
+
+
+def _read_saved_parent_result(
+    scan_dir: Path, scan_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
+    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
+    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+    parent_scan = manifest.get("scan")
+    if not isinstance(parent_scan, dict):
+        raise ContractError("Saved parent manifest has no scan object")
+    if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
+        parent_scan.get("id", scan_id) != scan_id
+        or findings.get("scanId", scan_id) != scan_id
+        or coverage.get("scanId", scan_id) != scan_id
+    ):
+        raise ContractError("Saved parent documents belong to a different scan")
+    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
 def _reconcile_child_coverage(

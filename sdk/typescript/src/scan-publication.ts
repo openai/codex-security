@@ -1,5 +1,9 @@
-import { relative, sep } from "node:path";
+import { lstat } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
 import { readThreatModelPath } from "./artifact-export.js";
+import { ScanAccounting } from "./scan-accounting.js";
+import { ScanCostTrackingError } from "./deep-scan.js";
+import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import {
   loadContract,
@@ -27,6 +31,44 @@ interface ScanResultContext {
 export interface ScanPublicationContext extends ScanResultContext {
   scanId: string;
   workbench: (args: readonly string[]) => Promise<JsonObject>;
+}
+
+/** Missing continuation metadata does not establish zero prior work. */
+export async function restorePriorScanCosts(
+  costs: ScanAccounting,
+  checkpoint: DeepScanCheckpointSummary | null,
+  resumeThreadId: unknown,
+  scanDir: string,
+  maxCostUsd?: number,
+): Promise<void> {
+  if (checkpoint?.legacy)
+    costs.record("legacy", checkpoint.legacy.cost ?? null);
+  if (
+    checkpoint?.costUnavailable ||
+    (typeof resumeThreadId !== "string" &&
+      checkpoint !== null &&
+      (checkpoint.mergeStarted === true ||
+        (checkpoint.mergeStarted !== false &&
+          checkpoint.mergedScanIds.length > 0) ||
+        // The host saves merge inputs before launching a merge. A completed
+        // discovery alone can still be waiting for the rest of its batch.
+        (await lstat(
+          join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+        ).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          },
+        ))))
+  ) {
+    costs.record("previous-work", null);
+    if (maxCostUsd !== undefined)
+      throw new ScanCostTrackingError(
+        "A prior scan session is unavailable; its cost limit cannot be verified.",
+        scanDir,
+      );
+  }
 }
 
 /** Seal, validate and record the completed scan. */

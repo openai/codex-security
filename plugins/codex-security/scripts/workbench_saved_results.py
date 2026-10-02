@@ -10,7 +10,6 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +45,7 @@ from workbench_composition import COMPOSITION_CHECKPOINT, CompositionView, load_
 from workbench_constants import PHASES
 from workbench_result_merge import (
     _checkpoint_head_directory,
+    _children,
     _deferred_candidate_id,
     _digest,
     _encoded,
@@ -59,14 +59,17 @@ from workbench_result_merge import (
     _legacy_read_saved_result,
     _legacy_retained_findings,
     _parent_scan_draft,
+    _read_saved_parent_result,
     _reconcile_child_coverage,
     _reconcile_child_withdrawals,
     _retire_previous_child_coverage,
+    _saved_result_paths,
     _terminal_parent_finding_keys,
 )
 from workbench_result_merge import (
     coverage_for_comparison as coverage_for_comparison,
 )
+from workbench_scan_usage import merge_scan_cost
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
@@ -143,50 +146,9 @@ def refresh_completed_scan(
     return db.scan_context(connection, scan["id"])
 
 
-def _children(scan_dir: Path, relative: str) -> list[str]:
-    cursor = scan_dir
-    for part in Path(relative).parts:
-        if part in {"..", "."}:
-            return []
-        cursor = cursor / part
-        try:
-            if not stat.S_ISDIR(cursor.lstat().st_mode):
-                return []
-        except FileNotFoundError:
-            return []
-    return sorted(child.name for child in cursor.iterdir())
-
-
-def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
-    directory = (
-        "checkpoints/pending" if (scan_dir / "checkpoints/pending").exists() else "checkpoints"
-    )
-    for name in _children(scan_dir, directory):
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            yield f"checkpoints/{name}"
-
-
 def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dict[str, Any], str]:
     draft, digest, _ = _legacy_read_saved_result(scan_dir, relative, scan_id)
     return draft, digest
-
-
-def _read_saved_parent_result(
-    scan_dir: Path, scan_id: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
-    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
-    parent_scan = manifest.get("scan")
-    if not isinstance(parent_scan, dict):
-        raise ContractError("Saved parent manifest has no scan object")
-    if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
-        parent_scan.get("id", scan_id) != scan_id
-        or findings.get("scanId", scan_id) != scan_id
-        or coverage.get("scanId", scan_id) != scan_id
-    ):
-        raise ContractError("Saved parent documents belong to a different scan")
-    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
 def _source_digests(value: Any, label: str) -> dict[str, str]:
@@ -901,10 +863,11 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
+    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     with db.scan_completion_lock(scan_id):
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] != "failed":
-            raise SystemExit("Only a stopped scan can preserve terminal results.")
+        if scan["status"] == "complete":
+            raise SystemExit("A completed scan cannot preserve new results.")
         workspace = db.require_workspace(connection, scan["workspace_id"])
         owner = (
             scan["continuation_thread_id"]
@@ -913,18 +876,35 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
         )
         if args.thread_id is not None and args.thread_id != owner:
             raise SystemExit("Saved results can only be published from the owning Codex thread.")
-        if args.coordinator_generation is not None:
+        if getattr(args, "coordinator_generation", None) is not None:
             if args.thread_id is None:
                 raise SystemExit("A coordinator result refresh requires its owning thread.")
             db.deep_scan.require_current_coordinator(
                 db.deep_scan.require_deep_scan_run(connection, scan_id), args
             )
-        else:
+        # The app can cancel before a continuation has claimed the scan.
+        elif not (
+            getattr(args, "after_stop", False)
+            and scan["canceled_at"] is not None
+            and scan["handoff_claim_token"] is None
+            and args.claim_token is None
+        ):
             db.handoff.require_current_continuation(
                 scan,
                 args.claim_token,
                 error_message="Saved results are owned by another continuation.",
             )
+        if cost_json is not None:
+            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+        if scan["status"] == "running":
+            return db.scan_context(connection, scan_id)
+        if getattr(args, "after_stop", False):
+            preserve_stopped_results_after_transition(db, connection, scan_id, stop_children=True)
+            return db.scan_context(connection, scan_id)
         published = preserve_scan_results_locked(db, connection, scan_id)
         if not published and scan["canceled_at"] is not None:
             raise SystemExit("Saved scan results could not be published or verified.")
@@ -1197,25 +1177,37 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     try:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
-        if scan["status"] == "failed":
-            connection.commit()
-            stop_composition_children(
-                db, connection, load_composition(connection, scan, checkpoint=False)
-            )
-            return db.scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
-        db.handoff.require_current_continuation(
-            scan,
-            args.claim_token,
-            error_message="Scan failure is owned by another continuation.",
-        )
+        if (
+            scan["status"] != "failed"
+            or getattr(args, "defer_publication", False)
+            or cost_json is not None
+        ):
+            db.handoff.require_current_continuation(
+                scan,
+                args.claim_token,
+                error_message="Scan failure is owned by another continuation.",
+            )
+        if cost_json is not None:
+            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
+        if scan["status"] == "failed":
+            if cost_json is not None:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+            connection.commit()
+            if not getattr(args, "defer_publication", False):
+                stop_composition_children(
+                    db, connection, load_composition(connection, scan, checkpoint=False)
+                )
+            return db.scan_context(connection, scan["id"])
         message = db.optional_text(args.message, maximum=2400)
         updated = connection.execute(
             """
             UPDATE scans
             SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?
+                cost_json = COALESCE(?, cost_json)
             WHERE id = ? AND status = 'running'
             """,
             (message, timestamp, timestamp, cost_json, scan["id"]),
@@ -1233,7 +1225,8 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     except BaseException:
         connection.rollback()
         raise
-    preserve_stopped_results_after_transition(db, connection, scan["id"], stop_children=True)
+    if not getattr(args, "defer_publication", False):
+        preserve_stopped_results_after_transition(db, connection, scan["id"], stop_children=True)
     return db.scan_context(connection, scan["id"])
 
 
@@ -1255,9 +1248,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
-            stop_composition_children(
-                db, connection, load_composition(connection, scan, checkpoint=False)
-            )
+            if not getattr(args, "defer_publication", False):
+                stop_composition_children(
+                    db, connection, load_composition(connection, scan, checkpoint=False)
+                )
             return db.workspace_state(connection, scan["workspace_id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
@@ -1282,7 +1276,8 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     except BaseException:
         connection.rollback()
         raise
-    preserve_stopped_results_after_transition(db, connection, scan["id"], stop_children=True)
+    if not getattr(args, "defer_publication", False):
+        preserve_stopped_results_after_transition(db, connection, scan["id"], stop_children=True)
     return db.workspace_state(connection, scan["workspace_id"])
 
 

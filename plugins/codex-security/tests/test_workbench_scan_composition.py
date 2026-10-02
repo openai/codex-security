@@ -842,6 +842,46 @@ def test_membership_migration_rebuilds_public_finding_projections(
 
 
 @pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_repeated_parent_stop_preserves_deferred_child_cleanup(tmp_path, command, deferred):
+    state, target = _scan_workspace(tmp_path)
+    directory = tmp_path / "scan"
+    parent = register(state, target, directory, mode="deep")
+    child = register(
+        state,
+        target,
+        directory / "artifacts/deep-scan/passes/active",
+        parent=parent["scanId"],
+        role="deep_pass",
+    )
+    arguments = ["--message", "Synthetic parent interruption."] if command == "fail-scan" else []
+    if deferred:
+        arguments.append("--defer-publication")
+
+    for _ in range(2):
+        run_workbench(state, command, "--scan-id", parent["scanId"], *arguments)
+        current = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
+        assert current["progress"]["status"] == ("running" if deferred else "failed")
+
+    if deferred:
+        run_workbench(
+            state,
+            "save-scan-artifact",
+            "--scan-id",
+            child["scanId"],
+            "--artifact-path",
+            "artifacts/final-receipt.txt",
+            input_text="Synthetic final child receipt.",
+        )
+        run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"], "--after-stop")
+        current = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
+        assert current["progress"]["status"] == "failed"
+        assert (Path(child["scanDir"]) / "artifacts/final-receipt.txt").read_text() == (
+            "Synthetic final child receipt."
+        )
+
+
+@pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])
 def test_stopping_parent_stops_registered_passes_before_archiving(tmp_path, command):
     state, target = _scan_workspace(tmp_path)
     directory = tmp_path / "scan"

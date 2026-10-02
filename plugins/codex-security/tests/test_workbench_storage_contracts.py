@@ -16,6 +16,50 @@ from workbench_test_support import (
 )
 
 
+def test_cost_receipts_replace_flat_and_wrapped_inputs_without_nesting(tmp_path: Path) -> None:
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    scan = register(state, target, scan_dir)
+    usage = {"coverage": "unavailable", "source": "codex_rollout", "threadCount": 0}
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    for receipt in ({"usage": usage}, {"usage": usage, "cost": cost}, cost):
+        saved = run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan["scanId"],
+            "--cost-json",
+            json.dumps(receipt),
+        )["scan"]
+        assert saved["usage"] == usage
+        if "model" in receipt or "cost" in receipt:
+            assert saved["cost"] == cost
+    failed = run_workbench(
+        state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
+    )
+    assert failed["scan"]["cost"] == cost
+    replacement = {**cost, "estimatedUsd": 0.002}
+    repeated = run_workbench(
+        state,
+        "fail-scan",
+        "--scan-id",
+        scan["scanId"],
+        "--message",
+        "Synthetic stop.",
+        "--cost-json",
+        json.dumps({"usage": usage, "cost": replacement}),
+    )
+    assert repeated["scan"]["cost"] == replacement
+    assert repeated["scan"]["usage"] == usage
+
+
 def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) -> None:
     target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
     target.mkdir()

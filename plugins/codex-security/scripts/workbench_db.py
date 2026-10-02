@@ -1489,14 +1489,36 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    if cost_json is None:
+    # Ordinary scans retain saved accounting unless an explicit usage envelope
+    # replaces it. Deep Scans supply a new total; earlier estimates are partial.
+    completion_cost_json = cost_json
+    if scan["mode"] != "deep" and "usage" not in scan_usage.stored_scan_cost_fields(cost_json):
+        completion_cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
+    cost_fields = scan_usage.stored_scan_cost_fields(completion_cost_json)
+    if "usage" not in scan_usage.stored_scan_cost_fields(cost_json) and (
+        cost_json is None or scan["deep_scan_owner_thread_id"] is not None or "usage" in cost_fields
+    ):
         measured_usage = scan_usage.collect_scan_usage(
             connection,
             scan,
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
-        cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
+        if measured_usage["coverage"] != "complete" and "usage" in cost_fields:
+            retained_usage = cost_fields["usage"]
+            if retained_usage["coverage"] != "unavailable" and (
+                measured_usage["coverage"] == "unavailable"
+                or retained_usage["totalTokens"] > measured_usage["totalTokens"]
+            ):
+                measured_usage = {
+                    **retained_usage,
+                    "coverage": "partial",
+                    "warnings": sorted(
+                        {*retained_usage.get("warnings", []), *measured_usage.get("warnings", [])}
+                    ),
+                }
+        completion_cost_json = parse_scan_cost(json.dumps({**cost_fields, "usage": measured_usage}))
+    cost_json = completion_cost_json
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = manifest["scan"]["completedAt"]
