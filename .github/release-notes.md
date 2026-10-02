@@ -42,6 +42,7 @@
 - improve authentication and Blue/Red support ([#1188](https://github.com/openai/codex-security/pull/1188))
 - bump @linear/sdk from 95.2.0 to 96.0.0 in /sdk/typescript ([#1191](https://github.com/openai/codex-security/pull/1191))
 - bump ruff from 0.16.8 to 0.16.9 in /plugins/codex-security ([#1189](https://github.com/openai/codex-security/pull/1189))
+- bump the codex group across 3 directories with 2 updates ([#1195](https://github.com/openai/codex-security/pull/1195))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
