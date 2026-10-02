@@ -1,4 +1,4 @@
-"""Per-finding severity checkpoints and the selection requested for each scan."""
+"""Reusable severity checkpoints and the assessments saved for each scan."""
 
 import argparse
 import json
@@ -27,14 +27,46 @@ FIELDS = {
 }
 
 
-def assessments(connection: sqlite3.Connection, finding_ids: list[str]) -> list[dict[str, Any]]:
+def assessments(
+    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str | None = None
+) -> list[dict[str, Any]]:
+    table = "finding_severity_assessments" if scan_id is None else "scan_severity_assessments"
+    scope = "" if scan_id is None else "WHERE assessment.scan_id = ?"
+    parameters = (
+        (json.dumps(finding_ids),) if scan_id is None else (json.dumps(finding_ids), scan_id)
+    )
     rows = connection.execute(
-        """SELECT assessment.* FROM json_each(?) AS selected
-        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
-        ORDER BY selected.key""",
-        (json.dumps(finding_ids),),
+        f"""SELECT assessment.* FROM json_each(?) AS selected
+        CROSS JOIN {table} AS assessment ON assessment.finding_id = selected.value
+        {scope} ORDER BY selected.key""",
+        parameters,
     )
     return [{key: row[column] for key, column in FIELDS.items()} for row in rows]
+
+
+def scan_assessments(
+    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str
+) -> list[dict[str, Any]]:
+    from finalize_scan_contract import _stable_id
+
+    saved = assessments(connection, finding_ids, scan_id)
+    by_finding = {assessment["findingId"]: assessment for assessment in saved}
+    missing = [finding_id for finding_id in finding_ids if finding_id not in by_finding]
+    legacy = connection.execute(
+        """SELECT assessment.*, finding.fingerprint
+        FROM json_each(?) AS selected
+        JOIN finding_severity_assessments AS assessment
+            ON assessment.finding_id = selected.value
+        JOIN findings AS finding ON finding.id = assessment.finding_id""",
+        (json.dumps(missing),),
+    )
+    for assessment in legacy:
+        # Match migration 46 without changing a database opened for publication.
+        if assessment["occurrence_id"] == _stable_id("occ", scan_id, assessment["fingerprint"]):
+            by_finding[assessment["finding_id"]] = {
+                key: assessment[column] for key, column in FIELDS.items()
+            }
+    return [by_finding[finding_id] for finding_id in finding_ids if finding_id in by_finding]
 
 
 def checkpoint(
@@ -59,7 +91,11 @@ def checkpoint(
                     payload["knowledgeBaseSha256"],
                 ),
             )
-            return {"assessments": assessments(connection, payload["findingIds"])}
+            return {
+                "assessments": scan_assessments(
+                    connection, payload["findingIds"], payload["scanId"]
+                )
+            }
     if payload["action"] != "save":
         raise SystemExit("Unknown severity checkpoint action.")
     finding = payload["finding"]
@@ -73,15 +109,18 @@ def checkpoint(
             is None
         ):
             upsert_finding(connection, finding, timestamp)
-        columns = ", ".join(FIELDS.values())
-        parameters = ", ".join("?" for _ in FIELDS)
-        updates = ", ".join(f"{column} = excluded.{column}" for column in FIELDS.values())
+        row = {
+            "scan_id": payload["scanId"],
+            **{column: assessment[key] for key, column in FIELDS.items()},
+        }
+        columns = ", ".join(row)
+        parameters = ", ".join("?" for _ in row)
+        updates = ", ".join(f"{column} = excluded.{column}" for column in row)
+        conflict = f"DO UPDATE SET {updates}"
         connection.execute(
-            f"""INSERT INTO finding_severity_assessments ({columns})
-            VALUES ({parameters})
-            ON CONFLICT(finding_id) DO UPDATE SET
-            {updates}""",
-            tuple(assessment[key] for key in FIELDS),
+            f"INSERT INTO scan_severity_assessments ({columns}) VALUES ({parameters}) "
+            f"ON CONFLICT(scan_id, finding_id) {conflict}",
+            tuple(row.values()),
         )
     return {}
 
@@ -105,13 +144,24 @@ def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
         if row is None:
             return {}
         finding_ids = json.loads(row["finding_ids_json"])
+        has_scan_assessments = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'"
+            ).fetchone()
+            is not None
+        )
+        saved = (
+            scan_assessments(connection, finding_ids, scan_id)
+            if has_scan_assessments
+            else assessments(connection, finding_ids)
+        )
         return {
             "scanId": scan_id,
             "findingIds": finding_ids,
             "assessedAt": row["assessed_at"],
             "rubricSha256": row["rubric_sha256"],
             "knowledgeBaseSha256": row["knowledge_base_sha256"],
-            "assessments": assessments(connection, finding_ids),
+            "assessments": saved,
         }
 
 
