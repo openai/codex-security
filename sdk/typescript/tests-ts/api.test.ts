@@ -751,6 +751,23 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    ["HTTP 403 ExpiredTokenException", "unauthorized"],
+    ["HTTP 403 UnrecognizedClientException", "unauthorized"],
+    ["HTTP 400 IncompleteSignature", "unauthorized"],
+    ["AccessDeniedException", "forbidden"],
+    ["NotAuthorized", "forbidden"],
+    ["OptInRequired", "forbidden"],
+    ["ThrottlingException", "rate_limited"],
+  ] as const)(
+    "classifies Bedrock error %s as %s",
+    (message, classification) => {
+      expect(classifyConnectionFailure(new Error(message))).toBe(
+        classification,
+      );
+    },
+  );
+
+  test.each([
     ["root configuration", { approval_policy: "never" }],
     [
       "selected profile",
@@ -1754,6 +1771,50 @@ describe("CodexSecurity orchestration", () => {
     });
     await client.close();
   });
+
+  test.each(["standard", "deep"] as const)(
+    "identifies Bedrock account advisory applicability in the %s parent prompt",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const client = new TestClient(
+        { codexOverrides: { model_provider: "amazon-bedrock" } },
+        {
+          environment: { AWS_PROFILE: "synthetic-bedrock" },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(prompt) {
+                expect(prompt).toContain(
+                  "Amazon Bedrock with AWS authentication",
+                );
+                expect(prompt).toContain(
+                  "Skip the ChatGPT account Daybreak access advisory",
+                );
+                expect(prompt).toContain(
+                  "Report any actual provider error unchanged",
+                );
+                throw new Error("Bedrock prompt captured");
+              },
+            }),
+          }),
+        },
+      );
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "Bedrock prompt captured",
+      );
+      await client.close();
+    },
+  );
 
   test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
     const root = await temporaryDirectory();

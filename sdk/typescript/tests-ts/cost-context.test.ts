@@ -39,6 +39,41 @@ test.each([
   },
 );
 
+test("prices the exact Bedrock Daybreak Blue ID with AWS short and long context rates", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 200_000,
+    cache_write_input_tokens: 300_000,
+    output_tokens: 100_000,
+  };
+  const cost = estimateScanCost("openai.gpt-daybreak-blue-5.6-sol", usage)!;
+  expect(cost).toMatchObject({
+    model: "openai.gpt-daybreak-blue-5.6-sol",
+    estimatedUsd: 6.138,
+    estimatedUsdRange: { min: 6.138, max: 11.176, context: "unknown" },
+    pricing: {
+      source:
+        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+      asOf: "2026-10-01",
+      serviceTier: "standard",
+      context: "short",
+      usdPerMillionTokens: {
+        input: 4.4,
+        cacheRead: 0.44,
+        cacheWrite: 5.5,
+        output: 22,
+      },
+      longContextUsdPerMillionTokens: {
+        input: 8.8,
+        cacheRead: 0.88,
+        cacheWrite: 11,
+        output: 33,
+      },
+    },
+  });
+  expect(estimateScanCost("gpt-daybreak-blue-5.6-sol", usage)).toBeNull();
+});
+
 test("reports a range for cache-heavy scans without changing the budget baseline", () => {
   const cost = estimateScanCost("gpt-5.6-sol", {
     input_tokens: 150_000_000,

@@ -8570,6 +8570,11 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
+          if (authentication.method === "aws_credentials") {
+            dashboard.note(
+              "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+            );
+          }
           return;
         }
         progress?.stopTimer();
@@ -8583,6 +8588,9 @@ async function executeScan(
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
+          );
+          progress?.stage(
+            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
           );
         } else if (authentication.method === "command") {
           progress?.stage("Authentication: native Codex command.");
@@ -9114,11 +9122,6 @@ function scanFailureMessage(
   // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
-  //
-  // The advice branches below still replace the underlying text rather than
-  // appending it. That is deliberate: upstream authentication and authorization
-  // errors can name the organization or project, which must not reach stderr or
-  // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
@@ -9137,18 +9140,34 @@ function scanFailureMessage(
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
-  switch (classifyConnectionFailure(error)) {
+  const classification = classifyConnectionFailure(error);
+  if (authentication?.method === "aws_credentials") {
+    const detail = diagnosticValue(error);
+    switch (classification) {
+      case "unauthorized":
+        return (
+          `${detail}\n${authenticationFailureMessage(authentication)} ` +
+          (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
+            ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
+            : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
+        );
+      case "forbidden":
+        return (
+          `${detail}\nThe AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+        );
+      case "rate_limited":
+        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
+      default:
+        return detail;
+    }
+  }
+  switch (classification) {
     case "unauthorized":
       return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
-          "Check your AWS identity and Bedrock model permissions."
-        );
       }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +

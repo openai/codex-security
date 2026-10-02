@@ -15,6 +15,7 @@ const rates = [
   ["gpt-5.6-luna", 200n, 20n, 250n, 1200n],
   ["gpt-daybreak-blue-latest", 4000n, 400n, 5000n, 20000n],
   ["gpt-daybreak-red-latest", 12500n, 1250n, 15625n, 75000n],
+  ["openai.gpt-daybreak-blue-5.6-sol", 4400n, 440n, 5500n, 22000n],
 ] as const;
 const count = fc.integer({ min: 0, max: 1_000_000_000 });
 const usageParts = fc.record({
@@ -70,7 +71,10 @@ describe("cost-model invariants", () => {
             BigInt(parts.cached) * cachedRate +
             BigInt(parts.written) * writeRate +
             BigInt(parts.output) * outputRate;
-          for (const selected of [model, `openai.${model}`]) {
+          const identifiers = model.startsWith("openai.")
+            ? [model]
+            : [model, `openai.${model}`];
+          for (const selected of identifiers) {
             expect(estimateScanCost(selected, tokens)).toMatchObject({
               model: selected,
               inputTokens: tokens.input_tokens,

@@ -49,6 +49,16 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
+const BEDROCK_DAYBREAK_BLUE_PRICING = {
+  model: "openai.gpt-daybreak-blue-5.6-sol",
+  // AWS commercial in-region Standard prices already include the 10% fee.
+  short: [4_400, 440, 5_500, 22_000],
+  long: [8_800, 880, 11_000, 33_000],
+  source:
+    "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+  asOf: "2026-10-01",
+} as const;
+
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
   "gpt-5.5": [5_000, 500, 5_000, 30_000],
@@ -141,10 +151,13 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
+  const bedrockDaybreakBlue = model === BEDROCK_DAYBREAK_BLUE_PRICING.model;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
-  const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
+  const pricing = bedrockDaybreakBlue
+    ? BEDROCK_DAYBREAK_BLUE_PRICING.short
+    : MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
@@ -162,7 +175,9 @@ export function estimateScanCost(
     outputTokens * outputRate;
   if (!Number.isSafeInteger(nanodollars)) return null;
 
-  const longPricing = LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
+  const longPricing = bedrockDaybreakBlue
+    ? BEDROCK_DAYBREAK_BLUE_PRICING.long
+    : LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
   let maximumNanodollars: number | null = null;
   if (longPricing !== undefined) {
     const [longInput, longRead, longWrite, longOutput] = longPricing;
@@ -197,11 +212,14 @@ export function estimateScanCost(
       context: "unknown",
     },
     pricing: {
-      source: pricingModel.startsWith("gpt-5.5")
-        ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-        : "https://developers.openai.com/api/docs/pricing",
-      asOf:
-        pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+      source: bedrockDaybreakBlue
+        ? BEDROCK_DAYBREAK_BLUE_PRICING.source
+        : pricingModel.startsWith("gpt-5.5")
+          ? "https://developers.openai.com/api/docs/models/gpt-5.5"
+          : "https://developers.openai.com/api/docs/pricing",
+      asOf: bedrockDaybreakBlue
+        ? BEDROCK_DAYBREAK_BLUE_PRICING.asOf
+        : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
           ? "2026-09-30"
           : "2026-09-14",
       serviceTier: "standard",
