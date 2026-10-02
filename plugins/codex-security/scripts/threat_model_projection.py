@@ -11,6 +11,27 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+_STRUCTURED_SECTIONS = (
+    ("Assets", "assets"),
+    ("Trust Boundaries", "trustBoundaries"),
+    ("Attacker Capabilities", "attackerCapabilities"),
+    ("Security Objectives", "securityObjectives"),
+    ("Assumptions", "assumptions"),
+)
+
+
+def _is_structured_model(model: dict[str, Any]) -> bool:
+    summary = model.get("summary")
+    return (
+        isinstance(summary, str)
+        and bool(summary)
+        and all(
+            isinstance(values := model.get(key, []), list)
+            and all(isinstance(value, str) and value for value in values)
+            for _, key in _STRUCTURED_SECTIONS
+        )
+    )
+
 
 def _markdown_content(model: dict[str, Any]) -> str | None:
     content = model.get("content")
@@ -23,6 +44,9 @@ def threat_model_body(model: dict[str, Any]) -> str:
     """Keep authored Markdown intact, including summaries from older scans."""
     content = _markdown_content(model)
     if content is not None:
+        # The structured schema permits legacy metadata as extension fields.
+        if _is_structured_model(model):
+            return content
         if "origin" in model and model["origin"] not in (
             "generated",
             "provided",
@@ -55,13 +79,7 @@ def threat_model_body(model: dict[str, Any]) -> str:
     sections = [
         summary if summary.strip() else "No explicit canonical threat-model summary was recorded."
     ]
-    for heading, key in (
-        ("Assets", "assets"),
-        ("Trust Boundaries", "trustBoundaries"),
-        ("Attacker Capabilities", "attackerCapabilities"),
-        ("Security Objectives", "securityObjectives"),
-        ("Assumptions", "assumptions"),
-    ):
+    for heading, key in _STRUCTURED_SECTIONS:
         values = model.get(key, [])
         if not isinstance(values, list):
             raise ValueError(f"threatModel.{key}: expected an array")

@@ -117,6 +117,35 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.assertTrue(document.startswith(b"# Full model\n\nSource-backed detail.\n"))
         self.assertNotIn(b"A shorter summary.", document)
 
+    def test_exports_legacy_metadata_with_markdown_content(self) -> None:
+        body = "# Saved model\n\nKeep **authored** detail.\n"
+        for metadata in (
+            {"origin": "legacy-import", "scope": "Repository-wide"},
+            {"origin": {"tool": "legacy"}, "scope": {"includePaths": 42}},
+            {"origin": None, "scope": None},
+            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        ):
+            with self.subTest(metadata=metadata):
+                model = {
+                    "summary": "Existing structured model.",
+                    "assets": ["Queue records"],
+                    "trustBoundaries": [],
+                    "format": "markdown",
+                    "content": body,
+                    **metadata,
+                }
+                self.manifest["scan"]["threatModel"] = model
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                sealed = (self.scan_dir / "scan-manifest.json").read_bytes()
+                document = FINALIZER.build_threat_model_export(self.scan_dir)
+                self.assertTrue(document.startswith(body.encode()))
+                self.assertNotIn(b"Existing structured model.", document)
+                self.assertEqual(
+                    FINALIZER.describe_threat_model(self.scan_dir)["threatModel"], model
+                )
+                self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), sealed)
+
     def test_failed_projection_update_does_not_expose_the_previous_model(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Original queue boundaries."}
         self.write_scan()
@@ -324,7 +353,6 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 {
                     "format": "markdown",
                     "content": "# Queue boundaries\n",
-                    "summary": "A legacy summary extension.",
                     **metadata,
                 },
                 expected,
@@ -343,6 +371,27 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     {"scope": {"includePaths": [], "summary": ""}},
                     "threatModel.scope.summary",
                 ),
+            )
+        )
+        cases.extend(
+            (
+                {
+                    "format": "markdown",
+                    "content": "# Queue boundaries\n",
+                    "origin": "legacy-import",
+                    **structured,
+                },
+                "threatModel.origin",
+            )
+            for structured in (
+                {"summary": ""},
+                {"summary": None},
+                {"summary": 42},
+                {"summary": "Queue boundaries.", "assets": None},
+                {"summary": "Queue boundaries.", "trustBoundaries": [""]},
+                {"summary": "Queue boundaries.", "attackerCapabilities": [None]},
+                {"summary": "Queue boundaries.", "securityObjectives": "Unavailable"},
+                {"summary": "Queue boundaries.", "assumptions": {}},
             )
         )
         for model, expected in cases:
