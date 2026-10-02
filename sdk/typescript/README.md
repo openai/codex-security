@@ -272,9 +272,20 @@ npx @openai/codex-security scan . --provider amazon-bedrock \
   --model openai.gpt-daybreak-blue-5.6-sol --effort high
 ```
 
-Daybreak Blue requires OpenAI approval/enrollment followed by AWS model-access
-provisioning; contact your AWS account team. See the
-[AWS model card](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html).
+For separately approved Daybreak Red model access in the same region:
+
+```bash
+npx @openai/codex-security scan . --provider amazon-bedrock \
+  --model openai.gpt-5.6-cyber --effort high
+```
+
+Both require OpenAI approval/enrollment followed by AWS model-access provisioning.
+Red requires separate Red approval and the model-specific approval for
+GPT-5.6-Cyber; Blue access does not include it. Contact your AWS account team.
+See the AWS model cards for
+[Blue](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html)
+and [Red](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html),
+and [OpenAI's access overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview).
 
 Run the exports and CLI command in the same shell, job, or container. Environment
 changes in another terminal or a completed subprocess do not reach the scan.

@@ -74,6 +74,48 @@ test("prices the exact Bedrock Daybreak Blue ID with AWS short and long context 
   expect(estimateScanCost("gpt-daybreak-blue-5.6-sol", usage)).toBeNull();
 });
 
+test("prices the exact Bedrock Daybreak Red ID without inventing long-context rates", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 200_000,
+    cache_write_input_tokens: 300_000,
+    output_tokens: 100_000,
+  };
+  const cost = estimateScanCost("openai.gpt-5.6-cyber", usage)!;
+  expect(cost).toMatchObject({
+    model: "openai.gpt-5.6-cyber",
+    estimatedUsd: 20.55625,
+    estimatedUsdRange: { min: 20.55625, max: null, context: "unknown" },
+    pricing: {
+      source:
+        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
+      asOf: "2026-10-01",
+      serviceTier: "standard",
+      context: "short",
+      usdPerMillionTokens: {
+        input: 13.75,
+        cacheRead: 1.375,
+        cacheWrite: 17.1875,
+        output: 82.5,
+      },
+    },
+  });
+  expect(cost.pricing).not.toHaveProperty("longContextUsdPerMillionTokens");
+  expect(estimateScanCost("gpt-5.6-cyber", usage)).toBeNull();
+});
+
+test.each([1, 3])(
+  "retains a Bedrock Red estimate for %i cache-write tokens",
+  (written) => {
+    const cost = estimateScanCost("openai.gpt-5.6-cyber", {
+      input_tokens: written,
+      cache_write_input_tokens: written,
+      output_tokens: 0,
+    });
+    expect(cost?.estimatedUsd).toBe((written * 17.1875) / 1_000_000);
+  },
+);
+
 test("reports a range for cache-heavy scans without changing the budget baseline", () => {
   const cost = estimateScanCost("gpt-5.6-sol", {
     input_tokens: 150_000_000,

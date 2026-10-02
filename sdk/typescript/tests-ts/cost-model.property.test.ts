@@ -90,6 +90,25 @@ describe("cost-model invariants", () => {
     );
   });
 
+  test("matches an exact integer oracle for fractional-nanodollar Bedrock Red rates", () => {
+    fc.assert(
+      fc.property(usageParts, (parts) => {
+        const halfNanodollars =
+          BigInt(parts.uncached) * 27_500n +
+          BigInt(parts.cached) * 2_750n +
+          BigInt(parts.written) * 34_375n +
+          BigInt(parts.output) * 165_000n;
+        expect(
+          estimateScanCost("openai.gpt-5.6-cyber", usage(parts)),
+        ).toMatchObject({
+          estimatedUsd: Number(halfNanodollars) / 2_000_000_000,
+          estimatedUsdRange: { max: null },
+        });
+      }),
+      propertyOptions,
+    );
+  });
+
   test("normalizes legacy cache writes without double charging", () => {
     fc.assert(
       fc.property(usageParts, (parts) => {

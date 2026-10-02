@@ -108,8 +108,8 @@ npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5
 
 Run the exports and scan in the same shell. Bedrock also accepts bearer tokens
 and the AWS credential chain. Native Bedrock scans and local result viewing or
-export do not require an OpenAI CLI login. Daybreak models still need
-[approved model access](docs/bedrock.md#daybreak-blue). Hosted publication has its
+export do not require an OpenAI CLI login. Daybreak Blue and Red still need
+[approved model access](docs/bedrock.md#daybreak-blue-and-red). Hosted publication has its
 own authentication requirements. See [Bedrock setup and verification](docs/bedrock.md).
 
 For other inference providers, set the provider's API key and select a model:

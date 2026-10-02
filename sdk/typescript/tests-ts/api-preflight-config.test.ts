@@ -88,9 +88,14 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
-  test.each(["standard", "deep"] as const)(
-    "accepts a cost limit for a %s Bedrock Daybreak Blue scan without starting inference",
-    async (mode) => {
+  test.each([
+    ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["standard", "openai.gpt-5.6-cyber"],
+    ["deep", "openai.gpt-5.6-cyber"],
+  ] as const)(
+    "accepts a cost limit for a %s Bedrock %s scan without starting inference",
+    async (mode, model) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       await mkdir(repository);
@@ -98,7 +103,7 @@ describe("CodexSecurity preflight configuration", () => {
         {
           codexOverrides: {
             model_provider: "amazon-bedrock",
-            model: "openai.gpt-daybreak-blue-5.6-sol",
+            model,
           },
         },
         {
@@ -117,7 +122,7 @@ describe("CodexSecurity preflight configuration", () => {
       ).resolves.toMatchObject({
         mode,
         modelProvider: "amazon-bedrock",
-        model: "openai.gpt-daybreak-blue-5.6-sol",
+        model,
         maxCostUsd: 1,
         authentication: {
           method: "aws_credentials",

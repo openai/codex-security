@@ -41,7 +41,7 @@ Codex Security itself.
 
 Once model access is provisioned, native Bedrock scanning uses AWS credentials
 without a separate `codex-security login` or OpenAI API key. Restricted models
-still require their approval and provisioning steps; see Daybreak Blue below.
+still require their approval and provisioning steps; see Daybreak Blue and Red below.
 Local Markdown/JSON reports, `scans show`, and `export` also
 need no cloud login. [Publishing to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
 requires separate ChatGPT credentials and access to that destination.
@@ -63,15 +63,22 @@ Bedrock defaults `model_reasoning_summary` to `none` because some models reject
 including resumes. Reasoning effort is unchanged; an explicit summary override
 still takes precedence. See [provider configuration](../sdk/typescript/README.md#amazon-bedrock).
 
-## Daybreak Blue
+## Daybreak Blue and Red
 
-The Bedrock model ID is `openai.gpt-daybreak-blue-5.6-sol`. AWS lists `us-east-2`
-and the Bedrock Mantle Responses API for this model. The native provider handles
-that endpoint; no custom base URL or connector is needed. Access requires OpenAI
-Trusted Access for Cyber enrollment and approval, followed by AWS provisioning
-through your account team. See the
-[AWS model card](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html)
-and [OpenAI's Daybreak overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview).
+Use the exact Bedrock identifier for the model your account can invoke:
+
+| Access        | Bedrock model ID                   | AWS model card                                                                                                     |
+| ------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Daybreak Blue | `openai.gpt-daybreak-blue-5.6-sol` | [Blue](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html) |
+| Daybreak Red  | `openai.gpt-5.6-cyber`             | [Red](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html)              |
+
+AWS lists `us-east-2` and the Bedrock Mantle Responses API for both models.
+The native provider handles that endpoint; no custom base URL or connector is
+needed. Access requires OpenAI Trusted Access for Cyber enrollment and approval,
+followed by AWS provisioning through your account team. Red requires separate
+Red approval and the model-specific approval for GPT-5.6-Cyber; Blue access does
+not grant Red access. See
+[OpenAI's Daybreak overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview).
 
 After that AWS access is granted, use your AWS credentials:
 
@@ -82,15 +89,23 @@ npx @openai/codex-security scan /path/to/repository \
   --provider amazon-bedrock --model openai.gpt-daybreak-blue-5.6-sol --effort high
 ```
 
-This command does not require an additional OpenAI CLI sign-in. It does not
-replace the model's approval or AWS provisioning requirements.
+For separately approved Red access, use:
 
-Cost estimates and `--max-cost` recognize this exact Bedrock model ID using the
-AWS model card's Standard commercial in-region rates, which include the AWS fee.
-The estimate reports a short/long-context range because aggregate scan usage
-does not identify each request's context tier. Spending limits use the existing
-short-context baseline; they do not guarantee the final AWS bill. Pricing for
-other Bedrock model IDs is unchanged.
+```bash
+npx @openai/codex-security scan /path/to/repository \
+  --provider amazon-bedrock --model openai.gpt-5.6-cyber --effort high
+```
+
+Neither command needs an additional OpenAI CLI sign-in after AWS model access
+is provisioned. The Bedrock reasoning-summary default remains `none` for both.
+
+Cost estimates and `--max-cost` recognize both exact Bedrock IDs using their
+AWS model cards' Standard commercial in-region rates, including the AWS fee.
+Blue reports a short/long-context range because aggregate usage does not identify
+each request's context tier. Red's card lists a 272K context window and only
+short-context pricing, so its upper estimate remains unavailable. Spending limits
+use the short-context baseline; they do not guarantee the final AWS bill. Pricing
+for other Bedrock model IDs is unchanged.
 
 ## Repeatable live smoke test
 
@@ -103,8 +118,9 @@ the published package.
 The following POSIX-shell recipe uses an existing profile. Keep these variables
 in the same shell for all steps. Replace the executable path and profile with
 your test installation and authorized identity. The model below tests Daybreak
-Blue after access is granted; use `openai.gpt-5.6-luna` for a general Bedrock test
-if that is the model your account can invoke:
+Blue after access is granted. Set `model="openai.gpt-5.6-cyber"` for an approved
+Red test, or use `openai.gpt-5.6-luna` for a general Bedrock test if that is the
+model your account can invoke:
 
 ```bash
 cli="/absolute/path/to/node_modules/.bin/codex-security"

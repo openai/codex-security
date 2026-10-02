@@ -49,15 +49,37 @@ export interface ScanTokenUsage {
   total_tokens: number;
 }
 
-const BEDROCK_DAYBREAK_BLUE_PRICING = {
-  model: "openai.gpt-daybreak-blue-5.6-sol",
+const BEDROCK_MODEL_PRICING: Readonly<
+  Record<
+    string,
+    {
+      short: ModelPricing;
+      long?: ModelPricing;
+      unitsPerUsd: number;
+      source: string;
+      asOf: string;
+    }
+  >
+> = {
   // AWS commercial in-region Standard prices already include the 10% fee.
-  short: [4_400, 440, 5_500, 22_000],
-  long: [8_800, 880, 11_000, 33_000],
-  source:
-    "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
-  asOf: "2026-10-01",
-} as const;
+  "openai.gpt-daybreak-blue-5.6-sol": {
+    short: [4_400, 440, 5_500, 22_000],
+    long: [8_800, 880, 11_000, 33_000],
+    unitsPerUsd: 1_000_000_000,
+    source:
+      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+    asOf: "2026-10-01",
+  },
+  "openai.gpt-5.6-cyber": {
+    // Half-nanodollar units preserve the $17.1875/M cache-write rate exactly,
+    // including an odd number of cache-write tokens.
+    short: [27_500, 2_750, 34_375, 165_000],
+    unitsPerUsd: 2_000_000_000,
+    source:
+      "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
+    asOf: "2026-10-01",
+  },
+};
 
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
@@ -94,13 +116,17 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
-function usdPerMillionTokens(pricing: ModelPricing): TokenPrices {
+function usdPerMillionTokens(
+  pricing: ModelPricing,
+  unitsPerUsd: number,
+): TokenPrices {
   const [input, cacheRead, cacheWrite, output] = pricing;
+  const unitsPerMillion = unitsPerUsd / 1_000_000;
   return {
-    input: input / 1_000,
-    cacheRead: cacheRead / 1_000,
-    cacheWrite: cacheWrite / 1_000,
-    output: output / 1_000,
+    input: input / unitsPerMillion,
+    cacheRead: cacheRead / unitsPerMillion,
+    cacheWrite: cacheWrite / unitsPerMillion,
+    output: output / unitsPerMillion,
   };
 }
 
@@ -151,13 +177,13 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockDaybreakBlue = model === BEDROCK_DAYBREAK_BLUE_PRICING.model;
+  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
-  const pricing = bedrockDaybreakBlue
-    ? BEDROCK_DAYBREAK_BLUE_PRICING.short
-    : MODEL_PRICING_NANODOLLARS[pricingModel];
+  const pricing =
+    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
@@ -168,17 +194,17 @@ export function estimateScanCost(
     output_tokens: outputTokens,
   } = normalized;
 
-  const nanodollars =
+  const costUnits =
     (inputTokens - cachedInputTokens - cacheWriteInputTokens) * inputRate +
     cachedInputTokens * cachedInputRate +
     cacheWriteInputTokens * cacheWriteInputRate +
     outputTokens * outputRate;
-  if (!Number.isSafeInteger(nanodollars)) return null;
+  if (!Number.isSafeInteger(costUnits)) return null;
 
-  const longPricing = bedrockDaybreakBlue
-    ? BEDROCK_DAYBREAK_BLUE_PRICING.long
+  const longPricing = bedrockPricing
+    ? bedrockPricing.long
     : LONG_CONTEXT_PRICING_NANODOLLARS[pricingModel];
-  let maximumNanodollars: number | null = null;
+  let maximumUnits: number | null = null;
   if (longPricing !== undefined) {
     const [longInput, longRead, longWrite, longOutput] = longPricing;
     // Unclassified input may include additional cache writes. Preserve the
@@ -192,7 +218,7 @@ export function estimateScanCost(
       cachedInputTokens * longRead +
       cacheWriteInputTokens * longWrite +
       outputTokens * longOutput;
-    if (Number.isSafeInteger(maximum)) maximumNanodollars = maximum;
+    if (Number.isSafeInteger(maximum)) maximumUnits = maximum;
   }
 
   return {
@@ -204,30 +230,34 @@ export function estimateScanCost(
       ? { cacheWriteInputTokensReported: false }
       : {}),
     outputTokens,
-    estimatedUsd: nanodollars / 1_000_000_000,
+    estimatedUsd: costUnits / unitsPerUsd,
     estimatedUsdRange: {
-      min: nanodollars / 1_000_000_000,
-      max:
-        maximumNanodollars === null ? null : maximumNanodollars / 1_000_000_000,
+      min: costUnits / unitsPerUsd,
+      max: maximumUnits === null ? null : maximumUnits / unitsPerUsd,
       context: "unknown",
     },
     pricing: {
-      source: bedrockDaybreakBlue
-        ? BEDROCK_DAYBREAK_BLUE_PRICING.source
+      source: bedrockPricing
+        ? bedrockPricing.source
         : pricingModel.startsWith("gpt-5.5")
           ? "https://developers.openai.com/api/docs/models/gpt-5.5"
           : "https://developers.openai.com/api/docs/pricing",
-      asOf: bedrockDaybreakBlue
-        ? BEDROCK_DAYBREAK_BLUE_PRICING.asOf
+      asOf: bedrockPricing
+        ? bedrockPricing.asOf
         : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
           ? "2026-09-30"
           : "2026-09-14",
       serviceTier: "standard",
       context: "short",
-      usdPerMillionTokens: usdPerMillionTokens(pricing),
+      usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),
       ...(longPricing === undefined
         ? {}
-        : { longContextUsdPerMillionTokens: usdPerMillionTokens(longPricing) }),
+        : {
+            longContextUsdPerMillionTokens: usdPerMillionTokens(
+              longPricing,
+              unitsPerUsd,
+            ),
+          }),
     },
   };
 }
