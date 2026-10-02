@@ -253,6 +253,12 @@ export interface ScanOptions extends ScanSettings {
   preserveProviderEnvironment?: boolean;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
+  /** @internal A complete ordinary pass owned by a Deep Scan. */
+  deepScanPass?: boolean;
+  /** @internal Persist composition membership after normal registration. */
+  onRegisteredScan?: (registration: JsonObject) => Promise<void>;
+  /** @internal A parent budget requires child usage tracking to succeed. */
+  requireCost?: boolean;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
