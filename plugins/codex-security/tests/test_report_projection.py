@@ -566,16 +566,20 @@ def test_projection_keeps_standard_findings_table_unchanged() -> None:
     assert "[Parser boundary \\[SCAN-001-parser\\]](#finding-1)" in markdown
 
 
-def test_projection_rejects_unsafe_detailed_writeup_path() -> None:
+@pytest.mark.parametrize("report_path", ["../outside.md", "findings/one/../../outside.md"])
+def test_projection_rejects_unsafe_detailed_writeup_path(report_path: str) -> None:
     manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["writeup"] = {"reportPath": "../outside.md"}
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
 
     with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
         PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    findings["findings"][0]["writeup"] = {"reportPath": "findings/one/two.md"}
-    with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
-        PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+@pytest.mark.parametrize("report_path", ["findings/one/two.md", "findings/source-scan/one/two.md"])
+def test_projection_preserves_original_report_names(report_path: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
+    assert report_path in PROJECTION.build_report_markdown(manifest, findings, coverage)
 
 
 def test_projection_rejects_duplicate_detailed_writeup_paths() -> None:
@@ -593,6 +597,29 @@ def test_projection_rejects_duplicate_detailed_writeup_paths() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert f"[Open report]({report_path})" in markdown
     assert "[Open report](findings/second-boundary/second-boundary.md)" in markdown
+
+
+@pytest.mark.parametrize("prefix", ["", "artifacts/deep-scan/passes/pass-1/"])
+@pytest.mark.parametrize("second_level", ["high", "informational"])
+def test_projection_keeps_each_writeups_evidence_directory_separate(
+    prefix: str, second_level: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    first = findings["findings"][0]
+    first["writeup"] = {"reportPath": prefix + "findings/shared/first.md"}
+    second = copy.deepcopy(first)
+    second["title"] = "Second parser boundary"
+    second["severity"]["level"] = second_level
+    second["writeup"] = {"reportPath": prefix + "findings/shared/second.md"}
+    findings["findings"].append(second)
+
+    with pytest.raises(PROJECTION.ReportProjectionError, match="share an evidence directory"):
+        PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    second["writeup"] = {"reportPath": prefix + "findings/second/report.md"}
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert first["writeup"]["reportPath"] in markdown
+    assert (second["writeup"]["reportPath"] in markdown) == (second_level != "informational")
 
 
 def test_projection_links_structural_hardening_portfolio() -> None:

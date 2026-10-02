@@ -326,8 +326,17 @@ describe("custom validation", () => {
     ).rejects.toThrow("unsealed custom-validation draft");
   });
 
-  test("validates persisted findings with empty optional dataflow details", async () => {
+  test("preserves optional details and nested write-up paths during validation", async () => {
     const f = await fixture(3);
+    const reportPath = "findings/retained/nested/details.md";
+    f.findings.findings[0]!.writeup = { reportPath };
+    await mkdir(join(f.scanDir, "findings/retained/nested"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(f.scanDir, reportPath),
+      "Synthetic original write-up.\n",
+    );
     for (const [index, finding] of f.findings.findings.entries()) {
       finding.attackPath = {
         dataflow: {
@@ -358,6 +367,10 @@ describe("custom validation", () => {
       join(f.scanDir, "findings.json"),
     );
     expect(saved.findings).toHaveLength(3);
+    expect(saved.findings[0]!.writeup).toEqual({ reportPath });
+    expect(await readFile(join(f.scanDir, reportPath), "utf8")).toBe(
+      "Synthetic original write-up.\n",
+    );
     for (const [index, finding] of saved.findings.entries()) {
       expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
       expect(finding.locations).toEqual(f.findings.findings[index]!.locations);

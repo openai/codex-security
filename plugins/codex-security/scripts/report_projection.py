@@ -18,7 +18,9 @@ DISPOSITION_LABELS = {
     "not_applicable": "Not applicable",
     "needs_follow_up": "Needs follow-up",
 }
-WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+WRITEUP_REPORT_PATH_RE = re.compile(
+    r"^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\.md$"
+)
 
 
 class ReportProjectionError(ValueError):
@@ -799,6 +801,18 @@ def build_report_markdown(
         raise ReportProjectionError(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
+        )
+    evidence_directories = [
+        path.rsplit("/", 1)[0]
+        for finding in findings_document["findings"]
+        if (path := _writeup_report_path(finding)) is not None
+    ]
+    shared_directories = sorted(
+        directory for directory, count in Counter(evidence_directories).items() if count > 1
+    )
+    if shared_directories:
+        raise ReportProjectionError(
+            "findings share an evidence directory: " + ", ".join(shared_directories)
         )
     deep_presentation = _uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []

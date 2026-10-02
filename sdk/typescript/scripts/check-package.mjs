@@ -246,6 +246,7 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "scan-merge",
     "security-policy",
     "security-policy-cli",
     "suggest-owners",

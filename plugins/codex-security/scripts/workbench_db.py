@@ -48,6 +48,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from report_projection import WRITEUP_REPORT_PATH_RE
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -145,7 +146,6 @@ from workbench_validation import (
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
-FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
 
 def now() -> str:
@@ -3034,10 +3034,7 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
     if not isinstance(writeup, dict):
         return []
     report_path = writeup.get("reportPath")
-    if (
-        not isinstance(report_path, str)
-        or FINDING_WRITEUP_REPORT_PATH.fullmatch(report_path) is None
-    ):
+    if not isinstance(report_path, str) or WRITEUP_REPORT_PATH_RE.fullmatch(report_path) is None:
         return []
     report_relative = PurePosixPath(report_path)
     artifacts = []

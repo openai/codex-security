@@ -1678,7 +1678,12 @@ The extraction root is not enforced.
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
 
-        def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+        def unlink_if_exists(
+            scan_dir: Path,
+            relative_path: str,
+            *,
+            expected_root_identity: tuple[int, int] | None = None,
+        ) -> None:
             (scan_dir / relative_path).unlink(missing_ok=True)
 
         backend.open_read_fd.side_effect = open_read_fd
