@@ -33,44 +33,43 @@ function matchingReports(pattern: string): string[] {
   }
   const parent = dirname(pattern);
   const namePattern = basename(pattern);
-  const directories = /[*?[]/u.test(parent)
-    ? matchingReports(parent)
-    : [parent];
-  return directories.flatMap((directory) => {
-    let names: string[];
-    try {
-      names = readdirSync(directory);
-    } catch {
-      return [];
-    }
-    return names
-      .filter(
-        (name) =>
-          (!name.startsWith(".") || namePattern.startsWith(".")) &&
-          minimatch(
-            name,
-            namePattern.replaceAll("\\", "\\\\").replaceAll("[^", "[\\^"),
-            {
-              dot: true,
-              nobrace: true,
-              noext: true,
-              noglobstar: true,
-              nonegate: true,
-              nocomment: true,
-              nocase: process.platform === "win32",
-            },
-          ),
-      )
-      .map((name) => join(directory, name))
-      .filter((path) => {
-        if (!directoriesOnly) return true;
-        try {
-          return statSync(path).isDirectory();
-        } catch {
-          return false;
-        }
-      });
-  });
+  return (/[*?[]/u.test(parent) ? matchingReports(parent) : [parent]).flatMap(
+    (directory) => {
+      let names: string[];
+      try {
+        names = readdirSync(directory);
+      } catch {
+        return [];
+      }
+      return names
+        .filter(
+          (name) =>
+            (!name.startsWith(".") || namePattern.startsWith(".")) &&
+            minimatch(
+              name,
+              namePattern.replaceAll("\\", "\\\\").replaceAll("[^", "[\\^"),
+              {
+                dot: true,
+                nobrace: true,
+                noext: true,
+                noglobstar: true,
+                nonegate: true,
+                nocomment: true,
+                nocase: process.platform === "win32",
+              },
+            ),
+        )
+        .map((name) => join(directory, name))
+        .filter((path) => {
+          if (!directoriesOnly) return true;
+          try {
+            return statSync(path).isDirectory();
+          } catch {
+            return false;
+          }
+        });
+    },
+  );
 }
 
 function integer(value: string): bigint {
