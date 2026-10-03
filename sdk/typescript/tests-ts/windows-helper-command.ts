@@ -56,9 +56,7 @@ export function windowsHelperFixture(root: string) {
           "-NoProfile",
           "-NonInteractive",
           "-EncodedCommand",
-          Buffer.from(command + "\nexit $LASTEXITCODE\n", "utf16le").toString(
-            "base64",
-          ),
+          Buffer.from(command, "utf16le").toString("base64"),
         ],
         {
           cwd: root,
