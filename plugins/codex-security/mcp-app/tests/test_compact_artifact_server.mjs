@@ -1,3 +1,4 @@
+import { gitText } from "../scripts/git.mjs";
 import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
@@ -63,8 +64,7 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     mkdir(scanRoot, { recursive: true }),
   ]);
   const git = (...arguments_) =>
-    execFileSync(
-      "git",
+    gitText(
       [
         "-c",
         "user.name=Fixture",

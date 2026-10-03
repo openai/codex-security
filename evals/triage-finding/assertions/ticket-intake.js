@@ -1,15 +1,4 @@
-function outputText(output) {
-  return typeof output === "string" ? output : JSON.stringify(output);
-}
-
-function hasTriageJson(text) {
-  return (
-    /```(?:json)?\s*[\s\S]*?```/i.test(text) ||
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i.test(text) ||
-    /["']findings["']\s*:/i.test(text) ||
-    /["']verdict["']\s*:/i.test(text)
-  );
-}
+const { outputText, hasTriageJson } = require("./output");
 
 const expectedPatterns = {
   unavailable: [/connector|Linear/i, /connect|authenticate|reauthorize/i, /paste|provide.*content/i],

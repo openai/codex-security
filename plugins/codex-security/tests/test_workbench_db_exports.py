@@ -1721,9 +1721,9 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
             with monkeypatch.context() as context:
                 context.setattr(results, "write_scan_local_bytes", interrupt_coverage)
                 with pytest.raises(OSError, match="Interrupted canonical publication"):
-                    db.write_scan_draft(connection, args)
+                    results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         else:
-            db.write_scan_draft(connection, args)
+            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         head = json.loads((scan_dir / "checkpoint-head.json").read_text())
         normalized_path = scan_dir / "checkpoints" / head["checkpoint"]
         normalized_bytes = normalized_path.read_bytes()
@@ -1748,7 +1748,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         raw["coverage"]["surfaces"] = documents["coverage"]["surfaces"]
         raw_path.write_text(json.dumps(raw))
         staged.write_text(json.dumps(documents))
-        db.write_scan_draft(connection, args)
+        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         assert normalized_path.read_bytes() == normalized_bytes
         assert retained_raw.read_bytes() == raw_bytes
         canonical = json.loads((scan_dir / "coverage.json").read_text())
@@ -1758,7 +1758,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         raw["coverage"]["deferred"] = [pending]
         raw_path.write_text(json.dumps(raw))
         staged.write_text(json.dumps(documents))
-        db.write_scan_draft(connection, args)
+        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         head_bytes = (scan_dir / "checkpoint-head.json").read_bytes()
         checkpoints = set((scan_dir / "checkpoints").iterdir())
         # A rejected write must not leave a fresh closure for stopped recovery.
@@ -1769,7 +1769,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         raw_path.write_text(json.dumps(raw))
         args.expected_draft_digest = "0" * 64
         with pytest.raises(SystemExit, match="scan_draft_conflict"):
-            db.write_scan_draft(connection, args)
+            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         assert (scan_dir / "checkpoint-head.json").read_bytes() == head_bytes
         assert set((scan_dir / "checkpoints").iterdir()) == checkpoints
         args.expected_draft_digest = None
@@ -1777,14 +1777,14 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         documents["manifest"]["scan"]["target"] = None
         staged.write_text(json.dumps(documents))
         with pytest.raises(results.ContractError, match="target"):
-            db.write_scan_draft(connection, args)
+            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         assert (scan_dir / "checkpoint-head.json").read_bytes() == head_bytes
         assert set((scan_dir / "checkpoints").iterdir()) == checkpoints
         documents["manifest"]["scan"]["target"] = target
         documents["coverage"]["deferred"].remove(pending)
         documents["coverage"]["resolvedDeferred"] = raw["coverage"]["resolvedDeferred"]
         staged.write_text(json.dumps(documents))
-        db.write_scan_draft(connection, args)
+        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         canonical = json.loads((scan_dir / "coverage.json").read_text())
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]

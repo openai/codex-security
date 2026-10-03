@@ -1,24 +1,9 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
-from pathlib import Path
-from types import ModuleType
 
 import pytest
-
-PLUGIN_DIR = Path(__file__).resolve().parent.parent
-
-
-def load_script(name: str) -> ModuleType:
-    path = PLUGIN_DIR / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+from workbench_test_support import load_script
 
 PROJECTION = load_script("report_projection")
 
