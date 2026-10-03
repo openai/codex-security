@@ -1006,8 +1006,9 @@ command; `--auth api-key` uses that configured variable. For `patch` and
 existing Codex configuration. With `auto` or `api-key` authentication, a configured
 `env_key` takes precedence over OpenAI account authentication, matching native Codex.
 Explicit `--auth chatgpt` omits the selected custom provider's API-key environment
-variable and selects stored account authentication in its runtime configuration,
-even if the provider normally uses only an API key. The original environment and
+variable, clears any configured `experimental_bearer_token`, and selects stored
+account authentication in its runtime configuration, even if the provider normally
+uses only an API key or bearer token. The original environment and
 Codex configuration remain unchanged.
 Model, effort, and provider settings also apply to
 `patch --assess-patch-risk`.

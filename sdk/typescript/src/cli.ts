@@ -1430,14 +1430,15 @@ export async function runCodexSkillCommand(
       const providerBearer =
         typeof providerConfiguration?.["experimental_bearer_token"] ===
         "string";
+      const providerKeyConfigured =
+        providerEnvKey !== undefined || providerBearer;
       const requiresOpenAiAuth =
         !commandAuth &&
-        (explicitChatgpt ||
-          (providerEnvKey === undefined && !providerBearer)) &&
+        (explicitChatgpt || !providerKeyConfigured) &&
         (provider === undefined ||
           provider === "openai" ||
           providerConfiguration?.["requires_openai_auth"] === true ||
-          (explicitChatgpt && providerEnvKey !== undefined));
+          (explicitChatgpt && providerKeyConfigured));
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
       if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
@@ -1479,15 +1480,17 @@ export async function runCodexSkillCommand(
         explicitChatgpt &&
         !commandAuth &&
         providerConfiguration !== undefined &&
-        providerEnvKey !== undefined
+        providerKeyConfigured
       ) {
-        selected = Object.fromEntries(
-          Object.entries(selected).filter(([name]) =>
-            process.platform === "win32"
-              ? name.toUpperCase() !== providerEnvKey.toUpperCase()
-              : name !== providerEnvKey,
-          ),
-        );
+        if (providerEnvKey !== undefined) {
+          selected = Object.fromEntries(
+            Object.entries(selected).filter(([name]) =>
+              process.platform === "win32"
+                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
+                : name !== providerEnvKey,
+            ),
+          );
+        }
         // Native provider keys take precedence over stored authentication.
         // Apply explicit ChatGPT selection to the home and CLI configuration.
         const providerOverrides =

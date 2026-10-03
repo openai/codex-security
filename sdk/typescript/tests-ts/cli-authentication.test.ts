@@ -1729,13 +1729,16 @@ describe("skill authentication", () => {
         ["verify-fix", "profile"],
       ] as const
     ).flatMap(([command, source]) =>
-      [true, false, undefined].map(
-        (requiresOpenAiAuth) => [command, source, requiresOpenAiAuth] as const,
+      [true, false, undefined].flatMap((requiresOpenAiAuth) =>
+        ["env_key", "bearer"].map(
+          (credential) =>
+            [command, source, requiresOpenAiAuth, credential] as const,
+        ),
       ),
     ),
   )(
-    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p)",
-    async (command, source, requiresOpenAiAuth) => {
+    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p, credential: %s)",
+    async (command, source, requiresOpenAiAuth, credential) => {
       const configuredEnvKey =
         process.platform === "win32" ? "gateway_api_key" : "GATEWAY_API_KEY";
       const environment = { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" };
@@ -1751,8 +1754,10 @@ describe("skill authentication", () => {
         ...Object.entries(providerConfig).map(
           ([key, value]) => `${key}=${JSON.stringify(value)}`,
         ),
-        `env_key=${JSON.stringify(configuredEnvKey)}`,
-        ...(requiresOpenAiAuth === false
+        ...(credential === "env_key"
+          ? [`env_key=${JSON.stringify(configuredEnvKey)}`]
+          : []),
+        ...(credential === "bearer" || requiresOpenAiAuth === false
           ? ['experimental_bearer_token="SYNTHETIC_FALLBACK_KEY"']
           : []),
       ];
@@ -1784,7 +1789,9 @@ describe("skill authentication", () => {
         storedCredentials: true,
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(result.launch.environment).toEqual({});
+      expect(result.launch.environment).toEqual(
+        credential === "env_key" ? {} : environment,
+      );
       expect(parseToml(result.launch.config)["model_providers"]).toEqual({
         gateway: { ...providerConfig, requires_openai_auth: true },
       });
@@ -1970,25 +1977,56 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each(["patch", "verify-fix"] as const)(
-    "%s uses native provider bearer authentication without an OpenAI login",
-    async (command) => {
+  test.each([
+    ["validate", "override"],
+    ["patch", "override"],
+    ["verify-fix", "override"],
+    ["patch", "ambient"],
+    ["verify-fix", "ambient"],
+  ] as const)(
+    "%s uses native provider bearer authentication from %s without an OpenAI login",
+    async (command, source) => {
+      const providerConfig = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        experimental_bearer_token: "SYNTHETIC_BEARER_TOKEN",
+        requires_openai_auth: true,
+      };
+      const settings = Object.entries(providerConfig).map(
+        ([key, value]) => `${key}=${JSON.stringify(value)}`,
+      );
       const result = await runProviderSkill({
         command,
         auth: "auto",
-        overrides: ['model_provider="gateway"'],
-        ambientConfig: [
+        overrides: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
-          'experimental_bearer_token="SYNTHETIC_BEARER_TOKEN"',
-          "requires_openai_auth=true",
-        ].join("\n"),
+          ...(source === "override"
+            ? settings.map((setting) => `model_providers.gateway.${setting}`)
+            : []),
+        ],
+        ...(source === "ambient"
+          ? {
+              ambientConfig: ["[model_providers.gateway]", ...settings].join(
+                "\n",
+              ),
+            }
+          : {}),
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.launch.environment).toEqual({});
+      if (source === "override") {
+        const override = result.launch.args.findLast((arg: string) =>
+          arg.startsWith("model_providers="),
+        );
+        expect(parseToml(override)["model_providers"]).toEqual({
+          gateway: providerConfig,
+        });
+      } else {
+        expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+          gateway: providerConfig,
+        });
+      }
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );
