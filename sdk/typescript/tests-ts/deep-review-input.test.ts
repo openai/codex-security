@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
 import {
   hasWindowsLoopbackShare,
@@ -75,9 +76,8 @@ function run(
     { cwd: f.root, encoding: "utf8", env },
   );
 }
-afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(removeTemporaryDirectory));
 });
 
 describe("deep-review worklists", () => {
@@ -503,15 +503,17 @@ describe("deep-review worklists", () => {
             undefined,
             workingDirectory,
           );
-          expect(
-            result.status,
-            `${powershell}: ${result.stderr || result.error?.message || ""}`,
-          ).toBe(0);
-          if (location !== "unc") expect(result.stderr).toBe("");
-          expect(read(output)).toEqual([
+          expect(result.stdout, result.diagnostics).not.toContain(
+            "expanded-plugin-used",
+          );
+          expect(result.status, result.diagnostics).toBe(0);
+          if (location !== "unc")
+            expect(result.stderr, result.diagnostics).toBe("");
+          expect(existsSync(output), result.diagnostics).toBe(true);
+          expect(read(output), result.diagnostics).toEqual([
             { path: "caf\u00e9/\u96ea.py", area: "src" },
           ]);
-          expect(readFileSync(expandedOutput, "utf8")).toBe(
+          expect(readFileSync(expandedOutput, "utf8"), result.diagnostics).toBe(
             "expanded output sentinel",
           );
         }
