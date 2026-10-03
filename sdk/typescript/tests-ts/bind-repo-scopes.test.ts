@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -254,6 +256,58 @@ test.skipIf(process.platform === "win32")(
     expect(run(f).status).toBe(0);
     expect(realpathSync(f.coverage)).toBe(target);
     expect(statSync(target).mode & 0o777).toBe(0o640);
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "documented PowerShell scope binding preserves literal input and artifact paths",
+  () => {
+    const requested = ["caf\u00e9/\u96ea.py", "src", "src"];
+    const f = fixture(requested);
+    const scopes = join(f.root, "scopes %USERNAME% !EXPAND! caf\u00e9's.json");
+    renameSync(f.scopes, scopes);
+    const expandedScopes = scopes.replace("%USERNAME%", "expanded-user");
+    writeFileSync(expandedScopes, '["wrong"]');
+    const launcher = windowsHelperFixture(f.root, {
+      CODEX_SECURITY_TARGET_PATHS_FILE: scopes,
+    });
+    const scanDir = join(f.root, "scan %USERNAME% !EXPAND! \u96ea's");
+    const expandedScanDir = scanDir.replace("%USERNAME%", "expanded-user");
+    for (const directory of [scanDir, expandedScanDir]) mkdirSync(directory);
+    const initial = {
+      "scan-manifest.json": readFileSync(f.manifest),
+      "coverage.json": readFileSync(f.coverage),
+    };
+    for (const powershell of launcher.powershells) {
+      for (const [name, bytes] of Object.entries(initial)) {
+        writeFileSync(join(scanDir, name), bytes);
+        writeFileSync(join(expandedScanDir, name), bytes);
+      }
+      const result = launcher.run(powershell, "skills/security-scan/SKILL.md", {
+        "<plugin_dir>": launcher.plugin,
+        "<scan_dir>": scanDir,
+      });
+      expect(
+        result.status,
+        `${powershell}: ${result.stderr || result.error?.message || ""}`,
+      ).toBe(0);
+      expect(result.stdout).toBe(
+        `Bound 3 requested scopes into the scan contract${newline}`,
+      );
+      expect(result.stderr).toBe("");
+      expect(
+        JSON.parse(readFileSync(join(scanDir, "scan-manifest.json"), "utf8"))
+          .scan.scope.includePaths,
+      ).toEqual(requested);
+      expect(
+        JSON.parse(readFileSync(join(scanDir, "coverage.json"), "utf8"))
+          .includePaths,
+      ).toEqual(requested);
+      expect(JSON.parse(readFileSync(scopes, "utf8"))).toEqual(requested);
+      expect(readFileSync(expandedScopes, "utf8")).toBe('["wrong"]');
+      for (const [name, bytes] of Object.entries(initial))
+        expect(readFileSync(join(expandedScanDir, name))).toEqual(bytes);
+    }
   },
 );
 
