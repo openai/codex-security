@@ -74,11 +74,11 @@ function buildHydrationPlan(records, { cacheRoot = DEFAULT_CACHE_ROOT, targetRoo
   }));
 }
 
-function runGit(args, cwd) {
+function runGit(args, cwd, stderr = "pipe") {
   return childProcess.execFileSync("git", args, {
     cwd,
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", stderr],
   });
 }
 
@@ -178,6 +178,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  runGit,
   DEFAULT_CACHE_ROOT,
   parseArgs,
   repositoryCacheId,

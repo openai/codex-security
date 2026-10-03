@@ -1,8 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { gitText } from "./support/shell.js";
 
 export function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
+  return gitText(
     [
       "-c",
       "user.name=Fixture",
@@ -10,6 +9,6 @@ export function git(repository: string, ...args: string[]): string {
       "user.email=fixture@example.com",
       ...args,
     ],
-    { cwd: repository, encoding: "utf8" },
+    { cwd: repository },
   ).trim();
 }

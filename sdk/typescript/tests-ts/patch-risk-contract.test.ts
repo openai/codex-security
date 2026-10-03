@@ -12,6 +12,7 @@ import { dirname, join, relative } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import {
@@ -677,7 +678,7 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  test("rejects long truncated strings without repeatedly scanning their suffix", () => {
+  test("rejects long truncated strings without repeatedly scanning their suffix", async () => {
     const complete = assessment();
     complete.impact.rationale = '"'.repeat(64000);
     const truncated = '{"impact":{"rationale":"' + '\\"'.repeat(64000) + "\\";
@@ -685,16 +686,15 @@ describe("patch risk assessment contract", () => {
       [truncated, 1],
       [JSON.stringify(complete), 0],
     ] as const) {
-      const result = spawnSync(
+      const result = await runCommand(
         node,
         [helper, "validate-patch-risk-assessment", "-"],
         {
           input,
-          encoding: "utf8",
           timeout: 5000,
         },
       );
-      expect(result.error).toBeUndefined();
+      expect(result.signal, result.error?.message).toBeNull();
       expect(result.status, result.stderr).toBe(status);
       if (status === 1)
         expect(result.stderr).toContain("cannot read assessment:");
@@ -811,6 +811,20 @@ describe("patch risk assessment contract", () => {
     }
   });
 
+  test("escapes terminal controls in assessment file-read error paths", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "patch-risk-read-error-"));
+    try {
+      const file = join(outside, "missing-\u001b[2J.json");
+      const result = validateText("", outside, [file]);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("missing-\\x1b[2J.json");
+      expect(result.stderr).not.toContain("\u001b");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   for (const location of ["absolute", "relative", "unc"] as const)
     test.skipIf(
       process.platform !== "win32" ||
@@ -841,7 +855,13 @@ describe("patch risk assessment contract", () => {
         const argument = (path: string) =>
           location === "absolute" ? path : relative(caller, path);
         for (const powershell of launcher.powershells) {
-          for (const input of ["invalid", "valid", "stdin", "missing"]) {
+          for (const input of [
+            "invalid",
+            "valid",
+            "stdin",
+            "pipeline",
+            "missing",
+          ]) {
             await writeFile(file, input === "invalid" ? "{}" : original);
             if (input === "missing") await rm(file);
             const result = await launcher.run(
@@ -849,10 +869,14 @@ describe("patch risk assessment contract", () => {
               "skills/assess-patch-risk/SKILL.md",
               {
                 "<plugin-root>": argument(launcher.plugin),
-                "<assessment.json>": input === "stdin" ? "-" : argument(file),
+                "<assessment.json>":
+                  input === "stdin" || input === "pipeline"
+                    ? "-"
+                    : argument(file),
               },
-              original,
+              input === "pipeline" ? "" : original,
               workingDirectory,
+              input === "pipeline" ? original : undefined,
             );
             const diagnostics = `${location} ${input}\n${result.diagnostics}`;
             expect(result.stdout, diagnostics).not.toContain(
@@ -867,9 +891,7 @@ describe("patch risk assessment contract", () => {
                 "missing required schema property",
               );
             else if (input === "missing")
-              expect(result.stderr, diagnostics).toContain(
-                "cannot read assessment:",
-              );
+              expect(result.stderr, diagnostics).toContain("Convert-Path");
             else if (location !== "unc")
               expect(result.stderr, diagnostics).toBe("");
             if (input === "missing")

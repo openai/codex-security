@@ -126,7 +126,7 @@ from workbench_target import (
     git_command,
     git_output,
     git_revision,
-    git_submodule_paths,
+    git_submodule_entries,
     git_target_metadata,
     git_worktree_context,
     remediation_checkout_snapshot,
@@ -397,18 +397,6 @@ def inspect_setup_values(
         "scope": normalized_scope,
         "target": inspect_target(str(target)),
     }
-
-
-def inspect_setup(args: argparse.Namespace) -> dict[str, Any]:
-    return inspect_setup_values(
-        args.target_path,
-        args.scope,
-        args.mode,
-        args.diff_target_kind,
-        args.diff_base_revision,
-        args.diff_head_revision,
-        args.diff_content_digest,
-    )
 
 
 def require_review_changes_target(target: Path) -> str:
@@ -920,18 +908,6 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             connection.rollback()
         raise
     return workspace_state(connection, workspace["id"])
-
-
-def start_prompt_only_scan(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return _start_prompt_driven_scan(connection, args, headless_standard=False)
-
-
-def start_headless_standard_scan(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return _start_prompt_driven_scan(connection, args, headless_standard=True)
 
 
 def _start_prompt_driven_scan(
@@ -1878,10 +1854,6 @@ def recover_scan_results(
     return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
-def write_scan_draft(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
 
@@ -2450,7 +2422,7 @@ def require_reviewed_patch_applied(
         git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
-        excluded += git_submodule_paths(target)
+        excluded += tuple(path for path, _ in git_submodule_entries(target))
     with tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary:
         reviewed_patch = Path(temporary) / "reviewed.patch"
         digest = hashlib.sha256()
@@ -3079,13 +3051,10 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
     except OSError:
         return artifacts
 
-    directories_seen = 0
-    for current_directory, directory_names, file_names in os.walk(
-        poc_root, topdown=True, followlinks=False
+    for directories_seen, (current_directory, directory_names, file_names) in enumerate(
+        os.walk(poc_root, topdown=True, followlinks=False), start=1
     ):
-        directories_seen += 1
         if directories_seen > FINDING_ARTIFACT_DIRECTORIES_LIMIT:
-            directory_names[:] = []
             break
         current_path = Path(current_directory)
         directory_names[:] = [
@@ -3366,7 +3335,15 @@ def main() -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-setup":
-        result = inspect_setup(args)
+        result = inspect_setup_values(
+            args.target_path,
+            args.scope,
+            args.mode,
+            args.diff_target_kind,
+            args.diff_base_revision,
+            args.diff_head_revision,
+            args.diff_content_digest,
+        )
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command in {"save-artifact", "read-artifact"}:
@@ -3395,9 +3372,9 @@ def main() -> None:
         elif args.command == "start-scan":
             result = start_scan(connection, args)
         elif args.command == "start-prompt-only-scan":
-            result = start_prompt_only_scan(connection, args)
+            result = _start_prompt_driven_scan(connection, args, headless_standard=False)
         elif args.command == "start-headless-standard-scan":
-            result = start_headless_standard_scan(connection, args)
+            result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "begin-deep-scan":
             result = deep_scan.begin_deep_scan(connection, args)
         elif args.command == "get-deep-scan":
@@ -3498,7 +3475,7 @@ def main() -> None:
         elif args.command == "recover-scan-results":
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
-            result = write_scan_draft(connection, args)
+            result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "save-scan-artifact":
             result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
