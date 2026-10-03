@@ -518,6 +518,72 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
     ]
 
 
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_includes_symlinks_replaced_by_source(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "config", "core.symlinks", "true")
+    for name in ("app/replaced.py", "app/binary.py"):
+        write_file(repository, name, b"routes.py")
+    git(repository, "add", ".")
+    for name in ("app/replaced.py", "app/binary.py"):
+        blob = git(repository, "hash-object", name)
+        git(repository, "update-index", "--cacheinfo", f"120000,{blob},{name}")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+
+    write_file(repository, "app/replaced.py", b"def handler():\n    return 1\n")
+    write_file(repository, "app/binary.py", b"\x00\xff\x01")
+    write_file(repository, "app/routes.py", b"changed = True\n")
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "replace symlinks")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        write_file(repository, "app/replaced.py", b"\x00\xff\x01")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "app/replaced.py",
+        "app/routes.py",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_omits_source_replaced_by_symlinks(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    source = write_file(repository, "app/replaced.py", b"def handler():\n    return 1\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "app/routes.py", b"changed = True\n")
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode == "revisions":
+        source.write_text("routes.py", encoding="utf-8")
+        git(repository, "add", ".")
+        blob = git(repository, "hash-object", "app/replaced.py")
+        git(repository, "update-index", "--cacheinfo", f"120000,{blob},app/replaced.py")
+        git(repository, "commit", "-qm", "replace source")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+    else:
+        source.unlink()
+        try:
+            source.symlink_to("routes.py")
+        except OSError as error:
+            pytest.skip(f"creating a symbolic link requires host support: {error}")
+        if mode == "staged":
+            git(repository, "add", ".")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "app/routes.py\n"
+
+
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
 def test_diff_inventory_includes_changed_terraform(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)

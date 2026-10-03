@@ -616,7 +616,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         "diff",
         "--name-status",
         "-z",
-        "--diff-filter=ACMRD",
+        "--diff-filter=ACMRDT",
         *diff_args,
         text=False,
     )

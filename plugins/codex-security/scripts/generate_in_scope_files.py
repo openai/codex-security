@@ -163,7 +163,7 @@ def committed_changed_paths(repository: Path, base: str, head: str) -> list[tupl
         "diff",
         "--raw",
         "-z",
-        "--diff-filter=ACMRD",
+        "--diff-filter=ACMRDT",
         f"{base}..{head}",
         text=False,
     )

@@ -988,6 +988,40 @@ def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
     assert rows[-1]["preview"] == ""
 
 
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_make_diff_rank_input_includes_symlinks_replaced_by_source(
+    tmp_path: Path, mode: str
+) -> None:
+    repo = tmp_path / "repo"
+    source_dir = repo / "src"
+    source_dir.mkdir(parents=True)
+    initialize_repo(repo)
+    git(repo, "config", "core.symlinks", "true")
+    source = source_dir / "replaced.py"
+    source.write_text("target.txt", encoding="utf-8")
+    git(repo, "add", ".")
+    blob = git(repo, "hash-object", "src/replaced.py")
+    git(repo, "update-index", "--cacheinfo", f"120000,{blob},src/replaced.py")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+
+    source.write_text("def handler():\n    return 1\n", encoding="utf-8")
+    arguments = ["--base", base, "--mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repo, "add", ".")
+    if mode == "revisions":
+        git(repo, "commit", "-qm", "replace symlink")
+        arguments = ["--base", base, "--head", git(repo, "rev-parse", "HEAD")]
+        source.write_text("def worktree_only():\n    pass\n", encoding="utf-8")
+    output = tmp_path / "diff.jsonl"
+
+    run_cli("make-diff-rank-input", "--repo", str(repo), *arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {"path": "src/replaced.py", "area": "diff", "preview": "function handler()"}
+    ]
+
+
 def test_make_diff_rank_input_uses_empty_tree_for_root_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
