@@ -3,11 +3,13 @@ import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
+  warningResult,
   capture,
   dependencies,
-  fakePreflight,
   fakeResult,
+  fakeSecurity,
 } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
 
 describe("CLI diagnostics", () => {
   test.each([
@@ -62,9 +64,7 @@ describe("CLI diagnostics", () => {
     async ({ command, args, structured }) => {
       const message =
         "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail";
-      const fail = () => {
-        throw new Error(message);
-      };
+      const fail = throwing(message);
       const deps = dependencies({ onCodex: fail, onRepositoryCommand: fail });
       deps.classifyScanSeverity = fail;
       deps.deduplicateScan = fail;
@@ -99,13 +99,8 @@ describe("CLI diagnostics", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw failure;
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      deps.createSecurity = () =>
+        fakeSecurity((Promise.reject<never>).bind(Promise, failure));
 
       expect(
         await main(
@@ -178,8 +173,8 @@ describe("CLI diagnostics", () => {
     const deps = dependencies({
       environment: { ...mode.environment, NO_COLOR: "1" },
     });
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
           source: "OPENAI_API_KEY",
@@ -190,10 +185,7 @@ describe("CLI diagnostics", () => {
         options?.onWarning?.(warning);
         options?.onObserverError?.("onWorkerStatus", new Error(observer));
         return result;
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
     expect(
       await main(
@@ -229,14 +221,7 @@ describe("CLI diagnostics", () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onWarning?.(warning, { kind: "target_changed" });
-        return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+    deps.createSecurity = () => fakeSecurity(warningResult(warning, true));
     expect(
       await main(
         ["scan", ".", "--json", "--verbose"],
@@ -255,8 +240,8 @@ describe("CLI diagnostics", () => {
     const stdout = capture();
     const stderr = capture(true);
     const deps = dependencies({ environment: { NO_COLOR: "1" } });
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onScanStarted?.();
         options?.onActivity?.({
           id: "synthetic-command",
@@ -267,10 +252,7 @@ describe("CLI diagnostics", () => {
         });
         options?.onObserverError?.("onWorkerStatus", new Error(observer));
         return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
     expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
       0,

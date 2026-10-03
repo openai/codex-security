@@ -9,6 +9,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { capture } from "./cli-fixtures.js";
 
 interface WorkflowStep {
   name?: string;
@@ -38,22 +39,6 @@ async function workflow(name: string) {
     on: Record<string, unknown>;
     env?: Record<string, unknown>;
     jobs: Record<string, WorkflowJob>;
-  };
-}
-
-function capture(): {
-  stream: Pick<NodeJS.WriteStream, "write">;
-  text: () => string;
-} {
-  let value = "";
-  return {
-    stream: {
-      write(chunk: string | Uint8Array): boolean {
-        value += chunk.toString();
-        return true;
-      },
-    },
-    text: () => value,
   };
 }
 
@@ -501,20 +486,20 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("provides executable help and version behavior", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const stdout = capture(null);
+    const stderr = capture(null);
     expect(await main([], stdout.stream, stderr.stream)).toBe(0);
     expect(stdout.text()).toContain("Usage: codex-security <command>");
     expect(stdout.text()).toContain("Integrations:");
     expect(stderr.text()).toBe("");
 
-    const versionOutput = capture();
+    const versionOutput = capture(null);
     expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
       0,
     );
     expect(versionOutput.text()).toBe(`${VERSION}\n`);
 
-    const scanHelpOutput = capture();
+    const scanHelpOutput = capture(null);
     expect(
       await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
     ).toBe(0);

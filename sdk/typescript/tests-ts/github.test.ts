@@ -1,8 +1,9 @@
+import { resolving } from "./support/promises.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Octokit } from "@octokit/core";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import {
   createAuthenticatedGitHub,
@@ -11,6 +12,8 @@ import {
   type GitHubCodeScanningImportOptions,
 } from "../src/github.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import type { OnCodex } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
 
 function alert(number: number, ref = "refs/heads/main") {
   return {
@@ -241,11 +244,7 @@ describe("GitHub code scanning import", () => {
   });
 
   test("validates selectors before authentication and supports cancellation", async () => {
-    let authenticated = false;
-    const createGitHub = async () => {
-      authenticated = true;
-      return github(() => Response.json([]));
-    };
+    const createGitHub = mock(resolving(github(() => Response.json([]))));
     for (const options of [
       { repository: "https://github.com/example/repository" },
       { repository: "example/.." },
@@ -268,7 +267,7 @@ describe("GitHub code scanning import", () => {
         { createGitHub },
       ),
     ).rejects.toThrow("Synthetic cancellation");
-    expect(authenticated).toBe(false);
+    expect(createGitHub).not.toHaveBeenCalled();
 
     const controller = new AbortController();
     await expect(
@@ -310,9 +309,7 @@ describe("GitHub import CLI", () => {
         { repository: "example/repository", alertNumbers: [42] },
         { createGitHub: async () => github(() => Response.json(alert(42))) },
       );
-      const mustNotStartCodex = () => {
-        throw new Error("Import must not start Codex");
-      };
+      const mustNotStartCodex = throwing("Import must not start Codex");
       expect(
         await main(
           ["import", "github", "example/repository", "--json"],
@@ -330,7 +327,7 @@ describe("GitHub import CLI", () => {
 
       const file = join(root, "github-alerts.json");
       await writeFile(file, stdout.text());
-      let input = "";
+      const onCodex = mock<OnCodex>().mockReturnValue(0);
       expect(
         await main(
           ["validate", file],
@@ -338,13 +335,11 @@ describe("GitHub import CLI", () => {
           capture().stream,
           dependencies({
             currentDirectory: root,
-            onCodex: (_args, _output, _environment, prompt) => {
-              input = prompt!;
-              return 0;
-            },
+            onCodex,
           }),
         ),
       ).toBe(0);
+      const input = onCodex.mock.lastCall ? onCodex.mock.lastCall[3]! : "";
       expect(JSON.parse(input.split("\n").at(-1)!)).toEqual([stdout.text()]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -416,21 +411,18 @@ describe("GitHub import CLI", () => {
       ["import", "github", "example/repository", "--github-state", "unknown"],
     ].map((argv) => [argv] as const),
   )("rejects invalid arguments %j", async (argv) => {
-    let called = false;
+    const importGitHubAlerts = mock(resolving([]));
     expect(
       await main(
         argv,
         capture().stream,
         capture().stream,
         dependencies({
-          importGitHubAlerts: async () => {
-            called = true;
-            return [];
-          },
+          importGitHubAlerts,
         }),
       ),
     ).toBe(2);
-    expect(called).toBe(false);
+    expect(importGitHubAlerts).not.toHaveBeenCalled();
   });
 
   test("returns cancellation and removes signal handlers", async () => {

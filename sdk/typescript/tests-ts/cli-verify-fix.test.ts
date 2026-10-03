@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -8,7 +8,7 @@ import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-function linearIssue(identifier: string) {
+async function linearIssue(identifier: string) {
   return {
     identifier,
     title: `Verify ${identifier}`,
@@ -25,6 +25,9 @@ function linearIssue(identifier: string) {
     }),
   };
 }
+
+const linearClient = () =>
+  ({ issue: linearIssue }) as ReturnType<LinearClientFactory>;
 
 describe("read-only finding verification", () => {
   test("verifies imported Linear issues in a read-only sandbox without exposing credentials", async () => {
@@ -44,10 +47,7 @@ describe("read-only finding verification", () => {
             LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_SECRET",
             OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
           },
-          linearClient: () =>
-            ({
-              issue: async (id: string) => linearIssue(id),
-            }) as ReturnType<LinearClientFactory>,
+          linearClient,
           onCodex: (args, output, processEnvironment, input) => {
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
@@ -270,10 +270,7 @@ describe("read-only finding verification", () => {
         capture().stream,
         dependencies({
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
-          linearClient: () =>
-            ({
-              issue: async (id: string) => linearIssue(id),
-            }) as ReturnType<LinearClientFactory>,
+          linearClient,
           onCodex: (_args, output) => {
             agentCalls += 1;
             prompt = output!.appServer!.prompt;
@@ -508,10 +505,7 @@ describe("read-only finding verification", () => {
           stderr.stream,
           dependencies({
             environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
-            linearClient: () =>
-              ({
-                issue: async (id: string) => linearIssue(id),
-              }) as ReturnType<LinearClientFactory>,
+            linearClient,
             onCodex: (_args, output) => {
               output?.stdout.write(JSON.stringify(result));
               return 0;
@@ -537,7 +531,7 @@ describe("read-only finding verification", () => {
     "rejects invalid verification selection %j",
     async (args, expected) => {
       const stderr = capture();
-      let started = false;
+      const onCodex = mock<() => number>().mockReturnValue(0);
 
       expect(
         await main(
@@ -546,15 +540,12 @@ describe("read-only finding verification", () => {
           stderr.stream,
           dependencies({
             environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
-            onCodex: () => {
-              started = true;
-              return 0;
-            },
+            onCodex,
           }),
         ),
       ).toBe(2);
       expect(stderr.text()).toContain(expected);
-      expect(started).toBe(false);
+      expect(onCodex).not.toHaveBeenCalled();
     },
   );
 });

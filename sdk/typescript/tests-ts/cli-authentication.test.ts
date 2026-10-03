@@ -1,9 +1,10 @@
+import { parseJsonLines } from "./support/json.js";
+import { resolving } from "./support/promises.js";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
-  mkdtemp,
   realpath,
   readFile,
   rm,
@@ -11,10 +12,9 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import {
@@ -29,18 +29,23 @@ import {
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import {
+  savedRecipe,
   capture,
   dependencies as cliDependencies,
   FakeSignals,
   fakePreflight,
   fakeResult,
+  fakeSecurity,
+  failingSecurity,
 } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
 
 let stateDirectory: string;
 
 beforeEach(async () => {
   stateDirectory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-cli-authentication-")),
+    await temporaryDirectory("codex-security-cli-authentication-"),
   );
 });
 
@@ -77,16 +82,11 @@ describe("CLI authentication", () => {
       const deps = dependencies();
       deps.prepareAuthenticationHome = async () =>
         join(stateDirectory, "codex-home");
-      let forwarded: readonly string[] | undefined;
-      deps.createSecurity = () => {
-        throw new Error("must not initialize Codex Security");
-      };
-      deps.runCodex = async (args) => {
-        forwarded = args;
-        return 17;
-      };
+      const runCodex = mock<typeof deps.runCodex>(resolving(17));
+      deps.createSecurity = throwing("must not initialize Codex Security");
+      deps.runCodex = runCodex;
       expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(17);
-      expect(forwarded).toEqual([argv[0], ...argv.slice(1)]);
+      expect(runCodex.mock.lastCall?.[0]).toEqual([argv[0], ...argv.slice(1)]);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
     }
@@ -124,7 +124,7 @@ describe("CLI authentication", () => {
     "validates and canonicalizes the credential home for status and logout",
     async () => {
       const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-cli-managed-auth-")),
+        await temporaryDirectory("codex-security-cli-managed-auth-"),
       );
       try {
         const actualState = join(root, "actual-state");
@@ -339,7 +339,7 @@ describe("CLI authentication", () => {
       [["scan", "--auth", "auto"], "auto"],
       [["scan"], "auto"],
     ] as const) {
-      let selected: ScanOptions["auth"];
+      const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
       const stderr = capture();
 
       expect(
@@ -349,13 +349,11 @@ describe("CLI authentication", () => {
           stderr.stream,
           dependencies({
             environment: { OPENAI_API_KEY: "synthetic-private-key" },
-            onTurn: (_repository, options) => {
-              selected = (options as ScanOptions).auth;
-            },
+            onTurn,
           }),
         ),
       ).toBe(0);
-      expect(selected).toBe(expected);
+      expect(onTurn.mock.results.at(-1)?.value).toBe(expected);
       expect(stderr.text()).not.toContain("synthetic-private-key");
     }
   });
@@ -379,18 +377,15 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture(false);
       const deps = dependencies({ environment });
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
           options?.onAuthentication?.({
             method: "aws_credentials",
             source,
             verified: false,
           });
           return fakeResult();
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+        });
 
       expect(
         await main(
@@ -463,18 +458,15 @@ describe("CLI authentication", () => {
       const deps = dependencies({
         environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
       });
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
           options?.onAuthentication?.({
             method: "aws_credentials",
             source: "AWS_BEARER_TOKEN_BEDROCK",
             verified: false,
           });
           throw new CodexSecurityError(detail);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+        });
 
       expect(
         await main(
@@ -622,22 +614,13 @@ describe("CLI authentication", () => {
       [["scans", "rerun", "scan-original", "--verbose"], "api-key"],
     ] as const) {
       const stderr = capture(true);
-      let selected: ScanOptions["auth"];
+      const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
       let question = "";
       let choices: readonly { label: string; value: string }[] = [];
       const deps = dependencies({
         environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
-        onTurn: (_repository, options) => {
-          selected = (options as ScanOptions).auth;
-        },
-        onWorkbench: () => ({
-          recipe: {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: "standard",
-            config: {},
-          },
-        }),
+        onTurn,
+        onWorkbench: () => savedRecipe(),
       });
       deps.hasStoredChatGPTSignIn = async () => true;
       deps.scanAuthenticationPrompt = {
@@ -653,7 +636,7 @@ describe("CLI authentication", () => {
       };
 
       expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
-      expect(selected).toBe(selection);
+      expect(onTurn.mock.results.at(-1)?.value).toBe(selection);
       expect(question).toBe("How would you like to authenticate this scan?");
       expect(choices).toEqual([
         { label: "ChatGPT subscription", value: "chatgpt" },
@@ -670,23 +653,20 @@ describe("CLI authentication", () => {
     for (const stage of ["status", "prompt"] as const) {
       const signals = new FakeSignals();
       const signalName = stage === "status" ? "SIGTERM" : "SIGINT";
-      let observedSignal: AbortSignal | undefined;
-      let initialized = false;
+      const interrupt = mock((_signal?: AbortSignal) => {
+        signals.emit(signalName);
+        return new Promise<never>(() => {});
+      });
+      const createSecurity = mock(
+        throwing("must not initialize a cancelled scan"),
+      );
       const deps = dependencies({
         signals,
         environment: { OPENAI_API_KEY: "synthetic-private-key" },
       });
-      deps.createSecurity = () => {
-        initialized = true;
-        throw new Error("must not initialize a cancelled scan");
-      };
-      const interrupt = <Value>(signal?: AbortSignal): Promise<Value> => {
-        observedSignal = signal;
-        signals.emit(signalName);
-        return new Promise(() => {});
-      };
+      deps.createSecurity = createSecurity;
       deps.hasStoredChatGPTSignIn = (signal) =>
-        stage === "status" ? interrupt<boolean>(signal) : Promise.resolve(true);
+        stage === "status" ? interrupt(signal) : Promise.resolve(true);
       deps.scanAuthenticationPrompt = {
         isInteractive: () => true,
         select: <Value extends string>(
@@ -694,14 +674,14 @@ describe("CLI authentication", () => {
           _options: readonly { label: string; value: Value }[],
           _presentation?: { header?: string },
           signal?: AbortSignal,
-        ) => interrupt<Value>(signal),
+        ) => interrupt(signal),
       };
 
       expect(
         await main(["scan"], capture().stream, capture(true).stream, deps),
       ).toBe(signalName === "SIGTERM" ? 143 : 130);
-      expect(observedSignal?.aborted).toBe(true);
-      expect(initialized).toBe(false);
+      expect(interrupt.mock.lastCall?.[0]?.aborted).toBe(true);
+      expect(createSecurity).not.toHaveBeenCalled();
       expect(signals.listeners.get("SIGINT")?.size).toBe(0);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     }
@@ -794,16 +774,14 @@ describe("CLI authentication", () => {
     ]) {
       const stdout = capture();
       const stderr = capture(scenario.terminal);
-      let selected: ScanOptions["auth"];
+      const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
       let prompts = 0;
-      let discoveries = 0;
+      const hasStoredChatGPTSignIn = mock(resolving(scenario.stored));
       const deps = dependencies({
         environment: scenario.key
           ? { OPENAI_API_KEY: "synthetic-private-key" }
           : {},
-        onTurn: (_repository, options) => {
-          selected = (options as ScanOptions).auth;
-        },
+        onTurn,
         onWorkbench: (args): JsonObject =>
           args[0] === "list-scans"
             ? { scans: [{ scanId: "scan-original" }] }
@@ -819,10 +797,7 @@ describe("CLI authentication", () => {
                 },
               },
       });
-      deps.hasStoredChatGPTSignIn = async () => {
-        discoveries += 1;
-        return scenario.stored;
-      };
+      deps.hasStoredChatGPTSignIn = hasStoredChatGPTSignIn;
       deps.scanAuthenticationPrompt = {
         isInteractive: () => scenario.inputInteractive !== false,
         select: async <Value extends string>(
@@ -839,12 +814,12 @@ describe("CLI authentication", () => {
       ).toBe(0);
       expect(prompts).toBe(0);
       if (scenario.argv.includes("--json") || scenario.argv.includes("jsonl")) {
-        expect(discoveries).toBe(0);
+        expect(hasStoredChatGPTSignIn).toHaveBeenCalledTimes(0);
         expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
         expect(stderr.text()).not.toMatch(/\x1b\[/u);
       }
       if (!scenario.argv.includes("--dry-run")) {
-        expect(selected).toBe(
+        expect(onTurn.mock.results.at(-1)?.value).toBe(
           scenario.recipeAuth ?? scenario.expectedAuth ?? "auto",
         );
       }
@@ -855,9 +830,7 @@ describe("CLI authentication", () => {
   test("rejects explicit API-key authentication before initializing a scan when no key is set", async () => {
     const stderr = capture();
     const deps = dependencies();
-    deps.createSecurity = () => {
-      throw new Error("must not initialize Codex Security");
-    };
+    deps.createSecurity = throwing("must not initialize Codex Security");
 
     expect(
       await main(
@@ -941,7 +914,7 @@ describe("CLI authentication", () => {
   });
 
   test("keeps delegated credentials in the configured Codex home", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-login-home-"));
+    const root = await temporaryDirectory("codex-security-login-home-");
     const repository = join(root, "repository");
     const relativeHome = join(repository, ".codex-security-home");
     const tildeHome = join(root, ".codex-security-home");
@@ -1035,8 +1008,8 @@ describe("CLI authentication", () => {
     const stdout = capture();
     const stderr = capture(true);
     const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
           source: "OPENAI_API_KEY",
@@ -1044,10 +1017,7 @@ describe("CLI authentication", () => {
         });
         options?.onScanStarted?.();
         return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
     expect(
       await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
@@ -1076,18 +1046,15 @@ describe("CLI authentication", () => {
         const stdout = capture();
         const stderr = capture(false);
         const deps = dependencies({ environment });
-        deps.createSecurity = () => ({
-          run: async (_repository, options) => {
+        deps.createSecurity = () =>
+          fakeSecurity(async (_repository, options) => {
             options?.onAuthentication?.({
               method: "api_key",
               source,
               verified: false,
             });
             throw new CodexSecurityError(detail);
-          },
-          preflight: async () => fakePreflight(),
-          close: async () => {},
-        });
+          });
 
         expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(
           2,
@@ -1183,18 +1150,15 @@ describe("CLI authentication", () => {
     const stdout = capture();
     const stderr = capture(false);
     const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
           source: "OPENAI_API_KEY",
           verified: false,
         });
         return fakeResult();
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
 
     expect(
       await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
@@ -1219,13 +1183,7 @@ describe("CLI authentication", () => {
     ] as const) {
       const stderr = capture(false);
       const deps = dependencies({ environment });
-      deps.createSecurity = () => ({
-        run: async () => {
-          throw new CodexSecurityError(message);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+      deps.createSecurity = () => failingSecurity(message);
 
       expect(await main(["scan"], capture().stream, stderr.stream, deps)).toBe(
         2,
@@ -1251,14 +1209,11 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
           options?.onAuthentication?.(authentication);
           return fakeResult();
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+        });
 
       expect(
         await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
@@ -1294,7 +1249,7 @@ describe("CLI authentication", () => {
 
   test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
     const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-auth-")),
+      await temporaryDirectory("codex-security-cli-ambient-auth-"),
     );
     try {
       const ambientHome = join(root, "ambient-codex");
@@ -1332,7 +1287,7 @@ describe("CLI authentication", () => {
 
   test("does not import ambient Codex authentication during login status after explicit logout", async () => {
     const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-cli-ambient-logout-")),
+      await temporaryDirectory("codex-security-cli-ambient-logout-"),
     );
     try {
       const ambientHome = join(root, "ambient-codex");
@@ -2277,10 +2232,7 @@ describe("skill authentication", () => {
             : "Authentication failed using OPENAI_API_KEY",
         );
       else expect(stderr.text()).toBe("Patch applied. Files changed: 1.\n");
-      const requests = (await readFile(requestLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const requests = parseJsonLines(await readFile(requestLog, "utf8"));
       const methods = requests.map((request) => request.method);
       if (!loginFailure) {
         expect(

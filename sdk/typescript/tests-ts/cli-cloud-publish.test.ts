@@ -1,7 +1,8 @@
+import { resolving } from "./support/promises.js";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/index.js";
 import {
@@ -9,8 +10,10 @@ import {
   dependencies,
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
+  mustNotInitializeCodex,
 } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -18,11 +21,14 @@ const receipt = {
   findingCount: 1,
 };
 
-const temporaryDirectories = createTemporaryDirectories({ canonical: false });
-afterEach(temporaryDirectories.cleanup);
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "cloud-saved-scans-",
+  false,
+);
+afterEach(cleanup);
 
 async function savedScansFixture() {
-  const root = await temporaryDirectories.create("cloud-saved-scans-");
+  const root = await temporaryDirectory();
   const scans = await Promise.all(
     [1, 2, 3].map(async (index) => {
       const scanDir = join(root, `scan ${index}`);
@@ -68,9 +74,7 @@ describe("publish scan to Cloud", () => {
   test("passes --dry-run through when publishing a findings CSV", async () => {
     const deps = dependencies({
       currentDirectory: "/workspace/repository",
-      onWorkbench: () => {
-        throw new Error("unexpected scan lookup");
-      },
+      onWorkbench: throwing("unexpected scan lookup"),
     });
     let publishedPath = "";
     deps.publishFindingsCsvToCloud = async (path, options) => {
@@ -127,11 +131,8 @@ describe("publish scan to Cloud", () => {
     ],
   ])("rejects combining --csv with %s", async (_name, args, message) => {
     const deps = dependencies();
-    let publications = 0;
-    deps.publishFindingsCsvToCloud = async () => {
-      publications++;
-      return receipt;
-    };
+    const publishFindingsCsvToCloud = mock(resolving(receipt));
+    deps.publishFindingsCsvToCloud = publishFindingsCsvToCloud;
     const stderr = capture();
     expect(
       await main(
@@ -141,7 +142,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(2);
-    expect(publications).toBe(0);
+    expect(publishFindingsCsvToCloud).toHaveBeenCalledTimes(0);
     expect(stderr.text()).toContain(message);
   });
 
@@ -202,11 +203,8 @@ describe("publish scan to Cloud", () => {
       if (failure === "incomplete") second!.progress.status = "running";
       if (failure === "unavailable")
         await rm(second!.scanDir, { recursive: true });
-      let uploads = 0;
-      deps.publishScanToCloud = async () => {
-        uploads++;
-        return receipt;
-      };
+      const publishScanToCloud = mock(resolving(receipt));
+      deps.publishScanToCloud = publishScanToCloud;
       const stderr = capture();
       expect(
         await main(
@@ -225,7 +223,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(2);
-      expect(uploads).toBe(0);
+      expect(publishScanToCloud).toHaveBeenCalledTimes(0);
       expect(stderr.text()).toMatch(
         /not found|not complete|artifacts or run a new scan/,
       );
@@ -236,9 +234,7 @@ describe("publish scan to Cloud", () => {
 
   test("rejects mixed ID and directory selectors before reading history", async () => {
     const deps = dependencies({
-      onWorkbench: () => {
-        throw new Error("unexpected lookup");
-      },
+      onWorkbench: throwing("unexpected lookup"),
     });
     const stderr = capture();
     expect(
@@ -267,9 +263,7 @@ describe("publish scan to Cloud", () => {
     let selections = 0;
     deps.publishPrompt = {
       isInteractive: () => true,
-      select: async () => {
-        throw new Error("unexpected single-select prompt");
-      },
+      select: unexpectedSingleSelect,
       checkbox: async <Value extends string>(
         _question: string,
         choices: readonly { label: string; value: Value }[],
@@ -322,20 +316,15 @@ describe("publish scan to Cloud", () => {
       signals.remove(signal, listener);
     deps.publishPrompt = {
       isInteractive: () => true,
-      select: async () => {
-        throw new Error("unexpected single-select prompt");
-      },
+      select: unexpectedSingleSelect,
       checkbox: async (_question, _choices, _presentation, signal) => {
         signals.emit("SIGINT");
         signal!.throwIfAborted();
         return [];
       },
     };
-    let uploads = 0;
-    deps.publishScanToCloud = async () => {
-      uploads++;
-      return receipt;
-    };
+    const publishScanToCloud = mock(resolving(receipt));
+    deps.publishScanToCloud = publishScanToCloud;
     expect(
       await main(
         ["publish", "scan", "--to", "cloud"],
@@ -344,7 +333,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(130);
-    expect(uploads).toBe(0);
+    expect(publishScanToCloud).toHaveBeenCalledTimes(0);
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,
@@ -438,16 +427,10 @@ describe("publish scan to Cloud", () => {
   test("publishes multiple explicit scans in order and deduplicates resolved paths", async () => {
     for (const dryRun of [false, true]) {
       const deps = dependencies({
-        onWorkbench: () => {
-          throw new Error("must not inspect scan history");
-        },
+        onWorkbench: unexpectedScanHistory,
       });
-      deps.createSecurity = () => {
-        throw new Error("must not initialize Codex");
-      };
-      deps.publishScan = async () => {
-        throw new Error("must not publish to Linear");
-      };
+      deps.createSecurity = mustNotInitializeCodex;
+      deps.publishScan = rejecting("must not publish to Linear");
       const directories = ["scan one", "scan-two"].map((path) =>
         resolve(deps.currentDirectory(), path),
       );
@@ -635,11 +618,8 @@ describe("publish scan to Cloud", () => {
 
   test("rejects multiple scans for Linear before publishing any findings", async () => {
     const deps = dependencies();
-    let calls = 0;
-    deps.publishScan = async () => {
-      calls++;
-      throw new Error("unexpected publication");
-    };
+    const publishScan = mock(rejecting("unexpected publication"));
+    deps.publishScan = publishScan;
     const stdout = capture();
     const stderr = capture();
     expect(
@@ -661,7 +641,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(2);
-    expect(calls).toBe(0);
+    expect(publishScan).toHaveBeenCalledTimes(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Multiple scan directories");
   });
@@ -675,16 +655,10 @@ describe("publish scan to Cloud", () => {
           const deps = dependencies({
             currentDirectory,
             environment: { CODEX_SECURITY_LINEAR_API_KEY: " " },
-            onWorkbench: () => {
-              throw new Error("must not inspect scan history");
-            },
+            onWorkbench: unexpectedScanHistory,
           });
-          deps.createSecurity = () => {
-            throw new Error("must not initialize Codex");
-          };
-          deps.publishScan = async () => {
-            throw new Error("must not publish to Linear");
-          };
+          deps.createSecurity = mustNotInitializeCodex;
+          deps.publishScan = rejecting("must not publish to Linear");
           let calls = 0;
           const result = dryRun
             ? {
@@ -746,15 +720,10 @@ describe("publish scan to Cloud", () => {
       },
     ]) {
       const deps = dependencies({
-        onWorkbench: () => {
-          throw new Error("must not inspect scan history");
-        },
+        onWorkbench: unexpectedScanHistory,
       });
-      const calls: string[] = [];
-      deps.publishScanToCloud = async (directory) => {
-        calls.push(directory);
-        return receipt;
-      };
+      const calls = mock(resolving<typeof receipt, [string]>(receipt));
+      deps.publishScanToCloud = calls;
       const stdout = capture();
       expect(
         await main(
@@ -764,7 +733,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(0);
-      expect(calls).toEqual(expected);
+      expect(calls.mock.calls.map(([value]) => value)).toEqual(expected);
       expect(JSON.parse(stdout.text())).toEqual(
         expected.length === 1
           ? receipt
@@ -778,7 +747,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test("publishes a scan once through canonical and directory-linked paths", async () => {
-    const root = await temporaryDirectories.create("cloud-publish-links-");
+    const root = await temporaryDirectory("cloud-publish-links-");
     const scans = join(root, "scans");
     const scanDir = join(scans, "completed-scan");
     const linkedScans = join(root, "linked-scans");
@@ -789,16 +758,11 @@ describe("publish scan to Cloud", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     const canonicalScan = await realpath(scanDir);
-    const calls: string[] = [];
+    const calls = mock(resolving<typeof receipt, [string]>(receipt));
     const deps = dependencies({
-      onWorkbench: () => {
-        throw new Error("must not inspect scan history");
-      },
+      onWorkbench: unexpectedScanHistory,
     });
-    deps.publishScanToCloud = async (directory) => {
-      calls.push(directory);
-      return receipt;
-    };
+    deps.publishScanToCloud = calls;
     const stdout = capture();
     expect(
       await main(
@@ -818,7 +782,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(0);
-    expect(calls).toEqual([canonicalScan]);
+    expect(calls.mock.calls.map(([value]) => value)).toEqual([canonicalScan]);
     expect(JSON.parse(stdout.text())).toEqual(receipt);
   });
 
@@ -833,11 +797,8 @@ describe("publish scan to Cloud", () => {
       ["scan-one", "scan-two"],
     ]) {
       const deps = dependencies();
-      let calls = 0;
-      deps.publishScanToCloud = async () => {
-        calls++;
-        return receipt;
-      };
+      const publishScanToCloud = mock(resolving(receipt));
+      deps.publishScanToCloud = publishScanToCloud;
       const stdout = capture();
       const stderr = capture();
       expect(
@@ -848,7 +809,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(2);
-      expect(calls).toBe(0);
+      expect(publishScanToCloud).toHaveBeenCalledTimes(0);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toBe("");
     }
@@ -877,9 +838,7 @@ describe("publish scan to Cloud", () => {
       let selections = 0;
       deps.publishPrompt = {
         isInteractive: () => true,
-        select: async () => {
-          throw new Error("unexpected single-select prompt");
-        },
+        select: unexpectedSingleSelect,
         checkbox: async (_question, choices, presentation) => {
           selections++;
           const directories: string[] = choices.map(({ value }) => value);
@@ -913,13 +872,9 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies();
     deps.publishPrompt = {
       isInteractive: () => false,
-      select: async () => {
-        throw new Error("unexpected picker");
-      },
+      select: rejecting("unexpected picker"),
     };
-    deps.publishScanToCloud = async () => {
-      throw new Error("unexpected publication");
-    };
+    deps.publishScanToCloud = rejecting("unexpected publication");
     const stderr = capture();
     expect(
       await main(
@@ -943,11 +898,8 @@ describe("publish scan to Cloud", () => {
       ["--skip-existing"],
     ]) {
       const deps = dependencies();
-      let calls = 0;
-      deps.publishScanToCloud = async () => {
-        calls++;
-        return receipt;
-      };
+      const publishScanToCloud = mock(resolving(receipt));
+      deps.publishScanToCloud = publishScanToCloud;
       const stdout = capture();
       const stderr = capture();
       expect(
@@ -965,7 +917,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(2);
-      expect(calls).toBe(0);
+      expect(publishScanToCloud).toHaveBeenCalledTimes(0);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain("cannot be combined with Linear options");
     }
@@ -975,9 +927,7 @@ describe("publish scan to Cloud", () => {
     for (const flag of ["--help", "--schema", "--llms", "--llms-full"]) {
       const stdout = capture();
       const deps = dependencies();
-      deps.publishScanToCloud = async () => {
-        throw new Error("unexpected publication");
-      };
+      deps.publishScanToCloud = rejecting("unexpected publication");
       expect(
         await main(
           ["publish", "scan", flag],
@@ -992,11 +942,9 @@ describe("publish scan to Cloud", () => {
 
   test("reports original publication failures without claiming success", async () => {
     const deps = dependencies();
-    deps.publishScanToCloud = async () => {
-      throw new Error(
-        `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
-      );
-    };
+    deps.publishScanToCloud = rejecting(
+      `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
+    );
     const stdout = capture();
     const stderr = capture();
     expect(
@@ -1050,11 +998,9 @@ describe("publish scan to Cloud", () => {
         environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-linear-key" },
       });
       let now = 0;
-      let forced = false;
+      const forceExit = mock();
       deps.now = () => now;
-      deps.forceExit = () => {
-        forced = true;
-      };
+      deps.forceExit = forceExit;
       deps.publishScanToCloud = async (_directory, options) => {
         signals.emit(signal);
         expect(options?.signal?.aborted).toBe(true);
@@ -1073,7 +1019,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(code);
-      expect(forced).toBe(false);
+      expect(forceExit).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
         signal === "SIGINT" ? "canceled" : "terminated",
@@ -1087,3 +1033,7 @@ describe("publish scan to Cloud", () => {
     }
   });
 });
+
+const unexpectedSingleSelect = rejecting("unexpected single-select prompt");
+
+const unexpectedScanHistory = throwing("must not inspect scan history");

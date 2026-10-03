@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import {
   securityPolicyDiff,
@@ -14,32 +14,24 @@ import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import {
   POLICY,
   PYTHON,
-  policyFixture,
+  createPolicyTestFixtures,
   stageResult,
 } from "./support/security-policy.js";
+import { rejecting, throwing } from "./support/errors.js";
 
-const fixtures: Awaited<ReturnType<typeof policyFixture>>[] = [];
-async function fixture() {
-  const f = await policyFixture();
-  fixtures.push(f);
-  return f;
-}
-afterEach(async () => {
-  await Promise.all(fixtures.splice(0).map((f) => f.cleanup()));
-});
+const { fixture, cleanup } = createPolicyTestFixtures();
+afterEach(cleanup);
 
 function prompt(overrides: Partial<PolicyPrompt> = {}): PolicyPrompt {
   return {
     isInteractive: () => false,
-    input: async () => {
-      throw new Error("Unexpected input prompt");
-    },
+    input: rejecting("Unexpected input prompt"),
     ...overrides,
   };
 }
 
 function policyDependencies(
-  f: Awaited<ReturnType<typeof policyFixture>>,
+  f: Awaited<ReturnType<typeof fixture>>,
   options: {
     draft?: SecurityPolicyDraft;
     prompt?: PolicyPrompt;
@@ -155,8 +147,8 @@ describe("policy CLI", () => {
     };
     const stdout = capture();
     const stderr = capture();
-    let closed = false;
-    let config: unknown;
+    const onClose = mock();
+    const onConfig = mock<(config: unknown) => void>();
     expect(
       await main(
         [
@@ -173,12 +165,8 @@ describe("policy CLI", () => {
         stderr.stream,
         policyDependencies(f, {
           draft,
-          onClose: () => {
-            closed = true;
-          },
-          onConfig: (value) => {
-            config = value;
-          },
+          onClose,
+          onConfig,
         }),
       ),
     ).toBe(0);
@@ -190,14 +178,14 @@ describe("policy CLI", () => {
     expect(stderr.text()).toContain("$1.00–$2.00 (standard, context unknown)");
     expect(stderr.text()).toContain("[1/3]");
     expect(stderr.text()).not.toContain("+Requests must be authorized");
-    expect(config).toMatchObject({
+    expect(onConfig.mock.lastCall?.[0]).toMatchObject({
       codexOverrides: {
         model: "gpt-5.6-terra",
         model_reasoning_effort: "high",
       },
     });
     expect(await readdir(f.repository)).toEqual([]);
-    expect(closed).toBe(true);
+    expect(onClose).toHaveBeenCalled();
   });
 
   test("offers the scan credential chooser before interactive policy generation", async () => {
@@ -306,13 +294,11 @@ describe("policy CLI", () => {
     for (const phase of ["status", "prompt"] as const) {
       const f = await fixture();
       const signals = new FakeSignals();
-      let initialized = false;
+      const onConfig = mock();
       const deps = policyDependencies(f, {
         signals,
         prompt: prompt({ isInteractive: () => true }),
-        onConfig: () => {
-          initialized = true;
-        },
+        onConfig,
       });
       deps.environment = { OPENAI_API_KEY: "synthetic-private-key" };
       deps.hasStoredChatGPTSignIn = async (signal) => {
@@ -339,7 +325,7 @@ describe("policy CLI", () => {
       expect(
         await main(["policy"], capture().stream, capture(true).stream, deps),
       ).toBe(143);
-      expect(initialized).toBe(false);
+      expect(onConfig).not.toHaveBeenCalled();
       expect(await readdir(f.outputDir)).toEqual([]);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     }
@@ -381,9 +367,7 @@ describe("policy CLI", () => {
         ["policy", "--headless", "--json"],
         stdout.stream,
         {
-          write: () => {
-            throw new Error("Progress output failed");
-          },
+          write: throwing("Progress output failed"),
         },
         policyDependencies(f),
       ),
@@ -402,9 +386,7 @@ describe("policy CLI", () => {
         stdout.stream,
         stderr.stream,
         policyDependencies(f, {
-          onClose: () => {
-            throw new Error("synthetic cleanup failure");
-          },
+          onClose: throwing("synthetic cleanup failure"),
         }),
       ),
     ).toBe(0);
@@ -474,9 +456,7 @@ describe("policy CLI", () => {
         stderr.stream,
         policyDependencies(f, {
           draft,
-          onPreview: () => {
-            throw new Error("Python preview failed");
-          },
+          onPreview: throwing("Python preview failed"),
         }),
       ),
     ).toBe(0);
@@ -507,7 +487,10 @@ describe("policy CLI", () => {
   test("asks owner questions and previews the exact draft without writing source", async () => {
     const f = await fixture();
     const stderr = capture(true);
-    let asked = 0;
+    const input = mock(async (question: string) => {
+      expect(question).toContain("internet-facing");
+      return "Private service";
+    });
     expect(
       await main(
         ["policy"],
@@ -516,16 +499,12 @@ describe("policy CLI", () => {
         policyDependencies(f, {
           prompt: prompt({
             isInteractive: () => true,
-            input: async (question) => {
-              asked++;
-              expect(question).toContain("internet-facing");
-              return "Private service";
-            },
+            input,
           }),
         }),
       ),
     ).toBe(0);
-    expect(asked).toBe(1);
+    expect(input).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("--- /dev/null");
     expect(stderr.text()).toContain("+Requests must be authorized");
     expect(stderr.text()).toContain("Owner review:");
@@ -539,12 +518,7 @@ describe("policy CLI", () => {
   test("preserves significant trailing spaces in the proposed diff", async () => {
     const f = await fixture();
     const draft = await f.generate({
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy"
-          ? { markdown: "# Policy\n\nLast line  \n" }
-          : {}),
-      }),
+      run: async (stage) => stageResult(stage, "# Policy\n\nLast line  \n"),
     });
     const stderr = capture(true);
     expect(
@@ -567,9 +541,7 @@ describe("policy CLI", () => {
     const f = await fixture();
     const stdout = capture();
     const deps = policyDependencies(f, {
-      onGenerate: () => {
-        throw new Error("Must not generate");
-      },
+      onGenerate: throwing("Must not generate"),
     });
     expect(
       await main(
@@ -592,7 +564,7 @@ describe("policy CLI", () => {
         const f = await fixture();
         const signals = new FakeSignals();
         const stdout = capture();
-        let closed = false;
+        const onClose = mock();
         expect(
           await main(
             ["policy", "--dry-run", "--json"],
@@ -605,14 +577,12 @@ describe("policy CLI", () => {
                 expect(options.signal?.aborted).toBe(true);
                 if (cooperative) options.signal!.throwIfAborted();
               },
-              onClose: () => {
-                closed = true;
-              },
+              onClose,
             }),
           ),
         ).toBe(exitCode);
         expect(stdout.text()).toBe("");
-        expect(closed).toBe(true);
+        expect(onClose).toHaveBeenCalled();
         expect(signals.listeners.get(signal)?.size).toBe(0);
         expect(await readdir(f.outputDir)).toEqual([]);
       }
@@ -623,10 +593,7 @@ describe("policy CLI", () => {
     const f = await fixture();
     const markdown = `${POLICY.trimEnd()}  `;
     const draft = await f.generate({
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy" ? { markdown } : {}),
-      }),
+      run: async (stage) => stageResult(stage, markdown),
     });
     const stdout = capture();
     expect(
@@ -746,12 +713,7 @@ describe("policy CLI", () => {
     await mkdir(join(f.repository, scope));
     const draft = await f.generate({
       path: scope,
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy"
-          ? { markdown: content, reviewNotes: [note] }
-          : {}),
-      }),
+      run: async (stage) => stageResult(stage, content, note),
     });
     const deps = policyDependencies(f, { draft });
     const create = deps.createPolicySecurity;
@@ -834,12 +796,11 @@ describe("policy CLI", () => {
 
   test("keeps policy argument and schema errors in full-output stdout", async () => {
     const f = await fixture();
-    let initialized = false;
+    const createPolicySecurity = mock(
+      throwing("Validation must finish before initializing Codex"),
+    );
     const deps = policyDependencies(f);
-    deps.createPolicySecurity = () => {
-      initialized = true;
-      throw new Error("Validation must finish before initializing Codex");
-    };
+    deps.createPolicySecurity = createPolicySecurity;
     for (const [args, message] of [
       [["policy", "--write"], "Unknown flag"],
       [["policy", "--path"], "Missing value"],
@@ -866,25 +827,21 @@ describe("policy CLI", () => {
         expect(stderr.text()).not.toContain('"ok": false');
       }
     }
-    expect(initialized).toBe(false);
+    expect(createPolicySecurity).not.toHaveBeenCalled();
     expect(await readdir(f.repository)).toEqual([]);
   });
 
   test("returns a full-output error when policy setup fails", async () => {
     const f = await fixture();
     const deps = policyDependencies(f);
-    deps.currentDirectory = () => {
-      throw new Error("Working directory is unavailable");
-    };
+    deps.currentDirectory = throwing("Working directory is unavailable");
     const stdout = capture();
     expect(
       await main(
         ["policy", "--json", "--full-output"],
         stdout.stream,
         {
-          write: () => {
-            throw new Error("Diagnostic output failed");
-          },
+          write: throwing("Diagnostic output failed"),
         },
         deps,
       ),
@@ -930,7 +887,7 @@ describe("policy CLI", () => {
   test("returns the interrupt exit code and removes signal listeners", async () => {
     const f = await fixture();
     const signals = new FakeSignals();
-    let closed = false;
+    const onClose = mock();
     expect(
       await main(
         ["policy", "--headless"],
@@ -938,9 +895,7 @@ describe("policy CLI", () => {
         capture().stream,
         policyDependencies(f, {
           signals,
-          onClose: () => {
-            closed = true;
-          },
+          onClose,
           onGenerate: (_repository, options) => {
             signals.emit("SIGINT");
             options.signal!.throwIfAborted();
@@ -948,7 +903,7 @@ describe("policy CLI", () => {
         }),
       ),
     ).toBe(130);
-    expect(closed).toBe(true);
+    expect(onClose).toHaveBeenCalled();
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,

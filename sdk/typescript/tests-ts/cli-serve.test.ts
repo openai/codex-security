@@ -90,10 +90,8 @@ for (const [name, args, port, customEmbeddings] of [
       timeout: 20_000,
     });
     const exited = once(child, "exit");
-    let stderr = "";
-    child.stderr.setEncoding("utf8").on("data", (chunk) => {
-      stderr += chunk;
-    });
+    const stderr = capture();
+    child.stderr.setEncoding("utf8").on("data", stderr.stream.write);
     try {
       let base: string | undefined;
       for await (const line of createInterface({ input: child.stdout })) {
@@ -105,7 +103,7 @@ for (const [name, args, port, customEmbeddings] of [
           break;
         }
       }
-      expect(base, stderr).toBeDefined();
+      expect(base, stderr.text()).toBeDefined();
       const response = await fetch(`${base}/v1/findings`);
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ findings: [], total: 0 });
@@ -139,7 +137,7 @@ for (const [name, args, port, customEmbeddings] of [
       const [code] = await exited;
       // Windows terminates child processes instead of delivering SIGTERM.
       if (process.platform !== "win32") expect(code).toBe(0);
-      expect(stderr).toBe("");
+      expect(stderr.text()).toBe("");
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");

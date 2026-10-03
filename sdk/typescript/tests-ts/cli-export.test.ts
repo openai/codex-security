@@ -1,10 +1,9 @@
+import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
   chmod,
-  cp,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -15,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
 import {
   CodexSecurityError,
@@ -26,14 +25,14 @@ import {
   SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
+  mustNotInitializeCodex,
 } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 async function copyCompletedScan(root: string): Promise<string> {
   const scan = join(root, "scan");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scan, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scan);
   if (process.platform !== "win32") await chmod(scan, 0o700);
   return scan;
 }
@@ -67,9 +66,7 @@ describe("CLI", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.createSecurity = () => {
-        throw new Error("must not initialize Codex");
-      };
+      deps.createSecurity = mustNotInitializeCodex;
       expect(
         await main(
           ["export", "scan", "--export-format", format, "--output", "-"],
@@ -135,9 +132,7 @@ describe("CLI", () => {
   test.skipIf(process.platform === "win32")(
     "streams a large stdout export through a slow destination without buffering or status noise",
     async () => {
-      const root = await mkdtemp(
-        join(tmpdir(), "codex-security-export-stream-"),
-      );
+      const root = await temporaryDirectory("codex-security-export-stream-");
       const fakePython = join(root, "fake-python");
       const expectedBytes = 2 * 1024 * 1024;
       await writeFile(
@@ -152,7 +147,7 @@ describe("CLI", () => {
       );
       let bytes = 0;
       let writes = 0;
-      let drains = 0;
+      const drains = mock(() => {});
       let emptyWrites = 0;
       const stdout = new Writable({
         highWaterMark: 32 * 1024,
@@ -163,9 +158,7 @@ describe("CLI", () => {
           setTimeout(callback, 1);
         },
       });
-      stdout.on("drain", () => {
-        drains += 1;
-      });
+      stdout.on("drain", drains);
       const stderr = capture();
 
       try {
@@ -187,7 +180,7 @@ describe("CLI", () => {
         ).toBe(0);
         expect(bytes).toBe(expectedBytes);
         expect(writes).toBeGreaterThan(1);
-        expect(drains).toBeGreaterThan(0);
+        expect(drains.mock.calls.length).toBeGreaterThan(0);
         expect(emptyWrites).toBe(0);
         expect(stderr.text()).toBe("");
 
@@ -227,9 +220,7 @@ describe("CLI", () => {
     test.skipIf(process.platform === "win32")(
       `terminates a stdout exporter promptly when ${failure}`,
       async () => {
-        const root = await mkdtemp(
-          join(tmpdir(), "codex-security-export-fail-"),
-        );
+        const root = await temporaryDirectory("codex-security-export-fail-");
         const fakePython = join(root, "fake-python");
         await writeFile(
           fakePython,
@@ -290,7 +281,7 @@ describe("CLI", () => {
   test.skipIf(process.platform === "win32")(
     "terminates a stdout exporter promptly when the destination fails under backpressure",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-export-fail-"));
+      const root = await temporaryDirectory("codex-security-export-fail-");
       const fakePython = join(root, "fake-python");
       await writeFile(
         fakePython,
@@ -351,7 +342,7 @@ describe("CLI", () => {
     ["partial", false],
     ["unknown", false],
   ] as const)("exports %s, deferred: %j", async (completeness, hasDeferred) => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = await copyCompletedScan(directory);
       const manifestPath = join(scan, "scan-manifest.json");
@@ -460,7 +451,7 @@ describe("CLI", () => {
   });
 
   test("expands home-relative export paths", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-export-home-"));
+    const root = await temporaryDirectory("codex-security-export-home-");
     const home = join(root, "home");
     const currentDirectory = join(root, "current");
     const previousHome = process.env["HOME"];
@@ -474,16 +465,9 @@ describe("CLI", () => {
       process.env["HOME"] = home;
       process.env["USERPROFILE"] = home;
 
-      const exports: Array<{
-        scanDir: string;
-        output: string;
-        sourceRoot?: string;
-      }> = [];
       const deps = dependencies({ currentDirectory });
-      deps.exportFindings = async (arguments_) => {
-        exports.push(arguments_);
-        return undefined;
-      };
+      const exports = mock<typeof deps.exportFindings>(resolving(undefined));
+      deps.exportFindings = exports;
       expect(
         await main(
           [
@@ -501,7 +485,7 @@ describe("CLI", () => {
           deps,
         ),
       ).toBe(0);
-      expect(exports).toEqual([
+      expect(exports.mock.calls.map(([value]) => value)).toEqual([
         expect.objectContaining({
           scanDir: await realpath(scan),
           output: join(await realpath(home), "findings.sarif"),
@@ -518,9 +502,7 @@ describe("CLI", () => {
   });
 
   test("explains a missing export-output directory", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-export-missing-"),
-    );
+    const root = await temporaryDirectory("codex-security-export-missing-");
     try {
       const output = join(root, "reports", "results.sarif");
       const stderr = capture();
@@ -543,7 +525,7 @@ describe("CLI", () => {
   });
 
   test("rejects a repository-controlled output symlink without following it", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = await copyCompletedScan(directory);
       const outside = join(directory, "outside.txt");
@@ -569,7 +551,7 @@ describe("CLI", () => {
   });
 
   test("passes the canonical scan directory to the exporter", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const actual = join(directory, "actual");
       const linked = join(directory, "linked");
@@ -599,7 +581,7 @@ describe("CLI", () => {
   });
 
   test("creates the optional scan-local exports directory", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = await copyCompletedScan(directory);
       const output = join(scan, "exports", "results.sarif");
@@ -619,7 +601,7 @@ describe("CLI", () => {
   });
 
   test("exports through a symlinked output parent", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = await copyCompletedScan(directory);
       const actualOutput = join(directory, "actual-output");
@@ -653,7 +635,7 @@ describe("CLI", () => {
   });
 
   test("rejects a symlinked output parent inside the scan directory", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = join(directory, "scan");
       const outside = join(directory, "outside");
@@ -695,7 +677,7 @@ describe("CLI", () => {
   });
 
   test("rejects a repository-controlled output-directory symlink", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    const directory = await temporaryDirectory("codex-security-export-");
     try {
       const scan = join(directory, "scan");
       const repository = join(directory, "repo");
