@@ -258,6 +258,23 @@ function validatePlan(plan: string, directory: string) {
       output_shards: assignedOutputs,
     };
   });
+  const counts = new Map<string, number>();
+  for (const worker of workers)
+    for (const name of worker.input_shards)
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+  const expected = new Set(inputNames);
+  const missing = inputNames.filter((name) => !counts.has(name)).sort(compare);
+  const duplicates = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name)
+    .sort(compare);
+  const unexpected = [...counts.keys()]
+    .filter((name) => !expected.has(name))
+    .sort(compare);
+  if (missing.length || duplicates.length || unexpected.length)
+    throw new Error(
+      `${plan}: pool plan must assign each input shard exactly once; missing=${pythonRepr(missing)}; duplicates=${pythonRepr(duplicates)}; unexpected=${pythonRepr(unexpected)}`,
+    );
   for (const [index, worker] of workers.entries()) {
     const assigned = inputNames.filter(
       (_, inputIndex) => inputIndex % workers.length === index,

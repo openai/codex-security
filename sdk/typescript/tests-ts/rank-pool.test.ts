@@ -503,22 +503,6 @@ describe("rank pool helpers", () => {
       },
       "do not match its input_shards",
     ],
-    [
-      "duplicate assignments",
-      (p: Plan) => {
-        p.workers[0]!.input_shards[1] = shardName(1);
-        p.workers[0]!.output_shards[1] = shardName(1, true);
-      },
-      "does not match the deterministic round_robin assignment",
-    ],
-    [
-      "round robin",
-      (p: Plan) => {
-        p.workers[0]!.input_shards.reverse();
-        p.workers[0]!.output_shards.reverse();
-      },
-      "does not match the deterministic round_robin assignment",
-    ],
   ] as const)("rejects tampered %s", (_name, edit, message) => {
     const f = fixture();
     make(f);
@@ -528,6 +512,73 @@ describe("rank pool helpers", () => {
     expect(result.stderr).toContain(message);
     expect(validate(f, "1").stdout).toBe("");
   });
+
+  test.each([
+    [
+      "missing",
+      [1, 5],
+      "pool plan must assign each input shard exactly once; missing=['rank-shard-0003.input.jsonl']; duplicates=[]; unexpected=[]",
+    ],
+    [
+      "duplicate",
+      [1, 1, 5],
+      "pool plan must assign each input shard exactly once; missing=['rank-shard-0003.input.jsonl']; duplicates=['rank-shard-0001.input.jsonl']; unexpected=[]",
+    ],
+    [
+      "unexpected",
+      [1, 6, 5],
+      "pool plan must assign each input shard exactly once; missing=['rank-shard-0003.input.jsonl']; duplicates=[]; unexpected=['rank-shard-0006.input.jsonl']",
+    ],
+    [
+      "reordered",
+      [3, 1, 5],
+      "worker slot 1 does not match the deterministic round_robin assignment",
+    ],
+  ] as const)(
+    "preserves diagnostics for %s assignments",
+    (_name, indexes, message) => {
+      const f = fixture();
+      make(f);
+      change(f, (p) => {
+        p.workers[0]!.input_shards = indexes.map((index) => shardName(index));
+        p.workers[0]!.output_shards = indexes.map((index) =>
+          shardName(index, true),
+        );
+      });
+      for (const slot of [undefined, "1"]) {
+        const result = validate(f, slot);
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe(`${f.plan}: ${message}${newline}`);
+      }
+    },
+  );
+
+  test.each(["schema", "outputs"])(
+    "checks every worker's %s before aggregate assignments",
+    (invalid) => {
+      const f = fixture();
+      make(f);
+      change(f, (p) => {
+        p.workers[0]!.input_shards[1] = shardName(1);
+        p.workers[0]!.output_shards[1] = shardName(1, true);
+        if (invalid === "schema") p.workers[1]!.slot = 1;
+        else p.workers[1]!.output_shards[0] = shardName(1, true);
+      });
+      const message =
+        invalid === "schema"
+          ? "slot must be 2"
+          : "output_shards do not match its input_shards";
+      for (const slot of [undefined, "1"]) {
+        const result = validate(f, slot);
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe(
+          `${f.plan}: workers[1].${message}${newline}`,
+        );
+      }
+    },
+  );
 
   test.each(["utf8", "utf8-bom", "utf16le", "utf16be", "utf32le", "utf32be"])(
     "accepts %s plan bytes and hashes the original encoding",
