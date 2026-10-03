@@ -1968,7 +1968,10 @@ selected from the `origin` push URL, including SSH URLs and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to the host in that URL and authenticate
 with `glab auth login --hostname HOST`. The existing `GITLAB_URI` and `GL_HOST`
 aliases are also accepted, in that order after `GITLAB_HOST`. Other hosts retain
-the GitHub workflow.
+the GitHub workflow. GitLab merge requests are created within the origin project;
+a fork merge request with the same branch name is not reused. Lines beginning
+with `/` in generated GitLab descriptions are escaped so they remain text
+instead of executing GitLab quick actions.
 
 ```bash
 GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID --create-pr
