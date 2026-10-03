@@ -76,11 +76,9 @@ The parent agent must reconcile validation and attack-path subagent outputs befo
 In PowerShell, replace the placeholders inside single quotes with literal paths, doubling any single quote in a path:
 
 ```powershell
-& {
-    $env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
-    $env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
-    cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper copy-deep-review-input --rank-input "%worklistDiscoveryDir%\rank_input.jsonl" --out "%worklistDiscoveryDir%\deep_review_input.jsonl""'
-}
+$env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
+cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper copy-deep-review-input --rank-input "%worklistDiscoveryDir%\rank_input.jsonl" --out "%worklistDiscoveryDir%\deep_review_input.jsonl""'
 ```
 
 These variables are temporary values in the calling shell, not application settings. Resolve paths against PowerShell's current location before CMD starts, including when that location is a UNC share. Missing paths stop the invocation with PowerShell's path error. The discovery directory already contains `rank_input.jsonl`; the output file does not need to exist. CMD expands the references once, preserving literal `%` and `!` in the paths.
