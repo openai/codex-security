@@ -246,7 +246,6 @@ const distFiles = new Set(
     "server/dashboard",
     "server/dashboard-types",
     "server/errors",
-    "server/findings-service",
     "server/routes",
     "server/server",
     "server/serve",

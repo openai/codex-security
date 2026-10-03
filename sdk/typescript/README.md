@@ -2756,8 +2756,8 @@ Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 without a state override, the service uses the same default state directory as
 the CLI. These settings also work on Windows.
 
-HTTP routing, orchestration, embedding generation, and the SQLite adapter live
-separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
+HTTP routing, embedding generation, and the SQLite adapter live
+separately under `src/server/`. `startFindingsServer` receives a `FindingEmbedder`
 whose `embed(findings)` method returns one `{ model, vector }` per finding in
 input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
