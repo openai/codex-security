@@ -374,6 +374,7 @@ def test_recovery_keeps_generic_work_that_collides_with_candidate_aliases(
     tmp_path: Path, checkpoint_scan, layout: str, alias: str, outcome: str, rewrite: bool
 ) -> None:
     scan_id, _, _, binding = checkpoint_scan
+    binding["target"]["targetId"] = "synthetic-target"
     output = tmp_path if layout == "parent" else tmp_path / "worker" / "output"
     directory = output if layout != "archived" else output.parent / "attempts" / "attempt-01"
     directory.mkdir(parents=True, exist_ok=True)
@@ -470,6 +471,69 @@ def test_selected_parent_replaces_stale_completion_marker(
         assert result[0]["scan"].get("complete", True) is (complete is not False)
         for task in tasks:
             assert task in result[2]["deferred"]
+
+
+@pytest.mark.parametrize("layout", ["worker", "result", "archived"])
+@pytest.mark.parametrize("evidence", ["missing", "malformed", "unrelated", "valid"])
+def test_reported_surface_requires_its_own_valid_candidate_finding(
+    tmp_path: Path, checkpoint_scan, layout: str, evidence: str
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    binding["target"]["targetId"] = "synthetic-target"
+    output = tmp_path / "worker" / "output"
+    directory = output if layout != "archived" else output.parent / "attempts" / "attempt-01"
+    directory.mkdir(parents=True, exist_ok=True)
+    pending = saved_draft(
+        scan_id,
+        deferred=[{"id": "candidate-task", "candidateId": "candidate-a", "reason": "Review."}],
+    )
+    checkpoint = write_checkpoint(directory / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    terminal = saved_draft(
+        scan_id,
+        complete=True,
+        surfaces=[
+            {
+                "id": "candidate-surface",
+                "candidateId": "candidate-a",
+                "label": "Candidate review",
+                "disposition": "reported",
+            }
+        ],
+    )
+    if layout == "result":
+        terminal["coverage"]["deferred"] = copy.deepcopy(pending["coverage"]["deferred"])
+    if evidence != "missing":
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, scan_id, tmp_path, relative_path="app.py")
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding.setdefault("extensions", {})["candidateId"] = (
+            "candidate-b" if evidence == "unrelated" else "candidate-a"
+        )
+        if evidence == "malformed":
+            finding.pop("title")
+        terminal["findings"] = [finding]
+    completed = write_checkpoint(directory / "checkpoints", terminal)
+    os.utime(completed, ns=(200, 200))
+    if layout == "result":
+        result = directory / "result.json"
+        result.write_text(json.dumps(terminal))
+        os.utime(result, ns=(300, 300))
+    else:
+        select(directory, completed, 300)
+    workers = [saved_discovery_worker(output, "worker", 2 if layout == "archived" else 1)]
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
+    repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
+    for result in (first, replay, repeated):
+        pending_candidates = {
+            row.get("candidateId") for row in result[2]["deferred"] if isinstance(row, dict)
+        }
+        assert ("candidate-a" in pending_candidates) is (evidence != "valid")
+        assert bool(result[1]["findings"]) is (evidence != "missing")
 
 
 @pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
@@ -970,3 +1034,114 @@ def test_selected_worker_checkpoint_preserves_terminal_coverage(
             ) is (head_time >= 200)
     assert replay[2] == first[2]
     assert all(path.read_bytes() == contents for path, contents in original_bytes.items())
+
+
+@pytest.mark.parametrize("head_time", [100, 200, 300])
+def test_terminal_selected_checkpoint_replaces_result_coverage(tmp_path, head_time):
+    scan_id = "selected-terminal"
+    binding = saved_binding("deep_repository", repository="synthetic")
+    before = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    after = {**before, "disposition": "no_issue_found"}
+    old_question = {"question": "Is the API review complete?"}
+    old_exclusion = {"id": "excluded", "pattern": "vendor/**", "reason": "Awaiting review."}
+    new_exclusion = {**old_exclusion, "reason": "Reviewed dependency scope."}
+    result = saved_draft(scan_id, surfaces=[before], complete=True)
+    result["coverage"].update(openQuestions=[old_question], explicitExclusions=[old_exclusion])
+    selected = copy.deepcopy(result)
+    selected["coverage"].update(
+        surfaces=[after], openQuestions=[], explicitExclusions=[new_exclusion]
+    )
+    output = tmp_path / "worker"
+    output.mkdir()
+    result_path = output / "result.json"
+    result_path.write_text(json.dumps(result))
+    os.utime(result_path, ns=(200, 200))
+    checkpoint = write_checkpoint(output / "checkpoints", selected)
+    os.utime(checkpoint, ns=(head_time, head_time))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(head_time, head_time))
+    workers = [saved_discovery_worker(output)]
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    for observed in (first, replay):
+        coverage = observed[2]
+        assert coverage["surfaces"] == ([after] if head_time >= 200 else [before])
+        assert coverage.get("openQuestions", []) == ([] if head_time >= 200 else [old_question])
+        assert coverage["explicitExclusions"] == (
+            [new_exclusion] if head_time >= 200 else [old_exclusion]
+        )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_multiple_selected_terminal_observations(tmp_path, complete):
+    scan_id = "selected-history"
+    binding = saved_binding("deep_repository", repository="synthetic")
+    before = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    after = {**before, "disposition": "no_issue_found"}
+    output = tmp_path / "worker"
+    output.mkdir()
+    result = saved_draft(scan_id, surfaces=[before], complete=True)
+    (output / "result.json").write_text(json.dumps(result))
+    os.utime(output / "result.json", ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    intermediate = copy.deepcopy(result)
+    intermediate["coverage"]["openQuestions"] = [{"question": "Review question."}]
+    intermediate_checkpoint = write_checkpoint(output / "checkpoints", intermediate)
+    os.utime(intermediate_checkpoint, ns=(250, 250))
+    head.write_text(json.dumps({"checkpoint": intermediate_checkpoint.name}))
+    os.utime(head, ns=(250, 250))
+    workers = [saved_discovery_worker(output)]
+    saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    terminal = saved_draft(scan_id, surfaces=[after], complete=complete)
+    checkpoint = write_checkpoint(output / "checkpoints", terminal)
+    os.utime(checkpoint, ns=(300, 300))
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(300, 300))
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
+    for result in (first, replay):
+        if complete:
+            assert result[2]["surfaces"] == [after]
+            assert result[2].get("openQuestions", []) == []
+        else:
+            assert result[2].get("openQuestions", []) == [{"question": "Review question."}]
+
+
+def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
+    scan_id = "selected-archive"
+    binding = saved_binding("deep_repository", repository="synthetic")
+    current = {
+        "id": "api",
+        "label": "Current review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    outdated = {**current, "label": "Old attempt"}
+    output = tmp_path / "worker"
+    output.mkdir()
+    (output / "result.json").write_text(
+        json.dumps(saved_draft(scan_id, surfaces=[current], complete=True))
+    )
+    os.utime(output / "result.json", ns=(200, 200))
+    archived = output / "attempts" / "attempt-1"
+    checkpoint = write_checkpoint(
+        archived / "checkpoints", saved_draft(scan_id, surfaces=[outdated], complete=True)
+    )
+    os.utime(checkpoint, ns=(300, 300))
+    head = archived / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(300, 300))
+    workers = [saved_discovery_worker(output, attempt=2)]
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
+    for result in (first, replay):
+        assert result[2]["surfaces"] == [current]

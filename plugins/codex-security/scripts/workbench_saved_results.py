@@ -1411,7 +1411,7 @@ def merge_saved_results(
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
-                    and item.get("disposition") in {"reported", "rejected", "not_applicable"}
+                    and item.get("disposition") in {"rejected", "not_applicable"}
                 ):
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
@@ -1553,6 +1553,17 @@ def merge_saved_results(
                 retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
                 if retained_surface not in coverage["surfaces"]:
                     coverage["surfaces"].append(copy.deepcopy(retained_surface))
+    selected_terminal_orders: dict[str, tuple[int, int]] = {}
+    for relative, draft, worker_id in sources:
+        if (
+            worker_id is not None
+            and relative in selected_observations
+            and draft.get("complete") is not False
+        ):
+            order = source_order[relative]
+            selected_terminal_orders[worker_id] = max(
+                selected_terminal_orders.get(worker_id, order), order
+            )
     terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
         if relative in current_results and draft.get("complete") is not False:
@@ -1562,6 +1573,13 @@ def merge_saved_results(
             )
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
+        selected_coverage_superseded = worker_id in selected_terminal_orders and (
+            source_order[relative] < selected_terminal_orders[worker_id]
+            or (
+                relative in current_results
+                and source_order[relative] <= selected_terminal_orders[worker_id]
+            )
+        )
         selected_candidates = {
             candidate_id
             for (owner, candidate_id), (_, source) in ordered_outcomes.items()
@@ -1598,6 +1616,7 @@ def merge_saved_results(
         if (
             (relative != "parent" or not parent_is_canonical)
             and not superseded
+            and not selected_coverage_superseded
             and (
                 draft.get("complete") is False
                 or draft["coverage"].get("completeness") != "complete"
@@ -1772,6 +1791,17 @@ def merge_saved_results(
                 # recovery and warnings rather than silently changing its contract.
                 continue
             for item in items:
+                # A selected terminal checkpoint replaces ordinary coverage, while
+                # candidate evidence and pending tasks retain their own reconciliation.
+                if (
+                    selected_coverage_superseded
+                    and field != "deferred"
+                    and not (
+                        isinstance(item, dict)
+                        and any(key in item for key in ("candidateId", "candidate", "finding"))
+                    )
+                ):
+                    continue
                 # A selected outcome must retain its evidence even if its result write failed.
                 if superseded and not (
                     isinstance(item, dict)
