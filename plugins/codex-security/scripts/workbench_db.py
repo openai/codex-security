@@ -2882,14 +2882,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     except (ContractError, OSError, SystemExit, ValueError):
         return
 
-    findings = findings_document.get("findings")
-    if not isinstance(findings, list):
-        return
-    by_occurrence = {
-        finding.get("occurrenceId"): finding
-        for finding in findings
-        if isinstance(finding, dict) and isinstance(finding.get("occurrenceId"), str)
-    }
+    by_occurrence = {finding["occurrenceId"]: finding for finding in findings_document["findings"]}
     updates = []
     for row in legacy_rows:
         finding = by_occurrence.get(row["id"])
