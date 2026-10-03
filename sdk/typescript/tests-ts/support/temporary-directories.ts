@@ -2,6 +2,20 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+export async function removeTemporaryDirectory(path: string): Promise<void> {
+  // Bun 1.3.14 ignores fs.rm's retry options.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
+        throw error;
+      await Bun.sleep(100 * (attempt + 1));
+    }
+  }
+}
+
 export function createTemporaryDirectories({
   canonical = true,
 }: { canonical?: boolean } = {}) {
