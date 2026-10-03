@@ -1,18 +1,7 @@
-function textFor(output) {
-  return typeof output === "string" ? output : JSON.stringify(output);
-}
+const { outputText: textFor, hasTriageJson } = require("./output");
 
 function containsAll(text, patterns) {
   return patterns.every((pattern) => pattern.test(text));
-}
-
-function hasTriageJson(text) {
-  return (
-    /```(?:json)?\s*[\s\S]*?```/i.test(text) ||
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i.test(text) ||
-    /["']findings["']\s*:/i.test(text) ||
-    /["']verdict["']\s*:/i.test(text)
-  );
 }
 
 function endpointPattern(path, queryParts = []) {
