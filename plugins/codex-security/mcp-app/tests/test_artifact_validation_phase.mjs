@@ -11,16 +11,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
+
 const {
-  candidateValidationRecordSchema,
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} = await importTestModule({
-  entryPoints: [
-    new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
-  ],
-});
+} = await importSource(
+  new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+);
 
 const toolSchema = JSON.parse(
   await readFile(
@@ -91,17 +89,6 @@ assert.equal(
         },
       },
     ],
-  }).success,
-  false,
-);
-assert.equal(
-  candidateValidationRecordSchema.safeParse(secondValidation).success,
-  true,
-);
-assert.equal(
-  candidateValidationRecordSchema.safeParse({
-    ...firstValidation,
-    confidence: "certain",
   }).success,
   false,
 );

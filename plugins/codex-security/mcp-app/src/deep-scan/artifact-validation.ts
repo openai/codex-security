@@ -144,10 +144,6 @@ export function reconcileDeepReduction(
   previous: DeepReductionInput | null,
 ): DeepReductionInput {
   const result = structuredClone(input);
-  if (result.complete === false)
-    throw new Error(
-      "Deep reduction is only a checkpoint, not a complete result.",
-    );
   for (const source of [
     ...discoveries.map((discovery) => discovery.result),
     ...(previous ? [previous] : []),
@@ -327,26 +323,25 @@ export function validateRetainedFindings(
   }
 }
 
-function parseStoredScanDraft<Result extends DeepReductionInput>(
+export function parseStoredScanDraft<Result extends DeepReductionInput>(
   value: Record<string, unknown>,
   label: string,
   expectedScanId: string | undefined,
   parse: (input: Record<string, unknown>) => Result,
+  invalidResultMessage = " returned an invalid Standard scan result: ",
+  differentScanMessage = " returned a result for a different scan.",
 ): Result {
   let parsed: Result;
   try {
     parsed = parse(value);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      label + " returned an invalid Standard scan result: " + detail,
-      {
-        cause: error,
-      },
-    );
+    throw new Error(label + invalidResultMessage + detail, {
+      cause: error,
+    });
   }
   if (expectedScanId !== undefined && parsed.scanId !== expectedScanId) {
-    throw new Error(label + " returned a result for a different scan.");
+    throw new Error(label + differentScanMessage);
   }
   return parsed;
 }

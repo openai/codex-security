@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
+
 const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
-  await importTestModule({
-    entryPoints: [
-      fileURLToPath(
-        new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
-      ),
-    ],
-  });
+  await importSource(
+    fileURLToPath(
+      new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
+    ),
+  );
 
 const rootRead = {
   path: { type: "special", value: { kind: "root" } },

@@ -1,3 +1,4 @@
+import { pythonExecutable } from "./support/python.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { TestClient } from "./support/api-client.js";
 
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -73,6 +75,51 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([
+    ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["standard", "openai.gpt-5.6-cyber"],
+    ["deep", "openai.gpt-5.6-cyber"],
+  ] as const)(
+    "accepts a cost limit for a %s Bedrock %s scan without starting inference",
+    async (mode, model) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model_provider: "amazon-bedrock",
+            model,
+          },
+        },
+        {
+          environment: {
+            AWS_PROFILE: "synthetic-bedrock-profile",
+            AWS_REGION: "us-east-2",
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+          prepareRuntime: async () => {
+            throw new Error("Local preflight must not start the runtime");
+          },
+        },
+      );
+      await expect(
+        client.preflight(repository, { mode, maxCostUsd: 1 }),
+      ).resolves.toMatchObject({
+        mode,
+        modelProvider: "amazon-bedrock",
+        model,
+        maxCostUsd: 1,
+        authentication: {
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        },
+      });
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "loads trusted project config through a Windows path alias",
     async () => {
@@ -90,11 +137,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter =
-        process.env["PYTHON"] ??
-        Bun.which("python3") ??
-        Bun.which("python") ??
-        Bun.which("py");
+      const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
       const result = spawnSync(
         interpreter!,

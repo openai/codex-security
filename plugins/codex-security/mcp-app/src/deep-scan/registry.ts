@@ -2,11 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { DeepScanCoordinator } from "./coordinator.js";
 import type { CoordinatorOptions } from "./coordinator.js";
 import { isTransientPersistenceError } from "./store.js";
-import type {
-  BeginDeepScanResult,
-  DeepScanCoordinatorClaim,
-  DeepScanRunState,
-} from "./types.js";
+import type { DeepScanCoordinatorClaim, DeepScanRunState } from "./types.js";
 
 const COORDINATOR_LEASE_MS = 30_000;
 const COORDINATOR_POLL_MS = 1_000;
@@ -52,13 +48,6 @@ export class DeepScanCoordinatorRegistry {
     void coordinator.settled().then(removeCoordinator, removeCoordinator);
     coordinator.start();
     return coordinator;
-  }
-
-  cancel(scanId: string, reason: string): boolean {
-    const coordinator = this.coordinators.get(scanId);
-    if (!coordinator) return false;
-    coordinator.cancel(reason);
-    return true;
   }
 
   async cancelAndWait(
@@ -204,14 +193,14 @@ export class DeepScanRemoteCoordinator {
 }
 
 export async function startOrJoinDeepScanCoordinator(input: {
-  begin: BeginDeepScanResult;
+  run: DeepScanRunState;
   registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
   options: Omit<CoordinatorOptions, "run" | "observeReplacement">;
 }): Promise<{
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {
-  const existing = input.registry.get(input.begin.run.scanId);
+  const existing = input.registry.get(input.run.scanId);
   if (existing) return { coordinator: existing, joined: true };
   const threadId = input.options.threadId;
   if (!threadId) {
@@ -220,7 +209,7 @@ export async function startOrJoinDeepScanCoordinator(input: {
     );
   }
   const claim = await input.options.store.claimCoordinator({
-    scanId: input.begin.run.scanId,
+    scanId: input.run.scanId,
     threadId,
     handoffClaimToken: input.options.handoffClaimToken,
   });

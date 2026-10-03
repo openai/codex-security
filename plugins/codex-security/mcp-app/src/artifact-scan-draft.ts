@@ -1,3 +1,4 @@
+import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
@@ -45,11 +46,8 @@ export interface ScanDraftResult {
   status: "draft_written";
 }
 
-export interface CompletedScanResult {
+export interface CompletedScanResult extends PreparedScanDraft {
   scanId: string;
-  manifest: JsonObject;
-  findings: JsonObject;
-  coverage: JsonObject;
 }
 
 interface PreparedScanDraft {
@@ -2426,10 +2424,6 @@ async function readExistingHardeningPortfolio(
 function requireObject(value: unknown, context: string): JsonObject {
   if (!isObject(value)) throw new Error(`${context} must be an object.`);
   return value;
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requireTextArray(value: unknown, context: string): string[] {

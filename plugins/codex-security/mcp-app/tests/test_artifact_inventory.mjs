@@ -13,15 +13,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
 
 const execFile = promisify(nodeExecFile);
 const temporaryRoots = [];
-const inventory = await importTestModule({
-  entryPoints: [
-    new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
-  ],
-});
+
+const inventory = await importSource(
+  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+);
 
 try {
   await testSchemasAreBoundAndExact();

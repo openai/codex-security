@@ -79,12 +79,13 @@ export async function requireRegularFile(
 ): Promise<void> {
   const rootPath = await fs.realpath(root);
   const resolvedPath = await fs.realpath(path);
+  const containmentMessage = `Deep Scan artifact escaped its scan directory: ${path}`;
   const child = relative(rootPath, resolvedPath);
-  if (!(
-    child === "" ||
-    (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`))
-  )) {
-    throw new Error(`Deep Scan artifact escaped its scan directory: ${path}`);
+  if (
+    child !== "" &&
+    (isAbsolute(child) || child === ".." || child.startsWith(`..${sep}`))
+  ) {
+    throw new Error(containmentMessage);
   }
   if (relative(resolve(path), resolvedPath) !== "") {
     throw new Error(
@@ -114,9 +115,8 @@ export async function archiveDirectory(
       typeof error !== "object" ||
       !("code" in error) ||
       error.code !== "ENOENT"
-    ) {
+    )
       throw error;
-    }
   }
   await fs.mkdir(source, { recursive: true });
 }

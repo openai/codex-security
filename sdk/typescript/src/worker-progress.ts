@@ -1,3 +1,5 @@
+import { isRecord } from "./record.js";
+
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
 const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
@@ -217,8 +219,4 @@ function isScanPhase(value: unknown): value is ScanPhase {
     value === "attack_path" ||
     value === "reporting"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -6,6 +6,7 @@ import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { readJson } from "./support/json.js";
 
 type Finding = Record<string, unknown> & {
   ruleId: string;
@@ -80,10 +81,6 @@ type ScanFixture = {
 const temporaryDirectories = createTemporaryDirectories();
 
 afterEach(temporaryDirectories.cleanup);
-
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);

@@ -714,9 +714,9 @@ export class DeepScanCoordinator {
       }
       return settlements.shift()!;
     };
-    const reconcileRemainingDiscoveries = async (
-      succeededState: "buffered" | "omitted",
-    ): Promise<unknown | undefined> => {
+    const reconcileRemainingDiscoveries = async (): Promise<
+      unknown | undefined
+    > => {
       const results = await Promise.allSettled([...active.values()]);
       let firstFailure: unknown | undefined;
       for (const result of results) {
@@ -728,9 +728,7 @@ export class DeepScanCoordinator {
         if (outcome.status === "failed") {
           if (!outcome.replaceableFailureKind) firstFailure ??= outcome.error;
         } else if (outcome.status === "succeeded") {
-          if (succeededState === "omitted") {
-            omittedWorkerIds.push(outcome.worker.id);
-          }
+          omittedWorkerIds.push(outcome.worker.id);
         }
       }
       return firstFailure;
@@ -825,7 +823,7 @@ export class DeepScanCoordinator {
       if (settlement.status === "rejected") {
         this.abortController.abort(errorMessage(settlement.error));
         await reconcileReducerSettlement();
-        await reconcileRemainingDiscoveries("buffered");
+        await this.settleSchedulerWork();
         throw settlement.error;
       }
       const outcome = settlement.outcome;
@@ -857,12 +855,12 @@ export class DeepScanCoordinator {
             );
             this.abortController.abort(thresholdError.message);
             await reconcileReducerSettlement();
-            await reconcileRemainingDiscoveries("buffered");
+            await this.settleSchedulerWork();
             throw thresholdError;
           }
           this.abortController.abort(outcome.error.message);
           await reconcileReducerSettlement();
-          await reconcileRemainingDiscoveries("buffered");
+          await this.settleSchedulerWork();
           throw outcome.error;
         }
         if (outcome.status === "canceled") {
@@ -902,7 +900,7 @@ export class DeepScanCoordinator {
           outcome.error,
         );
         this.abortController.abort(thresholdError.message);
-        await reconcileRemainingDiscoveries("buffered");
+        await this.settleSchedulerWork();
         throw thresholdError;
       }
       reducerFailures = 0;
@@ -921,7 +919,7 @@ export class DeepScanCoordinator {
 
     // Convergence cancels active workers, but their promises must settle before
     // the manifest records which results completed and which were canceled.
-    const lateFailure = await reconcileRemainingDiscoveries("omitted");
+    const lateFailure = await reconcileRemainingDiscoveries();
 
     // Once Deep reaches saturation, late worker errors cannot fail the scan.
     if (lateFailure && stopReason !== "saturated") throw lateFailure;

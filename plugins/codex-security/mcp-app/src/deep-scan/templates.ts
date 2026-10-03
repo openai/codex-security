@@ -13,9 +13,7 @@ export interface DiscoveryPromptInput {
 
 export interface DedupPromptInput {
   reducerLabel: string;
-  discoveries: {
-    workerId: string;
-  }[];
+  claimedWorkerIds: string[];
 }
 
 // Every worker starts in a fresh Codex thread. A single typed JSON object
@@ -48,7 +46,7 @@ export function renderDedupPrompt(input: DedupPromptInput): string {
   return renderDeepScanTemplate(dedupTemplate, {
     DEDUP_CONTEXT_JSON: formattedJson({
       reducerLabel: input.reducerLabel,
-      claimedWorkerIds: input.discoveries.map((worker) => worker.workerId),
+      claimedWorkerIds: input.claimedWorkerIds,
     }),
   });
 }

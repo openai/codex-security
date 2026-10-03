@@ -20,7 +20,7 @@ import {
   draftApi,
   draftFixture,
   scanId,
-} from "./scan-draft-fixture.mjs";
+} from "./scan-draft-recovery-fixture.mjs";
 
 const {
   completedScanInputSchema,

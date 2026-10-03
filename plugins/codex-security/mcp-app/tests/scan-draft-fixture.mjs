@@ -1,103 +1,33 @@
-import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { importTestModule } from "./import-test-module.mjs";
-export const draftApi = await importTestModule({
-  absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
-  entryPoints: ["../src/artifact-scan-draft.ts"],
-});
-export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
-export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
+export const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
-export function draftFixture(root, layout) {
-  const context = {
-    root,
-    repoRoot: root,
+export function workerDraft(findings, extra = {}) {
+  return {
     scanId,
-    layout: layout === "worker" ? "worker" : "scan",
-    mode: layout,
-    scope: ".",
-    status: "running",
-    ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
-    targetRevision: "1234567890abcdef",
-    targetContract: {
-      target: {
-        allowedKinds: [layout === "diff" ? "git_diff" : "git_worktree"],
-        targetId: "target_example",
-        displayName: "example",
-        requiredSnapshotDigest:
-          "codex-security-snapshot/v1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      },
-      scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
-      diffTarget:
-        layout === "diff"
-          ? {
-              kind: "range",
-              baseRevision: "a".repeat(40),
-              headRevision: "b".repeat(40),
-            }
-          : null,
-    },
-  };
-  const draft = (coverage = {}, complete = false) => ({
-    scanId,
-    ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
-    complete,
-    findings: [],
+    findings,
     coverage: {
-      completeness:
-        complete && !coverage.deferred?.length ? "complete" : "partial",
+      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
-      ...coverage,
     },
-  });
+    ...extra,
+  };
+}
+
+export function finding(id, repositoryPath) {
   return {
-    root,
-    context,
-    draft,
-    write: (input) =>
-      layout === "worker"
-        ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : draftApi.recordCodexSecurityScanDraft(context, input),
-    read: async () => {
-      const value = JSON.parse(
-        await readFile(
-          path.join(
-            root,
-            layout === "worker" ? "result.json" : "coverage.json",
-          ),
-          "utf8",
-        ),
-      );
-      return layout === "worker" ? value.coverage : value;
+    ruleId: "cross-site-scripting." + id,
+    identity: { anchor: id },
+    title: "Unsafe request output " + id,
+    summary: "A request-controlled value reaches an HTML response.",
+    severity: { level: "high" },
+    confidence: {
+      level: "high",
+      rationale: "The source establishes reachability.",
     },
+    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
+    locations: [{ path: repositoryPath, startLine: 1, endLine: 2 }],
+    remediation: "Encode request-controlled values before emitting HTML.",
+    provenance: { source: "local_plugin" },
   };
-}
-
-export async function fixture(t, layout) {
-  const directory = await realpath(
-    await mkdtemp(path.join(tmpdir(), "draft-recovery-")),
-  );
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const root = path.join(directory, "output");
-  await mkdir(root);
-  return draftFixture(root, layout);
-}
-
-export async function interruptDraftWrite(destination, action) {
-  const rename = fs.rename;
-  fs.rename = async (source, target) => {
-    if (target === destination) throw new Error("interrupted draft write");
-    return rename(source, target);
-  };
-  try {
-    await assert.rejects(action(), /interrupted draft write/);
-  } finally {
-    fs.rename = rename;
-  }
 }

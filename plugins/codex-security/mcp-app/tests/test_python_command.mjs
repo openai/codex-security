@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
 
 const {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
   resolvePythonCommand,
-} = await importTestModule({
-  entryPoints: [new URL("../src/python_command.ts", import.meta.url).pathname],
-});
+} = await importSource(
+  new URL("../src/python_command.ts", import.meta.url).pathname,
+);
 
 const windowsHome = "C:\\Users\\fixture";
 const windowsRoot = path.win32.join(

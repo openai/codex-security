@@ -15,21 +15,20 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
+
 const {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
-} = await importTestModule({
-  entryPoints: [
-    fileURLToPath(
-      new URL(
-        "../src/deep-scan/permission-profile-preflight.ts",
-        import.meta.url,
-      ),
+} = await importSource(
+  fileURLToPath(
+    new URL(
+      "../src/deep-scan/permission-profile-preflight.ts",
+      import.meta.url,
     ),
-  ],
-});
+  ),
+);
 
 const profileId = DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
 const expectedProfile = {
@@ -179,7 +178,6 @@ async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
         const result = await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd,
-          profileId,
           configOverrides: rawOverrides,
           expectedProfile,
           allowOpenAiApiKeyFallback: true,
@@ -653,7 +651,7 @@ async function testMissingWorkerDirectoryRemainsRetryable() {
 
 async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
-  const error = deepScanPermissionProfileFallbackError(warning, profileId);
+  const error = deepScanPermissionProfileFallbackError(warning);
   assert.equal(error?.name, "DeepScanNonRetryableError");
   assert.equal(
     error?.message.includes(
@@ -664,26 +662,24 @@ async function testRuntimeFallbackWarningClassification() {
   assert.equal(error?.message.includes("existing allowlist"), true);
   assert.equal(error?.message.includes("Deep Scan did not run."), false);
   assert.equal(
-    deepScanPermissionProfileFallbackError(`prefix ${warning}`, profileId),
+    deepScanPermissionProfileFallbackError(`prefix ${warning}`),
     undefined,
   );
   assert.equal(
     deepScanPermissionProfileFallbackError(
       warning.replace(profileId, "different-profile"),
-      profileId,
     ),
     undefined,
   );
   const unusualDestination = "\n`quoted destination`\n";
   const unusualWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`${unusualDestination}\`.`;
   assert.equal(
-    deepScanPermissionProfileFallbackError(unusualWarning, profileId)?.name,
+    deepScanPermissionProfileFallbackError(unusualWarning)?.name,
     "DeepScanNonRetryableError",
   );
   const emptyDestinationWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`\`.`;
   assert.equal(
-    deepScanPermissionProfileFallbackError(emptyDestinationWarning, profileId)
-      ?.name,
+    deepScanPermissionProfileFallbackError(emptyDestinationWarning)?.name,
     "DeepScanNonRetryableError",
   );
 }
@@ -698,7 +694,6 @@ async function testAbortKillsPreflightChild() {
       const running = preflightDeepScanWorkerPermissionProfile({
         codexPath,
         cwd,
-        profileId,
         configOverrides: rawOverrides,
         expectedProfile,
         signal: controller.signal,
@@ -728,7 +723,6 @@ function preflight(codexPath, cwd, env) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
-    profileId,
     configOverrides: rawOverrides,
     expectedProfile,
     ...(env === undefined ? {} : { env }),

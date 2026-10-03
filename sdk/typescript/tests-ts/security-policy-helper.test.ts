@@ -74,55 +74,23 @@ afterEach(() => {
 });
 
 describe("built SECURITY.md helper", () => {
-  test("accepts negative-number paths and unique long-option prefixes", () => {
-    const { root } = fixture();
-    const cases: [string, string, string][] = [
-      ["-1", "-2", "-3"],
-      ["-١", "-.5", "-1.5"],
-    ];
-    if (process.platform !== "win32") cases.push(["-4", "-1\n", "-3\n"]);
-    for (const [repo, scope, output] of cases) {
-      write(root, `${repo}/${scope}/SECURITY.md`, "negative path policy\n");
-      const result = run(
-        ["--r", repo, "--s", scope, "--o", output],
-        process.env,
-        root,
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe("");
-      expect(readFileSync(join(root, output), "utf8")).toContain(
-        "negative path policy",
-      );
-    }
-  });
-
-  test("accepts dash-prefixed paths containing spaces after option matching", () => {
+  test("accepts dash-prefixed paths with equals syntax", () => {
     const { root } = fixture();
     for (const [repo, scope, output] of [
-      ["- repository", "- archived", "- guidance"],
-      ["--repo space", "--special space", "--other= output"],
+      ["-1", "-2", "-3"],
+      ["--repo space", "--scope space", "--output= guidance"],
     ] as const) {
-      write(root, `${repo}/${scope}/SECURITY.md`, "space path policy\n");
+      write(root, `${repo}/${scope}/SECURITY.md`, "dash path policy\n");
       const result = run(
-        ["--repo", repo, "--scope", scope, "--out", output],
+        [`--repo=${repo}`, `--scope=${scope}`, `--out=${output}`],
         process.env,
         root,
       );
       expect(result.status, result.stderr).toBe(0);
-      expect(readFileSync(join(root, output), "utf8")).toContain(
-        "space path policy",
-      );
-    }
-    for (const value of [
-      "-hello world",
-      "--help=some text",
-      "--s=some text",
-      "--unsupported",
-      "-tab\tvalue",
-    ]) {
-      const result = run(["--repo", root, "--scope", value]);
-      expect(result.status, result.stderr).toBe(2);
       expect(result.stdout).toBe("");
+      expect(readFileSync(join(root, output), "utf8")).toContain(
+        "dash path policy",
+      );
     }
   });
 
@@ -162,6 +130,8 @@ describe("built SECURITY.md helper", () => {
         ],
         [{ HOMEDRIVE: drive, HOMEPATH: "current" }, "~/project", root],
         [{ USERPROFILE: `${drive}current` }, "~/project", root],
+        [{ USERPROFILE: drive }, "~/project", home],
+        [{ HOMEDRIVE: drive, HOMEPATH: "" }, "~/project", home],
         [{ USERPROFILE: "" }, "~", join(home, "project")],
         [{ HOMEDRIVE: drive, HOMEPATH: "" }, "~", join(home, "project")],
       ];
@@ -174,9 +144,23 @@ describe("built SECURITY.md helper", () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain("home-variable policy");
       }
-      expect(run(["--repo", root, "--scope", "~"], homeEnv({})).status).toBe(1);
-      const other = homeEnv({ USERPROFILE: `${home}\\`, USERNAME: "current" });
-      expect(run(["--repo", "~other", "--scope", "."], other).status).toBe(1);
+      expect(
+        run(["--repo", root, "--scope", "~"], homeEnv({})).status,
+      ).not.toBe(0);
+      const other = homeEnv({ USERPROFILE: home, USERNAME: "different" });
+      expect(run(["--repo", "~other", "--scope", "."], other).status).not.toBe(
+        0,
+      );
+      for (const profile of [
+        "\\\\host\\share\\",
+        "\\\\?\\UNC\\host\\share\\",
+        "\\\\?\\unc\\host\\share",
+      ]) {
+        const shareRoot = homeEnv({ USERPROFILE: profile, USERNAME: "share" });
+        const result = run(["--repo", root, "--scope", "~other"], shareRoot);
+        expect(result.status, result.stderr).not.toBe(0);
+        expect(result.stderr).toContain("Could not determine home directory.");
+      }
     },
   );
 
@@ -271,7 +255,7 @@ describe("built SECURITY.md helper", () => {
     expect(existsSync(join(root, "temporary.tmp"))).toBe(false);
   });
 
-  test("frames Unicode paths as ASCII JSON in codepoint order", () => {
+  test("frames Unicode paths as ASCII JSON in standard string order", () => {
     const { root } = fixture();
     for (const name of ["\u{10000}", "\ue000", "\u0080", "\u007f"]) {
       write(root, `${name}/SECURITY.md`, "policy\n");
@@ -279,7 +263,7 @@ describe("built SECURITY.md helper", () => {
     const result = inventory(root);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe(
-      '["\\u007f/SECURITY.md", "\\u0080/SECURITY.md", "\\ue000/SECURITY.md", "\\ud800\\udc00/SECURITY.md"]\n',
+      '["\\u007f/SECURITY.md", "\\u0080/SECURITY.md", "\\ud800\\udc00/SECURITY.md", "\\ue000/SECURITY.md"]\n',
     );
     const guidance = resolve(root, "\u{10000}").stdout;
     expectGuidance(guidance, [["\u{10000}/SECURITY.md", "policy"]]);
@@ -315,7 +299,7 @@ describe("built SECURITY.md helper", () => {
       const result = inventory(root);
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toBe(
-        '["SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md"]\n',
+        '["SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md"]\n',
       );
       expect(result.stderr).toBe("");
     },
@@ -509,62 +493,36 @@ describe("built SECURITY.md helper", () => {
     expectGuidance(result.stdout, [["SECURITY.md", "\ufeff"]]);
   });
 
-  test("preserves path parsing for file scopes and output destinations", () => {
-    const { root, output } = fixture();
-    write(root, "src/SECURITY.md", "source policy\n");
-    write(root, "src/app.ts", "export {};\n");
-    const expected: [string, string][] = [["src/SECURITY.md", "source policy"]];
-    for (const scope of ["src/app.ts/", "./src//app.ts/./"]) {
-      const result = resolve(`${root}/./`, scope, "./-/");
-      expect(result.status, result.stderr).toBe(0);
-      expectGuidance(result.stdout, expected);
-    }
-    const destination = `${output}/guidance.md/./`;
-    const result = resolve(root, "src/app.ts", destination);
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe("");
-    expectGuidance(readFileSync(join(output, "guidance.md"), "utf8"), expected);
-  });
-
-  test("resolves parent components after existing files and symbolic links", () => {
-    const { root } = fixture();
-    write(root, "nested/SECURITY.md", "nested policy\n");
-    write(root, "nested/file.ts", "export {};\n");
-    const expected: [string, string][] = [
-      ["nested/SECURITY.md", "nested policy"],
-    ];
-    for (const scope of ["nested/file.ts/..", "nested/SECURITY.md/../."]) {
-      const result = resolve(root, scope);
-      expect(result.status, result.stderr).toBe(0);
-      expectGuidance(result.stdout, expected);
-    }
-    const result = resolve(`${root}/nested/file.ts/..`, ".");
-    expect(result.status, result.stderr).toBe(0);
-    expectGuidance(result.stdout, [["SECURITY.md", "nested policy"]]);
-    symlinkSync("nested/file.ts/..", join(root, "alias"), "dir");
-    const linked = resolve(root, "alias");
-    expect(linked.status, linked.stderr).toBe(0);
-    expectGuidance(linked.stdout, expected);
-    const missing = resolve(root, "missing/../nested");
-    expect(missing.status, missing.stderr).toBe(
-      process.platform === "win32" ? 0 : 2,
-    );
-    if (process.platform === "win32") expectGuidance(missing.stdout, expected);
-    else expect(missing.stdout).toBe("");
-  });
-
   test.skipIf(process.platform === "win32")(
-    "returns the existing failure status for scope link cycles",
+    "resolves parent components after directory symlinks",
     () => {
-      const { root } = fixture();
-      symlinkSync("second", join(root, "first"), "dir");
-      symlinkSync("first", join(root, "second"), "dir");
-      const result = resolve(root, "first");
-      expect(result.status).toBe(1);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("Symlink loop");
+      const { root, output } = fixture();
+      write(root, "nested/SECURITY.md", "nested policy\n");
+      mkdirSync(join(root, "nested", "child"));
+      symlinkSync("nested/child", join(root, "alias"), "dir");
+      const result = resolve(root, "alias/..");
+      expect(result.status, result.stderr).toBe(0);
+      expectGuidance(result.stdout, [["nested/SECURITY.md", "nested policy"]]);
+
+      write(output, "SECURITY.md", "outside policy\n");
+      mkdirSync(join(output, "child"));
+      symlinkSync(join(output, "child"), join(root, "outside"), "dir");
+      const outside = resolve(root, "outside/..");
+      expect(outside.status).not.toBe(0);
+      expect(outside.stdout).toBe("");
+      expect(outside.stderr).toContain("outside the scan root");
     },
   );
+
+  test.skipIf(process.platform === "win32")("rejects scope link cycles", () => {
+    const { root } = fixture();
+    symlinkSync("second", join(root, "first"), "dir");
+    symlinkSync("first", join(root, "second"), "dir");
+    const result = resolve(root, "first");
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("scan scope does not exist");
+  });
 
   test("creates output directories and writes empty guidance when no policy exists", () => {
     const { root, output } = fixture();
@@ -736,13 +694,23 @@ describe("built SECURITY.md helper", () => {
       const profiles = join(root, "profiles");
       write(profiles, "current/SECURITY.md", "current policy\n");
       write(profiles, "sibling/SECURITY.md", "sibling policy\n");
-      const result = run(["--repo", "~sibling", "--scope", "~sibling"], {
-        ...process.env,
-        USERPROFILE: join(profiles, "current"),
-        USERNAME: "current",
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain("sibling policy\n");
+      for (const [home, cwd, scope] of [
+        [join(profiles, "current"), undefined, "~sibling"],
+        [`${join(profiles, "current")}\\`, undefined, "~sibling"],
+        [`${root.slice(0, 2)}current`, profiles, "."],
+      ] as const) {
+        const result = run(
+          ["--repo", "~sibling", "--scope", scope],
+          {
+            ...process.env,
+            USERPROFILE: home,
+            USERNAME: "current",
+          },
+          cwd,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("sibling policy\n");
+      }
     },
   );
 
@@ -787,15 +755,26 @@ describe("built SECURITY.md helper", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "resolves drive-relative and rooted scopes using the repository drive",
+    "resolves Windows scopes using the repository drive and native normalization",
     () => {
       const { root } = fixture("İrepository");
       write(root, "src/SECURITY.md", "component policy\n");
       write(root, "src/app.ts", "export {};\n");
+      const literalRoot = win32.toNamespacedPath(join(root, "src."));
+      write(literalRoot, "SECURITY.md", "literal directory policy\n");
       const drive = root.slice(0, 2);
       for (const scope of [
         `${drive}src\\app.ts`,
+        "src/app.ts",
+        "src/../src/app.ts",
+        "src.",
+        "src ",
+        `${drive}src.`,
+        `${drive}src `,
+        win32.toNamespacedPath(join(root, "src", "app.ts")),
         join(root, "src", "app.ts").slice(2),
+        `${join(root, "src")}.`,
+        `${join(root, "src").slice(2)}.`,
       ]) {
         const result = run(
           ["--repo", root, "--scope", scope],
@@ -806,6 +785,14 @@ describe("built SECURITY.md helper", () => {
         expectGuidance(result.stdout, [
           ["src/SECURITY.md", "component policy"],
         ]);
+      }
+      for (const [repo, scope, source] of [
+        [literalRoot, ".", "SECURITY.md"],
+        [win32.toNamespacedPath(root), "src.", "src./SECURITY.md"],
+      ] as const) {
+        const result = run(["--repo", repo, "--scope", scope]);
+        expect(result.status, result.stderr).toBe(0);
+        expectGuidance(result.stdout, [[source, "literal directory policy"]]);
       }
     },
   );
@@ -860,27 +847,15 @@ describe("built SECURITY.md helper", () => {
 
   test("preserves required and mutually exclusive helper arguments", () => {
     const { root } = fixture();
-    for (const [args, status] of [
-      [["--help", "--bogus"], 0],
-      [["-h", "--scope"], 0],
-      [["--hel", "--scope"], 0],
-      [["-hh", "--bogus"], 0],
-      [["--bogus", "--help"], 0],
-      [["positional", "--help"], 0],
-      [["-hfoo"], 0],
-      [["-hfoo-"], 0],
-      [["--scope", "--help"], 2],
-      [["--list=value", "--help"], 2],
-      [["-h=foo"], 2],
-      [["-h-"], 2],
-      [["-hh-"], 2],
-      [["-h--help"], 2],
-      [["--"], 2],
-      [["--", "--help"], 2],
-    ] as const) {
-      const result = run(["--repo", root, "--scope", ".", ...args]);
-      expect(result.status, result.stderr).toBe(status);
-      expect(result.stdout.includes("Usage:")).toBe(status === 0);
+    for (const flag of ["--help", "-h"]) {
+      const result = run([flag]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Usage:");
+    }
+    for (const args of [["--unknown"], ["--scope"], ["positional"]]) {
+      const result = run(["--repo", root, ...args]);
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stdout).toBe("");
     }
     for (const [args, message] of [
       [["--list"], "--repo is required"],

@@ -37,6 +37,7 @@ export type ScanObserverName = Parameters<
 type ScanEventOptions = Pick<
   Parameters<typeof runScanEvents>[0],
   | "authentication"
+  | "modelProvider"
   | "expectedFilesTotal"
   | "onActivity"
   | "onObserverError"
@@ -67,6 +68,13 @@ export function createApiTestFixtures() {
     async temporaryDirectory(): Promise<string> {
       return temporaryDirectories.create("codex-security-api-");
     },
+  };
+}
+
+export async function* failedPostScanEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
   };
 }
 

@@ -799,10 +799,8 @@ describe("direct Linear API publication", () => {
     let started = 0;
     let completed = 0;
     let completedAtFirstIssueProgress: number | undefined;
-    let releaseFirstBatch: (() => void) | undefined;
-    const firstBatchStarted = new Promise<void>((resolve) => {
-      releaseFirstBatch = resolve;
-    });
+    const { promise: firstBatchStarted, resolve: releaseFirstBatch } =
+      Promise.withResolvers<void>();
     const result = await publishScanInternal(
       publication.scanDirectory,
       {

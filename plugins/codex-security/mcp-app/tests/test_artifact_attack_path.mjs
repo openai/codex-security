@@ -9,15 +9,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importTestModule } from "./import-test-module.mjs";
+import { importSource } from "./import-module.mjs";
+
 const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} = await importTestModule({
-  entryPoints: [
-    new URL("../src/artifact-attack-path.ts", import.meta.url).pathname,
-  ],
-});
+} = await importSource(
+  new URL("../src/artifact-attack-path.ts", import.meta.url).pathname,
+);
 
 const scanId = "11111111-1111-4111-8111-111111111111";
 const temporaryRoots = [];

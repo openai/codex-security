@@ -9,14 +9,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importTestModule } from "./import-test-module.mjs";
+import { importModule } from "./import-module.mjs";
+
 const {
   deepReducerInputsInputSchema,
   deepReducerPageResponse,
   getCodexSecurityDeepReducerInputs,
   getCodexSecurityDeepReducerInputsPage,
   recordCodexSecurityDeepReduction,
-} = await importTestModule({
+} = await importModule({
   stdin: {
     contents: `
       export * from "./artifact-deep-reducer-pages.ts";

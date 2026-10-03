@@ -534,10 +534,8 @@ describe("live scan cost tracking", () => {
     });
     const errors: string[] = [];
     let traversals = 0;
-    let release: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: blocked, resolve: release } =
+      Promise.withResolvers<void>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -574,10 +572,8 @@ describe("live scan cost tracking", () => {
       cached_input_tokens: 200,
       output_tokens: 30,
     });
-    let reportCost!: (cost: unknown) => void;
-    const reportedCost = new Promise<unknown>((resolve) => {
-      reportCost = resolve;
-    });
+    const { promise: reportedCost, resolve: reportCost } =
+      Promise.withResolvers<unknown>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -1989,10 +1985,8 @@ describe("live scan cost tracking", () => {
     );
     await appendSessionItem(worker, progressMessage(3));
 
-    let reportProgress!: (progress: ScanProgress) => void;
-    const reportedProgress = new Promise<ScanProgress>((resolve) => {
-      reportProgress = resolve;
-    });
+    const { promise: reportedProgress, resolve: reportProgress } =
+      Promise.withResolvers<ScanProgress>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { importTestModule } from "./import-test-module.mjs";
+import { importModule } from "./import-module.mjs";
 
 const execFileAsync = promisify(execFile);
 const mcpAppRoot = path.resolve(
@@ -20,7 +20,7 @@ const {
   WorkbenchDeepScanStore,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
-} = await importTestModule({
+} = await importModule({
   stdin: {
     contents: [
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
@@ -75,7 +75,7 @@ async function testRecoveredPublicationRejectsLateFailure() {
     await mkdir(targetPath, { recursive: true });
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const store = new WorkbenchDeepScanStore(runWorkbench);
-    const { run } = await store.begin({
+    const run = await store.begin({
       targetPath,
       scope: ".",
       threadId: "publication-failure-owner",
@@ -154,7 +154,7 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
     await mkdir(targetPath, { recursive: true });
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const store = new WorkbenchDeepScanStore(runWorkbench);
-    const { run } = await store.begin({
+    const run = await store.begin({
       targetPath,
       scope: ".",
       threadId: "noop-publication-owner",
@@ -215,7 +215,7 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
   try {
     await mkdir(targetPath, { recursive: true });
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
-    const { run } = await new WorkbenchDeepScanStore(rawRunWorkbench).begin({
+    const run = await new WorkbenchDeepScanStore(rawRunWorkbench).begin({
       targetPath,
       scope: ".",
       threadId: "concurrent-draft-owner",
@@ -282,7 +282,7 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   try {
     await mkdir(targetPath, { recursive: true });
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
-    const { run } = await new WorkbenchDeepScanStore(runWorkbench).begin({
+    const run = await new WorkbenchDeepScanStore(runWorkbench).begin({
       targetPath,
       scope: ".",
       threadId: "checkpoint-owner",
@@ -392,14 +392,12 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
       ].join("\n"),
     );
 
-    const begun = await store.begin({
+    const run = await store.begin({
       targetPath,
       scope: ".",
       threadId,
       scanRoot,
     });
-    assert.equal(begun.shouldStart, true);
-    const { run } = begun;
     assert.equal(typeof run.createdAt, "string");
     assert.equal(run.config.maxTimeHours, 2.5);
     const owned = await store.claimCoordinator({
@@ -414,7 +412,7 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
       scanRoot,
     });
     const observed = await observer.claimCoordinator({
-      scanId: joined.run.scanId,
+      scanId: joined.scanId,
       threadId,
     });
     assert.equal(observed.acquired, false);
@@ -633,11 +631,10 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
       threadId: "deep-scan-store-continuation-thread",
       scanRoot,
     });
-    assert.equal(continued.shouldStart, false);
-    assert.equal(continued.run.scanId, run.scanId);
-    assert.equal(continued.run.status, "succeeded");
-    assert.equal(continued.run.manifestPath, manifestPath);
-    assert.equal(continued.run.config.maxTimeHours, 2.5);
+    assert.equal(continued.scanId, run.scanId);
+    assert.equal(continued.status, "succeeded");
+    assert.equal(continued.manifestPath, manifestPath);
+    assert.equal(continued.config.maxTimeHours, 2.5);
 
     const replay = await store.finish({
       scanId: run.scanId,
@@ -695,7 +692,7 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
       "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 1e-12\n",
     );
 
-    const { run } = await store.begin({
+    const run = await store.begin({
       targetPath,
       scope: ".",
       threadId,

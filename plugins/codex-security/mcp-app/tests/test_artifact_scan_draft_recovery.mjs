@@ -20,7 +20,7 @@ import {
   draftApi,
   fixture,
   interruptDraftWrite,
-} from "./scan-draft-fixture.mjs";
+} from "./scan-draft-recovery-fixture.mjs";
 
 const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
   draftApi;

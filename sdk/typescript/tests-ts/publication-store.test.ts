@@ -303,10 +303,8 @@ describe("read-only publication history", () => {
     const controller = new AbortController();
     const reason = new Error("Synthetic inspection cancellation.");
     let inputFile = "";
-    let started!: () => void;
-    const inspecting = new Promise<void>((resolve) => {
-      started = resolve;
-    });
+    const { promise: inspecting, resolve: started } =
+      Promise.withResolvers<void>();
     const python = spyOn(runtime, "resolvePluginPython").mockImplementation(
       async (options) => {
         expect(options?.signal).toBe(controller.signal);

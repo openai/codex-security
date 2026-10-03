@@ -1,3 +1,4 @@
+import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -11,15 +12,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { buildTestEntrypoint } from "./build-test-entrypoint.mjs";
 
-const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+import { applicationRoot, buildServer } from "./build-server.mjs";
+
 const pluginRoot = path.resolve(applicationRoot, "..");
 const bundledPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
   ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
@@ -30,7 +27,14 @@ const temporaryRoot = await mkdtemp(
 
 try {
   const runtimeBundle = path.join(temporaryRoot, "server.cjs");
-  await bundleEntrypoint("main.ts", runtimeBundle);
+  await buildServer(runtimeBundle, {
+    define: {
+      __dirname: JSON.stringify(path.join(bundledPluginRoot, "mcp")),
+      "import.meta.url": "__filename",
+    },
+    logOverride: { "empty-import-meta": "silent" },
+    target: "node20",
+  });
 
   await testParentToolList(runtimeBundle);
   await testClaimedParentArtifactOperations(runtimeBundle, "source");
@@ -1275,22 +1279,7 @@ async function testParentToolList(bundle) {
       undefined,
     );
 
-    const sandboxState = {
-      permissionProfile: {
-        type: "managed",
-        file_system: {
-          type: "restricted",
-          entries: [
-            {
-              path: { type: "special", value: { kind: "root" } },
-              access: "read",
-            },
-          ],
-        },
-        network: "restricted",
-      },
-      sandboxCwd: pathToFileURL(pluginRoot).href,
-    };
+    const sandboxState = readOnlyParentSandboxState(pluginRoot);
     for (const userContext of ["", "   "]) {
       requireToolError(
         await client.callTool({
@@ -1348,7 +1337,7 @@ async function testDiscoveryWorkerToolList(bundle) {
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
     CODEX_SECURITY_SCAN_ID: scanId,
-    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
   });
   try {
     assert.deepEqual(
@@ -1539,7 +1528,7 @@ async function testReducerWorkerToolList(bundle) {
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
     CODEX_SECURITY_SCAN_ID: scanId,
-    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
     CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
       scanRoot,
       claimedWorkers: [{ id: workerId, resultPath: workerResultPath }],
@@ -1724,19 +1713,6 @@ function reducerPagingFinding(id) {
     remediation: "Encode request-controlled values before emitting HTML.",
     provenance: { source: "local_plugin" },
   };
-}
-
-async function bundleEntrypoint(entrypoint, outfile) {
-  await buildTestEntrypoint({
-    define: {
-      __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__filename",
-    },
-    entryPoints: [path.join(applicationRoot, entrypoint)],
-    logOverride: { "empty-import-meta": "silent" },
-    outfile,
-    target: "node20",
-  });
 }
 
 async function startClient(bundle, environment) {

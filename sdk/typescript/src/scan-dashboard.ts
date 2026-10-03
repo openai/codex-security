@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
@@ -1091,10 +1092,6 @@ function detailsText(value: unknown): string {
       isRecord(item) && typeof item["text"] === "string" ? [item["text"]] : [],
     )
     .join("\n");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function styleInlineCode(value: string, line: DashboardActivityLine): string {

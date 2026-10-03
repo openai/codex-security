@@ -14,6 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, win32 } from "node:path";
+import { isRecord } from "./record.js";
 import {
   InternalLinearError,
   NetworkLinearError,
@@ -1556,10 +1557,8 @@ async function runPublicationCodex(
     const cleanup = (): void => {
       signal?.removeEventListener("abort", onAbort);
       activePublicationProcesses.delete(child);
-      if (forcedTermination !== undefined) {
-        clearTimeout(forcedTermination);
-        forcedTermination = undefined;
-      }
+      clearTimeout(forcedTermination);
+      forcedTermination = undefined;
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted === true) onAbort();
@@ -1741,8 +1740,4 @@ async function writePublicationReceipt(
     encoding: "utf8",
     mode: 0o600,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

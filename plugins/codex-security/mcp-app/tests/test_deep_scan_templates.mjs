@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { importTestModule } from "./import-test-module.mjs";
-const { renderDedupPrompt, renderDiscoveryPrompt } = await importTestModule({
-  entryPoints: [
-    new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
-  ],
-  loader: { ".md": "text" },
-});
+import { importSource } from "./import-module.mjs";
+
+const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
+  new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
+  { loader: { ".md": "text" } },
+);
 
 const discoveryInput = {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
@@ -54,6 +53,7 @@ assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 
 const dedup = renderDedupPrompt({
   reducerLabel: "dedup-0001",
+  claimedWorkerIds: ["worker-001"],
   discoveries: [
     {
       workerId: "worker-001",
@@ -88,7 +88,7 @@ for (const field of [
 const previousReduction = firstJsonBlock(
   renderDedupPrompt({
     reducerLabel: "dedup-0002",
-    discoveries: [],
+    claimedWorkerIds: [],
   }),
 );
 assert.deepEqual(previousReduction, {

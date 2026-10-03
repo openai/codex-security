@@ -1,3 +1,8 @@
+import {
+  finding,
+  scanId,
+  workerDraft as draft,
+} from "./scan-draft-fixture.mjs";
 import assert from "node:assert/strict";
 import {
   mkdir,
@@ -10,16 +15,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importTestModule } from "./import-test-module.mjs";
-const { validateDiscoveryArtifacts, validateReducerArtifacts } =
-  await importTestModule({
-    entryPoints: [
-      new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-        .pathname,
-    ],
-  });
+import { importSource } from "./import-module.mjs";
 
-const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
+const { validateDiscoveryArtifacts, validateReducerArtifacts } =
+  await importSource(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
+      .pathname,
+  );
+
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await realpath(
   await mkdtemp(path.join(tmpdir(), "deep-scan-artifact-validation-")),
@@ -310,12 +313,16 @@ async function testReducerValidation(root) {
           discoveries: [
             {
               workerId: "worker-a",
-              result: draft([], { threatModel: { summary: "Public API." } }),
+              result: draft([], {
+                threatModel: { summary: "Public API." },
+                scope: { summary: "Public API" },
+              }),
             },
             {
               workerId: "worker-b",
               result: draft([], {
                 threatModel: { summary: "Local operator." },
+                scope: { summary: "Local operator" },
               }),
             },
           ],
@@ -699,38 +706,6 @@ async function createWorker(artifacts, label, id, result) {
   const resultPath = path.join(output, "result.json");
   await writeResult(resultPath, result);
   return { id, resultPath };
-}
-
-function draft(findings, extra = {}) {
-  return {
-    scanId,
-    findings,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-    ...extra,
-  };
-}
-
-function finding(id, candidatePath) {
-  return {
-    ruleId: "cross-site-scripting." + id,
-    identity: { anchor: id },
-    title: "Unsafe request output " + id,
-    summary: "A request-controlled value reaches an HTML response.",
-    severity: { level: "high" },
-    confidence: {
-      level: "high",
-      rationale: "The source establishes reachability.",
-    },
-    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
-    locations: [{ path: candidatePath, startLine: 1, endLine: 2 }],
-    remediation: "Encode request-controlled values before emitting HTML.",
-    provenance: { source: "local_plugin" },
-  };
 }
 
 async function writeResult(file, value) {

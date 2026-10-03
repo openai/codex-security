@@ -1,3 +1,4 @@
+import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -631,7 +632,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Check Codex Security Daybreak Access",
       description:
-        "Check this account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan.",
+        "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
       inputSchema: z.object({}).strict(),
       annotations: {
         readOnlyHint: true,
@@ -689,7 +690,7 @@ export function createCodexSecurityServer(): McpServer {
       };
       const warning =
         access.status === "not_granted"
-          ? " This check is advisory: a scan may run, but protected results may not be displayable."
+          ? " This ChatGPT account check is advisory: a scan may run, but protected results associated with this account may not be displayable. It does not determine Amazon Bedrock model access or access to local CLI results."
           : "";
       return {
         content: [
@@ -1164,15 +1165,15 @@ export function createCodexSecurityServer(): McpServer {
             scanRoot: await scanRoot(),
           });
           if (handoffClaimToken) {
-            authenticatedArtifactClaims.set(begun.run.scanId, {
+            authenticatedArtifactClaims.set(begun.scanId, {
               claimToken: handoffClaimToken,
               threadId,
             });
           }
-          const immediate = deepScanTerminalResult(begun.run);
+          const immediate = deepScanTerminalResult(begun);
           if (immediate) return { begun, immediate };
           const started = await startOrJoinDeepScanCoordinator({
-            begin: begun,
+            run: begun,
             registry: deepScanCoordinators,
             options: {
               store: deepScanStore,
@@ -1181,9 +1182,9 @@ export function createCodexSecurityServer(): McpServer {
                 parentSandbox,
                 artifactContext: {
                   pluginRoot: PLUGIN_ROOT,
-                  repoRoot: begun.run.targetPath,
-                  scanId: begun.run.scanId,
-                  scope: begun.run.scope,
+                  repoRoot: begun.targetPath,
+                  scanId: begun.scanId,
+                  scope: begun.scope,
                 },
               }),
               pluginRoot: PLUGIN_ROOT,
@@ -1192,7 +1193,7 @@ export function createCodexSecurityServer(): McpServer {
               threadId,
               onComplete: async (draft, signal) => {
                 const context = await createScanArtifactContext(
-                  begun.run.scanId,
+                  begun.scanId,
                   runWorkbench,
                   {
                     requireRunning: true,
@@ -1243,7 +1244,7 @@ export function createCodexSecurityServer(): McpServer {
       if (joined) {
         logDeepScanEvent({
           event: "coordinator_joined",
-          scanId: begun.run.scanId,
+          scanId: begun.scanId,
         });
       }
       const terminal = await coordinator.wait(abortSignalFromExtra(extra));
@@ -2706,10 +2707,6 @@ function diffTargetArgs(
   ];
 }
 
-function isJsonObject(value: unknown): value is JsonObject {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
 function requestMetadataFromExtra(extra: unknown): JsonObject | undefined {
   if (!isJsonObject(extra)) return undefined;
   const requestInfo = isJsonObject(extra.requestInfo)
@@ -2778,27 +2775,25 @@ function isExecError(error: unknown): error is { stderr: string } {
   );
 }
 
+function failureDiagnostic(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : String(error);
+}
+
 function completionFailureMessage(error: unknown): string {
-  const diagnostic =
-    error instanceof Error && error.message.trim()
-      ? error.message.trim()
-      : String(error);
   return [
     "Codex Security scan completion failed.",
-    diagnostic,
+    failureDiagnostic(error),
     "Stop the current response and surface this exact MCP error.",
     "Do not retry completion or return a final, no-findings, structured, or benchmark response.",
   ].join("\n");
 }
 
 function deepScanInvocationFailureMessage(error: unknown): string {
-  const diagnostic =
-    error instanceof Error && error.message.trim()
-      ? error.message.trim()
-      : String(error);
   return [
     "Codex Security Deep Scan discovery did not start or rejoin.",
-    diagnostic,
+    failureDiagnostic(error),
     "Stop the current response and surface this exact MCP error.",
     "Do not call start_codex_security_deep_scan again in this response.",
     "Do not call get_codex_security_scan_context in this response.",
