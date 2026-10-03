@@ -89,8 +89,10 @@ export async function runRecordsProtocol(
   const inputError = (error: Error) => fail(-32000, error.message);
   const outputError = (error: Error) => fail(-32000, error.message, false);
   const canceled = () => {
-    if (finished) {
-      // A terminal response may be blocked on a host that stopped reading.
+    if (finished || (output instanceof Writable && output.writableLength > 0)) {
+      // A review request or terminal response can be blocked by a host that
+      // stopped reading. Do not queue cancellation behind that blocked write.
+      if (!finished) fail(-32800, "Deduplication canceled.", false);
       if (output instanceof Writable) output.destroy();
       complete(2);
     } else {
