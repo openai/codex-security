@@ -561,7 +561,8 @@ const findingRemediationClaimSchema = {
   requestId: z.string().uuid(),
 };
 const findingsExportSchema = {
-  format: z.enum(["csv", "json", "sarif"]),
+  artifact: z.enum(["findings", "threat-model"]).default("findings"),
+  format: z.enum(["csv", "json", "sarif", "md"]).optional(),
   scanId: z.string().uuid(),
 };
 const collectionPageSchema = {
@@ -1185,6 +1186,7 @@ export function createCodexSecurityServer(): McpServer {
                   repoRoot: begun.targetPath,
                   scanId: begun.scanId,
                   scope: begun.scope,
+                  pythonCommand: await resolvePythonCommand(),
                 },
               }),
               pluginRoot: PLUGIN_ROOT,
@@ -2072,9 +2074,9 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "export_codex_security_findings",
     {
-      title: "Export Codex Security Findings",
+      title: "Export Codex Security Artifacts",
       description:
-        "App-only. Export retained local findings from completed, failed, or canceled scans as canonical JSON, deterministic SARIF, or a CSV projection. Exported files remain inside the sealed scan directory.",
+        "App-only. Export retained local findings as JSON, SARIF, or CSV, or the saved threat model as Markdown without running another analysis. Findings require completed or preserved stopped results; threat models may be provisional. Defaults to findings in CSV, or Markdown when artifact is threat-model. Exported copies remain in the scan's exports directory, except canonical findings JSON.",
       inputSchema: findingsExportSchema,
       annotations: {
         readOnlyHint: false,
@@ -2084,16 +2086,19 @@ export function createCodexSecurityServer(): McpServer {
       },
       _meta: appMeta,
     },
-    async ({ scanId, format }) =>
+    async ({ scanId, artifact, format }) =>
       scanActionResult(
         await runWorkbench([
           "export-findings",
           "--scan-id",
           scanId,
-          "--format",
-          format,
+          "--artifact",
+          artifact,
+          ...optionalArg("--format", format),
         ]),
-        `Exported Codex Security findings as ${format.toUpperCase()}.`,
+        artifact === "threat-model"
+          ? "Exported the saved Codex Security threat model as Markdown."
+          : `Exported Codex Security findings as ${(format ?? "csv").toUpperCase()}.`,
       ),
   );
 

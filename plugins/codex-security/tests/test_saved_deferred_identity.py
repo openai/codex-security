@@ -136,7 +136,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     """Retry publication from frozen sources after the initial write fails."""
     prepared_coverage = []
 
-    def fail_publication(prepared):
+    def fail_publication(prepared, *, projection_warnings=None):
         prepared_coverage.append(prepared[4])
         raise OSError("injected publication failure")
 

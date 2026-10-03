@@ -16,7 +16,7 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import Ajv, { type AnySchema } from "ajv";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   InvalidTargetError,
@@ -28,6 +28,7 @@ import {
 import { preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -206,9 +207,21 @@ describe("CodexSecurity policy API", () => {
         yield* events(stage, stageResult(stage, content));
       },
     });
-    const draft = await f.security.generatePolicy(f.repository, {
-      outputDir: f.outputDir,
-    });
+    const python = spyOn(runtime, "resolvePluginPython");
+    let draft;
+    try {
+      draft = await f.security.generatePolicy(f.repository, {
+        outputDir: f.outputDir,
+      });
+      expect(python).toHaveBeenCalled();
+      for (const [selection] of python.mock.calls)
+        expect(selection).toMatchObject({
+          configuredPath: PYTHON,
+          protectedRoot: f.repository,
+        });
+    } finally {
+      python.mockRestore();
+    }
     const preview = await f.security.previewPolicy(draft);
     expect(f.pythonSelections).toHaveLength(2);
     for (const selection of f.pythonSelections)
@@ -1287,7 +1300,17 @@ describe("CodexSecurity policy API", () => {
     expect(
       await readFile(join(f.outputDir, "previous-SECURITY.md"), "utf8"),
     ).toBe(original);
-    expect(await readdir(f.outputDir)).not.toContain("policy-draft.json");
+    expect(
+      JSON.parse(
+        await readFile(join(f.outputDir, "policy-draft.json"), "utf8"),
+      ),
+    ).toMatchObject({
+      status: "threat_model_ready",
+      threatModel: {
+        format: "markdown",
+        content: stageResult("threat_model").markdown,
+      },
+    });
     await f.security.close();
   });
 
@@ -1314,10 +1337,22 @@ describe("CodexSecurity policy API", () => {
       expect(f.threads).toHaveLength(3);
       expect((await readdir(f.outputDir)).sort()).toEqual([
         "SECURITY.md",
-        "THREAT_MODEL.md",
+        "policy-draft.json",
         "previous-SECURITY.md",
         "project-spec.md",
+        "threatmodel.md",
       ]);
+      expect(
+        JSON.parse(
+          await readFile(join(f.outputDir, "policy-draft.json"), "utf8"),
+        ),
+      ).toMatchObject({
+        status: "threat_model_ready",
+        threatModel: {
+          format: "markdown",
+          content: stageResult("threat_model").markdown,
+        },
+      });
       expect(await readFile(join(f.outputDir, "SECURITY.md"), "utf8")).toBe(
         POLICY,
       );

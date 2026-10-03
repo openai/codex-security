@@ -2379,7 +2379,10 @@ describe("CLI", () => {
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
     expect(stdout.text()).toContain("Usage: codex-security export [scan-dir]");
+    expect(stdout.text()).toContain("--artifact <artifact>");
+    expect(stdout.text()).toContain("--scan <scan-id>");
     expect(stdout.text()).toContain("--export-format <format>");
+    expect(stdout.text()).toContain("threatmodel.md");
     expect(stdout.text()).toContain("--source-root <path>");
     expect(stdout.text()).toContain("sarif");
     expect(stdout.text()).not.toContain("--format {sarif}");
