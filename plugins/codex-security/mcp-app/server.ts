@@ -11,7 +11,7 @@ import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./src/python_command.js";
-import { MCP_APP_VERSION } from "./src/version.js";
+import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
   recoveryHandoffClaimTokenSchema,
