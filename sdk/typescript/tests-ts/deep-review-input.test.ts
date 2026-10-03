@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
 import {
@@ -81,6 +82,26 @@ afterEach(async () => {
 });
 
 describe("deep-review worklists", () => {
+  test("selects rows with long internal whitespace without rescanning suffixes", async () => {
+    const f = fixture();
+    write(f.input, [
+      { ...ranked("a.py"), reason: "a" + " ".repeat(128000) + "b" },
+    ]);
+    const result = await runCommand(
+      node,
+      [
+        helper,
+        "select-deep-review-input",
+        "--rank-output",
+        f.input,
+        "--out",
+        f.output,
+      ],
+      { cwd: f.root, timeout: 5000 },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(read(f.output)).toEqual([{ path: "a.py", area: "src" }]);
+  });
   test("copies all candidates in input order and selects included ranked rows", () => {
     const f = fixture();
     write(f.input, [candidate("a.py", "core"), candidate("b.py", "api")]);
@@ -148,6 +169,7 @@ describe("deep-review worklists", () => {
     ["+2_0", 1],
     ["２０", 1],
     ["٢٠", 1],
+    ["\u0085+２_０\u2028", 1],
     ["9".repeat(308), 3],
   ] as const)("preserves accepted integer percentage %s", (percent, count) => {
     const f = fixture();
