@@ -71,6 +71,7 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
+  environmentEntry,
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
@@ -103,6 +104,7 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -110,6 +112,7 @@ import {
   inlineToml,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
+  resolveCodexProfile,
   mergedCodexConfig,
   scanModel,
   scanModelConfiguration,
@@ -1060,7 +1063,7 @@ interface SkillCommandOutput {
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
-  readonly providerConfiguration?: JsonObject;
+  readonly codexOverrides?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1401,48 +1404,71 @@ export async function runCodexSkillCommand(
     let modelProvider: string | undefined;
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
-      const config =
-        output.modelProvider !== undefined
-          ? {
-              model_provider: output.modelProvider,
-              ...(output.providerConfiguration === undefined
-                ? {}
-                : {
-                    model_providers: {
-                      [output.modelProvider]: output.providerConfiguration,
-                    },
-                  }),
-            }
-          : output.appServer === undefined
-            ? {}
-            : await readCodexHomeConfig(processEnvironment);
-      const provider = scanModelProvider(config);
+      const ambientConfig =
+        output.appServer === undefined
+          ? {}
+          : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
+      const overrides = structuredClone(output.codexOverrides ?? {});
+      const config = deepMerge(ambientConfig, overrides);
+      const provider = output.modelProvider ?? scanModelProvider(config);
+      // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
-        typeof provider === "string"
+        typeof provider === "string" &&
+        !["openai", "ollama", "lmstudio"].includes(provider)
           ? (
               config["model_providers"] as
                 Record<string, JsonObject> | undefined
             )?.[provider]
           : undefined;
+      const providerEnvKey =
+        typeof providerConfiguration?.["env_key"] === "string"
+          ? providerConfiguration["env_key"]
+          : undefined;
+      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const explicitChatgpt =
+        output.auth === "chatgpt" && !isExternalModelProvider(provider);
+      const providerBearer =
+        typeof providerConfiguration?.["experimental_bearer_token"] ===
+        "string";
+      const providerKeyConfigured =
+        providerEnvKey !== undefined || providerBearer;
       const requiresOpenAiAuth =
-        provider === undefined ||
-        provider === "openai" ||
-        providerConfiguration?.["requires_openai_auth"] === true;
+        !commandAuth &&
+        (explicitChatgpt || !providerKeyConfigured) &&
+        (provider === undefined ||
+          provider === "openai" ||
+          providerConfiguration?.["requires_openai_auth"] === true ||
+          (explicitChatgpt && providerKeyConfigured));
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      authentication = scanAuthentication(
-        processEnvironment,
-        output.auth,
-        provider,
-        hasCommandAuth(config),
-      );
+      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
+        const key = environmentEntry(
+          processEnvironment,
+          providerEnvKey,
+        )?.trim();
+        if (!key && output.auth === "api-key") {
+          throw new AuthenticationRequiredError(
+            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
+          );
+        }
+        authentication = key
+          ? { method: "api_key", source: providerEnvKey, verified: false }
+          : { method: "stored_credentials", verified: false };
+      } else {
+        authentication = scanAuthentication(
+          processEnvironment,
+          output.auth,
+          provider,
+          commandAuth,
+        );
+      }
       if (
         authentication.method === "stored_credentials" &&
         isExternalModelProvider(provider)
       ) {
         const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
         throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
+          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
         );
       }
       let selected = selectedScanEnvironment(
@@ -1450,6 +1476,47 @@ export async function runCodexSkillCommand(
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
       );
+      if (
+        explicitChatgpt &&
+        !commandAuth &&
+        providerConfiguration !== undefined &&
+        providerKeyConfigured
+      ) {
+        if (providerEnvKey !== undefined) {
+          selected = Object.fromEntries(
+            Object.entries(selected).filter(([name]) =>
+              process.platform === "win32"
+                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
+                : name !== providerEnvKey,
+            ),
+          );
+        }
+        // Native provider keys take precedence over stored authentication.
+        // Apply explicit ChatGPT selection to the home and CLI configuration.
+        const providerOverrides =
+          typeof provider === "string"
+            ? (
+                overrides["model_providers"] as
+                  Record<string, JsonObject> | undefined
+              )?.[provider]
+            : undefined;
+        for (const selectedConfig of [
+          providerConfiguration,
+          providerOverrides,
+        ]) {
+          if (selectedConfig === undefined) continue;
+          delete selectedConfig["env_key"];
+          delete selectedConfig["experimental_bearer_token"];
+          selectedConfig["requires_openai_auth"] = true;
+        }
+        args = [
+          ...args,
+          ...modelProviderConfigOverride(overrides).flatMap((value) => [
+            "--config",
+            value,
+          ]),
+        ];
+      }
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -1533,6 +1600,15 @@ export async function runCodexSkillCommand(
             "--config",
             'cli_auth_credentials_store="ephemeral"',
           ];
+        }
+      }
+      if (authentication.method === "api_key" && providerEnvKey !== undefined) {
+        const providerKey = environmentEntry(
+          processEnvironment,
+          providerEnvKey,
+        );
+        if (providerKey !== undefined) {
+          selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
       if (output.appServer === undefined) {
@@ -7409,6 +7485,20 @@ async function runSkill(
         (isExternalModelProvider(provider)
           ? EXTERNAL_CODEX_PROVIDERS[provider]
           : undefined)));
+  const effectiveOverrides = resolveCommandAuthConfig(
+    mergeCodexOverrides(
+      overrides,
+      provider === undefined
+        ? {}
+        : {
+            model_provider: provider,
+            ...(providerConfiguration === undefined
+              ? {}
+              : { model_providers: { [provider]: providerConfiguration } }),
+          },
+    ),
+    configuredCodexHome(options.environment ?? dependencies.environment),
+  );
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   for (const input of inputs) {
@@ -7574,21 +7664,10 @@ async function runSkill(
       ...(provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(provider)}`]),
-      ...modelProviderConfigOverride(
-        resolveCommandAuthConfig(
-          mergeCodexOverrides(
-            overrides,
-            provider === undefined || providerConfiguration === undefined
-              ? {}
-              : {
-                  model_providers: {
-                    [provider]: providerConfiguration,
-                  },
-                },
-          ),
-          configuredCodexHome(options.environment ?? dependencies.environment),
-        ),
-      ).flatMap((value) => ["--config", value]),
+      ...modelProviderConfigOverride(effectiveOverrides).flatMap((value) => [
+        "--config",
+        value,
+      ]),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -7620,7 +7699,7 @@ async function runSkill(
       auth: options.auth ?? "auto",
       directory,
       modelProvider: provider,
-      providerConfiguration,
+      codexOverrides: effectiveOverrides,
       stdout,
       stderr,
       ...(appServer

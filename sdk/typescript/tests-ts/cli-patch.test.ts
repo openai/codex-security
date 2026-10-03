@@ -842,9 +842,11 @@ describe("scan and patch workflow", () => {
             expect(args).toContain("analytics.enabled=false");
             expect(args).toContain('model_provider="synthetic.gateway"');
             expect(output?.modelProvider).toBe("synthetic.gateway");
-            expect(output?.providerConfiguration?.["env_key"]).toBe(
-              "SYNTHETIC_KEY",
-            );
+            expect(output?.codexOverrides).toMatchObject({
+              model_providers: {
+                "synthetic.gateway": { env_key: "SYNTHETIC_KEY" },
+              },
+            });
             expect(
               parseToml(
                 args.find((arg) => arg.startsWith("model_providers="))!,
@@ -1229,9 +1231,15 @@ describe("scan and patch workflow", () => {
               arg.startsWith("model_providers="),
             );
             expect(output?.modelProvider).toBe(provider);
-            expect(output?.providerConfiguration?.["auth"]).toEqual({
-              command: "./synthetic-auth",
-              args: ["--json"],
+            expect(output?.codexOverrides).toMatchObject({
+              model_providers: {
+                [provider]: {
+                  auth: {
+                    command: "./synthetic-auth",
+                    args: ["--json"],
+                  },
+                },
+              },
             });
             completePatches(args, output);
             return 0;

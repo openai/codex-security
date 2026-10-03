@@ -886,9 +886,9 @@ describe("CLI skill commands", () => {
             onCodex: (args, output, environment) => {
               invocation = args;
               expect(output?.modelProvider).toBe("synthetic");
-              expect(output?.providerConfiguration).toEqual(
-                providerConfiguration,
-              );
+              expect(output?.codexOverrides).toMatchObject({
+                model_providers: { synthetic: providerConfiguration },
+              });
               expect(environment?.["SYNTHETIC_GATEWAY_KEY"]).toBe(
                 "SYNTHETIC_VALUE",
               );
