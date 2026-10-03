@@ -16,10 +16,43 @@ export function object(value: unknown): value is Row {
   );
 }
 export function objectEntries(value: Row): [string, unknown][] {
-  return (keyOrder.get(value) ?? Object.keys(value)).map((key) => [
-    key,
-    value[key],
-  ]);
+  const keys = new Set([...(keyOrder.get(value) ?? []), ...Object.keys(value)]);
+  return [...keys].map((key) => [key, value[key]]);
+}
+
+// json.dumps(..., ensure_ascii=True, indent=2), including parsed number types.
+export function stringifyJson(value: unknown): string {
+  const quote = (text: string) =>
+    JSON.stringify(text).replace(
+      /[\u007f-\uffff]/g,
+      (character) =>
+        `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
+  function encode(item: unknown, depth: number): string {
+    if (typeof item === "string") return quote(item);
+    if (item instanceof JsonFloat) {
+      const number = Number(item.source);
+      if (Number.isNaN(number)) return "NaN";
+      if (!Number.isFinite(number))
+        return number < 0 ? "-Infinity" : "Infinity";
+      return pythonRepr(item);
+    }
+    if (typeof item === "bigint") return String(item);
+    if (Array.isArray(item) || object(item)) {
+      const array = Array.isArray(item);
+      const entries = array
+        ? item.map((child) => encode(child, depth + 1))
+        : objectEntries(item).map(
+            ([key, child]) => `${quote(key)}: ${encode(child, depth + 1)}`,
+          );
+      const [open, close] = array ? ["[", "]"] : ["{", "}"];
+      if (entries.length === 0) return open + close;
+      const prefix = "  ".repeat(depth + 1);
+      return `${open}\n${prefix}${entries.join(`,\n${prefix}`)}\n${"  ".repeat(depth)}${close}`;
+    }
+    return JSON.stringify(item);
+  }
+  return encode(value, 0);
 }
 
 export class JsonSyntaxError extends Error {}

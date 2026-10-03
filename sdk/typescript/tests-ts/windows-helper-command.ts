@@ -9,7 +9,10 @@ import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 
-export function windowsHelperFixture(root: string) {
+export function windowsHelperFixture(
+  root: string,
+  environment: NodeJS.ProcessEnv = {},
+) {
   const plugin = join(root, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
   mkdirSync(join(plugin, "scripts"), { recursive: true });
   cpSync(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), { recursive: true });
@@ -66,6 +69,7 @@ export function windowsHelperFixture(root: string) {
         PLUGIN: "expanded-plugin",
         USERNAME: "expanded-user",
         EXPAND: "expanded-bang",
+        ...environment,
       };
       const overrides = new Set(
         Object.keys(fixtureEnvironment).map((key) => key.toUpperCase()),
@@ -103,6 +107,7 @@ export function windowsHelperFixture(root: string) {
             document,
             workingDirectory,
             paths,
+            environment,
             command,
             status: result.status,
             signal: result.signal,

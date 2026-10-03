@@ -107,6 +107,7 @@ export async function runArtifactHelper(
       "-I",
       "-X",
       "utf8",
+      "-B",
       join(plugin, "scripts", "finalize_scan_contract.py"),
       ...args,
     ],
