@@ -79,7 +79,7 @@ async function testWorkbenchStateFallback() {
           const standaloneInput = {
             targetPath,
             storage: "persistent",
-            path: "threat_model.md",
+            path: "threatmodel.md",
             content: "retained context\n",
           };
           if (firstOperation === "standalone") {
@@ -188,7 +188,7 @@ async function testWorkbenchStateFallback() {
         const artifact = {
           targetPath,
           storage: "persistent",
-          path: "threat_model.md",
+          path: "threatmodel.md",
         };
         const saved = await readFirstServer.request(2, "tools/call", {
           name: "save_codex_security_artifact",

@@ -22,6 +22,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import { readThreatModelPath } from "./artifact-export.js";
 import {
   OutputDirectoryNotEmptyError,
   errorMessage,
@@ -65,6 +66,7 @@ interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  threatModelPath?: string;
   coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
@@ -320,22 +322,39 @@ async function runCampaign(
         if (options.recoverScan === undefined) attempt += 1;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
+        let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
         let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined;
+            | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
+                Partial<Pick<ScanResult, "threatModelPath">>)
+            | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
             const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
+              const retainedCheckout = join(
+                output,
+                "recovery-checkouts",
+                task.id,
+                `attempt-${attempt}`,
+              );
+              const retained = await lstat(retainedCheckout).catch(
+                (error: NodeJS.ErrnoException) => {
+                  if (error.code !== "ENOENT") throw error;
+                  return undefined;
+                },
+              );
+              if (retained !== undefined) protectedRoot = retainedCheckout;
               attemptedResume = true;
               notifyProgress(options, {
                 repository: task.id,
@@ -372,6 +391,7 @@ async function runCampaign(
               await rm(checkout, { recursive: true, force: true });
               await mkdir(checkout, { mode: 0o700 });
             }
+            protectedRoot = checkout;
             await checkoutRevision(
               task,
               checkout,
@@ -422,6 +442,7 @@ async function runCampaign(
                 : { signal: options.signal }),
             });
           }
+          threatModelPath = result.threatModelPath;
           cost = result.cost;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
@@ -459,6 +480,12 @@ async function runCampaign(
             : warning === undefined
               ? "completed"
               : "completed_with_incomplete_coverage";
+        if (threatModelPath === undefined)
+          threatModelPath = await readThreatModelPath(scanDir, {
+            pythonPath: options.config.pythonPath,
+            protectedRoot,
+            signal: options.signal,
+          });
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -466,6 +493,7 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(threatModelPath === null ? {} : { threatModelPath }),
             ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),

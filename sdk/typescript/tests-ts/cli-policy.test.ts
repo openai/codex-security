@@ -185,7 +185,7 @@ describe("policy CLI", () => {
     const result = JSON.parse(stdout.text());
     expect(result.status).toBe("draft");
     expect(result.targetPath).toBe(join(f.repository, "SECURITY.md"));
-    expect(result.threatModelPath).toBe(join(f.outputDir, "THREAT_MODEL.md"));
+    expect(result.threatModelPath).toBe(join(f.outputDir, "threatmodel.md"));
     expect(result.cost).toEqual(draft.cost);
     expect(stderr.text()).toContain("$1.00–$2.00 (standard, context unknown)");
     expect(stderr.text()).toContain("[1/3]");

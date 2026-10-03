@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import {
   basename,
   dirname,
@@ -29,7 +30,9 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
+
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -591,6 +594,11 @@ export class CodexSecurity {
           ...contract,
           scanDir: state.scanDir,
           ...metadata,
+          threatModelPath: await readThreatModelPath(state.scanDir, {
+            pythonPath: this.config.pythonPath,
+            protectedRoot: local.protectedRoot,
+            signal,
+          }),
         });
       }
     }
@@ -1144,7 +1152,10 @@ export class CodexSecurity {
         )(target.repository, signal),
         ...model,
         pluginVersion: runtime.plugin.version,
+        pythonPath: session.python,
+        protectedRoot: inputs.protectedRoot,
         signal,
+        onWarning: warn,
         onStage: (stage) =>
           notifyObserver(
             "onStage",
@@ -1208,6 +1219,8 @@ export class CodexSecurity {
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
+      pythonPath: string;
+      protectedRoot: string;
       model: string;
       threadId: string | null;
     } | null = null;
@@ -1403,6 +1416,8 @@ export class CodexSecurity {
         budgetRecovery = {
           expectation,
           pluginRoot: runtime.plugin.installedRoot,
+          pythonPath: session.python,
+          protectedRoot,
           model,
           threadId: null,
         };
@@ -1926,12 +1941,14 @@ export class CodexSecurity {
       const { events } = await thread.runStreamed(prompt, turnOptions);
       checkOpen();
 
-      const result = await runScanEvents({
+      let result = await runScanEvents({
         thread,
         events,
         signal,
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
+        pythonPath: session.python,
+        protectedRoot,
         expectation,
         authentication,
         modelProvider,
@@ -2141,6 +2158,13 @@ export class CodexSecurity {
               "findings.json",
               "coverage.json",
               "report.md",
+              ...(result.threatModelPath === null
+                ? []
+                : [
+                    relative(scanDir, result.threatModelPath)
+                      .split(sep)
+                      .join("/"),
+                  ]),
               ...result.manifest.scan.artifacts.map(
                 (artifact) => artifact.path,
               ),
@@ -2156,12 +2180,14 @@ export class CodexSecurity {
             workbenchOptions,
             scanDir,
           );
-          await runScanEvents({
+          const followUpResult = await runScanEvents({
             thread,
             events: (await followUp()).events,
             signal,
             scanDir,
             pluginRoot: runtime.plugin.installedRoot,
+            pythonPath: session.python,
+            protectedRoot,
             expectation,
             model,
             onReconnect: options.onReconnect,
@@ -2169,6 +2195,15 @@ export class CodexSecurity {
             onObserverError: options.onObserverError,
           });
           checkOpen();
+          result = new ScanResult({
+            ...result,
+            threatModelPath: isDeepStrictEqual(
+              result.threatModel,
+              followUpResult.threatModel,
+            )
+              ? followUpResult.threatModelPath
+              : null,
+          });
         } catch (error) {
           if (artifactRestorer !== null) {
             for (const artifact of completedArtifacts) {
@@ -2195,6 +2230,8 @@ export class CodexSecurity {
             expectation,
             signal,
             true,
+            session.python,
+            protectedRoot,
           );
           notifyObserver(
             "onWarning",
@@ -2311,6 +2348,8 @@ export class CodexSecurity {
               ...(options.signal === undefined ? [] : [options.signal]),
             ]),
             true,
+            budgetRecovery.pythonPath,
+            budgetRecovery.protectedRoot,
           );
           if (result.coverage.completeness !== "partial") {
             throw new IncompleteScanError(
@@ -3271,6 +3310,8 @@ export class CodexSecurity {
         },
         signal,
         true,
+        python,
+        local.protectedRoot,
       );
       // Stable fixture identities are indexed by complete-scan without model matching.
       result.repositoryFindings = (await listRepositoryFindings(
@@ -3644,6 +3685,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   signal: AbortSignal;
   scanDir: string;
   pluginRoot: string;
+  pythonPath?: string;
+  protectedRoot?: string;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
   modelProvider?: unknown;
@@ -3790,6 +3833,8 @@ export async function runScanEvents(
       options.expectation,
       options.signal,
       options.workbenchValidated,
+      options.pythonPath,
+      options.protectedRoot,
     );
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
@@ -3999,6 +4044,7 @@ function scanPrompt(
     ...(skillName === "security-scan"
       ? [
           "This Standard scan authorizes its independent baseline auditor and focused investigators; use available subagent tools and continue with parent-agent fallback if capacity changes.",
+          "After architecture mapping yields a usable threatModel, call record_codex_security_scan_draft for this already registered scan with complete:false, findings:[], and truthful partial coverage, before continuing discovery. Preserve the model in later checkpoints as it changes. This checkpoint does not start or complete a scan; write final canonical files as instructed below.",
         ]
       : skillName === "deep-security-scan"
         ? []
@@ -4203,6 +4249,8 @@ async function collectResult(
   expectation: ScanExpectation,
   signal: AbortSignal,
   workbenchValidated = false,
+  pythonPath?: string,
+  protectedRoot?: string,
 ): Promise<ScanResult> {
   const required = [
     "scan-manifest.json",
@@ -4249,6 +4297,12 @@ async function collectResult(
     threadId,
     turnResult,
     sarifPath,
+    threatModelPath: await readThreatModelPath(scanDir, {
+      pluginRoot,
+      pythonPath,
+      protectedRoot,
+      signal,
+    }),
   });
 }
 

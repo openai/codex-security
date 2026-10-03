@@ -23,12 +23,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
+import { writeThreatModel } from "../src/artifact-export.js";
+import { PYTHON } from "./support/security-policy.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { DiffTarget } from "../src/targets.js";
 import { prepareOutputDir } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -142,6 +145,90 @@ function options(
 const results = readJsonLines<Record<string, unknown>>;
 
 describe("multiscan", () => {
+  test.each([false, true])(
+    "only links current models from failed child runs with recovery=%p",
+    async (recovery) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "model-source");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ncurrent,${source.path},${source.revision}\nstale,${source.path},${source.revision}\n`,
+      );
+      if (recovery)
+        await runMultiscan(
+          options(
+            paths,
+            client(async () => {
+              throw new Error("Synthetic interruption before checkpoint");
+            }),
+            { maxAttempts: 1, config: { pythonPath: PYTHON } },
+          ),
+        );
+      const checkouts: string[] = [];
+      const python = spyOn(runtime, "resolvePluginPython");
+      let summary;
+      try {
+        summary = await runMultiscan(
+          options(
+            paths,
+            client(async (checkout, scanOptions = {}) => {
+              checkouts.push(checkout);
+              const directory = scanOptions.outputDir!;
+              await mkdir(directory, { recursive: true });
+              const manifest = {
+                documentType: "codex-security.policy-draft",
+                status: "threat_model_ready",
+                threatModel: {
+                  format: "markdown",
+                  content: "# Earlier model\n",
+                },
+              };
+              await writeFile(
+                join(directory, "policy-draft.json"),
+                JSON.stringify(manifest),
+              );
+              await writeThreatModel(directory, { pythonPath: PYTHON });
+              if (directory.includes("stale")) {
+                manifest.threatModel.content = "# Updated model\n";
+                await writeFile(
+                  join(directory, "policy-draft.json"),
+                  JSON.stringify(manifest),
+                );
+              }
+              throw new Error("Synthetic child failure after checkpoint");
+            }),
+            {
+              maxAttempts: 1,
+              config: { pythonPath: PYTHON },
+              ...(recovery ? { recoverScan: async () => undefined } : {}),
+            },
+          ),
+        );
+        expect(checkouts).toHaveLength(2);
+        for (const checkout of checkouts) {
+          expect(python).toHaveBeenCalledWith(
+            expect.objectContaining({
+              configuredPath: PYTHON,
+              protectedRoot: checkout,
+            }),
+          );
+          if (recovery)
+            expect((await lstat(checkout)).isDirectory()).toBe(true);
+          else await expect(lstat(checkout)).rejects.toThrow();
+        }
+      } finally {
+        python.mockRestore();
+      }
+      const rows = (await results(summary.resultsPath)).reverse();
+      expect(
+        rows.find((row) => row["id"] === "current")?.["threatModelPath"],
+      ).toBeString();
+      expect(
+        rows.find((row) => row["id"] === "stale")?.["threatModelPath"],
+      ).toBeUndefined();
+    },
+  );
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
@@ -462,9 +549,14 @@ describe("multiscan", () => {
     });
   });
 
-  test.each([false, true])(
-    "recovery records the original attempt and preserves it after resume failure=%p",
-    async (failure) => {
+  test.each([
+    [false, "checkouts"],
+    [true, "checkouts"],
+    [false, "recovery-checkouts"],
+    [true, "recovery-checkouts"],
+  ] as const)(
+    "recovery records the original attempt with failure=%p and retained %s",
+    async (failure, layout) => {
       const paths = await fixture();
       const source = await repository(paths.root, "retained");
       await writeFile(
@@ -477,17 +569,41 @@ describe("multiscan", () => {
       const dir = join(paths.output, "artifacts", "retained", "attempt-1");
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "checkpoint"), "keep");
+      const checkout = join(
+        paths.output,
+        layout,
+        "retained",
+        ...(layout === "recovery-checkouts" ? ["attempt-1"] : []),
+      );
+      await mkdir(checkout, { recursive: true });
+      await writeFile(join(checkout, "source"), "keep checkout");
       const recoverScan = mock(async (scanDir: string) => {
         expect(scanDir).toBe(dir);
         if (failure) throw new Error("Resume transport failed");
         return completedScan(scanDir);
       });
       const runs = mock(completeRunWithoutAwait);
-      const summary = await runMultiscan(
-        options(paths, client(runs), {
-          maxAttempts: 3,
-          recoverScan,
-        }),
+      const python = spyOn(runtime, "resolvePluginPython");
+      let summary;
+      try {
+        summary = await runMultiscan(
+          options(paths, client(runs), {
+            maxAttempts: 3,
+            config: { pythonPath: PYTHON },
+            recoverScan,
+          }),
+        );
+        expect(python).toHaveBeenCalledWith(
+          expect.objectContaining({
+            configuredPath: PYTHON,
+            protectedRoot: checkout,
+          }),
+        );
+      } finally {
+        python.mockRestore();
+      }
+      expect(await readFile(join(checkout, "source"), "utf8")).toBe(
+        "keep checkout",
       );
       expect(runs.mock.calls.length).toBe(0);
       expect(recoverScan).toHaveBeenCalledTimes(1);

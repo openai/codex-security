@@ -131,6 +131,7 @@ function components(path: string): string[] {
 function supplementalPath(
   input: ArtifactLocation,
   context: ArtifactContext,
+  write = false,
 ): string[] {
   const parts = components(input.path!);
   if (input.storage === "temporary") return parts;
@@ -139,7 +140,8 @@ function supplementalPath(
     (parts.length > 1 &&
       ["artifacts", "findings", "hardening"].includes(parts[0]!)) ||
     path === "report_validation.md" ||
-    (!context.scanId && path === "threat_model.md");
+    (path === "threatmodel.md" && (!context.scanId || !write)) ||
+    (!context.scanId && !write && path === "threat_model.md");
   if (
     !allowed ||
     reservedArtifactPaths.some(
@@ -170,7 +172,9 @@ export async function saveCodexSecurityArtifact(
     );
   }
   const parts =
-    input.path === undefined ? undefined : supplementalPath(input, context);
+    input.path === undefined
+      ? undefined
+      : supplementalPath(input, context, true);
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };
