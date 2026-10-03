@@ -1,4 +1,4 @@
-import { hash } from "node:crypto";
+import { sha256Text as sha256 } from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -177,8 +177,7 @@ export function bindImportedFindings(
   return findings.map((finding) => {
     const ruleId = `import.${format}`;
     const anchor = finding.occurrenceId;
-    const fingerprint = `codex-security/v1:sha256:${hash(
-      "sha256",
+    const fingerprint = `codex-security/v1:sha256:${sha256(
       ["codex-security/v1", targetId, ruleId, anchor, ""].join("\0"),
     )}`;
     // A source report path names another scan's artifact. Preserve it as
@@ -186,8 +185,8 @@ export function bindImportedFindings(
     const { writeup, ...content } = finding;
     return {
       ...content,
-      findingId: `csf_${hash("sha256", fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${hash("sha256", [scanId, fingerprint].join("\0")).slice(0, 24)}`,
+      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
+      occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(0, 24)}`,
       ruleId,
       identity: { anchor },
       fingerprints: {
@@ -283,18 +282,15 @@ function decodeExportedCsvCell(value: string): string {
 export function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
   const ruleId = "import.csv";
   const anchor = row.finding_id;
-  const fingerprint = `codex-security/v1:sha256:${hash(
-    "sha256",
+  const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
-  const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
-  const occurrenceId = `occ_${hash(
-    "sha256",
-    [scanId, fingerprint].join("\0"),
-  ).slice(0, 24)}`;
   return {
-    findingId,
-    occurrenceId,
+    findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(
+      0,
+      24,
+    )}`,
     ruleId,
     identity: { anchor },
     fingerprints: {
@@ -347,8 +343,7 @@ function requiredCsvText(column: string) {
 
 function validCsvLine(value: string): boolean {
   if (!/^[1-9]\d*$/u.test(value)) return false;
-  const line = Number(value);
-  return Number.isSafeInteger(line);
+  return Number.isSafeInteger(Number(value));
 }
 
 function safeFindingPath(value: string): boolean {

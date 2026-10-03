@@ -36,7 +36,7 @@ import {
   compactFinding,
   findingCatalogue,
   groupFindings,
-  type ComparisonFinding,
+  type ComparisonFinding as Finding,
 } from "./finding-catalogue.js";
 import {
   codexSecurityCredentialHome,
@@ -55,7 +55,6 @@ import {
 /** @internal */
 export { environmentEntry } from "./auth.js";
 
-type Finding = ComparisonFinding;
 type ReadOnlyCodexThreadSource = Extract<
   CodexSecurityThreadSource,
   | typeof CODEX_SECURITY_THREAD_SOURCES.scan
@@ -353,10 +352,8 @@ export async function matchScanFindingsInternal(
     outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
       target: "draft-7",
     }),
-    ...(options.cyberAccessProgram === undefined
-      ? {}
-      : { cyberAccessProgram: options.cyberAccessProgram }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    cyberAccessProgram: options.cyberAccessProgram,
+    signal: options.signal,
   };
   let prompt = comparisonPrompt(pages[0]!, 0, pages.length);
   progress("catalogue", 1);
@@ -534,10 +531,7 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    threadSource: ReadOnlyCodexThreadSource;
-  },
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
   const config =
     options.config === undefined
@@ -579,15 +573,6 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const cyberFeatures: JsonObject = {};
-  for (const feature of [
-    "api_key_cyber_access_programs",
-    "api_key_model_discovery",
-  ]) {
-    if (effectiveFeatures?.[feature] !== undefined) {
-      cyberFeatures[feature] = effectiveFeatures[feature];
-    }
-  }
   const environment =
     options.codex === undefined
       ? await comparisonEnvironment(
@@ -627,7 +612,10 @@ async function startReadOnlyCodexThread(
           codex_security_surface: runtimeOptions.surface,
         },
         features: {
-          ...cyberFeatures,
+          api_key_cyber_access_programs:
+            effectiveFeatures?.["api_key_cyber_access_programs"],
+          api_key_model_discovery:
+            effectiveFeatures?.["api_key_model_discovery"],
           apps: false,
           code_mode: false,
           code_mode_only: false,
@@ -670,10 +658,8 @@ export async function runReadOnlyCodex(
   const thread = await startReadOnlyCodexThread(options, runtimeOptions);
   const turn = await thread.run(prompt, {
     outputSchema,
-    ...(options.cyberAccessProgram === undefined
-      ? {}
-      : { cyberAccessProgram: options.cyberAccessProgram }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    cyberAccessProgram: options.cyberAccessProgram,
+    signal: options.signal,
   });
   return turn.finalResponse;
 }
@@ -856,21 +842,19 @@ function reconcileComparison(
       },
     ];
   });
+  const isSeparateGroup = ({
+    beforeOccurrenceId,
+    afterOccurrenceId,
+  }: ScanComparisonPair) =>
+    groupByOccurrence.get(beforeOccurrenceId) !==
+    groupByOccurrence.get(afterOccurrenceId);
   const comparison = {
     matches,
-    uncertain: response.uncertain.filter(
-      ({ beforeOccurrenceId, afterOccurrenceId }) =>
-        groupByOccurrence.get(beforeOccurrenceId) !==
-        groupByOccurrence.get(afterOccurrenceId),
-    ),
+    uncertain: response.uncertain.filter(isSeparateGroup),
     ...(response.related === undefined
       ? {}
       : {
-          related: response.related.filter(
-            ({ beforeOccurrenceId, afterOccurrenceId }) =>
-              groupByOccurrence.get(beforeOccurrenceId) !==
-              groupByOccurrence.get(afterOccurrenceId),
-          ),
+          related: response.related.filter(isSeparateGroup),
         }),
   };
   validateComparison(input, comparison, allowHistoricalUncertainty, true);
@@ -923,12 +907,7 @@ export function comparisonFindingGroups(
   comparison: ScanComparisonResult,
 ): string[][] {
   const findingIds = new Map(
-    [...input.before, ...input.after].flatMap((finding) =>
-      typeof finding["findingId"] === "string" &&
-      finding["findingId"].trim().length > 0
-        ? [[finding.occurrenceId, finding["findingId"]] as const]
-        : [],
-    ),
+    [...input.before, ...input.after].flatMap(findingIdEntry),
   );
   return comparison.matches.flatMap((match) => {
     const ids = [
@@ -1018,18 +997,11 @@ function requiredEvidenceRequest(
   omitted: Record<"before" | "after", ReadonlySet<string>>,
   requested: Record<"before" | "after", ReadonlyMap<string, EvidenceCursor>>,
 ): EvidenceRequest | undefined {
-  const required = {
-    before: new Set([
-      ...omitted.before,
-      ...matches.flatMap((match) => match.beforeOccurrenceIds),
-    ]),
-    after: new Set([
-      ...omitted.after,
-      ...matches.flatMap((match) => match.afterOccurrenceIds),
-    ]),
-  };
   for (const side of ["before", "after"] as const) {
-    for (const id of required[side]) {
+    const required = new Set(omitted[side]);
+    for (const match of matches)
+      for (const id of match[`${side}OccurrenceIds`]) required.add(id);
+    for (const id of required) {
       const cursor = requested[side].get(id);
       if (cursor !== undefined && cursor.nextOffset !== null) {
         return {
@@ -1061,8 +1033,8 @@ function requiredEvidenceRequest(
     ].join("\n"),
   );
   for (const side of ["before", "after"] as const) {
-    for (const id of required[side]) {
-      if (requested[side].has(id) || !omitted[side].has(id)) continue;
+    for (const id of omitted[side]) {
+      if (requested[side].has(id)) continue;
       const identities = missing[`${side}OccurrenceIds`];
       const length = characterCount(JSON.stringify(id));
       const separator = identities.length === 0 ? 0 : 1;
@@ -1232,12 +1204,7 @@ function validateComparison(
   );
   const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
   const findingIds = new Map(
-    [...input.before, ...input.after].flatMap((finding) =>
-      typeof finding["findingId"] === "string" &&
-      finding["findingId"].trim().length > 0
-        ? [[finding.occurrenceId, finding["findingId"]] as const]
-        : [],
-    ),
+    [...input.before, ...input.after].flatMap(findingIdEntry),
   );
   const matchedBefore = new Map<string, number>();
   const matchedAfter = new Map<string, number>();
@@ -1371,4 +1338,11 @@ function validateComparison(
     }
     relatedPairs.add(pair);
   }
+}
+
+function findingIdEntry(finding: Finding) {
+  return typeof finding["findingId"] === "string" &&
+    finding["findingId"].trim().length > 0
+    ? [[finding.occurrenceId, finding["findingId"]] as const]
+    : [];
 }

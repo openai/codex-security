@@ -12,24 +12,27 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import fc from "fast-check";
 import { ContractValidationError, loadContract } from "../src/index.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
-import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { propertyOptions } from "./support/property.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { readJson as readJsonFile, writeJson } from "./support/json.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-contract-",
+  false,
+);
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 async function copyExample(): Promise<string> {
-  const root = await temporaryDirectories.create("codex-security-contract-");
+  const root = await temporaryDirectory();
   const scanDir = join(root, "scan");
   await cp(EXAMPLE, scanDir, { recursive: true });
   if (process.platform !== "win32") await chmod(scanDir, 0o700);
@@ -180,7 +183,7 @@ describe("canonical scan contract", () => {
     let referenceDevice = highDevice;
     let referenceInode = identity.ino;
     let referenceRegular = true;
-    let referenceClosed = 0;
+    const closeMock = mock(async () => {});
     const file = {
       stat: async () => {
         inspected += 1;
@@ -197,9 +200,7 @@ describe("canonical scan contract", () => {
         ino: referenceInode,
         isFile: () => referenceRegular,
       }),
-      close: async () => {
-        referenceClosed += 1;
-      },
+      close: closeMock,
     } as unknown as FileHandle;
     const openReference = async () => reference;
     const checked = { path, metadata, parents: [] };
@@ -208,7 +209,7 @@ describe("canonical scan contract", () => {
     await expect(
       sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(true);
-    expect(referenceClosed).toBe(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
 
     const inconsistentNumberInode = {
       dev: metadata.dev,
@@ -228,13 +229,13 @@ describe("canonical scan contract", () => {
     await expect(
       sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(false);
-    expect(referenceClosed).toBe(2);
+    expect(closeMock).toHaveBeenCalledTimes(2);
 
     referenceDevice = device;
     await expect(
       sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(true);
-    expect(referenceClosed).toBe(3);
+    expect(closeMock).toHaveBeenCalledTimes(3);
 
     device = highDevice;
     referenceDevice = highDevice;
@@ -494,9 +495,7 @@ describe("canonical scan contract", () => {
   test.skipIf(process.platform === "win32")(
     "accepts a scan directory beneath a symlinked parent",
     async () => {
-      const root = await temporaryDirectories.create(
-        "codex-security-contract-link-",
-      );
+      const root = await temporaryDirectory("codex-security-contract-link-");
       const parent = join(root, "actual-parent");
       const linkedParent = join(root, "linked-parent");
       await mkdir(parent, { mode: 0o700 });
@@ -524,9 +523,7 @@ describe("canonical scan contract", () => {
   });
 
   test("loads contract schemas larger than the previous size limit", async () => {
-    const pluginRoot = await temporaryDirectories.create(
-      "codex-security-schema-large-",
-    );
+    const pluginRoot = await temporaryDirectory("codex-security-schema-large-");
     await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
       recursive: true,
     });
@@ -576,7 +573,7 @@ describe("canonical scan contract", () => {
   });
 
   test("accepts valid schemas beyond the previous complexity limit", async () => {
-    const pluginRoot = await temporaryDirectories.create(
+    const pluginRoot = await temporaryDirectory(
       "codex-security-schema-complex-",
     );
     await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
@@ -593,7 +590,7 @@ describe("canonical scan contract", () => {
   });
 
   test("does not expose attacker-controlled schema compilation errors", async () => {
-    const pluginRoot = await temporaryDirectories.create(
+    const pluginRoot = await temporaryDirectory(
       "codex-security-schema-compile-",
     );
     await mkdir(join(pluginRoot, "schemas"));

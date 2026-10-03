@@ -1,7 +1,6 @@
 import {
-  bundledPluginRoot,
-  codexSecurityStateDirectory,
-  resolvePluginPython,
+  workbenchEnvironment,
+  resolveWorkbenchRuntime,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../runtime.js";
@@ -104,11 +103,9 @@ export class SqliteFindingsStore implements FindingsStore {
   }
 
   async listDedupeGroups(findingId: string): Promise<FindingDedupeGroup[]> {
-    const result = await this.run([
-      "list-dedupe-groups",
-      `--finding-id=${findingId}`,
-    ]);
-    return result["groups"] as unknown as FindingDedupeGroup[];
+    return (
+      await this.run(["list-dedupe-groups", `--finding-id=${findingId}`])
+    )["groups"] as unknown as FindingDedupeGroup[];
   }
 
   private async run(args: string[], input?: string) {
@@ -117,14 +114,8 @@ export class SqliteFindingsStore implements FindingsStore {
   }
 
   private async resolveOptions(): Promise<WorkbenchCommandOptions> {
-    const environment = {
-      ...this.environment,
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(this.environment),
-    };
-    const [python, pluginRoot] = await Promise.all([
-      resolvePluginPython({ environment }),
-      bundledPluginRoot(),
-    ]);
+    const environment = workbenchEnvironment(this.environment);
+    const [python, pluginRoot] = await resolveWorkbenchRuntime({ environment });
     return {
       python,
       pluginRoot,

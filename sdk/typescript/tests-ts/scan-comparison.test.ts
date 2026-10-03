@@ -1,14 +1,13 @@
+import { once } from "node:events";
 import {
   copyFile,
   mkdir,
-  mkdtemp,
+  rm,
   readFile,
   realpath,
-  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import {
@@ -17,7 +16,7 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonForScan,
@@ -30,6 +29,8 @@ import {
   type ScanComparisonOptions,
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
+import { temporaryDirectory as createTemporaryDirectory } from "./support/temporary-directories.js";
+import { fail } from "./support/errors.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -53,6 +54,12 @@ afterEach(async () => {
     }),
   );
 });
+
+async function temporaryDirectory(prefix = "codex-security-comparison-") {
+  const path = await createTemporaryDirectory(prefix, false);
+  temporaryDirectories.push(path);
+  return path;
+}
 
 function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
@@ -123,10 +130,7 @@ describe("semantic scan comparison", () => {
   ] as const)(
     "supplies %s authentication to Codex matching",
     async (_name, keys, expected) => {
-      const home = await mkdtemp(
-        join(tmpdir(), "codex-security-matcher-auth-"),
-      );
-      temporaryDirectories.push(home);
+      const home = await temporaryDirectory("codex-security-matcher-auth-");
       let captured: CodexOptions | undefined;
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
       const startThread = spyOn(
@@ -161,10 +165,7 @@ describe("semantic scan comparison", () => {
   test.each(["unselected", "default", "home", "overrides", "override-profile"])(
     "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
     async (selection) => {
-      const home = await mkdtemp(
-        join(tmpdir(), "codex-security-cyber-helper-"),
-      );
-      temporaryDirectories.push(home);
+      const home = await temporaryDirectory("codex-security-cyber-helper-");
       const disabled = {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
@@ -252,10 +253,9 @@ describe("semantic scan comparison", () => {
   test.each(["home", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
-      const home = await mkdtemp(
-        join(tmpdir(), "codex-security-command-comparison-"),
+      const home = await temporaryDirectory(
+        "codex-security-command-comparison-",
       );
-      temporaryDirectories.push(home);
       const commandAuth = selection !== "override-away";
       const provider = {
         name: "Synthetic",
@@ -370,8 +370,7 @@ describe("semantic scan comparison", () => {
   );
 
   test("does not substitute managed login for an explicitly configured command provider", async () => {
-    const home = await mkdtemp(join(tmpdir(), "codex-security-command-login-"));
-    temporaryDirectories.push(home);
+    const home = await temporaryDirectory("codex-security-command-login-");
     const state = join(home, "state");
     await mkdir(join(state, "codex-home"), { recursive: true });
     // Invalid auth remains native Codex's responsibility, without login fallback.
@@ -381,19 +380,16 @@ describe("semantic scan comparison", () => {
     );
     const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: state };
     expect(
-      await comparisonEnvironment(environment, async () => {
-        throw new Error("Must not probe managed login");
-      }),
+      await comparisonEnvironment(environment, async () =>
+        fail("Must not probe managed login"),
+      ),
     ).toEqual(environment);
   });
 
   test.each(["chatgpt", "api-key"] as const)(
     "rejects ambient command auth that conflicts with explicit %s authentication",
     async (auth) => {
-      const home = await mkdtemp(
-        join(tmpdir(), "codex-security-auth-conflict-"),
-      );
-      temporaryDirectories.push(home);
+      const home = await temporaryDirectory("codex-security-auth-conflict-");
       const provider = {
         name: "Synthetic",
         base_url: "https://provider.example/v1",
@@ -464,8 +460,7 @@ describe("semantic scan comparison", () => {
   );
 
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
-    const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(home);
+    const home = await temporaryDirectory("codex-security-comparison-");
     await writeFile(
       join(home, "config.toml"),
       '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
@@ -559,16 +554,14 @@ describe("semantic scan comparison", () => {
   });
 
   test("preserves environment API-key precedence over managed credentials", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-comparison-");
     const stateDirectory = join(root, "state");
     const credentialHome = join(stateDirectory, "codex-home");
     await mkdir(credentialHome, { recursive: true, mode: 0o700 });
-    let statusProbed = false;
-    const account = async () => {
-      statusProbed = true;
+
+    const account = mock(async () => {
       return { authenticated: true, details: "Logged in using ChatGPT" };
-    };
+    });
 
     const environment = await comparisonEnvironment(
       {
@@ -596,21 +589,22 @@ describe("semantic scan comparison", () => {
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
-    expect(statusProbed).toBe(false);
+    expect(account).not.toHaveBeenCalled();
   });
 
   test.skipIf(process.platform !== "win32")(
     "recognizes provider scan variables regardless of Windows casing",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-comparison-");
       const stateDirectory = join(root, "state");
       const providerHome = join(root, "provider-home");
       await mkdir(join(stateDirectory, "codex-home"), {
         recursive: true,
         mode: 0o700,
       });
-      let statusProbed = false;
+      const statusProbed = mock(async () => {
+        return { authenticated: true, details: "Logged in using ChatGPT" };
+      });
       const provider = {
         codex_security_scan_id: "scan",
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -618,21 +612,17 @@ describe("semantic scan comparison", () => {
         FIREWORKS_API_KEY: "synthetic-provider-key",
       };
 
-      const environment = await comparisonEnvironment(provider, async () => {
-        statusProbed = true;
-        return { authenticated: true, details: "Logged in using ChatGPT" };
-      });
+      const environment = await comparisonEnvironment(provider, statusProbed);
 
       expect(environment).toEqual(provider);
-      expect(statusProbed).toBe(false);
+      expect(statusProbed).not.toHaveBeenCalled();
     },
   );
 
   test.skipIf(process.platform !== "win32")(
     "replaces differently cased Windows CODEX_HOME variables",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-comparison-");
       const stateDirectory = join(root, "state");
       const credentialHome = join(stateDirectory, "codex-home");
       await mkdir(credentialHome, { recursive: true, mode: 0o700 });
@@ -656,8 +646,7 @@ describe("semantic scan comparison", () => {
   );
 
   test("reuses managed keyring credentials when no environment key is present", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-comparison-");
     const stateDirectory = join(root, "state");
     const credentialHome = join(stateDirectory, "codex-home");
     await mkdir(credentialHome, { recursive: true, mode: 0o700 });
@@ -678,8 +667,7 @@ describe("semantic scan comparison", () => {
   test.skipIf(process.platform === "win32")(
     "uses the canonical keyring identity when the state parent is symlinked",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-comparison-");
       const actualState = join(root, "actual-state");
       const linkedState = join(root, "linked-state");
       const credentialHome = join(actualState, "codex-home");
@@ -701,8 +689,7 @@ describe("semantic scan comparison", () => {
   );
 
   test("forwards cancellation to managed credential-status checks", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-comparison-");
     const stateDirectory = join(root, "state");
     await mkdir(join(stateDirectory, "codex-home"), {
       recursive: true,
@@ -710,23 +697,19 @@ describe("semantic scan comparison", () => {
     });
     const controller = new AbortController();
     let observedSignal: AbortSignal | undefined;
-    const { promise: started, resolve: statusStarted } =
-      Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
 
     const waiting = comparisonEnvironment(
       { CODEX_SECURITY_STATE_DIR: stateDirectory },
       async (_command, _environment, signal) => {
         observedSignal = signal;
-        statusStarted();
-        return await new Promise((_resolve, reject) => {
-          signal?.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
-          });
-        });
+        started.resolve();
+        await once(signal!, "abort");
+        throw signal!.reason;
       },
       controller.signal,
     );
-    await started;
+    await started.promise;
     controller.abort(new DOMException("canceled", "AbortError"));
 
     await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
@@ -734,8 +717,7 @@ describe("semantic scan comparison", () => {
   });
 
   test("retains API-key authentication when the managed home is not signed in", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-comparison-");
     const stateDirectory = join(root, "state");
     const ambientHome = join(root, "ambient-codex-home");
     await mkdir(ambientHome, { mode: 0o700 });
@@ -760,8 +742,7 @@ describe("semantic scan comparison", () => {
   test.skipIf(process.platform !== "win32")(
     "recognizes stored credentials under a backslash home-relative path",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-comparison-");
       const ambientHome = join(root, "ambient-codex-home");
       await mkdir(ambientHome);
       await writeFile(join(ambientHome, "auth.json"), "{}");
@@ -971,7 +952,9 @@ describe("semantic scan comparison", () => {
     const unselected = { findingId: "unselected", occurrenceId: "unselected" };
     const after = { findingId: "renamed", occurrenceId: "current-renamed" };
     const saved = new Map<string, ScanComparisonResult>();
-    let observed: ScanComparisonInput | undefined;
+    const matchFindings = mock<typeof matchScanFindings>((input, options) => {
+      return matchScanFindings(input, { ...options, codex: model.codex });
+    });
     const model = fakeCodex({
       matches: [],
       uncertain: [
@@ -1009,13 +992,10 @@ describe("semantic scan comparison", () => {
         saved.set(args[2]!, JSON.parse(commandInput!) as ScanComparisonResult);
         return {};
       },
-      matchFindings(input, options) {
-        observed = input;
-        return matchScanFindings(input, { ...options, codex: model.codex });
-      },
+      matchFindings,
     });
 
-    expect(observed).toEqual({
+    expect(matchFindings.mock.lastCall?.[0]).toEqual({
       before: [firstShared, firstOther, latestShared],
       after: [after],
     });
@@ -1057,7 +1037,19 @@ describe("semantic scan comparison", () => {
         findingId: stable ? "previous" : "new",
         occurrenceId: "new",
       };
-      let calls = 0;
+      const workbench = mock(async (args: readonly string[]) => {
+        return args[0] === "list-unmatched-scan-pairs"
+          ? {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: [after],
+                  beforeScans: [{ scanId: "prior", findings: [before] }],
+                },
+              ],
+            }
+          : {};
+      });
       const model = fakeCodex({ matches: [], uncertain: [] });
       await matchCompletedScan({
         scanId: "current",
@@ -1067,24 +1059,11 @@ describe("semantic scan comparison", () => {
           ? [{ findingId: "previous", sourceScanId: "prior" }]
           : [],
         findings: [after],
-        async workbench(args) {
-          calls += 1;
-          return args[0] === "list-unmatched-scan-pairs"
-            ? {
-                batches: [
-                  {
-                    afterScanId: "current",
-                    afterFindings: [after],
-                    beforeScans: [{ scanId: "prior", findings: [before] }],
-                  },
-                ],
-              }
-            : {};
-        },
+        workbench,
         matchFindings: (input, options) =>
           matchScanFindings(input, { ...options, codex: model.codex }),
       });
-      expect(calls).toBe(expectedCalls);
+      expect(workbench).toHaveBeenCalledTimes(expectedCalls);
       expect(model.calls.prompt !== undefined).toBe(expectedModel);
     },
   );
@@ -1289,9 +1268,7 @@ describe("semantic scan comparison", () => {
 
   test("does not start Codex when either scan has no findings", async () => {
     const codex: NonNullable<ScanComparisonOptions["codex"]> = {
-      startThread() {
-        throw new Error("No model is needed.");
-      },
+      startThread: () => fail("No model is needed."),
     };
     for (const input of [
       { before: [], after: [finding("after")] },
@@ -1319,9 +1296,7 @@ describe("semantic scan comparison", () => {
     ],
   ])("rejects %s occurrence IDs before matching", async (_, input) => {
     const codex: NonNullable<ScanComparisonOptions["codex"]> = {
-      startThread() {
-        throw new Error("No model should start for invalid input.");
-      },
+      startThread: () => fail("No model should start for invalid input."),
     };
 
     await expect(matchScanFindings(input, { codex })).rejects.toThrow(

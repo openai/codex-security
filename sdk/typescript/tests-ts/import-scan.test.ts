@@ -13,7 +13,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
@@ -23,13 +23,11 @@ import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 const description =
   'An imported report with a comma, a "quoted value", and Unicode: café.\n\n' +
@@ -84,7 +82,7 @@ async function fixture(format: "csv" | "json" = "csv") {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "import-scan-test-"),
   );
-  roots.push(root);
+  roots.track(root);
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const stateDirectory = join(root, "state");
@@ -348,7 +346,7 @@ test.each(["regular file", "symbolic link"])(
     const context = await fixture("json");
     const originalOpen = filesystem.open;
     let replaced = false;
-    let read = false;
+    const observeRead = mock(rejecting("Read a replaced source"));
     let restoreRead: (() => void) | undefined;
     const opening = spyOn(filesystem, "open").mockImplementation(
       async (...args: Parameters<typeof filesystem.open>) => {
@@ -365,10 +363,7 @@ test.each(["regular file", "symbolic link"])(
         }
         replaced = true;
         const file = await originalOpen(...args);
-        const reading = spyOn(file, "readFile").mockImplementation(async () => {
-          read = true;
-          throw new Error("Read a replaced source");
-        });
+        const reading = spyOn(file, "readFile").mockImplementation(observeRead);
         restoreRead = () => reading.mockRestore();
         return file;
       },
@@ -378,7 +373,7 @@ test.each(["regular file", "symbolic link"])(
         importScan(context.options, { environment: context.environment }),
       ).rejects.toThrow();
       expect(replaced).toBe(true);
-      expect(read).toBe(false);
+      expect(observeRead).not.toHaveBeenCalled();
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -434,9 +429,7 @@ test("reimporting the retained source preserves finding identities with new scan
 
 test("dry run validates source rows without creating database state or invoking the workbench", async () => {
   const context = await fixture();
-  const unexpected = async () => {
-    throw new Error("Dry run invoked scan persistence");
-  };
+  const unexpected = rejecting("Dry run invoked scan persistence");
   const result = await importScan(
     { ...context.options, dryRun: true },
     {

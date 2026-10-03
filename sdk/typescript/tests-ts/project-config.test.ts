@@ -12,15 +12,11 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
-
-const directories = createTemporaryDirectories();
-afterEach(directories.cleanup);
-async function temporaryDirectory() {
-  const directory = await directories.create("project-config-");
-  return directory;
-}
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("project-config-");
+afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
