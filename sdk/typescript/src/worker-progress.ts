@@ -79,7 +79,10 @@ export function scanProgressUpdatesFromEvent(
       : item["type"] === "command_execution"
         ? item["aggregated_output"]
         : null;
-  if (typeof output !== "string") return [];
+  return typeof output === "string" ? scanProgressUpdatesFromText(output) : [];
+}
+
+export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   const updates: ScanProgress[] = [];
   let codeFence = false;
   for (const line of output.split(/\r?\n/u)) {
