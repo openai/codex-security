@@ -23,6 +23,15 @@ from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
 
 
+def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
+    name = name.strip()
+    if not name:
+        raise SystemExit("Scan name cannot be empty.")
+    connection.execute("UPDATE scans SET name = ? WHERE id = ?", (name, scan["id"]))
+    connection.commit()
+    return {"scanId": scan["id"], "name": name}
+
+
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     if scan["recipe_json"] is None:
         raise SystemExit("This scan does not have a saved launch recipe.")
@@ -260,13 +269,15 @@ def list_scans(
     if args is not None and args.query:
         query = args.query.strip().casefold()
         if query:
+            connection.create_function("codex_security_casefold", 1, str.casefold)
             clauses.append(
                 "(instr(lower(scans.target_path), ?) > 0 "
+                "OR instr(codex_security_casefold(COALESCE(scans.name, '')), ?) > 0 "
                 "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
                 "OR instr(lower(scans.scope), ?) > 0 "
                 "OR instr(lower(scans.mode), ?) > 0)"
             )
-            values.extend((query, query, query, query))
+            values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
     limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
@@ -309,6 +320,7 @@ def list_scans(
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
                 "model": row["model"],
+                "name": row["name"],
                 "parentScanId": row["parent_scan_id"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
