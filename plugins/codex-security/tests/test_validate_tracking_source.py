@@ -1,53 +1,29 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
+import hashlib
 import io
 import json
-import shutil
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import ModuleType
+
+from workbench_test_support import ScanFixtureTestCase, load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "completed-scan"
 
 
-def load_validator() -> ModuleType:
-    script = PLUGIN_ROOT / "scripts" / "validate_tracking_source.py"
-    spec = importlib.util.spec_from_file_location("validate_tracking_source", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-VALIDATOR = load_validator()
+VALIDATOR = load_script("validate_tracking_source")
 
 
 def test_completed_example_passes_tracking_validation() -> None:
     assert VALIDATOR.validate_source(EXAMPLE_SCAN)
 
 
-class ValidateTrackingSourceTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.scan_dir = Path(self.temp_dir.name) / "scan"
-        shutil.copytree(EXAMPLE_SCAN, self.scan_dir)
-        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
-        findings = json.loads((self.scan_dir / "findings.json").read_text())
-        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
-        report = VALIDATOR.FINALIZER._generate_report_projection(manifest, findings, coverage)
-        (self.scan_dir / "report.md").write_bytes(report)
-
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
-    def read_json(self, name: str) -> dict[str, object]:
-        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+class ValidateTrackingSourceTest(ScanFixtureTestCase):
+    validator = VALIDATOR
+    example_scan = EXAMPLE_SCAN
 
     def write_json(self, name: str, payload: object) -> None:
         (self.scan_dir / name).write_text(
@@ -64,7 +40,7 @@ class ValidateTrackingSourceTest(unittest.TestCase):
             for item in manifest["scan"]["artifacts"]
             if item["path"] == manifest["scan"]["findingsRef"]
         )
-        artifact["sha256"] = VALIDATOR.FINALIZER._sha256_bytes(findings_bytes)
+        artifact["sha256"] = hashlib.sha256(findings_bytes).hexdigest()
         self.write_json("scan-manifest.json", manifest)
 
     def rewrite_coverage_and_seal(self, coverage: dict[str, object]) -> None:
@@ -76,7 +52,7 @@ class ValidateTrackingSourceTest(unittest.TestCase):
             for item in manifest["scan"]["artifacts"]
             if item["path"] == manifest["scan"]["coverageRef"]
         )
-        artifact["sha256"] = VALIDATOR.FINALIZER._sha256_bytes(coverage_bytes)
+        artifact["sha256"] = hashlib.sha256(coverage_bytes).hexdigest()
         self.write_json("scan-manifest.json", manifest)
 
     def test_selects_the_finding_from_a_sealed_scan(self) -> None:
@@ -103,7 +79,7 @@ class ValidateTrackingSourceTest(unittest.TestCase):
             for item in manifest["scan"]["artifacts"]
             if item["path"] == manifest["scan"]["findingsRef"]
         )
-        artifact["sha256"] = VALIDATOR.FINALIZER._sha256_bytes(findings_bytes)
+        artifact["sha256"] = hashlib.sha256(findings_bytes).hexdigest()
         self.write_json("scan-manifest.json", manifest)
 
         with self.assertRaisesRegex(

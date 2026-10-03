@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 from pathlib import Path
-from types import ModuleType
 
 import pytest
+from workbench_test_support import load_script
 
-
-def load_windows_scan_local_files() -> ModuleType:
-    script = Path(__file__).resolve().parent.parent / "scripts" / "windows_scan_local_files.py"
-    spec = importlib.util.spec_from_file_location("windows_scan_local_files", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-WINDOWS_FILES = load_windows_scan_local_files()
+WINDOWS_FILES = load_script("windows_scan_local_files")
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,4 @@
-function outputText(output) {
-  return typeof output === "string" ? output : JSON.stringify(output);
-}
+const { outputText } = require("./output");
 
 function matchedFormatNames(text) {
   const supportedFormats = [

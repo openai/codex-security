@@ -502,9 +502,19 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
-test("bulk insert preserves complete findings and embeddings without creating scans", async () => {
+test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
-  const base = await start(store);
+  const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
+  const server = await startFindingsServer(options);
+  servers.push(server);
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("No port");
+  const base = `http://127.0.0.1:${address.port}`;
+  options.store = (await fixture()).store;
+  options.embeddings = {
+    embed: rejecting("Replaced server embedder was used"),
+  };
   const findings = [finding(1), finding(2)];
   const log = spyOn(console, "log").mockImplementation(() => undefined);
   try {
