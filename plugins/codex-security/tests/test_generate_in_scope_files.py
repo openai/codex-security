@@ -519,13 +519,25 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_terraform(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("main.tf", b'variable "enabled" { default = false }\n'),
+        ("terraform.tfvars", b"enabled = false\n"),
+        ("production.auto.tfvars", b"enabled = false\n"),
+        ("terraform.tfvars.json", b'{"enabled": false}\n'),
+        ("production.auto.tfvars.json", b'{"enabled": false}\n'),
+    ],
+)
+def test_diff_inventory_includes_changed_terraform(
+    tmp_path: Path, mode: str, filename: str, content: bytes
+) -> None:
     repository = make_repository(tmp_path)
-    write_file(repository, "infra/main.tf", b'variable "enabled" { default = false }\n')
+    write_file(repository, f"infra/{filename}", content)
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "infra/main.tf", b'variable "enabled" { default = true }\n')
+    write_file(repository, f"infra/{filename}", content.replace(b"false", b"true"))
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
         git(repository, "add", ".")
@@ -537,7 +549,7 @@ def test_diff_inventory_includes_changed_terraform(tmp_path: Path, mode: str) ->
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "infra/main.tf\n"
+    assert output.read_text(encoding="utf-8") == f"infra/{filename}\n"
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])

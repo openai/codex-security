@@ -257,17 +257,29 @@ def test_rank_input_bounds_large_text_reads(
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("main.tf", 'variable "enabled" { default = false }'),
+        ("terraform.tfvars", "enabled = false"),
+        ("production.auto.tfvars", "enabled = false"),
+        ("terraform.tfvars.json", '{"enabled": false}'),
+        ("production.auto.tfvars.json", '{"enabled": false}'),
+    ],
+)
+def test_rank_input_includes_terraform(
+    tmp_path: Path, mode: str, filename: str, content: str
+) -> None:
     repo = tmp_path / "repo"
     infra = repo / "infra"
     infra.mkdir(parents=True)
     initialize_repo(repo)
-    source = infra / "main.tf"
-    source.write_text('variable "enabled" { default = false }\n', encoding="utf-8")
+    source = infra / filename
+    source.write_text(content + "\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
     base = git(repo, "rev-parse", "HEAD")
-    changed = 'variable "enabled" { default = true }'
+    changed = content.replace("false", "true")
     source.write_text(changed + "\n", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
 
@@ -284,7 +296,11 @@ def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
     run_cli(*arguments, "--out", str(output))
 
     assert read_jsonl(output) == [
-        {"path": "infra/main.tf", "area": "infra" if mode == "repo" else "diff", "preview": changed}
+        {
+            "path": f"infra/{filename}",
+            "area": "infra" if mode == "repo" else "diff",
+            "preview": "key enabled" if filename.endswith(".json") else changed,
+        }
     ]
 
 
