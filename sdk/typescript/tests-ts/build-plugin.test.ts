@@ -137,22 +137,20 @@ describe("bundled plugin build", () => {
       "package.json",
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
-    await writeFixture(
-      packageRoot,
-      "scripts/build-plugin.mjs",
-      await readFile(
-        new URL("../scripts/build-plugin.mjs", import.meta.url),
-        "utf8",
-      ),
-    );
-    await writeFixture(
-      packageRoot,
-      "scripts/check-plugin-source.mjs",
-      await readFile(
-        new URL("../scripts/check-plugin-source.mjs", import.meta.url),
-        "utf8",
-      ),
-    );
+    for (const script of [
+      "build-plugin",
+      "check-plugin-source",
+      "plugin-contract",
+    ]) {
+      await writeFixture(
+        packageRoot,
+        `scripts/${script}.mjs`,
+        await readFile(
+          new URL(`../scripts/${script}.mjs`, import.meta.url),
+          "utf8",
+        ),
+      );
+    }
     await writeFixture(
       source,
       "plugin-files.json",

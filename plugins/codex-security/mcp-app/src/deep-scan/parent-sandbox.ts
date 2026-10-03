@@ -1,3 +1,4 @@
+import { asRecord as record } from "../record.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -279,12 +280,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function hasGlobMetacharacters(value: string): boolean {
   return value.includes("*") || value.includes("?") || value.includes("[");
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {

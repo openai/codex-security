@@ -25,6 +25,7 @@ import {
   matchCompletedScan,
   matchScanFindings,
   matchScanFindingsInternal,
+  runReadOnlyCodex,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -151,6 +152,97 @@ describe("semantic scan comparison", () => {
         );
         expect(startThread).toHaveBeenCalledTimes(1);
         expect(captured?.apiKey).toBe(expected);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["unselected", "default", "home", "overrides", "override-profile"])(
+    "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
+    async (selection) => {
+      const home = await mkdtemp(
+        join(tmpdir(), "codex-security-cyber-helper-"),
+      );
+      temporaryDirectories.push(home);
+      const disabled = {
+        api_key_cyber_access_programs: false,
+        api_key_model_discovery: false,
+        shell_tool: true,
+      };
+      const profile = {
+        profile: "selected",
+        features: { api_key_cyber_access_programs: true },
+        profiles: { selected: { features: disabled } },
+      };
+      await writeFile(
+        join(home, "config.toml"),
+        stringify(selection === "home" ? { features: disabled } : {}),
+      );
+      const options = {
+        cyberAccessProgram:
+          selection === "unselected" ? undefined : ("daybreak_blue" as const),
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+        workingDirectory: home,
+        ...(selection === "overrides"
+          ? { config: { codexOverrides: { features: disabled } } }
+          : selection === "override-profile"
+            ? { config: { codexOverrides: profile } }
+            : {}),
+      };
+      let captured: CodexOptions | undefined;
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, threadOptions) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        return codex.startThread(threadOptions!) as ReturnType<
+          Codex["startThread"]
+        >;
+      });
+      try {
+        for (const helper of ["matching", "planning"]) {
+          if (helper === "matching") {
+            await matchScanFindings(
+              { before: [finding("before")], after: [finding("after")] },
+              options,
+            );
+          } else {
+            await runReadOnlyCodex("Plan components.", {}, options, {
+              surface: "cli",
+              threadSource: "security_scan",
+            });
+          }
+          expect(calls.turnOptions?.cyberAccessProgram).toBe(
+            options.cyberAccessProgram,
+          );
+          const features = captured?.config?.["features"] as Record<
+            string,
+            unknown
+          >;
+          expect(features["api_key_cyber_access_programs"]).toBe(
+            selection === "unselected" ? undefined : selection === "default",
+          );
+          expect(features["api_key_model_discovery"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
+          expect(features).toMatchObject({
+            shell_tool: false,
+            plugins: false,
+            multi_agent: false,
+            unified_exec: false,
+          });
+        }
+        expect(startThread).toHaveBeenCalledTimes(2);
       } finally {
         startThread.mockRestore();
       }
@@ -618,10 +710,8 @@ describe("semantic scan comparison", () => {
     });
     const controller = new AbortController();
     let observedSignal: AbortSignal | undefined;
-    let statusStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      statusStarted = resolve;
-    });
+    const { promise: started, resolve: statusStarted } =
+      Promise.withResolvers<void>();
 
     const waiting = comparisonEnvironment(
       { CODEX_SECURITY_STATE_DIR: stateDirectory },
@@ -899,6 +989,7 @@ describe("semantic scan comparison", () => {
       previousFindings: [firstOther, latestShared],
       falsePositives: [],
       findings: [after],
+      cyberAccessProgram: "daybreak_red",
       async workbench(args, commandInput) {
         if (args[0] === "list-unmatched-scan-pairs") {
           return {
@@ -928,6 +1019,7 @@ describe("semantic scan comparison", () => {
       before: [firstShared, firstOther, latestShared],
       after: [after],
     });
+    expect(model.calls.turnOptions?.cyberAccessProgram).toBe("daybreak_red");
     expect([...saved.keys()]).toEqual(["first", "latest"]);
     for (const [scanId, occurrenceId] of [
       ["first", firstShared.occurrenceId],

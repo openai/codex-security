@@ -26,7 +26,11 @@ import {
   prepareEval,
   runPreparedEval,
 } from "./harness.mjs";
-import { createEvalHome, withEvalState } from "./runtime.mjs";
+import {
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  createEvalHome,
+  withEvalState,
+} from "./runtime.mjs";
 
 const unixOnly = { skip: process.platform === "win32", timeout: 15000 };
 const sdkUrl = new URL(
@@ -381,7 +385,7 @@ if (kind === "preflight") {
     let result = {};
     if (request.method === "config/read") result = { config };
     if (request.method === "permissionProfile/list") result = {
-      data: [{ id: "discovery_eval", allowed: scenario.mode !== "managed-rejection" }], nextCursor: null,
+      data: [{ id: config.default_permissions, allowed: scenario.mode !== "managed-rejection" }], nextCursor: null,
     };
     if (request.method === "configRequirements/read") result = { requirements: null };
     if (request.method === "account/read") result = scenario.accountResult;
@@ -399,7 +403,7 @@ if (kind === "preflight") {
     }
     send({ type: "item.completed", item: { id: "final", type: "agent_message", text: JSON.stringify(scenario.result) } });
     if (scenario.mode.startsWith("fallback-")) {
-      const message = "Configured value for \x60permission_profile\x60 is disallowed by requirements; falling back from \x60discovery_eval\x60 to required value \x60:read-only\x60.";
+      const message = "Configured value for \x60permission_profile\x60 is disallowed by requirements; falling back from \x60" + config.default_permissions + "\x60 to required value \x60:read-only\x60.";
       send(scenario.mode === "fallback-item"
         ? { type: "item.completed", item: { id: "warning", type: "error", message } }
         : { type: "error", message });
@@ -454,18 +458,23 @@ test(
     assert.equal(exec.config.approval_policy, "never");
     assert.equal(exec.config.model_reasoning_effort, "xhigh");
     assert.equal(exec.config.web_search, "disabled");
-    assert.equal(exec.config.default_permissions, "discovery_eval");
-    assert.equal(exec.config.permissions.discovery_eval.network.enabled, false);
+    assert.equal(
+      exec.config.default_permissions,
+      DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+    );
+    assert.equal(
+      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network
+        .enabled,
+      false,
+    );
     assert.deepEqual(
-      exec.config.permissions.discovery_eval.filesystem[
-        settings.env.CODEX_HOME
-      ],
+      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID]
+        .filesystem[settings.env.CODEX_HOME],
       { ".": "deny" },
     );
     assert.deepEqual(
-      exec.config.permissions.discovery_eval.filesystem[
-        dirname(dirname(settings.env.CODEX_CLI_PATH))
-      ],
+      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID]
+        .filesystem[dirname(dirname(settings.env.CODEX_CLI_PATH))],
       { ".": "read" },
     );
     assert.equal(exec.args.includes("--sandbox"), false);

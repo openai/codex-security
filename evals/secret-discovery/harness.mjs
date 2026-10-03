@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createFixture, writeFixture } from "./fixtures.mjs";
 import { gradeResult } from "./grade.mjs";
 import {
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   bundledCodexSdkEnvironment,
   deepScanPermissionProfileFallbackError,
   executablePathForSpawn,
@@ -188,7 +189,7 @@ export function codexSettings(home, codexPath, environment = process.env) {
     // Raw TOML preserves literal filesystem keys that SDK object flattening loses.
     // Everything outside the source, references, and minimal runtime is unreadable.
     configOverrides: [
-      'default_permissions="discovery_eval"',
+      `default_permissions=${inlineToml(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
       "allow_login_shell=false",
       'shell_environment_policy.inherit="core"',
       "shell_environment_policy.ignore_default_excludes=false",
@@ -201,7 +202,7 @@ export function codexSettings(home, codexPath, environment = process.env) {
       'model_reasoning_effort="xhigh"',
       'web_search="disabled"',
       'windows.sandbox="elevated"',
-      `permissions.discovery_eval=${inlineToml(permissionProfile(home, codexPath))}`,
+      `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${inlineToml(permissionProfile(home, codexPath))}`,
     ],
   };
 }
@@ -224,7 +225,6 @@ export async function preflightEval(prepared, settings, signal) {
   const { useOpenAiApiKey } = await preflightDeepScanWorkerPermissionProfile({
     codexPath: settings.codexPathOverride,
     cwd: prepared.repo,
-    profileId: "discovery_eval",
     configOverrides: settings.configOverrides,
     env: settings.env,
     allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
@@ -272,10 +272,7 @@ export async function runPreparedEval(prepared, codex, { model, signal } = {}) {
           : event.type === "item.completed" && event.item.type === "error"
             ? event.item.message
             : undefined;
-      const fallback = deepScanPermissionProfileFallbackError(
-        warning,
-        "discovery_eval",
-      );
+      const fallback = deepScanPermissionProfileFallbackError(warning);
       if (fallback && !failure) {
         failure = fallback;
         controller.abort(fallback);

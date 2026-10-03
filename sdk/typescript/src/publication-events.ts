@@ -1,4 +1,5 @@
 import { isLinearIssueIdentifier, linearIssueReference } from "./linear.js";
+import { isRecord } from "./record.js";
 import {
   linearPublicationArguments,
   type PreparedPublicationIssue,
@@ -360,8 +361,4 @@ function normalizeNonemptyString(value: unknown): string | undefined {
 function containsIdentifier(value: string, identifier: string): boolean {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "u").test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

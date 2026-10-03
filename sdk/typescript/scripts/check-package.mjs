@@ -10,6 +10,7 @@ import {
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { regularTarListingLines } from "./package-tar-listing.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -129,25 +130,7 @@ for (const file of required) {
 }
 
 const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-const { externalOwnedExact, shippedExact } = contract;
-if (
-  !Array.isArray(externalOwnedExact) ||
-  !externalOwnedExact.every((path) => typeof path === "string") ||
-  !Array.isArray(shippedExact) ||
-  !shippedExact.every((path) => typeof path === "string")
-) {
-  throw new Error("Plugin projection contract contains invalid paths.");
-}
-const publicManifest = ".codex-plugin/plugin.json";
-if (!externalOwnedExact.includes(publicManifest)) {
-  throw new Error(
-    "Plugin projection contract must declare the public manifest as externally owned.",
-  );
-}
-const pluginPaths = [
-  publicManifest,
-  ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-];
+const pluginPaths = pluginContractFiles(contract);
 const pluginFiles = new Set(pluginPaths);
 if (pluginFiles.size !== pluginPaths.length) {
   throw new Error("Plugin projection contract contains duplicate paths.");
@@ -228,6 +211,7 @@ const distFiles = new Set(
     "publication-store",
     "publish",
     "result",
+    "record",
     "runtime",
     "scan-activity",
     "scan-comparison",

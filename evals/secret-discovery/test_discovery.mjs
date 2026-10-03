@@ -12,6 +12,7 @@ import {
   runPreparedEval,
   threadSettings,
 } from "./harness.mjs";
+import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mjs";
 
 function sourceEvidence(fixture, path, startLine, endLine = startLine) {
   const source = fixture.files[path]
@@ -1093,7 +1094,10 @@ test("named read-only profile excludes gold and credentials without a legacy san
     CODEX_CLI_PATH: codexPath,
   });
   assert.equal(settings.codexPathOverride, codexPath);
-  assert.equal(config.default_permissions, "discovery_eval");
+  assert.equal(
+    config.default_permissions,
+    DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  );
   assert.equal(config.features.plugins, false);
   assert.equal(config.features.apps, false);
   assert.equal(config.features.memories, false);
@@ -1108,7 +1112,11 @@ test("named read-only profile excludes gold and credentials without a legacy san
     },
   );
   assert.deepEqual(
-    JSON.parse(JSON.stringify(config.permissions.discovery_eval.filesystem)),
+    JSON.parse(
+      JSON.stringify(
+        config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].filesystem,
+      ),
+    ),
     {
       ":minimal": "read",
       ":workspace_roots": "read",
@@ -1117,7 +1125,7 @@ test("named read-only profile excludes gold and credentials without a legacy san
     },
   );
   assert.deepEqual(
-    { ...config.permissions.discovery_eval.network },
+    { ...config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network },
     { enabled: false },
   );
   assert.equal(

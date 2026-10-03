@@ -13,18 +13,16 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { setTimeout as delay } from "node:timers/promises";
+
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.mjs";
+import { consumeLines } from "./consume-lines.mjs";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
 }
 
 async function testWorkbenchStateFallback() {
-  const mcpAppRoot = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "..",
-  );
   const pluginRoot = path.resolve(mcpAppRoot, "..");
   const fixtureRoot = await realpath(
     await mkdtemp(path.join(tmpdir(), "codex-security-state-fallback-")),
@@ -49,18 +47,7 @@ async function testWorkbenchStateFallback() {
   await mkdir(targetPath, { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFakePython(fakePythonPath);
-  await build({
-    bundle: true,
-    define: { "import.meta.url": "__filename" },
-    entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    outfile: serverBundlePath,
-    platform: "node",
-    target: "node20",
-  });
+  await buildServer(serverBundlePath, { target: "node20" });
 
   try {
     if (process.getuid?.() !== 0) {
@@ -706,17 +693,6 @@ async function pathExists(filePath) {
   }
 }
 
-function consumeLines(buffer, consume) {
-  let newline = buffer.indexOf("\n");
-  while (newline >= 0) {
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (line) consume(line);
-    newline = buffer.indexOf("\n");
-  }
-  return buffer;
-}
-
 function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
@@ -724,10 +700,6 @@ function withTimeout(promise, timeoutMs, label) {
       throw new Error(`Timed out waiting for ${label}`);
     }),
   ]);
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function escapeRegex(value) {

@@ -15,15 +15,8 @@ export interface WindowsHandle {
   finalPath(flags: number): { error: number; path: Buffer };
   read(buffer: Buffer, offset: number, length: number): WindowsResult;
   write(buffer: Buffer, offset: number, length: number): WindowsResult;
-  seek(distance: bigint, origin: number): WindowsResult<string>;
-  size(): WindowsResult<string>;
-  setEndOfFile(): number;
-  flush(): number;
   rename(destination: Buffer, replace: boolean): number;
   setDisposition(deleteFile: boolean): number;
-  /** Acquires an exclusive whole-file lock; contention returns Windows error 33. */
-  lock(nonblocking: boolean): number;
-  unlock(): number;
 }
 
 /** Paths are UTF-16LE code units without a terminator, including lone surrogates. */
@@ -43,7 +36,6 @@ export interface WindowsBinding {
     disposition: number,
     flags: number,
   ): { error: number; handle?: WindowsHandle | null };
-  createWindowsDirectory(path: Buffer): number;
   createWindowsDirectories(path: Buffer): number;
 }
 

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson as readJsonFile } from "./support/json.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -113,9 +113,7 @@ function projectFindingDetails(details: JsonObject): string {
   return new TextDecoder().decode(result.stdout);
 }
 
-async function readJson(path: string): Promise<JsonObject> {
-  return JSON.parse(await readFile(path, "utf8")) as JsonObject;
-}
+const readJson = readJsonFile<JsonObject>;
 
 async function startMcp() {
   const child = spawn(

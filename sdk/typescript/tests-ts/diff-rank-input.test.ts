@@ -1,4 +1,6 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { pythonExecutable } from "./support/python.js";
+import { git } from "./git-fixture.js";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -18,34 +20,11 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const temporaryRoots: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
 
-function pythonExecutable(): string | null {
-  return (
-    process.env["PYTHON"] ??
-    Bun.which("python3") ??
-    Bun.which("python") ??
-    Bun.which("py")
-  );
-}
-
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
-}
 
 test("diff previews stay inside the selected repository", () => {
   const root = realpathSync(
