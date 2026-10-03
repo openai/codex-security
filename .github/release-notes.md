@@ -53,6 +53,7 @@
 - close saved review tasks and simplify recovery ([#1036](https://github.com/openai/codex-security/pull/1036))
 - bump @types/node to 26.6.3 ([#1199](https://github.com/openai/codex-security/pull/1199))
 - bump Codex CLI and SDK to 0.162.0-alpha.9 ([#1198](https://github.com/openai/codex-security/pull/1198))
+- include server-rendered templates in scan inventories ([#1197](https://github.com/openai/codex-security/pull/1197))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
