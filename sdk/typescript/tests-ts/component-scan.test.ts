@@ -12,8 +12,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import { afterEach, expect, test, mock } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
+import { writeThreatModel } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
 import {
   componentPlanningBatches,
@@ -29,6 +30,7 @@ import {
 } from "../src/component-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
+import * as runtime from "../src/runtime.js";
 import { normalizeTarget, nullIfMissingFile } from "../src/targets.js";
 import {
   matchScanFindings,
@@ -120,6 +122,7 @@ async function completed(
   options: ScanOptions,
   findings = [finding(String(options.target))],
   coverage: "complete" | "partial" = "complete",
+  threatModelPath: string | null = null,
 ) {
   const original = fakeResult([], coverage);
   const scanId = String(options.target);
@@ -132,6 +135,7 @@ async function completed(
     scanDir: options.outputDir!,
     threadId: scanId,
     sarifPath: null,
+    threatModelPath,
   });
   await mkdir(result.scanDir, { recursive: true });
   for (const [name, value] of Object.entries({
@@ -291,6 +295,88 @@ function uncertain(
     reason: "Possibly independent controls.",
   };
 }
+
+test("links independently scoped saved models including a failed component", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
+  const python = spyOn(runtime, "resolvePluginPython");
+  let summary: Awaited<ReturnType<typeof scan>>;
+  try {
+    summary = await scan(paths, {
+      components: components.slice(0, 2),
+      createSecurity: client(async (_repository, options) => {
+        await mkdir(options.outputDir!, { recursive: true });
+        const failed = String(options.target).includes("web");
+        await writeFile(
+          join(
+            options.outputDir!,
+            failed ? "THREAT_MODEL.md" : "threatmodel.md",
+          ),
+          `# Model\n\nScope: ${String(options.target)}\n`,
+        );
+        if (failed) throw new Error("Synthetic component failure");
+        return completed(
+          options,
+          [],
+          "complete",
+          join(options.outputDir!, "threatmodel.md"),
+        );
+      }),
+    });
+    expect(python).toHaveBeenCalledWith(
+      expect.objectContaining({ protectedRoot: paths.repository }),
+    );
+  } finally {
+    python.mockRestore();
+  }
+  const saved = await json(summary.summaryPath!);
+  const report = await readFile(summary.reportPath!, "utf8");
+  for (const [index, scope] of ["apps/api", "apps/web"].entries()) {
+    const filename = index === 0 ? "threatmodel.md" : "THREAT_MODEL.md";
+    const expected = join(paths.outputDir, `component-${index + 1}`, filename);
+    expect(saved.components[index].threatModelPath).toBe(expected);
+    expect(await readFile(expected, "utf8")).toContain(scope);
+    expect(report).toContain(`./component-${index + 1}/${filename}`);
+  }
+  expect(summary).toMatchObject({ completed: 1, failed: 1 });
+});
+
+test("omits a failed component's stale model link while retaining its model", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
+  const summary = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: client(async (_repository, options) => {
+      const directory = options.outputDir!;
+      await mkdir(directory, { recursive: true });
+      const manifest = {
+        documentType: "codex-security.policy-draft",
+        status: "threat_model_ready",
+        threatModel: { format: "markdown", content: "# Earlier model\n" },
+      };
+      await writeFile(
+        join(directory, "policy-draft.json"),
+        JSON.stringify(manifest),
+      );
+      await writeThreatModel(directory);
+      manifest.threatModel.content = "# Updated model\n";
+      await writeFile(
+        join(directory, "policy-draft.json"),
+        JSON.stringify(manifest),
+      );
+      throw new Error("Synthetic component failure after checkpoint");
+    }),
+  });
+  const saved = await json(summary.summaryPath!);
+  expect(saved.components[0].threatModelPath).toBeUndefined();
+  expect(
+    (await json(join(paths.outputDir, "component-1", "policy-draft.json")))
+      .threatModel.content,
+  ).toBe("# Updated model\n");
+  expect(await readFile(summary.reportPath!, "utf8")).not.toContain(
+    "[Threat model]",
+  );
+});
 
 test("bounds standard scans, continues after failure, and preserves partial results", async () => {
   const paths = await fixture();

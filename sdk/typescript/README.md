@@ -514,13 +514,13 @@ npx @openai/codex-security policy . --path services/api \
 
 The artifact directory contains:
 
-| File                   | Purpose                                                   |
-| ---------------------- | --------------------------------------------------------- |
-| `SECURITY.md`          | Editable policy draft.                                    |
-| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
-| `project-spec.md`      | System description and security boundaries.               |
-| `previous-SECURITY.md` | Original policy used for the diff.                        |
-| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+| File                   | Purpose                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                                                  |
+| `threatmodel.md`       | Detailed threat model with source references.                                           |
+| `project-spec.md`      | System description and security boundaries.                                             |
+| `previous-SECURITY.md` | Original policy used for the diff.                                                      |
+| `policy-draft.json`    | Target, policy hashes, revision, retained threat model, stage status, and review notes. |
 
 Keep supporting documents private until reviewed for disclosure. A generated
 threat scenario is neither owner approval nor a confirmed vulnerability.
@@ -1797,10 +1797,71 @@ contain them. Press `d` during a scan for details, then `a` for all sources,
 
 ### Exports and CI
 
-`export` writes CSV, JSON, or SARIF from a completed, sealed scan, defaulting to
-the current repository's latest completed scan. It doesn't start Codex or load
-credentials. Use `--output -` for stdout and `--source-root PATH` to add SARIF
-source-line fingerprints. `export --help` lists all options.
+`export` reads saved results without starting Codex or loading credentials.
+It defaults to the current repository's latest completed scan. Select a result
+directory positionally, or use `--scan ID` with a scan ID or unique prefix;
+these source selectors cannot be combined. `--artifact findings` is the default
+and requires sealed results. Findings support `--export-format csv|json|sarif`,
+with `sarif` as the default. Use `--source-root PATH` to add SARIF source-line
+fingerprints.
+
+Standard, Deep, Diff, and policy workflows save threat models with
+their results. They also write `threatmodel.md`; if that file cannot be written,
+the saved model remains available for export. Component and bulk scans keep a
+separate model for each child run. New documents record the model and scan
+scopes and identify provisional or recovered content. Some results have no
+saved model.
+
+Use `--artifact threat-model` to export the retained model as Markdown. The
+format is `md` and the default destination is `./threatmodel.md`. Explicitly
+selected results can expose a saved model before scan completion or after a
+later failure. Policy result directories and historical saved Markdown models
+are also supported. A historical document in a sealed scan must be listed in
+the manifest with a matching digest. A missing model returns an error; export
+does not substitute an older run or generate a new model.
+
+```bash
+codex-security export --artifact threat-model
+codex-security export --scan SCAN_ID --artifact threat-model --output docs/threatmodel.md
+codex-security export /path/to/policy-results --artifact threat-model --output -
+codex-security scan . --knowledge-base docs/threatmodel.md
+```
+
+`--output -` emits only artifact content, with diagnostics on stderr. Markdown
+and CSV stdout cannot be combined with JSON command output. Exporting into a
+repository does not make the document automatic scan input; use the existing
+`--knowledge-base` option when you want to provide it as context.
+
+`ScanResult.threatModel` contains the saved structured model or Markdown.
+`threatModelPath` points to its current document, including supported historical
+filenames. Either can be null. The model remains exportable when the document
+could not be written. Scan JSON and policy results expose these fields. History
+reports model availability, provenance, and the document path without including
+the model body. Policy generation saves its model before drafting `SECURITY.md`,
+so a later drafting failure does not discard it.
+
+SDK scan methods verify model paths before returning them. A manually
+constructed `ScanResult` uses the `threatModelPath` supplied in its options, or
+`null` if omitted.
+
+The SDK offers the same offline export without an authenticated session:
+
+```ts
+import { exportArtifact } from "@openai/codex-security";
+
+const exported = await exportArtifact({
+  source: { directory: "/path/to/scan-results" }, // Or { scanId: "SCAN_ID" }.
+  artifact: "threat-model",
+  output: "/path/to/threatmodel.md",
+});
+console.log(exported.path, exported.provenance);
+```
+
+`exportArtifact` also supports findings with `format: "csv" | "json" | "sarif"`.
+For threat-model file exports, returned provenance belongs to the same saved
+snapshot as the exported document. `output: "-"` streams to stdout and returns
+null path/provenance. `pythonPath` selects the helper interpreter and `signal`
+cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
