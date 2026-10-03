@@ -194,6 +194,34 @@ def test_file_authored_resolution_can_leave_manifest_unchanged(
     assert warnings == []
 
 
+@pytest.mark.parametrize("update", [{"reason": ""}, {"paths": [1]}, {"reason": "Updated review."}])
+def test_file_authored_deferred_update_preserves_valid_checkpoint_evidence(
+    tmp_path: Path, checkpoint_scan, update: dict
+) -> None:
+    scan_id, pending, _, binding = checkpoint_scan
+    pending["complete"] = False
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    current = copy.deepcopy(pending)
+    current["coverage"]["deferred"][0].update(update)
+    write_saved_parent(tmp_path, current, 200)
+    warnings: list[str] = []
+    _, _, coverage = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], warnings, stopped=True, reason="interrupted"
+    )
+    finalize_scan_contract._recover_unsealed_coverage(
+        coverage,
+        Path(saved.__file__).resolve().parent.parent / "schemas",
+        tmp_path,
+        warnings,
+        [],
+    )
+    expected = "Updated review." if update.get("reason") == "Updated review." else "Review remains."
+    assert [row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"] == [
+        expected
+    ]
+
+
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
 def test_frozen_observations_survive_live_head_changes(
     tmp_path: Path, checkpoint_scan, layout: str

@@ -1260,6 +1260,13 @@ def merge_saved_results(
                     or relative in current_results
                     or relative in selected_observations
                 ):
+                    try:
+                        # A malformed update cannot discard valid saved evidence.
+                        _validate_schema_node(
+                            item, coverage_schema["deferred"]["items"], "coverage.deferred"
+                        )
+                    except ContractError:
+                        continue
                     accepted_deferred_orders[key] = max(
                         accepted_deferred_orders.get(key, order), order
                     )
