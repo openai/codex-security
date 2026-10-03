@@ -965,19 +965,85 @@ describe("multiscan", () => {
         paths,
         client(async (_repository, scanOptions = {}) => {
           scanOptions.onWarning?.("Could not run post-scan instructions.");
+          scanOptions.onWarning?.("Repository changed during the scan.");
           return await completedScan(scanOptions.outputDir!);
         }),
         { onProgress: (event) => progress.push(event) },
       ),
     );
 
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({
+      completed: 1,
+      incomplete: 0,
+      failed: 0,
+      warnings: [
+        {
+          repository: "follow-up-warning",
+          warnings: [
+            "Could not run post-scan instructions.",
+            "Repository changed during the scan.",
+          ],
+        },
+      ],
+    });
     expect(progress).toContainEqual({
       repository: "follow-up-warning",
       attempt: 1,
       status: "started",
       warning: "Could not run post-scan instructions.",
     });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        id: "follow-up-warning",
+        status: "completed",
+        warnings: [
+          "Could not run post-scan instructions.",
+          "Repository changed during the scan.",
+        ],
+      },
+    ]);
+
+    const resumedProgress: typeof progress = [];
+    const resumed = await runMultiscan(
+      options(
+        paths,
+        client(async () => Promise.reject(new Error("must not rerun"))),
+        {
+          onProgress: (event) => resumedProgress.push(event),
+        },
+      ),
+    );
+
+    expect(resumed).toMatchObject({
+      completed: 1,
+      skipped: 1,
+      failed: 0,
+      warnings: [
+        {
+          repository: "follow-up-warning",
+          warnings: [
+            "Could not run post-scan instructions.",
+            "Repository changed during the scan.",
+          ],
+        },
+      ],
+    });
+    expect(resumedProgress).toEqual(
+      expect.arrayContaining([
+        {
+          repository: "follow-up-warning",
+          attempt: 1,
+          status: "completed",
+          warning: "Could not run post-scan instructions.",
+        },
+        {
+          repository: "follow-up-warning",
+          attempt: 1,
+          status: "completed",
+          warning: "Repository changed during the scan.",
+        },
+      ]),
+    );
   });
 
   test.each([false, true])(
