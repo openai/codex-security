@@ -16,15 +16,12 @@ from workbench_validation import optional_text, require_uuid, user_context_argum
 MAX_PREFLIGHT_ISSUES = 32
 
 
-def _javascript_string_length(value: str) -> int:
-    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
-
-
 def _preflight_issue_text(value: Any, maximum: int, label: str) -> str:
     if not isinstance(value, str):
         raise SystemExit(f"Preflight issue {label} must be text.")
     normalized = value.strip()
-    if not normalized or _javascript_string_length(normalized) > maximum:
+    # Match JavaScript's UTF-16 code-unit length.
+    if not normalized or len(normalized.encode("utf-16-le", errors="surrogatepass")) // 2 > maximum:
         raise SystemExit(f"Preflight issue {label} must contain 1 to {maximum} characters.")
     return normalized
 
