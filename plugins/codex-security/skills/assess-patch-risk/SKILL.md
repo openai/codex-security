@@ -70,7 +70,15 @@ Before returning the result, validate the JSON from any working directory with:
 <plugin-root>/scripts/launch_codex_security_mcp --helper validate-patch-risk-assessment <assessment.json>
 ```
 
-Use the `.cmd` launcher on Windows and prefix its quoted path with `&` in PowerShell. Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file. The validator uses the bundled Node runtime helper and does not require Python.
+On Windows, use this PowerShell invocation. Replace the placeholders inside the single quotes with literal paths, doubling any single quote in a path:
+
+```powershell
+$env:patchRiskPluginRoot = '<plugin-root>'
+$env:patchRiskAssessment = '<assessment.json>'
+cmd.exe /d /v:off /s /c '""%patchRiskPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper validate-patch-risk-assessment "%patchRiskAssessment%""'
+```
+
+These two environment variables are temporary values in the calling shell, not application settings. CMD expands their references once, preserving literal `%` and `!` in the paths. Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file. The validator uses the bundled Node runtime helper and does not require Python.
 
 Correct structural or invariant errors by revisiting the evidence; never change a recommendation merely to make validation pass. Return the validated JSON in the response. Write it to disk only when the caller requests an artifact, and keep every assessment-created file outside the subject checkout and its Git directories.
 
