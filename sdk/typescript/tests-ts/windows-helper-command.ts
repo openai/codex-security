@@ -39,6 +39,7 @@ export function windowsHelperFixture(
       document: string,
       paths: Record<string, string>,
       input?: string,
+      workingDirectory = root,
     ) {
       const source = readFileSync(join(PLUGIN_ROOT, document), "utf8");
       let command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
@@ -46,6 +47,9 @@ export function windowsHelperFixture(
         throw new Error(`No PowerShell command in ${document}`);
       for (const [placeholder, path] of Object.entries(paths))
         command = command.replaceAll(placeholder, path.replaceAll("'", "''"));
+      command =
+        `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
+        command;
       return spawnSync(
         powershell,
         [
