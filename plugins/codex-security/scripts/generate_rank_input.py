@@ -21,6 +21,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from generate_in_scope_files import windows_stream_component
 from rank_preview import (
     DEFAULT_PREVIEW_BYTES,
     TEXT_CODE_EXTENSIONS,
@@ -185,17 +186,6 @@ def path_is_diff_excluded(path: Path) -> bool:
     if path.parts[:2] == (".github", "workflows"):
         return False
     return path_is_excluded(path)
-
-
-def windows_stream_component(path: Path) -> str | None:
-    """Return the first NTFS alternate-data-stream component."""
-
-    if os.name != "nt":
-        return None
-    return next(
-        (component for component in path.parts if component != path.anchor and ":" in component),
-        None,
-    )
 
 
 def resolve_scope(
@@ -486,9 +476,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     for path, status in changed:
         rel = path.relative_to(repo)
 
-        if status == "D":
-            preview = ""
-        elif args.mode == "revisions":
+        preview = ""
+        if status != "D" and args.mode == "revisions":
             content = revision_blobs[rel]
             if content is None:
                 raise SystemExit(
@@ -497,9 +486,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
             if is_binary:
                 continue
-        elif path.is_symlink():
-            preview = ""
-        elif path.is_file():
+        elif status != "D" and not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
@@ -508,8 +495,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview, is_binary = preview_for(path, args.preview_bytes)
                 if is_binary:
                     continue
-        else:
-            preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))

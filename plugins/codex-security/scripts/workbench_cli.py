@@ -22,6 +22,7 @@ from workbench_constants import (
     PHASE_PROGRESS_UNITS,
     PHASES,
     REMEDIATION_UPDATE_STATES,
+    positive_int,
 )
 
 
@@ -398,13 +399,6 @@ def parse_args(description: str) -> argparse.Namespace:
         index = arguments.index("--user-context-stdin")
         arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
     return parser.parse_args(arguments)
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
 
 
 if __name__ == "__main__":

@@ -352,10 +352,6 @@ def write_threat_model_projection_if_possible(
         return warning
 
 
-def _validate_report_output_paths(scan_dir: Path) -> None:
-    _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
-
-
 def _json_bytes(payload: Any) -> bytes:
     try:
         encoded = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True)
@@ -404,22 +400,6 @@ def _require_safe_json_string(value: str, context: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
-
-
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
@@ -506,10 +486,6 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         )
     if path.exists() and not path.is_file():
         raise ContractError(f"{relative_path}: expected a regular file")
-
-
-def _descriptor_relative_reads_available() -> bool:
-    return os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
 
 
 def _is_windows() -> bool:
@@ -610,7 +586,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
 def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
     scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, context)
-    if not _descriptor_relative_reads_available():
+    if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
         try:
@@ -915,11 +891,7 @@ def _validate_target(target: dict[str, Any]) -> None:
         _validate_remote(remote, "scan.target.remote")
     if kind == "git_revision":
         _require_str(target, "revision", "scan.target")
-    elif kind == "git_worktree":
-        _require_str(target, "snapshotDigest", "scan.target")
-    elif kind == "git_diff":
-        _require_str(target, "snapshotDigest", "scan.target")
-    elif kind == "directory_snapshot":
+    elif kind in ("git_worktree", "git_diff", "directory_snapshot"):
         _require_str(target, "snapshotDigest", "scan.target")
 
 
@@ -937,11 +909,11 @@ def _fingerprint(target_id: str, finding: dict[str, Any]) -> str:
     if not SLUG_RE.fullmatch(rule_id):
         raise ContractError("finding.ruleId: expected a stable lowercase rule slug")
     material = "\0".join((FINGERPRINT_ALGORITHM, target_id, rule_id, anchor, instance))
-    return f"{FINGERPRINT_ALGORITHM}:sha256:{_sha256_text(material)}"
+    return f"{FINGERPRINT_ALGORITHM}:sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}_{_sha256_text(chr(0).join(parts))[:24]}"
+    return f"{prefix}_{hashlib.sha256(chr(0).join(parts).encode('utf-8')).hexdigest()[:24]}"
 
 
 def _validate_location(location: dict[str, Any], context: str) -> None:
@@ -2582,7 +2554,7 @@ def _artifact_record(
         "mediaType": media_type,
         "path": relative_path,
         "sha256": (
-            _sha256_bytes(contents)
+            hashlib.sha256(contents).hexdigest()
             if contents is not None
             else _sha256_scan_local_file(scan_dir, relative_path, relative_path)
         ),
@@ -2633,7 +2605,7 @@ def _validate_existing_seal(
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (
-            _sha256_bytes(contents)
+            hashlib.sha256(contents).hexdigest()
             if contents is not None
             else _sha256_scan_local_file(scan_dir, path, context)
         )
@@ -3024,12 +2996,12 @@ def _prepare_scan_finalization(
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_report_output_paths(scan_dir)
+        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_report_output_paths(scan_dir)
+        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
         scan["artifacts"] = [
             _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
             _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),

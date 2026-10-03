@@ -40,6 +40,7 @@ export function windowsHelperFixture(
       paths: Record<string, string>,
       input?: string,
       workingDirectory = root,
+      pipelineInput?: string,
     ) {
       const source = readFileSync(join(PLUGIN_ROOT, document), "utf8");
       let command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
@@ -47,11 +48,37 @@ export function windowsHelperFixture(
         throw new Error(`No PowerShell command in ${document}`);
       for (const [placeholder, path] of Object.entries(paths))
         command = command.replaceAll(placeholder, path.replaceAll("'", "''"));
+      if (pipelineInput !== undefined)
+        command = command.replace(
+          /^cmd\.exe/m,
+          `'${pipelineInput.replaceAll("'", "''")}' | cmd.exe`,
+        );
       command =
         "$ProgressPreference = 'SilentlyContinue'\n" +
         `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;
+      const fixtureEnvironment = {
+        SystemRoot: systemRoot,
+        PATH: join(systemRoot, "System32"),
+        HOME: root,
+        USERPROFILE: root,
+        LOCALAPPDATA: root,
+        XDG_CACHE_HOME: root,
+        CODEX_MCP_NODE_PATH: Bun.which("node")!,
+        PLUGIN: "expanded-plugin",
+        USERNAME: "expanded-user",
+        EXPAND: "expanded-bang",
+        ...environment,
+      };
+      const overrides = new Set(
+        Object.keys(fixtureEnvironment).map((key) => key.toUpperCase()),
+      );
+      const inheritedEnvironment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !overrides.has(key.toUpperCase()),
+        ),
+      );
       const result = await runCommand(
         powershell,
         [
@@ -64,17 +91,8 @@ export function windowsHelperFixture(
         {
           cwd: root,
           env: {
-            SystemRoot: systemRoot,
-            PATH: join(systemRoot, "System32"),
-            HOME: root,
-            USERPROFILE: root,
-            LOCALAPPDATA: root,
-            XDG_CACHE_HOME: root,
-            CODEX_MCP_NODE_PATH: Bun.which("node")!,
-            PLUGIN: "expanded-plugin",
-            USERNAME: "expanded-user",
-            EXPAND: "expanded-bang",
-            ...environment,
+            ...inheritedEnvironment,
+            ...fixtureEnvironment,
           },
           timeout: 30_000,
           input,

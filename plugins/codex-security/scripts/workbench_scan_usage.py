@@ -117,7 +117,6 @@ def collect_scan_usage(
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
 
     total = _empty_token_usage()
-    observed_thread_count = 0
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     for session in sessions:
@@ -151,17 +150,16 @@ def collect_scan_usage(
             missing_thread_ids.add(session.thread_id)
             continue
         accepted_thread_ids.add(session.thread_id)
-        observed_thread_count += 1
         _add_token_usage(total, session_usage)
 
-    if not observed_thread_count:
+    if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
 
     result: dict[str, Any] = {
         "coverage": "partial" if missing_thread_ids or warnings else "complete",
         "source": "codex_rollout",
         **total,
-        "threadCount": observed_thread_count,
+        "threadCount": len(accepted_thread_ids),
     }
     if missing_thread_ids:
         result["missingThreadCount"] = len(missing_thread_ids)
@@ -202,13 +200,11 @@ def _scan_root_thread_ids(
                 (scan["id"],),
             )
         )
-    roots: list[str] = []
-    seen: set[str] = set()
+    roots: dict[str, None] = {}
     for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip() and candidate not in seen:
-            roots.append(candidate)
-            seen.add(candidate)
-    return roots
+        if isinstance(candidate, str) and candidate.strip():
+            roots[candidate] = None
+    return list(roots)
 
 
 def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
