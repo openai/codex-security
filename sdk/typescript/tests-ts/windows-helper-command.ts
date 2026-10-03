@@ -48,9 +48,10 @@ export function windowsHelperFixture(
       for (const [placeholder, path] of Object.entries(paths))
         command = command.replaceAll(placeholder, path.replaceAll("'", "''"));
       command =
+        "$ProgressPreference = 'SilentlyContinue'\n" +
         `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
         command;
-      return spawnSync(
+      const result = spawnSync(
         powershell,
         [
           "-NoLogo",
@@ -81,6 +82,25 @@ export function windowsHelperFixture(
           windowsHide: true,
         },
       );
+      return {
+        ...result,
+        diagnostics: JSON.stringify(
+          {
+            powershell,
+            document,
+            workingDirectory,
+            paths,
+            command,
+            status: result.status,
+            signal: result.signal,
+            error: result.error?.message,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          },
+          null,
+          2,
+        ),
+      };
     },
   };
 }
