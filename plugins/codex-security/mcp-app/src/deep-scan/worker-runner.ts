@@ -428,8 +428,8 @@ export class DeepScanWorkerRunner {
         const result = await this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
-          // Discovery workers write only to their isolated directory. Setup and
-          // dedup workers own shared scan artifacts; the target remains read-only.
+          // Discovery workers write only to their isolated directory. Reducers
+          // own shared scan artifacts; the target remains read-only.
           workingDirectory:
             input.kind === "discovery"
               ? input.artifactDir

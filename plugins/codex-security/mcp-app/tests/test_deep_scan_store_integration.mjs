@@ -1,9 +1,9 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,7 @@ await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
 
 async function createWorkbenchFixture(prefix, homeName = "home") {
-  const fixtureRoot = await mkdtemp(path.join(tmpdir(), prefix));
+  const fixtureRoot = await temporaryDirectory(prefix);
   const targetPath = path.join(fixtureRoot, "target");
   const environment = {
     ...process.env,
@@ -201,14 +201,11 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
   const python = process.env.PYTHON?.trim() || "python3";
   const rawRunWorkbench = createWorkbenchRunner(python, environment);
   let stagedWrites = 0;
-  let releaseInitialWrites;
-  const initialWritesReady = new Promise((resolve) => {
-    releaseInitialWrites = resolve;
-  });
+  const initialWritesReady = Promise.withResolvers();
   const runWorkbench = async (args) => {
     if (args[0] === "write-scan-draft" && ++stagedWrites <= 2) {
-      if (stagedWrites === 2) releaseInitialWrites();
-      await initialWritesReady;
+      if (stagedWrites === 2) initialWritesReady.resolve();
+      await initialWritesReady.promise;
     }
     return rawRunWorkbench(args);
   };
