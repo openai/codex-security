@@ -182,18 +182,7 @@ function validatePlan(plan: string, directory: string) {
   const inputs = discoverInputShards(directory);
   const inputNames = inputs.map((path) => basename(path));
   const outputNames = inputNames.map(outputName);
-  let bytes: Buffer;
-  try {
-    bytes = readFile(plan);
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ENOENT" || error.code === "ENOTDIR")
-    )
-      throw new Error(`Rank pool plan missing: ${plan}`);
-    throw error;
-  }
+  const bytes = readFile(plan, "Rank pool plan");
   let payload: unknown;
   try {
     payload = parseJsonBytes(bytes);
