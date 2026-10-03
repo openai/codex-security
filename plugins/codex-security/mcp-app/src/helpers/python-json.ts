@@ -73,13 +73,12 @@ export function parseJsonBytes(bytes: Buffer): unknown {
 }
 
 export function parseJson(source: string, rejectDuplicates = false): unknown {
-  const tokens = [
-    ...source.matchAll(
-      /"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|-?Infinity|NaN|[^ \t\r\n]/gu,
-    ),
-  ];
-  let index = 0;
-  const position = () => tokens[index]?.index ?? source.length;
+  const tokens = source.matchAll(
+    /"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:,]|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|-?Infinity|NaN|[^ \t\r\n]/gu,
+  );
+  let current: RegExpExecArray | undefined;
+  const peek = () => (current ??= tokens.next().value);
+  const position = () => peek()?.index ?? source.length;
   function error(message: string, offset = position()): never {
     const before = source.slice(0, offset);
     const line = before.split("\n").length;
@@ -91,10 +90,14 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
   }
   if (source.startsWith("\ufeff"))
     error("Unexpected UTF-8 BOM (decode using utf-8-sig)", 0);
-  const take = () => tokens[index++]?.[0];
+  const take = () => {
+    const token = peek()?.[0];
+    current = undefined;
+    return token;
+  };
   function expect(token: string): void {
-    if (tokens[index]?.[0] !== token) error(`Expecting '${token}' delimiter`);
-    index++;
+    if (peek()?.[0] !== token) error(`Expecting '${token}' delimiter`);
+    take();
   }
   function string(token: string, start: number): string {
     try {
@@ -110,7 +113,7 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
       const row = Object.create(null) as Row;
       const keys: string[] = [];
       function finish(): Row {
-        index++;
+        take();
         const unique = new Set<string>();
         for (const key of keys) {
           if (rejectDuplicates && unique.has(key))
@@ -120,7 +123,7 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
         keyOrder.set(row, [...unique]);
         return row;
       }
-      if (tokens[index]?.[0] === "}") return finish();
+      if (peek()?.[0] === "}") return finish();
       while (true) {
         const keyStart = position();
         const key = take();
@@ -130,20 +133,20 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
         expect(":");
         row[name] = value();
         keys.push(name);
-        if (tokens[index]?.[0] === "}") return finish();
+        if (peek()?.[0] === "}") return finish();
         expect(",");
       }
     }
     if (token === "[") {
       const values: unknown[] = [];
-      if (tokens[index]?.[0] === "]") {
-        index++;
+      if (peek()?.[0] === "]") {
+        take();
         return values;
       }
       while (true) {
         values.push(value());
-        if (tokens[index]?.[0] === "]") {
-          index++;
+        if (peek()?.[0] === "]") {
+          take();
           return values;
         }
         expect(",");
@@ -165,7 +168,7 @@ export function parseJson(source: string, rejectDuplicates = false): unknown {
     return error("Expecting value", start);
   }
   const result = value();
-  if (index !== tokens.length) error("Extra data");
+  if (peek()) error("Extra data");
   return result;
 }
 

@@ -11,10 +11,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
+import {
+  hasWindowsLoopbackShare,
+  windowsLoopbackPath,
+} from "./windows-helper-location.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -450,48 +454,69 @@ describe("deep-review worklists", () => {
       );
     },
   );
-  test.skipIf(process.platform !== "win32")(
-    "documented PowerShell copy command preserves literal paths and worklist contents",
-    () => {
-      const f = fixture();
-      const launcher = windowsHelperFixture(f.root);
-      const discovery = join(f.root, "discovery %USERNAME% !EXPAND! \u96ea's");
-      const expandedDiscovery = discovery.replace(
-        "%USERNAME%",
-        "expanded-user",
-      );
-      for (const directory of [discovery, expandedDiscovery])
-        mkdirSync(directory);
-      write(join(discovery, "rank_input.jsonl"), [
-        candidate("caf\u00e9/\u96ea.py"),
-      ]);
-      write(join(expandedDiscovery, "rank_input.jsonl"), [
-        candidate("wrong.py"),
-      ]);
-      const output = join(discovery, "deep_review_input.jsonl");
-      const expandedOutput = join(expandedDiscovery, "deep_review_input.jsonl");
-      for (const powershell of launcher.powershells) {
-        writeFileSync(output, "literal output sentinel");
-        writeFileSync(expandedOutput, "expanded output sentinel");
-        const result = launcher.run(
-          powershell,
-          "skills/security-scan/references/scan-artifacts-and-ledger.md",
-          { "<plugin_dir>": launcher.plugin, "<discovery_dir>": discovery },
+  for (const location of ["absolute", "relative", "unc"] as const)
+    test.skipIf(
+      process.platform !== "win32" ||
+        (location === "unc" && !hasWindowsLoopbackShare),
+    )(
+      `documented PowerShell copy command preserves ${location} literal paths and worklist contents`,
+      () => {
+        const f = fixture();
+        const launcher = windowsHelperFixture(f.root);
+        const discovery = join(
+          f.root,
+          "discovery %USERNAME% !EXPAND! \u96ea's",
         );
-        expect(
-          result.status,
-          `${powershell}: ${result.stderr || result.error?.message || ""}`,
-        ).toBe(0);
-        expect(result.stderr).toBe("");
-        expect(read(output)).toEqual([
-          { path: "caf\u00e9/\u96ea.py", area: "src" },
+        const expandedDiscovery = discovery.replace(
+          "%USERNAME%",
+          "expanded-user",
+        );
+        for (const directory of [discovery, expandedDiscovery])
+          mkdirSync(directory);
+        write(join(discovery, "rank_input.jsonl"), [
+          candidate("caf\u00e9/\u96ea.py"),
         ]);
-        expect(readFileSync(expandedOutput, "utf8")).toBe(
-          "expanded output sentinel",
+        write(join(expandedDiscovery, "rank_input.jsonl"), [
+          candidate("wrong.py"),
+        ]);
+        const output = join(discovery, "deep_review_input.jsonl");
+        const expandedOutput = join(
+          expandedDiscovery,
+          "deep_review_input.jsonl",
         );
-      }
-    },
-  );
+        const caller = join(f.root, "caller");
+        mkdirSync(caller);
+        const workingDirectory =
+          location === "unc" ? windowsLoopbackPath(caller) : caller;
+        const argument = (path: string) =>
+          location === "absolute" ? path : relative(caller, path);
+        for (const powershell of launcher.powershells) {
+          rmSync(output, { force: true });
+          writeFileSync(expandedOutput, "expanded output sentinel");
+          const result = launcher.run(
+            powershell,
+            "skills/security-scan/references/scan-artifacts-and-ledger.md",
+            {
+              "<plugin_dir>": argument(launcher.plugin),
+              "<discovery_dir>": argument(discovery),
+            },
+            undefined,
+            workingDirectory,
+          );
+          expect(
+            result.status,
+            `${powershell}: ${result.stderr || result.error?.message || ""}`,
+          ).toBe(0);
+          if (location !== "unc") expect(result.stderr).toBe("");
+          expect(read(output)).toEqual([
+            { path: "caf\u00e9/\u96ea.py", area: "src" },
+          ]);
+          expect(readFileSync(expandedOutput, "utf8")).toBe(
+            "expanded output sentinel",
+          );
+        }
+      },
+    );
   test.skipIf(process.platform !== "win32")(
     "Windows launcher reads and writes paths with spaces",
     () => {
