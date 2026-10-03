@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { sourceReferences } from "../source-references.mjs";
 
 // This is the existing code-mode transport ceiling, used only to size the eval.
 const IPC_FRAME_LIMIT_BYTES = 64 * 1024 * 1024;
@@ -103,13 +104,7 @@ export async function createReducerPagingFixture(root) {
         workerId,
         result: {
           ...result,
-          findings: currentFindings.map((value, index) => ({
-            ...value,
-            provenance: {
-              ...value.provenance,
-              sourceFindingIds: [`${workerId}:${index}`],
-            },
-          })),
+          findings: currentFindings.map(sourceReferences({ id: workerId })),
         },
       },
     ],

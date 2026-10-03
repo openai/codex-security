@@ -1,13 +1,6 @@
+import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.mjs";
 
@@ -19,7 +12,7 @@ const {
 );
 
 const scanId = "11111111-1111-4111-8111-111111111111";
-const temporaryRoots = [];
+const temporaryDirectories = createTemporaryDirectories(true);
 
 try {
   await testSchemaMatchesDocumentedAttackPathDecisions();
@@ -32,14 +25,7 @@ try {
   await testMalformedLedgerIsNotReplaced();
   await testEmptyLedgerAcceptsAnEmptyBatch();
 } finally {
-  await Promise.all(
-    temporaryRoots.map((root) =>
-      rm(root, {
-        recursive: true,
-        force: true,
-      }),
-    ),
-  );
+  await temporaryDirectories.cleanup();
 }
 
 async function testSchemaMatchesDocumentedAttackPathDecisions() {
@@ -293,15 +279,9 @@ async function testEmptyLedgerAcceptsAnEmptyBatch() {
 }
 
 async function createFixture(label, originalRows) {
-  const root = await realpath(
-    await mkdtemp(
-      path.join(
-        tmpdir(),
-        `codex-security-attack-path-${label.replace(/\s+/gu, "-")}-`,
-      ),
-    ),
+  const root = await temporaryDirectories.create(
+    `codex-security-attack-path-${label.replace(/\s+/gu, "-")}-`,
   );
-  temporaryRoots.push(root);
   const ledgerPath = path.join(
     root,
     "artifacts",
@@ -374,10 +354,7 @@ function attackPath(decision = "reportable") {
 
 async function readRows(fixture) {
   const content = await readFile(fixture.ledgerPath, "utf8");
-  return content
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  return content.split(/\r?\n/u).filter(Boolean).map(JSON.parse);
 }
 
 async function assertUnchanged(fixture) {
