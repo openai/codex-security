@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
