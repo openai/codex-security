@@ -14,12 +14,14 @@ from test_workbench_standard_deep_results import (
     write_saved_parent,
 )
 from workbench_test_support import (
+    create_saved_workspace,
     fail_deep_scan,
     replay_saved_results,
     run_workbench,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -468,6 +470,81 @@ def test_selected_parent_replaces_stale_completion_marker(
         assert result[0]["scan"].get("complete", True) is (complete is not False)
         for task in tasks:
             assert task in result[2]["deferred"]
+
+
+@pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
+@pytest.mark.parametrize("complete", [False, True, None])
+def test_completion_checks_selected_parent_checkpoint(
+    tmp_path: Path, command: str, complete: bool | None
+) -> None:
+    state = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("value = 1\n")
+    workspace = create_saved_workspace(state, target)
+    started = start_delivered_scan(
+        state,
+        "--workspace-id",
+        str(workspace["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(started["results"]["scanDir"])
+    write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["complete"] = complete is False
+    manifest_path.write_text(json.dumps(manifest))
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    if complete is False:
+        coverage.update(
+            completeness="partial", deferred=[{"id": "review", "reason": "Review reopened."}]
+        )
+    draft = {
+        "scanId": scan_id,
+        "findings": json.loads((scan_dir / "findings.json").read_text())["findings"],
+        "coverage": coverage,
+    }
+    if complete is not None:
+        draft["complete"] = complete
+    artifacts = ("scan-manifest.json", "findings.json", "coverage.json")
+    for name in artifacts:
+        os.utime(scan_dir / name, ns=(100, 100))
+    checkpoint = write_checkpoint(scan_dir / "checkpoints", draft)
+    os.utime(checkpoint, ns=(200, 200))
+    select(scan_dir, checkpoint, 300)
+    original = {
+        name: (scan_dir / name).read_bytes() for name in (*artifacts, "checkpoint-head.json")
+    }
+    checkpoint_files = {
+        path.relative_to(scan_dir)
+        for directory in ("checkpoints", "checkpoint-heads")
+        for path in (scan_dir / directory).glob("*.json")
+    }
+
+    result = run_workbench(state, command, "--scan-id", scan_id, check=False)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    if complete is False:
+        assert result["returncode"] != 0
+        assert "The latest saved scan draft is incomplete" in result["stderr"]
+        assert scan["progress"]["status"] == "running"
+        assert {name: (scan_dir / name).read_bytes() for name in original} == original
+        assert (scan_dir / "checkpoint-head.json").stat().st_mtime_ns == 300
+        assert {
+            path.relative_to(scan_dir)
+            for directory in ("checkpoints", "checkpoint-heads")
+            for path in (scan_dir / directory).glob("*.json")
+        } == checkpoint_files
+    else:
+        assert result["returncode"] == 0, result["stderr"]
+        assert scan["progress"]["status"] == (
+            "complete" if command == "complete-scan" else "running"
+        )
+        completed = json.loads(manifest_path.read_text())["scan"]
+        assert completed.get("complete", True) is True
+        assert completed["sealedAt"]
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])

@@ -1488,13 +1488,6 @@ def complete_scan_locked(
     current_manifest = None
     if current_manifest_path is not None:
         current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
@@ -1533,12 +1526,8 @@ def complete_scan_locked(
             if merge_parent_draft
             else nullcontext()
         ):
-            prepared = _prepare_scan_finalization(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-                completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
-                draft_documents=saved_results.merge_saved_results(
+            draft_documents = (
+                saved_results.merge_saved_results(
                     scan_dir,
                     scan["id"],
                     completion_binding,
@@ -1551,7 +1540,23 @@ def complete_scan_locked(
                     reason="",
                 )
                 if merge_parent_draft
-                else None,
+                else None
+            )
+            completion_manifest = draft_documents[0] if draft_documents else current_manifest
+            if (
+                completion_manifest is not None
+                and isinstance(completion_manifest.get("scan"), dict)
+                and completion_manifest["scan"].get("complete") is False
+            ):
+                raise RecoverableContractError(
+                    "The latest saved scan draft is incomplete; continue the scan before completing it."
+                )
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=expected_coverage_mode(scan),
+                completion_binding=completion_binding,
+                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                draft_documents=draft_documents,
             )
         add_warning()
         wrote = True
