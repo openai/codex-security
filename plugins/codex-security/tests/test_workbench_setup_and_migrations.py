@@ -44,6 +44,28 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
+def test_sqlite_snapshot_rejects_destination_aliasing_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+        connection.commit()
+    alias = tmp_path / "alias.sqlite3"
+    alias.symlink_to(source)
+    for destination in (source, alias):
+        completed = subprocess.run(
+            [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(destination)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode != 0
+        assert "same file as source" in completed.stderr
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
 def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     completion_lock = namespace["scan_completion_lock"]
