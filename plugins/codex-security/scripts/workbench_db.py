@@ -2926,17 +2926,13 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
 def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
     if not isinstance(finding, dict):
         return False
-    severity = finding.get("severity")
-    confidence = finding.get("confidence")
     return (
         finding.get("findingId") == row["finding_id"]
         and finding.get("title") == row["title"]
         and finding.get("summary") == row["summary"]
         and finding.get("remediation") == row["remediation"]
-        and isinstance(severity, dict)
-        and severity.get("level") == row["severity"]
-        and isinstance(confidence, dict)
-        and confidence.get("level") == row["confidence"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
     )
 
 
