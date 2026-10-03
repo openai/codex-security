@@ -249,14 +249,12 @@ interface CodexClientLike {
 
 interface PreparedRuntime {
   codexHome: string;
-  persistentCredentialHome?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
   deepScanConfigPath?: string;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
-  effectiveConfig?: JsonObject;
 }
 
 interface PreparedSession {
@@ -485,7 +483,6 @@ export class CodexSecurity {
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
-  #runtimePromise: Promise<PreparedRuntime> | null = null;
   #runtime: PreparedRuntime | null = null;
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
@@ -2546,12 +2543,7 @@ export class CodexSecurity {
         authentication.environment,
         this.#abortController.signal,
       );
-      if (
-        this.#runtime === null ||
-        this.#runtime.persistentCredentialHome === true
-      ) {
-        await setCodexSecurityCredentialLogout(authentication.codexHome, true);
-      }
+      await setCodexSecurityCredentialLogout(authentication.codexHome, true);
       if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
       this.#runtimeCredentialSource = null;
       this.#requireOpen();
@@ -2568,11 +2560,7 @@ export class CodexSecurity {
   async #finishClose(): Promise<void> {
     const activeOperation = this.#activeOperation;
     const loginHandles = [...this.#loginHandles];
-    if (
-      activeOperation !== null ||
-      loginHandles.length > 0 ||
-      (this.#runtime === null && this.#runtimePromise !== null)
-    ) {
+    if (activeOperation !== null || loginHandles.length > 0) {
       this.#abortController.abort();
     }
     for (const handle of loginHandles) handle.cancel();
@@ -2581,26 +2569,10 @@ export class CodexSecurity {
         (operation): operation is Promise<unknown> => operation !== null,
       ),
     );
-    const runtime =
-      this.#runtime ?? (await this.#runtimePromise?.catch(() => null));
+    const runtime = this.#runtime;
     this.#runtime = null;
-    this.#runtimePromise = null;
-    if (runtime !== null && runtime !== undefined) {
-      await this.#cleanupRuntime(runtime);
-    }
-  }
-
-  async #cleanupRuntime(runtime: PreparedRuntime): Promise<void> {
-    const cleanupResults = await Promise.allSettled(
-      [
-        runtime.persistentCredentialHome ? undefined : runtime.codexHome,
-        runtime.bootstrapWorkspace,
-      ]
-        .filter((path): path is string => path !== undefined)
-        .map((path) => cleanupSdkDirectory(path)),
-    );
-    for (const result of cleanupResults) {
-      if (result.status === "rejected") throw result.reason;
+    if (runtime?.bootstrapWorkspace !== undefined) {
+      await cleanupSdkDirectory(runtime.bootstrapWorkspace);
     }
   }
 
@@ -2633,12 +2605,7 @@ export class CodexSecurity {
     codexHome: string,
     source: "api_key" | "stored_credentials",
   ): Promise<void> {
-    if (
-      this.#runtime === null ||
-      this.#runtime.persistentCredentialHome === true
-    ) {
-      await setCodexSecurityCredentialLogout(codexHome, false);
-    }
+    await setCodexSecurityCredentialLogout(codexHome, false);
     if (this.#runtime !== null) this.#runtime.credentialsAvailable = true;
     this.#runtimeCredentialSource = source;
   }
@@ -2829,28 +2796,31 @@ export class CodexSecurity {
           signal,
         );
       }
-      const previousRuntime = this.#runtime;
-      const runtime = await this.#ensureRuntime(
-        signal,
-        temporaryRoot,
-        (path) =>
-          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-        options.auth,
-        requestedConfig,
-      );
-      if (
-        runtime === previousRuntime &&
-        this.#dependencies.prepareRuntime === undefined
-      ) {
+      this.#requireOpen();
+      if (this.#runtime === null) {
+        this.#runtime = await this.#prepareRuntime(
+          signal,
+          temporaryRoot,
+          (path) =>
+            requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+          options.auth,
+          requestedConfig,
+        );
+        this.#requireOpen();
+        this.#runtimeCredentialSource = this.#runtime.credentialsAvailable
+          ? "stored_credentials"
+          : null;
+      } else if (this.#dependencies.prepareRuntime === undefined) {
         await this.#refreshPersistentRuntime(
-          runtime,
+          this.#runtime,
           scanEnvironment,
           signal,
           requestedConfig,
         );
       }
+      const runtime = this.#runtime;
       const effectiveConfig = scanCyberAccessConfig(
-        runtime.effectiveConfig ?? requestedConfig,
+        requestedConfig,
         options.cyberAccessProgram,
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
@@ -2986,39 +2956,6 @@ export class CodexSecurity {
     }
   }
 
-  async #ensureRuntime(
-    signal?: AbortSignal,
-    temporaryRoot?: string,
-    validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
-    requestedConfig?: JsonObject,
-  ): Promise<PreparedRuntime> {
-    this.#requireOpen();
-    if (this.#runtime !== null) return this.#runtime;
-    if (this.#runtimePromise === null) {
-      const runtimePromise = this.#prepareRuntime(
-        signal ?? this.#abortController.signal,
-        temporaryRoot,
-        validateLocation,
-        auth,
-        requestedConfig,
-      );
-      this.#runtimePromise = runtimePromise;
-      void runtimePromise.catch(() => {
-        if (this.#runtimePromise === runtimePromise) {
-          this.#runtimePromise = null;
-        }
-      });
-    }
-    const runtime = await this.#runtimePromise;
-    this.#requireOpen();
-    this.#runtime = runtime;
-    this.#runtimeCredentialSource = runtime.credentialsAvailable
-      ? "stored_credentials"
-      : null;
-    return this.#runtime;
-  }
-
   #trackLoginHandle(handle: CodexLoginHandle): CodexLoginHandle {
     this.#loginHandles.add(handle);
     void handle.wait().then(
@@ -3061,7 +2998,6 @@ export class CodexSecurity {
       (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
         ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
-    runtime.effectiveConfig = mergedConfig;
   }
 
   async #validatePolicyInputs(
@@ -3482,29 +3418,25 @@ export class CodexSecurity {
 
   async #prepareRuntime(
     signal: AbortSignal,
-    temporaryRoot?: string,
-    validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
-    requestedConfig?: JsonObject,
+    temporaryRoot: string | undefined,
+    validateLocation: (path: string) => void,
+    auth: ScanAuthMode | undefined,
+    requestedConfig: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const modelProvider =
-      requestedConfig === undefined
-        ? undefined
-        : scanModelProvider(requestedConfig);
+    const modelProvider = scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
-      requestedConfig !== undefined && hasCommandAuth(requestedConfig)
+      hasCommandAuth(requestedConfig)
         ? withoutOpenAiApiKeys(this.#dependencies.environment)
         : this.#dependencies.environment,
       auth,
       modelProvider,
     );
-    const codexHome =
-      validateLocation === undefined
-        ? await prepareCodexSecurityCredentialHome(processEnvironment)
-        : await realpath(codexSecurityCredentialHome(processEnvironment));
+    const codexHome = await realpath(
+      codexSecurityCredentialHome(processEnvironment),
+    );
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
@@ -3523,11 +3455,9 @@ export class CodexSecurity {
         "CODEX_HOME",
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
-      const mergedConfig =
-        requestedConfig ?? (await mergedCodexConfig(this.config));
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
-        sharedCredentialCodexConfig(mergedConfig, codexHome),
+        sharedCredentialCodexConfig(requestedConfig, codexHome),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
@@ -3549,7 +3479,7 @@ export class CodexSecurity {
         ? join(bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
       const credentialsAvailable =
-        hasCommandAuth(mergedConfig) ||
+        hasCommandAuth(requestedConfig) ||
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -3560,7 +3490,6 @@ export class CodexSecurity {
             );
       return {
         codexHome,
-        persistentCredentialHome: true,
         bootstrapWorkspace,
         configPath,
         deepScanConfigPath,
@@ -3572,7 +3501,6 @@ export class CodexSecurity {
             codexSecurityStateDirectory(processEnvironment),
         },
         credentialsAvailable,
-        effectiveConfig: mergedConfig,
       };
     } catch (error) {
       if (bootstrapWorkspace !== undefined) {
