@@ -6,7 +6,7 @@ import {
   widePath,
   windowsFileSystem,
 } from "../../../native/windows-files.mjs";
-import { mkdir, pythonPath } from "./helper-files";
+import { filesystemErrorMessage, mkdir, pythonPath } from "./helper-files";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import { pythonRepr } from "./python-json";
 import {
@@ -110,9 +110,9 @@ export function validateShard(
   input: string,
   output: string,
 ): [RankRow[], RankRow[]] {
-  const inputs = loadRankRows(input, false);
+  const inputs = loadRankRows(input, false, "Rank input shard");
   requireUniquePaths(inputs, `Rank input shard ${basename(input)}`);
-  const outputs = loadRankRows(output, true);
+  const outputs = loadRankRows(output, true, "Rank output shard");
   requireUniquePaths(outputs, `Rank output shard ${basename(output)}`);
   const expected = new Map(inputs.map((row) => [row.path, row.area]));
   const actual = new Set(outputs.map((row) => row.path));
@@ -278,7 +278,7 @@ export function rankShardsCommand(
     }
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = filesystemErrorMessage(error);
     print(
       error instanceof ArgumentError
         ? `${usage}\n${command}: error: ${message}`

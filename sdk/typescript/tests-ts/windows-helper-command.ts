@@ -50,6 +50,7 @@ export function windowsHelperFixture(
       command =
         "$ProgressPreference = 'SilentlyContinue'\n" +
         `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
+        "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;
       const result = await runCommand(
         powershell,

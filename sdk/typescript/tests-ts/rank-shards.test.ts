@@ -358,9 +358,22 @@ describe("rank shard helpers", () => {
 
   test("rejects missing, unexpected, and duplicate worker outputs", () => {
     const f = fixture();
+    for (const result of [make(f), merge(f)]) {
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(`Rank input missing: ${f.input}${newline}`);
+    }
+    const missingInput = validate(f);
+    expect(missingInput.status).toBe(1);
+    expect(missingInput.stderr).toBe(
+      `Rank input shard missing: ${shard(f, 1)}${newline}`,
+    );
     write(f.input, [candidate("a.py")]);
     expect(make(f).status).toBe(0);
-    expect(validate(f).stderr).toContain(shard(f, 1, true));
+    const missingOutput = validate(f);
+    expect(missingOutput.status).toBe(1);
+    expect(missingOutput.stderr).toBe(
+      `Rank output shard missing: ${shard(f, 1, true)}${newline}`,
+    );
     write(shard(f, 2, true), []);
     expect(merge(f).stderr).toContain(
       "missing output shards ['rank-shard-0001.output.jsonl']; unexpected output shards ['rank-shard-0002.output.jsonl']",
@@ -373,6 +386,21 @@ describe("rank shard helpers", () => {
     );
     expect(merge(f).stderr).toContain("duplicate paths");
   });
+
+  test.skipIf(process.platform === "win32")(
+    "escapes terminal controls in native shard output errors",
+    () => {
+      const f = fixture();
+      write(f.input, [candidate("a.py")]);
+      f.directory = join(f.root, "shards-\x1b[2J");
+      writeFileSync(f.directory, "existing file");
+      const result = make(f);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("\\x1b[2J");
+      expect(result.stderr).not.toContain("\x1b");
+      expect(readFileSync(f.directory, "utf8")).toBe("existing file");
+    },
+  );
 
   test.each([
     "rank-shard-x.input.jsonl",
