@@ -1,7 +1,10 @@
 import { findingFingerprint, sha256 } from "./support/finding-identity.js";
-import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { responding } from "./support/responses.js";
+import { once } from "node:events";
+import { rejecting } from "./support/errors.js";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -10,10 +13,13 @@ import {
   codexSecurityCredentialHome,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories = createTemporaryDirectories({ canonical: false });
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-cloud-csv-",
+  false,
+);
 const login = {
   auth_mode: "chatgpt",
   tokens: {
@@ -60,21 +66,19 @@ const csvRow = [
 ].join(",");
 
 async function csvFixture(contents = `${csvHeader}\n${csvRow}\n`) {
-  const root = await directories.create("codex-security-cloud-csv-");
+  const root = await temporaryDirectory();
   const path = join(root, "findings.csv");
   await writeFile(path, contents);
   return path;
 }
 
-afterEach(directories.cleanup);
+afterEach(cleanup);
 
 async function fixture() {
-  const root = await directories.create("codex-security-cloud-");
+  const root = await temporaryDirectory("codex-security-cloud-");
   const scan = join(root, "scan");
   const home = join(root, "home");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scan, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scan);
   if (process.platform !== "win32") await chmod(scan, 0o700);
   await mkdir(home, { mode: 0o700 });
   await writeFile(join(home, "auth.json"), JSON.stringify(login), {
@@ -135,13 +139,10 @@ async function addSecondFinding(scan: string): Promise<void> {
 describe("Cloud publication", () => {
   test("previews a validated findings export CSV without credentials or network access", async () => {
     const path = await csvFixture();
-    let requests = 0;
+    const fetchMock = mock(rejecting("unexpected request"));
     const result = await publishFindingsCsvToCloud(path, {
       dryRun: true,
-      fetch: async () => {
-        requests++;
-        throw new Error("unexpected request");
-      },
+      fetch: fetchMock,
     });
     expect(result).toMatchObject({
       scanId: expect.stringMatching(/^scan_csv_[a-f0-9]{24}$/),
@@ -166,7 +167,7 @@ describe("Cloud publication", () => {
         },
       ],
     });
-    expect(requests).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   test("posts CSV findings with generated scan provenance", async () => {
@@ -301,38 +302,32 @@ describe("Cloud publication", () => {
     ["duplicate finding", `${csvHeader}\n${csvRow}\n${csvRow}`],
   ])("rejects a CSV with %s before authentication", async (_name, source) => {
     const path = await csvFixture(`${source}\n`);
-    let requests = 0;
+    const fetchMock = mock(rejecting("unexpected request"));
     await expect(
       publishFindingsCsvToCloud(path, {
         environment: {},
-        fetch: async () => {
-          requests++;
-          throw new Error("unexpected request");
-        },
+        fetch: fetchMock,
       }),
     ).rejects.toThrow(/Findings CSV/);
-    expect(requests).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   test.each([false, true])(
     "rejects artifacts from another scan before upload or preview (dryRun=%j)",
     async (dryRun) => {
       const { scan, environment } = await fixture();
-      let requests = 0;
+      const fetchMock = mock(rejecting("unexpected request"));
       await expect(
         publishScanToCloud(scan, {
           environment,
           dryRun,
           expectedScanId: "another-scan",
-          fetch: async () => {
-            requests++;
-            throw new Error("unexpected request");
-          },
+          fetch: fetchMock,
         }),
       ).rejects.toThrow(
         "Scan artifacts do not match selected scan another-scan.",
       );
-      expect(requests).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(0);
     },
   );
 
@@ -345,16 +340,13 @@ describe("Cloud publication", () => {
     const findings = JSON.parse(
       await readFile(join(scan, "findings.json"), "utf8"),
     );
-    let requests = 0;
+    const fetchMock = mock(rejecting("unexpected request"));
     expect(
       await publishScanToCloud(scan, {
         environment,
         dryRun: true,
         expectedScanId: manifest.scan.id,
-        fetch: async () => {
-          requests++;
-          throw new Error("unexpected request");
-        },
+        fetch: fetchMock,
       }),
     ).toEqual({
       scanId: manifest.scan.id,
@@ -363,7 +355,7 @@ describe("Cloud publication", () => {
       dryRun: true,
       findings: findings.findings,
     });
-    expect(requests).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
     await writeFile(join(scan, "findings.json"), "{}");
     await expect(
       publishScanToCloud(scan, { environment, dryRun: true }),
@@ -378,41 +370,38 @@ describe("Cloud publication", () => {
     const findings = JSON.parse(
       await readFile(join(scan, "findings.json"), "utf8"),
     );
-    let requests = 0;
+    const fetchMock = mock(async (url: string, options: RequestInit) => {
+      expect(new URL(String(url)).origin).toBe("https://chatgpt.com");
+      expect(options).toMatchObject({
+        method: "POST",
+        redirect: "error",
+        headers: {
+          Authorization: "Bearer synthetic-access-token",
+          "ChatGPT-Account-ID": "synthetic-account",
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      });
+      expect(JSON.parse(String(options!.body))).toEqual({
+        schemaVersion: "1.0",
+        scan: manifest.scan,
+        findings: findings.findings,
+      });
+      expect(JSON.stringify(options)).not.toContain("synthetic-refresh-token");
+      expect(JSON.stringify(options)).not.toContain("synthetic-id-token");
+      expect(options!.signal).toBeInstanceOf(AbortSignal);
+      return Response.json(receipt, { status: 201 });
+    });
     const result = await publishScanToCloud(scan, {
       environment: { ...environment, OPENAI_API_KEY: "synthetic-api-key" },
-      fetch: async (url, options) => {
-        requests++;
-        expect(new URL(String(url)).origin).toBe("https://chatgpt.com");
-        expect(options).toMatchObject({
-          method: "POST",
-          redirect: "error",
-          headers: {
-            Authorization: "Bearer synthetic-access-token",
-            "ChatGPT-Account-ID": "synthetic-account",
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-        });
-        expect(JSON.parse(String(options!.body))).toEqual({
-          schemaVersion: "1.0",
-          scan: manifest.scan,
-          findings: findings.findings,
-        });
-        expect(JSON.stringify(options)).not.toContain(
-          "synthetic-refresh-token",
-        );
-        expect(JSON.stringify(options)).not.toContain("synthetic-id-token");
-        expect(options!.signal).toBeInstanceOf(AbortSignal);
-        return Response.json(receipt, { status: 201 });
-      },
+      fetch: fetchMock,
     });
     expect(result).toEqual({
       scanId: manifest.scan.id,
       findingIds: ["finding-1"],
       findingCount: 1,
     });
-    expect(requests).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("accepts opaque Cloud finding IDs that differ from local finding IDs", async () => {
@@ -475,20 +464,19 @@ describe("Cloud publication", () => {
       join(home, "config.toml"),
       'cli_auth_credentials_store = "auto"\n',
     );
-    let requests = 0;
-    const send = async (_url: string, options: RequestInit) => {
-      requests++;
+
+    const send = mock(async (_url: string, options: RequestInit) => {
       expect(new Headers(options!.headers).get("ChatGPT-Account-ID")).toBe(
         "dedicated-account",
       );
       return Response.json(receipt);
-    };
+    });
     await publishScanToCloud(scan, { environment, fetch: send });
     await setCodexSecurityCredentialLogout(home, true);
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
     ).rejects.toThrow("ChatGPT login already available to Codex Security");
-    expect(requests).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   test("resolves missing or empty CODEX_HOME through the existing user-home helper", async () => {
@@ -509,7 +497,7 @@ describe("Cloud publication", () => {
           HOME: home,
           USERPROFILE: home,
         },
-        fetch: async () => Response.json(receipt),
+        fetch: receiptResponse,
       });
       expect(result.findingIds).toEqual(["finding-1"]);
     }
@@ -517,11 +505,8 @@ describe("Cloud publication", () => {
 
   test("requires an explicit file credential setting before reading auth.json", async () => {
     const { scan, home, environment } = await fixture();
-    let requests = 0;
-    const send = async () => {
-      requests++;
-      return Response.json(receipt);
-    };
+
+    const send = mock(receiptResponse);
     for (const config of [undefined, "[features]\nplugins = true\n"]) {
       if (config === undefined) {
         await rm(join(home, "config.toml"));
@@ -532,16 +517,13 @@ describe("Cloud publication", () => {
         publishScanToCloud(scan, { environment, fetch: send }),
       ).rejects.toThrow("ChatGPT login already available to Codex Security");
     }
-    expect(requests).toBe(0);
+    expect(send).toHaveBeenCalledTimes(0);
   });
 
   test("rejects unsupported, missing, or malformed credentials without leaking their contents", async () => {
     const { scan, home, environment } = await fixture();
-    let requests = 0;
-    const send = async () => {
-      requests++;
-      return Response.json(receipt);
-    };
+
+    const send = mock(receiptResponse);
     for (const credentials of [
       { auth_mode: "apikey", OPENAI_API_KEY: "synthetic-api-secret" },
       { ...login, auth_mode: "personal_access_token" },
@@ -563,12 +545,12 @@ describe("Cloud publication", () => {
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
     ).rejects.toThrow("ChatGPT login already available to Codex Security");
-    expect(requests).toBe(0);
+    expect(send).toHaveBeenCalledTimes(0);
   });
 
   test("does not use a stale file when keyring or automatic credential storage is selected", async () => {
     const { scan, home, environment } = await fixture();
-    let requests = 0;
+    const fetchMock = mock(receiptResponse);
     for (const mode of ["keyring", "auto"]) {
       await writeFile(
         join(home, "config.toml"),
@@ -576,10 +558,7 @@ describe("Cloud publication", () => {
       );
       const error = await publishScanToCloud(scan, {
         environment,
-        fetch: async () => {
-          requests++;
-          return Response.json(receipt);
-        },
+        fetch: fetchMock,
       }).then(
         () => undefined,
         (failure: unknown) => failure,
@@ -588,7 +567,7 @@ describe("Cloud publication", () => {
         "ChatGPT login already available to Codex Security",
       );
     }
-    expect(requests).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
 
     await writeFile(
       join(home, "config.toml"),
@@ -596,64 +575,52 @@ describe("Cloud publication", () => {
     );
     await publishScanToCloud(scan, {
       environment,
-      fetch: async () => {
-        requests++;
-        return Response.json(receipt);
-      },
+      fetch: fetchMock,
     });
-    expect(requests).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("rejects tampered scan artifacts before reading credentials or uploading", async () => {
     const { scan, environment } = await fixture();
     await writeFile(join(scan, "findings.json"), "{}");
-    let requests = 0;
+    const fetchMock = mock(receiptResponse);
     await expect(
       publishScanToCloud(scan, {
         environment,
-        fetch: async () => {
-          requests++;
-          return Response.json(receipt);
-        },
+        fetch: fetchMock,
       }),
     ).rejects.toThrow();
-    expect(requests).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   test("does not retry HTTP errors or expose server response bodies", async () => {
     const { scan, environment } = await fixture();
     for (const status of [401, 403, 404, 413, 422, 429, 503]) {
-      let requests = 0;
+      const fetchMock = mock(responding("synthetic-access-token", status));
       try {
         await publishScanToCloud(scan, {
           environment,
-          fetch: async () => {
-            requests++;
-            return new Response("synthetic-access-token", { status });
-          },
+          fetch: fetchMock,
         });
         throw new Error("expected publication to fail");
       } catch (error) {
         expect(String(error)).toContain(`HTTP ${status}`);
         expect(String(error)).not.toContain("synthetic-access-token");
       }
-      expect(requests).toBe(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });
 
   test("does not retry an ambiguous transport failure", async () => {
     const { scan, environment } = await fixture();
-    let requests = 0;
+    const fetchMock = mock(rejecting("synthetic-access-token"));
     await expect(
       publishScanToCloud(scan, {
         environment,
-        fetch: async () => {
-          requests++;
-          throw new Error("synthetic-access-token");
-        },
+        fetch: fetchMock,
       }),
     ).rejects.toThrow("Cloud publication was not confirmed");
-    expect(requests).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("preserves caller cancellation during the publication request", async () => {
@@ -667,12 +634,10 @@ describe("Cloud publication", () => {
         signal: controller.signal,
         fetch: async (_url, options) => {
           const signal = options.signal as AbortSignal;
-          return await new Promise<Response>((_resolve, reject) => {
-            signal.addEventListener("abort", () => reject(signal.reason), {
-              once: true,
-            });
-            controller.abort(cancellation);
-          });
+          const waiting = once(signal, "abort");
+          controller.abort(cancellation);
+          await waiting;
+          throw signal.reason;
         },
       }),
     ).rejects.toBe(cancellation);
@@ -686,15 +651,12 @@ describe("Cloud publication", () => {
       ok: true,
       status: 201,
       body: null,
-      json: async () =>
-        await new Promise<never>((_resolve, reject) => {
-          controller.signal.addEventListener(
-            "abort",
-            () => reject(controller.signal.reason),
-            { once: true },
-          );
-          controller.abort(cancellation);
-        }),
+      json: async () => {
+        const waiting = once(controller.signal, "abort");
+        controller.abort(cancellation);
+        await waiting;
+        throw controller.signal.reason;
+      },
     } as unknown as Response;
 
     await expect(
@@ -748,3 +710,7 @@ describe("Cloud publication", () => {
     ).rejects.toThrow("invalid acceptance receipt");
   });
 });
+
+async function receiptResponse() {
+  return Response.json(receipt);
+}

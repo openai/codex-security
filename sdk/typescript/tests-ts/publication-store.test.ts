@@ -1,7 +1,7 @@
+import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
-  cp,
   mkdir,
   readFile,
   readdir,
@@ -25,15 +25,17 @@ import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import type { PublishedScanIssue } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const SCAN_ID = "22222222-2222-4222-8222-222222222222";
 const OTHER_SCAN_ID = "33333333-3333-4333-8333-333333333333";
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-publication-store-",
+);
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 interface PublicationFixture {
   environment: NodeJS.ProcessEnv;
@@ -50,9 +52,7 @@ async function publicationFixture(
     stateDirectoryName?: string;
   } = {},
 ): Promise<PublicationFixture> {
-  const root = await temporaryDirectories.create(
-    "codex-security-publication-store-",
-  );
+  const root = await temporaryDirectory();
   const scanDirectory = join(root, "completed-scan");
   await mkdir(scanDirectory, { mode: 0o700 });
   const stateDirectory = join(root, options.stateDirectoryName ?? "state");
@@ -215,9 +215,7 @@ describe("read-only publication history", () => {
   test("matches the manifest recorded when the scan completed", async () => {
     const fixture = await publicationFixture({ seedScan: false });
     const scanDirectory = fixture.publication.scanDirectory;
-    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDirectory, {
-      recursive: true,
-    });
+    await copyCompletedScanFixture(scanDirectory);
     const options = {
       destination: "linear" as const,
       teamId: "team-example",
@@ -303,8 +301,7 @@ describe("read-only publication history", () => {
     const controller = new AbortController();
     const reason = new Error("Synthetic inspection cancellation.");
     let inputFile = "";
-    const { promise: inspecting, resolve: started } =
-      Promise.withResolvers<void>();
+    const inspecting = Promise.withResolvers<void>();
     const python = spyOn(runtime, "resolvePluginPython").mockImplementation(
       async (options) => {
         expect(options?.signal).toBe(controller.signal);
@@ -313,17 +310,12 @@ describe("read-only publication history", () => {
     );
     const workbench = spyOn(runtime, "runWorkbench").mockImplementation(
       async (options, args) => {
-        started();
+        inspecting.resolve();
         expect(options.signal).toBe(controller.signal);
         expect(args[0]).toBe("inspect-linear-publication");
         inputFile = args[args.indexOf("--input-file") + 1]!;
-        return new Promise<never>((_resolve, reject) => {
-          options.signal!.addEventListener(
-            "abort",
-            () => reject(options.signal!.reason),
-            { once: true },
-          );
-        });
+        await once(options.signal!, "abort");
+        throw options.signal!.reason;
       },
     );
     try {
@@ -332,7 +324,7 @@ describe("read-only publication history", () => {
         fixture.environment,
         controller.signal,
       );
-      await inspecting;
+      await inspecting.promise;
       controller.abort(reason);
       await expect(pending).rejects.toBe(reason);
       expect(inputFile).not.toBe("");
