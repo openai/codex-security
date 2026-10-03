@@ -48,6 +48,8 @@
 - consolidate helpers and adjacent tooling ([#1194](https://github.com/openai/codex-security/pull/1194))
 - support per-scan Cyber access programs ([#1185](https://github.com/openai/codex-security/pull/1185))
 - preserve custom provider authentication in skill commands ([#1187](https://github.com/openai/codex-security/pull/1187))
+- restore completed artifacts after follow-up cancellation ([#1057](https://github.com/openai/codex-security/pull/1057))
+- detect credentials exposed in source ([#1134](https://github.com/openai/codex-security/pull/1134))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

@@ -87,36 +87,38 @@ describe("CLI diagnostics", () => {
     },
   );
 
-  test.each([
+  for (const failure of [
     new CodexSecurityError("token budget exceeded"),
     new CodexSecurityError("basic validation failed"),
     new OutputDirectoryError(
       "Could not write results: token=SYNTHETIC_LOCAL_VALUE",
     ),
     new CodexSecurityError("request timed out token=SYNTHETIC_TIMEOUT_VALUE"),
-  ])("preserves scan failure details for %s", async (failure) => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async () => {
-        throw failure;
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+  ]) {
+    test(`preserves scan failure details for ${failure.message}`, async () => {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw failure;
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
 
-    expect(
-      await main(
-        ["scan", ".", "--json", "--verbose"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(JSON.parse(stdout.text()).message).toBe(failure.message);
-    expect(stderr.text()).toContain(failure.message);
-  });
+      expect(
+        await main(
+          ["scan", ".", "--json", "--verbose"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text()).message).toBe(failure.message);
+      expect(stderr.text()).toContain(failure.message);
+    });
+  }
 
   test.each([
     { name: "dashboard", args: [], environment: {}, tty: true, verbose: false },

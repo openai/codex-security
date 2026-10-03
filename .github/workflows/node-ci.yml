@@ -516,6 +516,8 @@ jobs:
       - name: Test deterministic triage eval contracts
         working-directory: evals/triage-finding
         run: node --run test:deterministic
+      - name: Test secret discovery eval contracts
+        run: node --test evals/secret-discovery/test_*.mjs
 
   required-test:
     name: ${{ matrix.os }} / node-22

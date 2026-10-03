@@ -2219,15 +2219,18 @@ describe("plugin runtime preparation", () => {
       });
       await writeFile(join(scanDir, artifact), expected);
       const python = await resolvePluginPython({ environment });
+      const restorationSignal = new AbortController();
       const restorer = await prepareScanArtifactRestorer(
         {
           python,
           pluginRoot: upgraded.installedRoot,
           environment,
+          signal: restorationSignal.signal,
         },
         scanDir,
       );
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      restorationSignal.abort();
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
