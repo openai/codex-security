@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
 import {
-  copyFile,
-  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -15,6 +13,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import {
   hasWindowsLoopbackShare,
@@ -835,27 +834,13 @@ describe("patch risk assessment contract", () => {
       async () => {
         const outside = await mkdtemp(join(tmpdir(), "patch-risk-powershell-"));
         powershellDirectories.push(outside);
-        const plugin = join(outside, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
-        const expandedPlugin = plugin.replace("%PLUGIN%", "expanded-plugin");
+        const launcher = windowsHelperFixture(outside);
         const file = join(
           outside,
           "review-%USERNAME% !EXPAND! \u96ea's",
           "assessment.json",
         );
         const expandedFile = file.replace("%USERNAME%", "expanded-user");
-        await mkdir(join(plugin, "scripts"), { recursive: true });
-        await cp(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), {
-          recursive: true,
-        });
-        await copyFile(
-          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
-          join(plugin, "scripts", "launch_codex_security_mcp.cmd"),
-        );
-        await mkdir(join(expandedPlugin, "scripts"), { recursive: true });
-        await writeFile(
-          join(expandedPlugin, "scripts", "launch_codex_security_mcp.cmd"),
-          "@echo expanded-plugin-used\r\n@exit /b 0\r\n",
-        );
         for (const path of [file, expandedFile])
           await mkdir(dirname(path), { recursive: true });
         const original = JSON.stringify(assessment()).replace(
@@ -863,52 +848,13 @@ describe("patch risk assessment contract", () => {
           "example/caf\u00e9-\u96ea",
         );
         await writeFile(expandedFile, original);
-        const skill = await readFile(
-          join(PLUGIN_ROOT, "skills", "assess-patch-risk", "SKILL.md"),
-          "utf8",
-        );
-        const command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(
-          skill,
-        )?.[1];
-        expect(command).toBeDefined();
-        const quote = (value: string) => value.replaceAll("'", "''");
         const caller = join(outside, "caller");
         await mkdir(caller);
         const workingDirectory =
           location === "unc" ? windowsLoopbackPath(caller) : caller;
         const argument = (path: string) =>
           location === "absolute" ? path : relative(caller, path);
-        const powershells = [
-          join(
-            process.env["SystemRoot"]!,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe",
-          ),
-          Bun.which("pwsh"),
-        ].filter((value): value is string => value !== null);
-        const fixtureEnvironment = {
-          SystemRoot: process.env["SystemRoot"],
-          PATH: join(process.env["SystemRoot"]!, "System32"),
-          HOME: outside,
-          USERPROFILE: outside,
-          LOCALAPPDATA: outside,
-          XDG_CACHE_HOME: outside,
-          CODEX_MCP_NODE_PATH: node,
-          PLUGIN: "expanded-plugin",
-          USERNAME: "expanded-user",
-          EXPAND: "expanded-bang",
-        };
-        const overrides = new Set(
-          Object.keys(fixtureEnvironment).map((key) => key.toUpperCase()),
-        );
-        const inherited = Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([key]) => !overrides.has(key.toUpperCase()),
-          ),
-        );
-        for (const powershell of powershells) {
+        for (const powershell of launcher.powershells) {
           for (const input of [
             "invalid",
             "valid",
@@ -918,66 +864,21 @@ describe("patch risk assessment contract", () => {
           ]) {
             await writeFile(file, input === "invalid" ? "{}" : original);
             if (input === "missing") await rm(file);
-            const script =
-              "$ProgressPreference = 'SilentlyContinue'\n" +
-              `Set-Location -LiteralPath '${quote(workingDirectory)}' -ErrorAction Stop\n` +
-              "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
-              command!
-                .replace("<plugin-root>", quote(argument(plugin)))
-                .replace(
-                  "<assessment.json>",
-                  quote(
-                    input === "stdin" || input === "pipeline"
-                      ? "-"
-                      : argument(file),
-                  ),
-                ) +
-              "\n";
-            const result = await runCommand(
+            const result = await launcher.run(
               powershell,
-              [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                Buffer.from(
-                  input === "pipeline"
-                    ? script.replace(
-                        /^cmd\.exe/m,
-                        `'${quote(original)}' | cmd.exe`,
-                      )
-                    : script,
-                  "utf16le",
-                ).toString("base64"),
-              ],
+              "skills/assess-patch-risk/SKILL.md",
               {
-                cwd: outside,
-                env: { ...inherited, ...fixtureEnvironment },
-                timeout: 30_000,
-                input: input === "pipeline" ? "" : original,
-                windowsHide: true,
-              },
-            );
-            const diagnostics = JSON.stringify(
-              {
-                powershell,
-                location,
-                input,
-                workingDirectory,
-                plugin: argument(plugin),
-                assessment:
+                "<plugin-root>": argument(launcher.plugin),
+                "<assessment.json>":
                   input === "stdin" || input === "pipeline"
                     ? "-"
                     : argument(file),
-                status: result.status,
-                signal: result.signal,
-                error: result.error?.message,
-                stdout: result.stdout,
-                stderr: result.stderr,
               },
-              null,
-              2,
+              input === "pipeline" ? "" : original,
+              workingDirectory,
+              input === "pipeline" ? original : undefined,
             );
+            const diagnostics = `${location} ${input}\n${result.diagnostics}`;
             expect(result.stdout, diagnostics).not.toContain(
               "expanded-plugin-used",
             );

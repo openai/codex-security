@@ -1,10 +1,9 @@
 import { decodeUtf8 } from "./utf8";
 import assessmentSchema from "../../../schemas/patch-risk-assessment.schema.json";
 import { validateAgainstSchema, type ContractSchema } from "./contract-schema";
-import { filesystemErrorMessage, readFile } from "./helper-files";
+import { filesystemErrorMessage, pythonPath, readFile } from "./helper-files";
 import { decodePosixBytes } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
-import { parsedPath } from "./resolve-security-md";
 
 interface Assessment {
   recommendation: "merge" | "revise" | "no_op" | "block" | "hold_for_evidence";
@@ -130,22 +129,7 @@ export function validatePatchRiskAssessment(value: unknown): string[] {
 function readAssessment(path: string): unknown {
   let contents: Buffer;
   try {
-    const prefix =
-      path.startsWith("//") && !path.startsWith("///")
-        ? "//"
-        : path.startsWith("/")
-          ? "/"
-          : "";
-    // pathlib removes dot/empty components, but preserves symlink-sensitive "..".
-    const input =
-      process.platform === "win32"
-        ? parsedPath(path)
-        : prefix +
-            path
-              .split("/")
-              .filter((part) => part && part !== ".")
-              .join("/") || ".";
-    contents = readFile(path === "-" ? 0 : input);
+    contents = readFile(path === "-" ? 0 : pythonPath(path));
   } catch (error) {
     throw new Error(`cannot read assessment: ${filesystemErrorMessage(error)}`);
   }
