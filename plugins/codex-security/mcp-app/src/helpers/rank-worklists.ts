@@ -24,8 +24,23 @@ export function compare(left: string, right: string): number {
   return a.length - b.length;
 }
 
-export function loadRankRows(path: string, selection: boolean): RankRow[] {
-  const contents = decodeUtf8(readFile(path));
+export function loadRankRows(
+  path: string,
+  selection: boolean,
+  label = selection ? "Rank output" : "Rank input",
+): RankRow[] {
+  let contents: string;
+  try {
+    contents = decodeUtf8(readFile(path));
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    )
+      throw new Error(`${label} missing: ${path}`);
+    throw error;
+  }
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();
   const fields = selection
