@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     stable_target_id,
@@ -279,7 +280,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -1327,6 +1328,28 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
     )["deepScan"]
 
     assert deep_scan["config"]["workers"] == 7
+
+
+def test_deep_scan_join_preserves_repository_provenance(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    codex_home = tmp_path / "codex-home"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    remote = "https://github.com/example/original.git"
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
+    first = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/example/replacement.git"],
+        cwd=target,
+        check=True,
+    )
+    second = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
+    assert second["startDisposition"] == "joined"
+    assert second["deepScan"]["scanId"] == first["deepScan"]["scanId"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_remote, target_repository_path, target_provenance_recorded FROM scans"
+        ).fetchall() == [(remote, ".", 1)]
 
 
 def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) -> None:

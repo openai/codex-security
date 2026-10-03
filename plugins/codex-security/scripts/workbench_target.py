@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -11,8 +12,9 @@ import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, BinaryIO
+from urllib.parse import urlsplit, urlunsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -747,6 +749,93 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
 
 def git_revision(target: Path) -> str:
     return git_output(target, "rev-parse", "HEAD") or "unversioned"
+
+
+def expected_coverage_mode(scan: sqlite3.Row) -> str:
+    if scan["mode"] == "diff":
+        mode = {
+            "commit": "commit",
+            "range": "branch_diff",
+            "working_tree": "working_tree",
+        }.get(scan["diff_target_kind"])
+        if mode is None:
+            raise SystemExit("This migrated diff scan does not have a validated change set.")
+        return mode
+    if scan["scope"] != "." or (
+        "recipe_json" in scan.keys()
+        and scan["recipe_json"] is not None
+        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
+    ):
+        return "scoped_path"
+    return "deep_repository" if scan["mode"] == "deep" else "repository"
+
+
+def saved_repository_provenance(scan: sqlite3.Row) -> dict[str, str] | None:
+    """Distinguish legacy scans from authoritative, possibly absent SCM identity."""
+    if "target_provenance_recorded" not in scan.keys() or not scan["target_provenance_recorded"]:
+        return None
+    return {
+        field: scan[column]
+        for column, field in (
+            ("target_remote", "remote"),
+            ("target_repository_path", "repositoryPath"),
+        )
+        if scan[column] is not None
+    }
+
+
+def verify_repository_provenance(scan: sqlite3.Row, target: dict[str, Any]) -> None:
+    provenance = saved_repository_provenance(scan)
+    if provenance is not None:
+        for field in ("remote", "repositoryPath"):
+            if target.get(field) != provenance.get(field):
+                raise SystemExit(
+                    f"scan-manifest.json target {field} must match saved scan provenance."
+                )
+    elif target.get("repositoryPath") is not None:
+        raise SystemExit(
+            "scan-manifest.json target repositoryPath must match saved scan provenance."
+        )
+
+
+def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
+    """Capture repository identity at scan start, without persisting remote credentials."""
+    root = git_output(target, "rev-parse", "--show-toplevel")
+    if root is None:
+        return None, None
+    repository_path = target.resolve().relative_to(Path(root).resolve()).as_posix()
+    origins = git_output(target, "config", "--null", "--get-all", "remote.origin.url")
+    remote = origins.split("\0", 1)[0] if origins is not None else None
+    if remote is None:
+        return None, repository_path
+    if PureWindowsPath(remote).drive:
+        return None, repository_path
+    if "://" not in remote:
+        authority, separator, path = remote.partition(":")
+        if not separator:
+            return None, repository_path
+        remote = f"ssh://{authority}/{path}"
+    try:
+        parsed = urlsplit(remote)
+        port = parsed.port
+    except ValueError:
+        return None, repository_path
+    if (
+        parsed.scheme not in {"https", "ssh"}
+        or parsed.hostname is None
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.strip("/")
+    ):
+        return None, repository_path
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    # This is an SCM locator, not an authenticated clone URL. User info never
+    # belongs in a retained scan artifact that can later be published.
+    return urlunsplit((parsed.scheme, host, parsed.path, "", "")), repository_path
 
 
 def git_target_metadata(target: Path) -> dict[str, Any]:

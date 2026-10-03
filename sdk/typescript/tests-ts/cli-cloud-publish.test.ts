@@ -1,4 +1,16 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  chmod,
+  cp,
+  readFile,
+  writeFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -10,6 +22,26 @@ import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
+
+const cloudDestination = {
+  environment_id: "env-1",
+  environment_name: "Example",
+  repository_id: "repo-1",
+  repository_full_name: "example/repo",
+  repository_remote: "https://github.com/example/repo",
+  connector_id: "connector-1",
+};
+async function populateScan(scanDir: string) {
+  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+    recursive: true,
+  });
+  if (process.platform !== "win32") await chmod(scanDir, 0o700);
+  const path = join(scanDir, "scan-manifest.json"),
+    manifest = JSON.parse(await readFile(path, "utf8"));
+  manifest.scan.target.repositoryPath = ".";
+  manifest.scan.target.revision = "a".repeat(40);
+  await writeFile(path, JSON.stringify(manifest));
+}
 
 const receipt = {
   scanId: "scan-1",
@@ -32,7 +64,7 @@ async function savedScansFixture() {
   const scans = await Promise.all(
     [1, 2, 3].map(async (index) => {
       const scanDir = join(root, `scan ${index}`);
-      await mkdir(scanDir);
+      await populateScan(scanDir);
       return {
         scanId: `${String(index).repeat(8)}-1111-4111-8111-111111111111`,
         scanDir,
@@ -53,6 +85,7 @@ async function savedScansFixture() {
       return { scan };
     },
   });
+  deps.listCloudDestinations = async () => [cloudDestination];
   return { scans, deps, workbenchCalls };
 }
 
@@ -71,21 +104,11 @@ describe("publish scan to Cloud", () => {
     expect(stdout.text()).toContain("Findings CSV");
   });
 
-  test("passes --dry-run through when publishing a findings CSV", async () => {
-    const deps = dependencies({
-      currentDirectory: "/workspace/repository",
-      onWorkbench: () => {
-        throw new Error("unexpected scan lookup");
-      },
-    });
-    let publishedPath = "";
-    deps.publishFindingsCsvToCloud = async (path, options) => {
-      publishedPath = path;
-      expect(options?.dryRun).toBe(true);
-      expect(options?.signal).toBeInstanceOf(AbortSignal);
-      return { ...receipt, dryRun: true };
+  test("rejects legacy CSV publication before invoking a publisher", async () => {
+    const deps = dependencies();
+    deps.publishFindingsCsvToCloud = async () => {
+      throw new Error("unexpected publisher");
     };
-    const stdout = capture();
     const stderr = capture();
     expect(
       await main(
@@ -95,24 +118,15 @@ describe("publish scan to Cloud", () => {
           "--to",
           "cloud",
           "--csv",
-          "inputs/findings.csv",
+          "findings.csv",
           "--dry-run",
-          "--json",
         ],
-        stdout.stream,
+        capture().stream,
         stderr.stream,
         deps,
       ),
-    ).toBe(0);
-    expect(publishedPath).toBe(
-      resolve("/workspace/repository", "inputs/findings.csv"),
-    );
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      scanId: "scan-1",
-      findingCount: 1,
-      dryRun: true,
-    });
-    expect(stderr.text()).toBe("");
+    ).toBe(2);
+    expect(stderr.text()).toContain("CSV imports are unsupported");
   });
 
   test.each([
@@ -265,6 +279,180 @@ describe("publish scan to Cloud", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("Use --scan or scan directory inputs");
+  });
+
+  test("selects the Cloud environment before listing matching local scans", async () => {
+    const { scans, deps, workbenchCalls } = await savedScansFixture();
+    const unrelated = join(scans[1]!.scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(unrelated, "utf8"));
+    manifest.scan.target.remote = "https://github.com/example/other";
+    await writeFile(unrelated, JSON.stringify(manifest));
+    let environmentSelected = false;
+    deps.listCloudDestinations = async () => [
+      {
+        ...cloudDestination,
+        environment_name: "Example\u001b[2J\u001b[H\u009b2J",
+      },
+      { ...cloudDestination, environment_id: "env-2" },
+    ];
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async (_question, choices) => {
+        expect(workbenchCalls).toHaveLength(0);
+        expect(choices[0]!.label).not.toMatch(/[\u001b\u009b]/u);
+        expect(choices[0]!.label).toContain("Example");
+        expect(String(choices[0]!.value)).toBe("env-1");
+        environmentSelected = true;
+        return choices[1]!.value;
+      },
+      checkbox: async (_question, choices) => {
+        expect(environmentSelected).toBe(true);
+        expect(choices.map((item) => String(item.value))).toEqual([
+          scans[0]!.scanId,
+          scans[2]!.scanId,
+        ]);
+        return [choices[0]!.value];
+      },
+    };
+    deps.publishScanToCloud = async (_directory, options) => {
+      expect(options?.cloudEnvironment).toBe("env-2");
+      return receipt;
+    };
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "--to", "cloud", "--json"],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toBe("");
+  });
+
+  test("one environment with multiple repositories shows large matching scans", async () => {
+    const { scans, deps } = await savedScansFixture();
+    const path = join(scans[1]!.scanDir, "scan-manifest.json"),
+      manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.scan.target.remote = "https://github.com/example/second";
+    await writeFile(path, JSON.stringify(manifest));
+    for (const scan of scans) {
+      const findingsPath = join(scan.scanDir, "findings.json");
+      const findings = JSON.parse(await readFile(findingsPath, "utf8"));
+      findings.findings[0].summary = "Large artifact-backed evidence. ".repeat(
+        12000,
+      );
+      const bytes = JSON.stringify(findings);
+      expect(Buffer.byteLength(bytes)).toBeGreaterThan(256 * 1024);
+      await writeFile(findingsPath, bytes);
+      const manifestPath = join(scan.scanDir, "scan-manifest.json");
+      const saved = JSON.parse(await readFile(manifestPath, "utf8"));
+      saved.scan.artifacts.find(
+        (artifact: { path: string }) => artifact.path === "findings.json",
+      ).sha256 = createHash("sha256").update(bytes).digest("hex");
+      await writeFile(manifestPath, JSON.stringify(saved));
+    }
+    deps.listCloudDestinations = async () => [
+      cloudDestination,
+      {
+        ...cloudDestination,
+        repository_id: "repo-2",
+        repository_remote: manifest.scan.target.remote,
+      },
+    ];
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async () => {
+        throw new Error("One environment must auto-select");
+      },
+      checkbox: async (_question, choices) => {
+        expect(choices.map((item) => String(item.value))).toEqual(
+          scans.map((item) => item.scanId),
+        );
+        return choices.map((item) => item.value);
+      },
+    };
+    deps.publishScanToCloud = async (_directory, options) => {
+      expect(options?.cloudEnvironment).toBe("env-1");
+      return receipt;
+    };
+    expect(
+      await main(
+        ["publish", "scan", "--to", "cloud", "--json"],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+  });
+
+  test("cancels environment selection before reading scan history", async () => {
+    const { deps, workbenchCalls } = await savedScansFixture();
+    const signals = new FakeSignals();
+    deps.addSignalListener = (signal, listener) =>
+      signals.add(signal, listener);
+    deps.removeSignalListener = (signal, listener) =>
+      signals.remove(signal, listener);
+    deps.listCloudDestinations = async () => [
+      cloudDestination,
+      { ...cloudDestination, environment_id: "env-2" },
+    ];
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async (_question, _choices, _presentation, signal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        signals.emit("SIGTERM");
+        signal!.throwIfAborted();
+        throw new Error("unreachable");
+      },
+    };
+    deps.publishScanToCloud = async () => {
+      throw new Error("unexpected upload");
+    };
+    expect(
+      await main(
+        ["publish", "scan", "--to", "cloud"],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(143);
+    expect(workbenchCalls).toHaveLength(0);
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
+  });
+
+  test("passes explicit environment selection with a saved ID from another directory", async () => {
+    const { scans, deps, workbenchCalls } = await savedScansFixture();
+    deps.currentDirectory = () => "/unrelated/repository";
+    deps.publishScanToCloud = async (_directory, options) => {
+      expect(options?.cloudEnvironment).toBe("env-1");
+      expect(options?.expectedScanId).toBe(scans[0]!.scanId);
+      return receipt;
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--to",
+          "cloud",
+          "--scan",
+          scans[0]!.scanId,
+          "--cloud-environment",
+          "env-1",
+        ],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(workbenchCalls).toEqual([
+      ["get-scan", "--scan-id", scans[0]!.scanId],
+    ]);
   });
 
   test("publishes checked scans in display order from one multi-select prompt", async () => {
@@ -865,7 +1053,7 @@ describe("publish scan to Cloud", () => {
     const root = await mkdtemp(join(tmpdir(), "cloud-publish-picker-"));
     const scanDir = join(root, "completed-scan");
     try {
-      await mkdir(scanDir);
+      await populateScan(scanDir);
       const deps = dependencies({
         onWorkbench: (args) => {
           expect(args).toEqual(["list-scans", "--status", "complete"]);
@@ -881,6 +1069,7 @@ describe("publish scan to Cloud", () => {
           };
         },
       });
+      deps.listCloudDestinations = async () => [cloudDestination];
       let selections = 0;
       deps.publishPrompt = {
         isInteractive: () => true,
@@ -916,29 +1105,41 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("requests an explicit scan outside a terminal without suggesting Linear options", async () => {
-    const deps = dependencies();
-    deps.publishPrompt = {
-      isInteractive: () => false,
-      select: async () => {
-        throw new Error("unexpected picker");
-      },
-    };
-    deps.publishScanToCloud = async () => {
-      throw new Error("unexpected publication");
-    };
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
-    expect(stderr.text()).not.toContain("--linear-team");
-  });
+  test.each([false, true])(
+    "requests an explicit scan outside a terminal before discovery (dryRun=%s)",
+    async (dryRun) => {
+      const deps = dependencies();
+      deps.listCloudDestinations = async () => {
+        throw new Error("unexpected discovery");
+      };
+      deps.publishPrompt = {
+        isInteractive: () => false,
+        select: async () => {
+          throw new Error("unexpected picker");
+        },
+      };
+      deps.publishScanToCloud = async () => {
+        throw new Error("unexpected publication");
+      };
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "--to",
+            "cloud",
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
+      expect(stderr.text()).not.toContain("--linear-team");
+    },
+  );
 
   test("rejects Linear-specific options before uploading to Cloud", async () => {
     for (const linearOptions of [
@@ -978,7 +1179,7 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("keeps the internal Cloud destination out of help and discovery", async () => {
+  test("documents native Cloud selection in help and discovery", async () => {
     for (const flag of ["--help", "--schema", "--llms", "--llms-full"]) {
       const stdout = capture();
       const deps = dependencies();
@@ -993,7 +1194,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(0);
-      expect(stdout.text().toLowerCase()).not.toContain("cloud");
+      expect(stdout.text().toLowerCase()).toContain("cloud");
     }
   });
 

@@ -18,6 +18,7 @@ from test_workbench_prompt_only_scan import start_headless_standard_scan, start_
 from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    saved_scan_repository_provenance,
     stable_target_id,
     write_completed_contract,
 )
@@ -158,6 +159,7 @@ def create_cli_scan(
         target_kind="git_revision" if target_revision is not None else "directory_snapshot",
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
+        target_provenance=saved_scan_repository_provenance(state_dir, launched["scanId"]),
     )
     if not finding or extra_anchors:
         findings_path = scan_dir / "findings.json"
@@ -424,6 +426,7 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
         relative_path="README.md",
         target_kind="git_revision",
         target_revision=revision,
+        target_provenance=saved_scan_repository_provenance(state_dir, launched["scanId"]),
     )
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
 

@@ -19,6 +19,7 @@ from finalize_scan_contract import write_scan_local_bytes
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
+    git_repository_provenance,
     git_revision,
     worktree_content_digest,
 )
@@ -210,6 +211,12 @@ def insert_running_scan(
             timestamp,
             timestamp,
         ),
+    )
+    remote, repository_path = git_repository_provenance(target)
+    connection.execute(
+        "UPDATE scans SET target_remote = ?, target_repository_path = ?, "
+        "target_provenance_recorded = 1 WHERE id = ?",
+        (remote, repository_path, scan_id),
     )
     connection.execute(
         """

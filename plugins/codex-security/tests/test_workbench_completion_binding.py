@@ -16,6 +16,7 @@ from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    saved_scan_repository_provenance,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
@@ -99,7 +100,9 @@ def register_cli_scan(
     )
 
 
-def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
+def _start_diff_scan_with_draft(
+    tmp_path: Path, kind: str, *, legacy_provenance: bool = False
+) -> tuple[Path, Path, dict[str, Any]]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     base = initialize_git_repository(target)
@@ -149,6 +152,13 @@ def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, 
                 "head": head,
             },
         )
+    if legacy_provenance:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET target_provenance_recorded = 0, target_remote = NULL, "
+                "target_repository_path = NULL WHERE id = ?",
+                (registered["scanId"],),
+            )
     diff_target = registered["contract"]["diffTarget"]
     write_completed_contract(
         Path(registered["scanDir"]),
@@ -156,6 +166,7 @@ def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, 
         target,
         relative_path="README.md",
         target_kind="git_diff",
+        target_provenance=saved_scan_repository_provenance(state_dir, registered["scanId"]),
         diff_base_revision=diff_target["baseRevision"],
         diff_head_revision=diff_target["headRevision"],
         snapshot_digest=f"codex-security-snapshot/v1:sha256:{'a' * 64}",
@@ -226,8 +237,13 @@ def test_completion_binds_diff_snapshot_digest(
 
 
 @pytest.mark.parametrize("kind", ["commit", "range"])
-def test_completion_preserves_legacy_sealed_diff_snapshot_digest(tmp_path: Path, kind: str) -> None:
-    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+@pytest.mark.parametrize("legacy_provenance", [False, True])
+def test_completion_preserves_legacy_sealed_diff_snapshot_digest(
+    tmp_path: Path, kind: str, legacy_provenance: bool
+) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(
+        tmp_path, kind, legacy_provenance=legacy_provenance
+    )
     scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
     _seal_draft(scan_dir, target)
     sealed_artifacts = _sealed_artifacts(scan_dir)
@@ -237,8 +253,13 @@ def test_completion_preserves_legacy_sealed_diff_snapshot_digest(tmp_path: Path,
 
 
 @pytest.mark.parametrize("kind", ["commit", "range"])
-def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: str) -> None:
-    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+@pytest.mark.parametrize("legacy_provenance", [False, True])
+def test_stopped_recovery_preserves_legacy_diff_snapshot(
+    tmp_path: Path, kind: str, legacy_provenance: bool
+) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(
+        tmp_path, kind, legacy_provenance=legacy_provenance
+    )
     scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
     legacy_digest = f"codex-security-snapshot/v1:sha256:{'a' * 64}"
     manifest_path = scan_dir / "scan-manifest.json"
@@ -503,6 +524,7 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
         relative_path="README.md",
         target_kind="git_revision",
         target_revision=revision,
+        target_provenance=saved_scan_repository_provenance(state_dir, scan_id),
     )
     manifest_path = scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())

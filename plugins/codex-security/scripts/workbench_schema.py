@@ -867,6 +867,15 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "freeze scan repository provenance",
+        """
+        ALTER TABLE scans ADD COLUMN target_remote TEXT;
+        ALTER TABLE scans ADD COLUMN target_repository_path TEXT;
+        ALTER TABLE scans ADD COLUMN target_provenance_recorded INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 )
 
 

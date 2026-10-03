@@ -27,6 +27,33 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("https://github.com/example/project.git", "https://github.com/example/project.git"),
+        ("git@github.com:example/project.git", "ssh://github.com/example/project.git"),
+        (
+            "https://fixture-user:fixture-password@github.com/example/project.git",
+            "https://github.com/example/project.git",
+        ),
+        ("../another-local-checkout", None),
+        (r"C:\repos\project", None),
+        ("C:/repos/project", None),
+        (r"C:relative\project", None),
+    ],
+)
+def test_repository_provenance_records_identity_without_clone_credentials(
+    tmp_path: Path, remote: str, expected: str | None
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (expected, ".")
+    subdirectory = target / "nested"
+    subdirectory.mkdir()
+    assert WORKBENCH_TARGET["git_repository_provenance"](subdirectory) == (expected, "nested")
+
+
 def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(tmp_path / "missing-git"))
 
@@ -317,3 +344,35 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     if os.name != "nt":
         assert expected == host_git
     assert trusted_git_executable(repository) == str(expected)
+
+
+@pytest.mark.parametrize("multiple_urls", [False, True])
+def test_repository_provenance_uses_first_configured_origin_before_transport_rewrites(
+    tmp_path: Path, multiple_urls: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    canonical = "https://github.com/example/first.git"
+    subprocess.run(["git", "remote", "add", "origin", canonical], cwd=target, check=True)
+    if multiple_urls:
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://github.com/example/second.git",
+            ],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(
+        ["git", "config", "url.git@github-work:.insteadOf", "https://github.com/"],
+        cwd=target,
+        check=True,
+    )
+    expanded = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=target, text=True
+    )
+    assert expanded.strip() == "git@github-work:example/first.git"
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (canonical, ".")

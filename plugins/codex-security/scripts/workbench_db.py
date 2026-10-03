@@ -119,6 +119,7 @@ from workbench_target import (
     diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    expected_coverage_mode,
     git_bytes,
     git_command,
     git_output,
@@ -130,7 +131,9 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    saved_repository_provenance,
     scan_target_warning,
+    verify_repository_provenance,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -478,25 +481,6 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def expected_coverage_mode(scan: sqlite3.Row) -> str:
-    if scan["mode"] == "diff":
-        mode = {
-            "commit": "commit",
-            "range": "branch_diff",
-            "working_tree": "working_tree",
-        }.get(scan["diff_target_kind"])
-        if mode is None:
-            raise SystemExit("This migrated diff scan does not have a validated change set.")
-        return mode
-    if scan["scope"] != "." or (
-        "recipe_json" in scan.keys()
-        and scan["recipe_json"] is not None
-        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
-    ):
-        return "scoped_path"
-    return "deep_repository" if scan["mode"] == "deep" else "repository"
-
-
 def workbench_completion_binding(
     scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -512,6 +496,8 @@ def workbench_completion_binding(
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
     }
+    provenance = saved_repository_provenance(scan)
+    target.update(provenance or {})
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
@@ -537,6 +523,7 @@ def workbench_completion_binding(
         "allowedTargetKinds": target_contract["allowedKinds"],
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
+        "repositoryProvenanceRecorded": provenance is not None,
     }
     return scan_history.preserve_sealed_completion(binding, manifest)
 
@@ -556,6 +543,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
         raise SystemExit("scan-manifest.json targetId must match the workbench target.")
     if target.get("displayName") != expected_target["displayName"]:
         raise SystemExit("scan-manifest.json target displayName must match the workbench target.")
+    verify_repository_provenance(scan, target)
     if target.get("kind") not in expected_target["allowedKinds"]:
         raise SystemExit("scan-manifest.json target kind must match the workbench target.")
     if (

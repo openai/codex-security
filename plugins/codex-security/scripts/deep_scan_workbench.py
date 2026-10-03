@@ -25,6 +25,7 @@ from workbench.storage import create_private_directory
 from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    git_repository_provenance,
     git_revision,
     worktree_content_digest,
 )
@@ -901,6 +902,12 @@ def begin_deep_scan_for_target(
                 timestamp,
                 timestamp,
             ),
+        )
+        remote, repository_path = git_repository_provenance(target)
+        connection.execute(
+            "UPDATE scans SET target_remote = ?, target_repository_path = ?, "
+            "target_provenance_recorded = 1 WHERE id = ?",
+            (remote, repository_path, scan_id),
         )
         connection.execute(
             """
