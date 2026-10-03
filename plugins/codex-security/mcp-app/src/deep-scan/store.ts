@@ -15,7 +15,6 @@ import type {
   DeepScanMergeState,
   DeepScanRunState,
   DeepScanRunStatus,
-  DeepScanStore,
   DeepScanTerminalReason,
   DeepScanWorkerKind,
   DeepScanWorkerMutation,
@@ -110,7 +109,7 @@ class DeepScanPersistenceError extends Error {
   }
 }
 
-export class WorkbenchDeepScanStore implements DeepScanStore {
+export class WorkbenchDeepScanStore {
   private writeTail: Promise<void> = Promise.resolve();
   private readonly coordinatorLeases = new Map<
     string,
@@ -258,16 +257,6 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
       { coordinatorGeneration: lease.run.coordinatorGeneration, updatedAt },
     );
     return { ...lease.run, updatedAt };
-  }
-
-  async cancel(scanId: string, threadId: string): Promise<JsonObject> {
-    return this.enqueueWrite([
-      "cancel-scan",
-      "--scan-id",
-      scanId,
-      "--thread-id",
-      threadId,
-    ]);
   }
 
   async updateWorker(
@@ -475,7 +464,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   /**
    * Run mutations in call order. Callers receive their own operation's result
    * or error, while the stored tail always resolves so one failed write cannot
-   * prevent later cancellation or cleanup from reaching the workbench.
+   * prevent later persistence or cleanup from reaching the workbench.
    *
    * This orders one Node store instance; SQLite still provides transactions for
    * other workbench processes. Reads remain concurrent and observe a committed

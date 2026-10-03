@@ -3,17 +3,9 @@ import {
   scanId,
   workerDraft as draft,
 } from "./scan-draft-fixture.mjs";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.mjs";
 
@@ -24,9 +16,7 @@ const { validateDiscoveryArtifacts, validateReducerArtifacts } =
   );
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "deep-scan-artifact-validation-")),
-);
+const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);

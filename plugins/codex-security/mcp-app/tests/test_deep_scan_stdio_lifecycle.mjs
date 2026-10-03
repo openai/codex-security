@@ -1,25 +1,24 @@
 import { assertNoError, assertFlagPair } from "./assertions.mjs";
 import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.mjs";
-import { consumeLines } from "./consume-lines.mjs";
+import * as streams from "./support/streams.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,9 +35,7 @@ if (process.platform === "win32") {
 }
 
 async function testDeepScanStdioLifecycle() {
-  const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-security-deep-stdio-"),
-  );
+  const fixtureRoot = await temporaryDirectory("codex-security-deep-stdio-");
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
@@ -898,89 +895,15 @@ async function testDeepScanStdioLifecycle() {
 }
 
 function startServer(serverPath, env) {
-  const child = spawn(process.execPath, [serverPath, "--stdio"], {
+  return streams.startServer(serverPath, env, {
     cwd: pluginRoot,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
+    component: "codex_security_deep_scan",
+    withTimeout,
+    responseLabel: "JSON-RPC response",
+    // Non-structured diagnostics remain available in the child process on test failure.
+    stderrLines: [],
+    checkSignalCode: true,
   });
-  const responses = new Map();
-  const waiters = new Map();
-  const stderrEvents = [];
-  const stderrLines = [];
-  let stdoutBuffer = "";
-  let stderrBuffer = "";
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk;
-    stdoutBuffer = consumeLines(stdoutBuffer, (line) => {
-      const response = JSON.parse(line);
-      responses.set(response.id, response);
-      waiters.get(response.id)?.(response);
-      waiters.delete(response.id);
-    });
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderrBuffer += chunk;
-    stderrBuffer = consumeLines(stderrBuffer, (line) => {
-      stderrLines.push(line);
-      try {
-        const event = JSON.parse(line);
-        if (event.component === "codex_security_deep_scan")
-          stderrEvents.push(event);
-      } catch {
-        // Non-structured diagnostics remain available in the child process on test failure.
-      }
-    });
-  });
-
-  return {
-    pid: child.pid,
-    notify(method, params = {}) {
-      child.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`,
-      );
-    },
-    sendRequest(id, method, params = {}) {
-      child.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
-    },
-    request(id, method, params = {}) {
-      this.sendRequest(id, method, params);
-      return this.waitForResponse(id);
-    },
-    waitForResponse(id, timeoutMs = 15_000) {
-      const existing = responses.get(id);
-      if (existing) return Promise.resolve(existing);
-      return withTimeout(
-        new Promise((resolve) => waiters.set(id, resolve)),
-        timeoutMs,
-        `JSON-RPC response ${id}`,
-      );
-    },
-    stderrEvents() {
-      return [...stderrEvents];
-    },
-    stderrText() {
-      return stderrLines.join("\n");
-    },
-    response(id) {
-      return responses.get(id);
-    },
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.stdin.end();
-      const exited = new Promise((resolve) => child.once("exit", resolve));
-      const graceful = await Promise.race([
-        exited.then(() => true),
-        delay(2_000).then(() => false),
-      ]);
-      if (!graceful && child.exitCode === null) child.kill("SIGKILL");
-      await exited;
-    },
-  };
 }
 
 function toolCall(
