@@ -407,13 +407,26 @@ def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_svelte(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        (
+            "Counter.svelte",
+            '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>',
+        ),
+        ("profile.EJS", "<% const count = 0; %>\n<p><%= count %></p>"),
+        ("show.html.erb", "<% count = 0 %>\n<p><%= count %></p>"),
+        ("card.phtml", "<?php $count = 0; ?>\n<p><?= $count ?></p>"),
+    ],
+)
+def test_rank_input_includes_templates(
+    tmp_path: Path, mode: str, filename: str, content: str
+) -> None:
     repo = tmp_path / "repo"
     components = repo / "src"
     components.mkdir(parents=True)
     initialize_repo(repo)
-    source = components / "Counter.svelte"
-    content = '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>'
+    source = components / filename
     source.write_text(content + "\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
@@ -436,7 +449,7 @@ def test_rank_input_includes_svelte(tmp_path: Path, mode: str) -> None:
 
     assert read_jsonl(output) == [
         {
-            "path": "src/Counter.svelte",
+            "path": f"src/{filename}",
             "area": "src" if mode == "repo" else "diff",
             "preview": changed,
         }

@@ -626,14 +626,17 @@ def test_diff_inventory_includes_changed_solidity(tmp_path: Path, mode: str) -> 
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_svelte(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize("filename", ["+page.svelte", "profile.ejs", "show.html.erb", "card.phtml"])
+def test_diff_inventory_includes_changed_templates(
+    tmp_path: Path, mode: str, filename: str
+) -> None:
     repository = make_repository(tmp_path)
-    source = b"<script>let count = 0;</script>\n<button>{count}</button>\n"
-    write_file(repository, "src/routes/+page.svelte", source)
+    path = f"src/routes/{filename}"
+    write_file(repository, path, b"<p>before</p>\n")
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "src/routes/+page.svelte", source.replace(b"count = 0", b"count = 1"))
+    write_file(repository, path, b"<p>after</p>\n")
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
         git(repository, "add", ".")
@@ -645,7 +648,7 @@ def test_diff_inventory_includes_changed_svelte(tmp_path: Path, mode: str) -> No
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "src/routes/+page.svelte\n"
+    assert output.read_text(encoding="utf-8") == f"{path}\n"
 
 
 def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
