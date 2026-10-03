@@ -1398,12 +1398,9 @@ async function testCancellationClearsRetryWait() {
   });
   const sleepStarted = Promise.withResolvers();
   const coordinator = createCoordinator(fixture, store, executor, {
-    clock: {
-      now: immediateClock.now,
-      sleep: async (_delayMs, signal) => {
-        sleepStarted.resolve();
-        await waitForAbort(signal);
-      },
+    clock: undefined,
+    log: (event) => {
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
     },
   });
   coordinator.start();

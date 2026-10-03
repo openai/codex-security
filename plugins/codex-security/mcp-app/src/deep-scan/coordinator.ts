@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -1088,22 +1089,11 @@ export class DeepScanCoordinator {
 const systemClock: DeepScanClock = {
   now: () => Date.now(),
   sleep: async (delayMs, signal) => {
-    if (signal.aborted) throw abortError(signal.reason);
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolvePromise();
-      }, delayMs);
-      const onAbort = (): void => {
-        cleanup();
-        rejectPromise(abortError(signal.reason));
-      };
-      const cleanup = (): void => {
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", onAbort);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    try {
+      await delay(delayMs, undefined, { signal });
+    } catch (error) {
+      throw signal.aborted ? abortError(signal.reason) : error;
+    }
   },
 };
 
