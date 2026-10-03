@@ -7613,13 +7613,11 @@ export async function readSkillCommandOutput(
 ): Promise<{
   message?: string;
   error?: string;
-  malformed: boolean;
   completed?: boolean;
   sandboxUnavailable?: boolean;
 }> {
   let message: string | undefined;
   let error: string | undefined;
-  let malformed = false;
   let threadId: string | undefined;
   let turnId: string | undefined;
   let completed = false;
@@ -7674,11 +7672,9 @@ export async function readSkillCommandOutput(
     try {
       event = JSON.parse(line);
     } catch {
-      malformed = true;
       continue;
     }
     if (typeof event !== "object" || event === null) {
-      malformed = true;
       continue;
     }
     const value = event as Record<string, unknown>;
@@ -7898,7 +7894,6 @@ export async function readSkillCommandOutput(
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
-    malformed,
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
   };

@@ -1211,7 +1211,6 @@ process.stdout.write(JSON.stringify({
     await expect(readSkillCommandOutput(events())).resolves.toEqual({
       message: "Validated finding",
       error: "Reconnecting... 2/5",
-      malformed: false,
     });
 
     async function* failed(): AsyncGenerator<Buffer> {
@@ -1222,7 +1221,6 @@ process.stdout.write(JSON.stringify({
     }
     await expect(readSkillCommandOutput(failed())).resolves.toEqual({
       error: "401 sk-proj-SYNTHETIC_SECRET",
-      malformed: true,
     });
 
     async function* unicode(): AsyncGenerator<Buffer> {
@@ -1238,7 +1236,6 @@ process.stdout.write(JSON.stringify({
     }
     await expect(readSkillCommandOutput(unicode())).resolves.toEqual({
       message: "Café 🔒",
-      malformed: false,
     });
   });
 
@@ -1257,7 +1254,6 @@ process.stdout.write(JSON.stringify({
     }
     await expect(readSkillCommandOutput(oversizedLine())).resolves.toEqual({
       message: "must still drain",
-      malformed: true,
     });
     expect(drained).toBe(true);
 
@@ -1275,7 +1271,6 @@ process.stdout.write(JSON.stringify({
     }
     await expect(readSkillCommandOutput(oversizedResponse())).resolves.toEqual({
       message: largeResponse,
-      malformed: false,
     });
 
     const stdout = capture();
