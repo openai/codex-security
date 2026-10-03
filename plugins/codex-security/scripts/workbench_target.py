@@ -454,10 +454,6 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
     return tuple(entries)
 
 
-def git_submodule_paths(target: Path) -> tuple[Path, ...]:
-    return tuple(path for path, _ in git_submodule_entries(target))
-
-
 def require_clean_submodule_worktrees(target: Path) -> None:
     for submodule, expected_revision in git_submodule_entries(target):
         relative_path = str(submodule.relative_to(target))
@@ -872,9 +868,5 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
     return None
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()
