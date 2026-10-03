@@ -1,15 +1,4 @@
-function parseExpected(value) {
-  if (Array.isArray(value)) {
-    return value.map(String);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
+const { parseExpected } = require("./output");
 
 function expectedScanbenchMapping(context) {
   const caseId = String(context.vars.case_id || "");

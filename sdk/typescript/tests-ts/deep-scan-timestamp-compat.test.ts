@@ -19,6 +19,7 @@ if sys.version_info >= (3, 11):
     deep_scan.datetime = Python310Datetime
 case = json.loads(sys.argv[2])
 deep_scan.now = lambda: case["now"]
+deep_scan.configure(deep_scan)
 connection = sqlite3.connect(":memory:")
 connection.execute("CREATE TABLE deep_scan_workers (scan_id TEXT, status TEXT)")
 if case.get("activeWorker"):

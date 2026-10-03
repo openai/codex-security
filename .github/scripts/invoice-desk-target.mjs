@@ -40,14 +40,11 @@ export async function resolveScanTargets(
     );
     if (candidates.length === 0) return [];
     const dispatched = new Set(await dispatchedScanTitles(sha));
-    return candidates
-      .filter(
-        (pr) =>
-          !dispatched.has(
-            `Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`,
-          ),
-      )
-      .map((pr) => ({ pr: pr.number, sha: pr.head.sha }));
+    return candidates.flatMap((pr) =>
+      !dispatched.has(`Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`)
+        ? { pr: pr.number, sha: pr.head.sha }
+        : [],
+    );
   }
   if (eventName !== "workflow_dispatch") return [];
   const { pr_number: number = "", source_sha: sourceSha = "" } =
