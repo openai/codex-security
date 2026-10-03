@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const childProcess = require("node:child_process");
+const { runGit } = require("../sastbench/scripts/hydrate-sastbench-repos");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -67,21 +67,9 @@ function plannedJobs(dataset, args) {
   return jobs;
 }
 
-function runGit(args, cwd) {
-  childProcess.execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-}
-
 function gitOutput(args, cwd) {
   try {
-    return childProcess.execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    return runGit(args, cwd, "ignore").trim();
   } catch {
     return null;
   }

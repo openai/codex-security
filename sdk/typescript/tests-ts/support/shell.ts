@@ -1,3 +1,4 @@
+export { gitText } from "../../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";

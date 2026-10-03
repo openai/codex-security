@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { runWorkbench } from "../src/runtime.js";
+import { workbenchCommand as workbench } from "./support/workbench-command.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -36,6 +36,7 @@ const deepScanOwnershipProbe = [
   "deep_scan.require_scan = lambda database, value: database.execute('SELECT * FROM scans WHERE id = ?', (value,)).fetchone()",
   "deep_scan.require_workspace = lambda database, value: database.execute('SELECT * FROM workspaces WHERE id = ?', (value,)).fetchone()",
   "deep_scan.now = lambda: 'after'",
+  "deep_scan.configure(deep_scan)",
   "deep_scan.deep_scan_result = lambda database, value, *, start_disposition=None: {'startDisposition': start_disposition}",
   "try:",
   "    result = deep_scan.begin_deep_scan_for_scan(connection, scan_id, 'requesting-thread', argparse.Namespace(claim_token=case['suppliedToken'], model=None, reasoning_effort=None))",
@@ -138,6 +139,7 @@ test("recovers an interrupted copied Deep Scan publication", async () => {
       "connection.execute('INSERT INTO scans VALUES (?, ?)', ('scan', str(scan_dir)))",
       "connection.execute('INSERT INTO deep_scan_workers VALUES (?, ?, ?, ?, ?)', ('scan', 'dedup', 'running', str(snapshot.parent.parent), 'now'))",
       "deep_scan.require_scan = lambda database, value: database.execute('SELECT * FROM scans WHERE id = ?', (value,)).fetchone()",
+      "deep_scan.configure(deep_scan)",
       "deep_scan.recover_candidate_ledger_publication(connection, 'scan')",
       "print(json.dumps({'ledger': ledger.read_text(encoding='utf-8'), 'backup': backup.exists()}))",
     ].join("\n"),
@@ -169,20 +171,11 @@ test.each([
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const command = (args: string[], input?: string) =>
-      runWorkbench(
-        {
-          python: python!,
-          pluginRoot: PLUGIN_ROOT,
-          environment: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: join(root, "state"),
-            CODEX_HOME: join(root, "codex-home"),
-          },
-        },
-        args,
-        input,
-      );
+    const command = workbench(python!, () => ({
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      CODEX_HOME: join(root, "codex-home"),
+    }));
     const registration = await command(
       [
         "register-cli-scan",

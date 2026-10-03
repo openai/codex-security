@@ -9,19 +9,17 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
-const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const packageRoot = resolve(scriptDirectory, "..");
+const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const execFileAsync = promisify(execFile);
 
 function validatePath(path) {
   const parts = path.split("/");
   if (
-    path === "" ||
     path.includes("\\") ||
     posix.isAbsolute(path) ||
     parts.some((part) => part === "" || part === "." || part === "..")

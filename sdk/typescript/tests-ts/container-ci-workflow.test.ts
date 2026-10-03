@@ -90,6 +90,7 @@ test.each([
   ["pull_request", false, ".github/workflows/container-release.yml", true],
   ["pull_request", false, ".github/workflows/native-windows.yml", true],
   ["pull_request", false, ".github/workflows/node-ci.yml", true],
+  ["pull_request", false, ".github/actions/setup-tools/action.yml", true],
   ["pull_request", false, "sdk/typescript/src/index.ts", true],
   [
     "pull_request",
@@ -127,6 +128,9 @@ test.each([
           .map((line) => line.split("=")),
       );
       expect(outputs["container-validate"]).toBe(String(selected));
+      if (path === ".github/actions/setup-tools/action.yml") {
+        expect(outputs["test-quality"]).toBe("true");
+      }
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

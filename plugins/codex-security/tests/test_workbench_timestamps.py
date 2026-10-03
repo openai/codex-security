@@ -5,6 +5,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,7 +53,7 @@ def test_deep_scan_deadline_and_heartbeat_on_python310(monkeypatch, tmp_path: Pa
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     deep = importlib.import_module("deep_scan_workbench")
     monkeypatch.setattr(deep, "datetime", Python310DateTime)
-    monkeypatch.setattr(deep, "now", lambda: "2026-08-15T12:00:00Z")
+    monkeypatch.setattr(deep, "_dependencies", SimpleNamespace(now=lambda: "2026-08-15T12:00:00Z"))
     assert deep.deep_scan_deadline_reached(
         {"created_at": "2026-08-15T11:00:00z", "max_time_hours": 1}
     )
