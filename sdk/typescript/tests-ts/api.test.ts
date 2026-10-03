@@ -431,12 +431,16 @@ describe("CodexSecurity finding validation", () => {
   async function validationClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       validationEvents(),
+    useCallerHome = false,
   ) {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
-    const stateDirectory = join(root, "state");
-    await Promise.all([mkdir(repository), mkdir(codexHome)]);
+    const callerHome = join(root, "caller-home");
+    const stateDirectory = useCallerHome
+      ? join(callerHome, "state", "plugins", "codex-security")
+      : join(root, "state");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(callerHome)]);
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
@@ -444,7 +448,8 @@ describe("CodexSecurity finding validation", () => {
     } = {};
     const workbench = mock(async () => ({}));
     const environment = {
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_HOME: callerHome,
+      ...(useCallerHome ? {} : { CODEX_SECURITY_STATE_DIR: stateDirectory }),
       OPENAI_API_KEY: "synthetic-validation-key",
     };
     const client = new TestClient(
@@ -497,7 +502,8 @@ describe("CodexSecurity finding validation", () => {
         options,
         captured,
         workbench,
-      } = await validationClient();
+        stateDirectory,
+      } = await validationClient(undefined, kind === "object");
       await using client = security;
       const inputPath = join(options.repositoryPath, "finding.txt");
       await writeFile(
@@ -548,6 +554,9 @@ describe("CodexSecurity finding validation", () => {
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
         options.repositoryPath,
+      );
+      expect(captured.codex?.env?.["CODEX_SECURITY_STATE_DIR"]).toBe(
+        stateDirectory,
       );
     },
   );
@@ -1490,9 +1499,10 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          resolveCodexCommand: () => {
-            throw new Error(`${provider} must not sign in to OpenAI`);
-          },
+          // The injected model client needs no process; an auth probe must fail.
+          resolveCodexCommand: () => ({
+            command: join(root, "unexpected-openai-auth.exe"),
+          }),
           createCodex: (options: CodexOptions) => {
             codexOptions = options;
             return {
@@ -1581,9 +1591,10 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          resolveCodexCommand: () => {
-            throw new Error("Amazon Bedrock must not sign in to OpenAI");
-          },
+          // The injected model client needs no process; an auth probe must fail.
+          resolveCodexCommand: () => ({
+            command: join(root, "unexpected-openai-auth.exe"),
+          }),
           createCodex: (options: CodexOptions) => {
             codexOptions = options;
             return {
@@ -1706,9 +1717,10 @@ describe("CodexSecurity orchestration", () => {
           }
           return mockWorkbench(args, input);
         },
-        resolveCodexCommand: () => {
-          throw new Error("The Bedrock profile must not sign in to OpenAI");
-        },
+        // The injected model client needs no process; an auth probe must fail.
+        resolveCodexCommand: () => ({
+          command: join(root, "unexpected-openai-auth.exe"),
+        }),
         createCodex: (options: CodexOptions) => {
           codexOptions = options;
           return {
@@ -5346,16 +5358,13 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => ({
-            ...preparedRuntime(codexHome),
-            environment: {
-              PATH: [knowledgeBaseBin, trustedBin, dirname(trustedGit)].join(
-                delimiter,
-              ),
-              GIT_SSH_COMMAND: "synthetic-ssh --fixture",
-            },
-          }),
+          environment: {
+            PATH: [knowledgeBaseBin, trustedBin, dirname(trustedGit)].join(
+              delimiter,
+            ),
+            GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+          },
+          prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
@@ -6114,15 +6123,11 @@ describe("CodexSecurity orchestration", () => {
         },
       },
       {
-        environment: {},
+        environment: { PATH: process.env["PATH"] ?? "" },
         prepareRuntime: async () => {
           const runtime = preparedRuntime(codexHome);
           return {
             ...runtime,
-            environment: {
-              ...runtime.environment,
-              PATH: process.env["PATH"] ?? "",
-            },
             plugin: {
               ...runtime.plugin,
               installedRoot: join(
@@ -6784,6 +6789,14 @@ describe("CodexSecurity orchestration", () => {
     "non-directory tools",
     "blank override",
   ])("preserves default SDK bundled tools for %s", async (scenario) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `preserves default SDK bundled tools for ${scenario}`,
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -6827,14 +6840,25 @@ describe("CodexSecurity orchestration", () => {
       await writeFile(toolsDirectory, "not a directory\n");
     const callerEnvironment = {
       OPENAI_API_KEY: "ambient-key",
+      ...pathEnvironment,
       ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
     };
     const runtimeEnvironment = {
+      ...callerEnvironment,
       CODEX_HOME: codexHome,
-      CODEX_CLI_PATH: executable,
-      ...pathEnvironment,
     };
     const originalEnvironment = { ...runtimeEnvironment };
+    const runtimeModule = await import("../src/runtime.js");
+    const executionEnvironment = runtimeModule.pluginExecutionEnvironment;
+    mock.module("../src/runtime.js", () => ({
+      ...runtimeModule,
+      pluginExecutionEnvironment: (
+        ...args: Parameters<typeof executionEnvironment>
+      ) => ({
+        ...executionEnvironment(...args),
+        CODEX_CLI_PATH: executable,
+      }),
+    }));
     let codexOptions: CodexOptions | null = null;
     const client = new TestClient(
       {},
@@ -6887,10 +6911,15 @@ describe("CodexSecurity orchestration", () => {
       expect(runtimeEnvironment).toEqual(originalEnvironment);
       expect(callerEnvironment).toEqual({
         OPENAI_API_KEY: "ambient-key",
+        ...pathEnvironment,
         ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
       });
     } finally {
       await client.close();
+      mock.module("../src/runtime.js", () => ({
+        ...runtimeModule,
+        pluginExecutionEnvironment: executionEnvironment,
+      }));
     }
   });
 
@@ -7061,7 +7090,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const client = new TestClient(
       {},
       {
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        environment: {
+          ...fakeCommand.environment,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           environment: { CODEX_HOME: codexHome, ...fakeCommand.environment },
@@ -7216,25 +7248,51 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await client.close();
   });
 
-  test("uses a rotated environment API key on the next scan", async () => {
+  test("uses the current environment after rotating and removing an API key", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
+    const ambientHome = join(root, "ambient-home");
+    const statusPath = join(root, "status.json");
+    const statusScript = join(root, "status.mjs");
+    const fakeCommand = nodeCodex(statusScript);
     await mkdir(repository);
+    await mkdir(ambientHome);
+    await writeFile(
+      statusScript,
+      `
+import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(statusPath)}, JSON.stringify({
+  key: process.env.OPENAI_API_KEY, marker: process.env.SYNTHETIC_STATUS_MARKER, home: process.env.CODEX_HOME,
+}));
+console.error("Logged in using ChatGPT");
+process.exit(0);
+`,
+    );
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const environment: Record<string, string | undefined> = {
+      ...fakeCommand.environment,
       OPENAI_API_KEY: "first-key",
+      CODEX_HOME: ambientHome,
+      SYNTHETIC_STATUS_MARKER: "first",
     };
     const selectedKeys: Array<string | undefined> = [];
     const client = new TestClient(
       {},
       {
         environment,
+        resolveCodexCommand: () => fakeCommand.command,
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           credentialsAvailable: false,
+          environment: {
+            ...fakeCommand.environment,
+            CODEX_HOME: codexHome,
+            OPENAI_API_KEY: environment["OPENAI_API_KEY"]!,
+            SYNTHETIC_STATUS_MARKER: "first",
+          },
         }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
@@ -7250,7 +7308,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     environment["OPENAI_API_KEY"] = "second-key";
     await expect(client.run(repository)).rejects.toThrow("scan reached");
 
-    expect(selectedKeys).toEqual(["first-key", "second-key"]);
+    delete environment["OPENAI_API_KEY"];
+    environment["SYNTHETIC_STATUS_MARKER"] = "current";
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
+    expect(JSON.parse(await readFile(statusPath, "utf8"))).toEqual({
+      marker: "current",
+      home: codexHome,
+    });
+    expect(selectedKeys).toEqual(["first-key", "second-key", undefined]);
     await client.close();
   });
 

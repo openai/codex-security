@@ -1,6 +1,34 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import {
+  scanAuthentication,
+  runtimeScanAuthentication,
+  selectedScanEnvironment,
+  withoutOpenAiApiKeys,
+  environmentApiKey,
+  definedEnvironment,
+  withoutCodexHome,
+  environmentValue,
+  type ScanAuthentication,
+} from "./execution-auth.js";
+export { scanAuthentication, environmentValue } from "./execution-auth.js";
+/** @internal */
+export {
+  runtimeScanAuthentication,
+  selectedScanEnvironment,
+} from "./execution-auth.js";
+export type { ScanAuthentication } from "./execution-auth.js";
+import {
+  prepareExecutionSource,
+  type PreparedRuntime,
+  type PreparedSession,
+  type ExecutionSource,
+  type CodexClientLike,
+  type CodexThreadLike,
+  type ScanEvent,
+} from "./execution-preparation.js";
+
+import {
   chmod,
   lstat,
   mkdir,
@@ -26,7 +54,6 @@ import {
   Codex,
   type CodexOptions,
   type ThreadOptions,
-  type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
@@ -85,9 +112,7 @@ import {
   type ResolvedDeepScanConfig,
 } from "./deep-config.js";
 import {
-  DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
-  SCAN_AUTH_MODES,
   ScanSettingsSchema,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -202,7 +227,6 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
-  type PluginInstall,
   type ProcessEnvironment,
   type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
@@ -226,55 +250,6 @@ import {
   inspectTrustedExecutable,
   type InspectedExecutable,
 } from "./trusted-executable.js";
-
-interface CodexThreadLike {
-  readonly id: string | null;
-  runStreamed(
-    input: string,
-    options: TurnOptions,
-  ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
-}
-
-interface ScanEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
-
-interface CodexClientLike {
-  startThread(options: ThreadOptions): CodexThreadLike;
-  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
-}
-
-interface PreparedRuntime {
-  codexHome: string;
-  persistentCredentialHome?: boolean;
-  bootstrapWorkspace?: string;
-  configPath?: string;
-  deepScanConfigPath?: string;
-  plugin: PluginInstall;
-  environment: Record<string, string>;
-  credentialsAvailable: boolean;
-  effectiveConfig?: JsonObject;
-}
-
-interface PreparedSession {
-  safetyIdentifier?: string;
-  runtime: PreparedRuntime;
-  runtimeHome: string;
-  effectiveConfig: JsonObject;
-  preflightConfig: JsonObject;
-  sessionConfig: JsonObject;
-  modelProvider: unknown;
-  externalProvider:
-    | (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS]
-    | null;
-  apiKey: string | null;
-  scanEnvironment: ProcessEnvironment;
-  authentication: ScanAuthentication;
-  approvalPolicy: "never" | "on-request";
-  python: string;
-  releaseCredentialHome: (() => Promise<void>) | null;
-}
 
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
@@ -344,31 +319,6 @@ export interface ValidationResult {
   outputDir: string;
   threadId: string | null;
 }
-
-export type ScanAuthentication =
-  | { method: "command"; verified: false }
-  | {
-      method: "api_key";
-      source: string;
-      verified: false;
-    }
-  | {
-      method: "stored_credentials";
-      credentialType?: "api_key" | "chatgpt";
-      verified: false;
-    }
-  | {
-      method: "aws_credentials";
-      source:
-        | "AWS_BEARER_TOKEN_BEDROCK"
-        | "AWS_ACCESS_KEY_ID"
-        | "AWS_PROFILE"
-        | "AWS_WEB_IDENTITY_TOKEN_FILE"
-        | "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
-        | "AWS_CONTAINER_CREDENTIALS_FULL_URI"
-        | "default_credential_chain";
-      verified: false;
-    };
 
 export type ScanTrustedAccessStatus = "granted" | "not_granted" | "unknown";
 
@@ -1302,7 +1252,6 @@ export class CodexSecurity {
         runtimeHome,
         effectiveConfig,
         preflightConfig,
-        modelProvider,
         authentication,
         approvalPolicy,
         python,
@@ -1310,11 +1259,7 @@ export class CodexSecurity {
       releaseCredentialHome = session.releaseCredentialHome;
       let git: InspectedExecutable = {
         executable: null,
-        environment: selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          modelProvider,
-        ),
+        environment: session.source.environment,
       };
       for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
         git = await inspectTrustedExecutable(
@@ -1614,7 +1559,8 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...environmentWithGit(git.environment, git),
+          ...withoutCodexHome(environmentWithGit(git.environment, git)),
+          CODEX_HOME: runtime.codexHome,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -1808,7 +1754,7 @@ export class CodexSecurity {
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
-        modelProvider,
+        session.source.modelProvider,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1975,7 +1921,7 @@ export class CodexSecurity {
         protectedRoot,
         expectation,
         authentication,
-        modelProvider,
+        modelProvider: session.source.modelProvider,
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
@@ -2689,33 +2635,19 @@ export class CodexSecurity {
   #createSessionCodex(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
-    auth: ScanAuthMode = "auto",
+    _auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
-    const {
-      runtime,
-      python,
-      modelProvider,
-      externalProvider,
-      apiKey,
-      sessionConfig,
-    } = session;
+    const { runtime, python, externalProvider, apiKey, sessionConfig } =
+      session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...environmentWithGit(
         pluginExecutionEnvironment(
           python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              commandAuth
-                ? withoutOpenAiApiKeys(runtime.environment)
-                : runtime.environment,
-              auth,
-              modelProvider,
-            ),
-          ),
+          withoutCodexHome(session.source.environment),
         ),
         git,
       ),
@@ -2723,6 +2655,9 @@ export class CodexSecurity {
         ? {}
         : { [externalProvider.env_key]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(
+        session.source.environment,
+      ),
       ...runtimePaths,
     };
     for (const name of Object.keys(environment)) {
@@ -2744,10 +2679,10 @@ export class CodexSecurity {
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
     let codexPathOverride =
-      environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
+      environmentValue(session.source.environment, "CODEX_CLI_PATH") ===
       undefined
         ? undefined
-        : this.#codexCommand().command;
+        : session.source.command.command;
     let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
     if (process.platform === "win32" && codexPathOverride === undefined) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
@@ -2815,34 +2750,20 @@ export class CodexSecurity {
         await mergedCodexConfig(this.config),
         configuredCodexHome(this.#dependencies.environment),
       );
-      const commandAuth = hasCommandAuth(requestedConfig);
-      const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider =
-        !commandAuth && isExternalModelProvider(modelProvider)
-          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-          : null;
-      let authentication = scanAuthentication(
-        this.#dependencies.environment,
-        options.auth,
+      const source = prepareExecutionSource({
+        command: this.#codexCommand(),
+        configuration: requestedConfig,
+        environment: this.#dependencies.environment,
+        auth: options.auth,
+      });
+      const {
         modelProvider,
-        commandAuth,
-      );
-      const apiKey =
-        authentication.method === "api_key"
-          ? environmentApiKey(this.#dependencies.environment, modelProvider)
-          : null;
-      if (externalProvider !== null && apiKey === null) {
-        throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
-        );
-      }
-      const scanEnvironment = selectedScanEnvironment(
-        commandAuth
-          ? withoutOpenAiApiKeys(this.#dependencies.environment)
-          : this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
+        externalProvider,
+        apiKey,
+        environment: scanEnvironment,
+      } = source;
+      const commandAuth = hasCommandAuth(source.configuration);
+      let authentication = source.authentication;
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
@@ -2857,25 +2778,19 @@ export class CodexSecurity {
       const previousRuntime = this.#runtime;
       const runtime = await this.#ensureRuntime(
         signal,
+        source,
         temporaryRoot,
         (path) =>
           requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-        options.auth,
-        requestedConfig,
       );
       if (
         runtime === previousRuntime &&
         this.#dependencies.prepareRuntime === undefined
       ) {
-        await this.#refreshPersistentRuntime(
-          runtime,
-          scanEnvironment,
-          signal,
-          requestedConfig,
-        );
+        await this.#refreshPersistentRuntime(runtime, source, signal);
       }
       const effectiveConfig = scanCyberAccessConfig(
-        runtime.effectiveConfig ?? requestedConfig,
+        structuredClone(runtime.effectiveConfig ?? source.configuration),
         options.cyberAccessProgram,
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
@@ -2912,7 +2827,7 @@ export class CodexSecurity {
         this.#runtimeCredentialSource === "api_key"
       ) {
         const ambientHome =
-          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+          environmentValue(source.environment, "CODEX_HOME") ??
           join(homedir(), ".codex");
         runtime.credentialsAvailable = await importAmbientAuth(
           ambientHome,
@@ -2934,8 +2849,11 @@ export class CodexSecurity {
         authentication.method === "stored_credentials"
       ) {
         const status = await accountStatus(
-          this.#codexCommand(),
-          runtime.environment,
+          source.command,
+          {
+            ...withoutCodexHome(source.environment),
+            CODEX_HOME: runtime.codexHome,
+          },
           signal,
         );
         runtime.credentialsAvailable = status.authenticated;
@@ -2953,7 +2871,7 @@ export class CodexSecurity {
       }
       if (!commandAuth)
         authentication = await runtimeScanAuthentication(
-          this.#dependencies.environment,
+          source.environment,
           runtime.codexHome,
           options.auth,
           modelProvider,
@@ -2986,6 +2904,7 @@ export class CodexSecurity {
       });
       checkOpen();
       return {
+        source,
         runtime,
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
@@ -3012,21 +2931,19 @@ export class CodexSecurity {
   }
 
   async #ensureRuntime(
-    signal?: AbortSignal,
+    signal: AbortSignal,
+    source: ExecutionSource,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
-    requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
     if (this.#runtime !== null) return this.#runtime;
     if (this.#runtimePromise === null) {
       const runtimePromise = this.#prepareRuntime(
-        signal ?? this.#abortController.signal,
+        signal,
+        source,
         temporaryRoot,
         validateLocation,
-        auth,
-        requestedConfig,
       );
       this.#runtimePromise = runtimePromise;
       void runtimePromise.catch(() => {
@@ -3062,10 +2979,10 @@ export class CodexSecurity {
 
   async #refreshPersistentRuntime(
     runtime: PreparedRuntime,
-    environment: ProcessEnvironment,
+    source: ExecutionSource,
     signal: AbortSignal,
-    mergedConfig: JsonObject,
   ): Promise<void> {
+    const mergedConfig = source.configuration;
     throwIfAborted(signal);
     const config = await preserveCodexSecurityPluginRegistration(
       runtime.codexHome,
@@ -3076,8 +2993,8 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
-        codexCommand: this.#codexCommand(),
-        environment: withoutCodexHome(environment),
+        codexCommand: source.command,
+        environment: withoutCodexHome(source.environment),
         signal,
       },
     );
@@ -3516,25 +3433,16 @@ export class CodexSecurity {
 
   async #prepareRuntime(
     signal: AbortSignal,
+    source: ExecutionSource,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
-    requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const modelProvider =
-      requestedConfig === undefined
-        ? undefined
-        : scanModelProvider(requestedConfig);
-    const processEnvironment = selectedScanEnvironment(
-      requestedConfig !== undefined && hasCommandAuth(requestedConfig)
-        ? withoutOpenAiApiKeys(this.#dependencies.environment)
-        : this.#dependencies.environment,
-      auth,
-      modelProvider,
-    );
+    const modelProvider = source.modelProvider;
+    const processEnvironment = source.environment;
+    const requestedConfig = source.configuration;
     const codexHome =
       validateLocation === undefined
         ? await prepareCodexSecurityCredentialHome(processEnvironment)
@@ -3557,8 +3465,7 @@ export class CodexSecurity {
         "CODEX_HOME",
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
-      const mergedConfig =
-        requestedConfig ?? (await mergedCodexConfig(this.config));
+      const mergedConfig = requestedConfig;
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
         sharedCredentialCodexConfig(mergedConfig, codexHome),
@@ -3566,14 +3473,13 @@ export class CodexSecurity {
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
-      const codexCommand = this.#codexCommand();
       await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
-        codexCommand,
+        source.command,
         { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
         signal,
       );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        codexCommand,
+        codexCommand: source.command,
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
@@ -4347,54 +4253,6 @@ async function collectResult(
   });
 }
 
-export function scanAuthentication(
-  environment: ProcessEnvironment,
-  auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
-  modelProvider?: unknown,
-  commandAuth = false,
-): ScanAuthentication {
-  if (!SCAN_AUTH_MODES.includes(auth)) {
-    throw new TypeError(
-      "Scan authentication mode must be auto, chatgpt, or api-key.",
-    );
-  }
-  if (commandAuth) return { method: "command", verified: false };
-  if (modelProvider === "amazon-bedrock") {
-    const sources = [
-      "AWS_BEARER_TOKEN_BEDROCK",
-      "AWS_ACCESS_KEY_ID",
-      "AWS_PROFILE",
-      "AWS_WEB_IDENTITY_TOKEN_FILE",
-      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-      "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-    ] as const;
-    const source = sources.find((name) => environmentValue(environment, name));
-    return {
-      method: "aws_credentials",
-      source: source ?? "default_credential_chain",
-      verified: false,
-    };
-  }
-  if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
-    return { method: "stored_credentials", verified: false };
-  }
-  const key = environmentApiKeyEntry(environment, modelProvider);
-  if (
-    auth === "api-key" &&
-    key === null &&
-    !isExternalModelProvider(modelProvider)
-  ) {
-    throw new AuthenticationRequiredError(
-      "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY. " +
-        "Set a valid API key or use '--auth chatgpt'.",
-    );
-  }
-  return key === null
-    ? { method: "stored_credentials", verified: false }
-    : { method: "api_key", source: key.source, verified: false };
-}
-
-/** Shell-neutral guidance so PowerShell users are not told to run POSIX `unset`. */
 export function formatEnvironmentVariableRemovalGuidance(
   names: readonly string[],
 ): string {
@@ -4410,74 +4268,6 @@ export function formatEnvironmentVariableRemovalGuidance(
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
 
-/** @internal */
-export async function runtimeScanAuthentication(
-  environment: ProcessEnvironment,
-  codexHome: string,
-  auth: ScanAuthMode = "auto",
-  modelProvider?: unknown,
-): Promise<ScanAuthentication> {
-  const authentication = scanAuthentication(environment, auth, modelProvider);
-  if (authentication.method !== "stored_credentials") return authentication;
-
-  try {
-    const stored = JSON.parse(
-      await readFile(join(codexHome, "auth.json"), "utf8"),
-    ) as unknown;
-    if (!isRecord(stored)) return authentication;
-
-    const mode = stored["auth_mode"];
-    if (mode === "apikey" || mode === "api_key") {
-      return { ...authentication, credentialType: "api_key" };
-    }
-    if (mode === "chatgpt") {
-      return { ...authentication, credentialType: "chatgpt" };
-    }
-  } catch {
-    return authentication;
-  }
-
-  return authentication;
-}
-
-/** @internal */
-export function selectedScanEnvironment(
-  environment: ProcessEnvironment,
-  auth: ScanAuthMode = "auto",
-  modelProvider?: unknown,
-): ProcessEnvironment {
-  const selectedProviderKey = isExternalModelProvider(modelProvider)
-    ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
-    : null;
-  const bedrockProvider = modelProvider === "amazon-bedrock";
-  if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
-    return environment;
-  }
-  return Object.fromEntries(
-    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
-      const key = name.toUpperCase();
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
-        return (
-          !bedrockProvider &&
-          (selectedProviderKey === null || key === selectedProviderKey)
-        );
-      }
-      return true;
-    }),
-  );
-}
-
-function withoutOpenAiApiKeys(
-  environment: ProcessEnvironment,
-): ProcessEnvironment {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) =>
-        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-    ),
-  );
-}
-
 function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,
   observer: ((...args: Arguments) => void) | undefined,
@@ -4489,34 +4279,6 @@ function notifyObserver<Arguments extends unknown[]>(
     .then(() => observer?.(...args))
     .catch((error: unknown) => onObserverError?.(observerName, error))
     .catch(() => {});
-}
-
-function environmentApiKey(
-  environment: ProcessEnvironment,
-  modelProvider?: unknown,
-): string | null {
-  return environmentApiKeyEntry(environment, modelProvider)?.value ?? null;
-}
-
-function environmentApiKeyEntry(
-  environment: ProcessEnvironment,
-  modelProvider?: unknown,
-): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
-  value: string;
-} | null {
-  const keys = isExternalModelProvider(modelProvider)
-    ? [EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
-    : (["OPENAI_API_KEY", "CODEX_API_KEY"] as const);
-  for (const requested of keys) {
-    const value = environmentValue(environment, requested)?.trim();
-    if (value) return { source: requested, value };
-  }
-  return null;
 }
 
 function reconnectAttempt(message: string): [number, number] | null {
@@ -4939,43 +4701,4 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
-}
-
-function definedEnvironment(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
-
-function withoutCodexHome(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(definedEnvironment(environment)).filter(
-      ([name]) => name.toUpperCase() !== "CODEX_HOME",
-    ),
-  );
-}
-
-export function environmentValue(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested];
-  if (exact !== undefined && exact.trim() !== "") return exact;
-  const upper = requested.toUpperCase();
-  for (const [name, value] of Object.entries(environment)) {
-    if (
-      name.toUpperCase() === upper &&
-      value !== undefined &&
-      value.trim() !== ""
-    ) {
-      return value;
-    }
-  }
-  return undefined;
 }

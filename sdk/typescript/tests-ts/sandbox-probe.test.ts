@@ -161,6 +161,7 @@ describe("Codex sandbox probe", () => {
       await mkdir(scanDir, { mode: 0o700 });
       await writeFile(join(repository, "app.py"), "print('synthetic')\n");
       const command = await syntheticCodex(root, 1);
+      let resolutions = 0;
       const client = new TestClient(
         { pluginPath: await syntheticPlugin(root) },
         {
@@ -168,7 +169,10 @@ describe("Codex sandbox probe", () => {
             OPENAI_API_KEY: "synthetic-key",
             CODEX_SECURITY_STATE_DIR: state,
           },
-          resolveCodexCommand: () => ({ command }),
+          resolveCodexCommand: () => ({
+            command:
+              resolutions++ === 0 ? command : join(root, "unselected-codex"),
+          }),
           probeCodexSandbox,
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
@@ -183,6 +187,7 @@ describe("Codex sandbox probe", () => {
         expect(await readFile(`${command}.args`, "utf8")).toBe(
           ["sandbox", "--", command, "--version", ""].join("\n"),
         );
+        expect(resolutions).toBe(1);
       } finally {
         await client.close();
       }
