@@ -4237,8 +4237,7 @@ describe("GitHub release workflow safeguards", () => {
           ]),
         );
         for (const stepName of [
-          "Set up pnpm",
-          "Set up Node.js",
+          "Set up TypeScript tools",
           "Install dependencies",
           "Check Markdown formatting",
         ]) {
