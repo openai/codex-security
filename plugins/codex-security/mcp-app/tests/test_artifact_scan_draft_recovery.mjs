@@ -498,6 +498,40 @@ for (const layout of ["standard", "diff", "worker"]) {
     assert.deepEqual(retried.coverage.resolvedDeferred, [close(id)]);
   });
 
+  for (const hasPublishedId of [false, true]) {
+    test(`${layout}: a legacy ID-less surface stays closed, published ID=${hasPublishedId}`, async (t) => {
+      const f = await fixture(t, layout);
+      const surface = { label: "Uploads", disposition: "needs_follow_up" };
+      if (hasPublishedId) {
+        await f.write(
+          f.draft({ surfaces: [{ ...surface, id: "surface_uploads" }] }),
+        );
+      }
+      await saveScanDraftCheckpoint(
+        f.context,
+        f.draft({ surfaces: [surface], deferred: [generic] }),
+        false,
+      );
+      const restored = await f.write(f.draft({}, true));
+      assert.equal(restored.coverage.surfaces.length, 1);
+      const restoredSurface = restored.coverage.surfaces[0];
+      if (hasPublishedId) assert.equal(restoredSurface.id, "surface_uploads");
+      const resolved = f.draft(
+        {
+          surfaces: [{ ...restoredSurface, disposition: "no_issue_found" }],
+          resolvedDeferred: [close(restored.coverage.deferred[0].id)],
+        },
+        true,
+      );
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const result = await f.write(resolved);
+        assert.equal(result.coverage.completeness, "complete");
+        assert.deepEqual(result.coverage.surfaces, resolved.coverage.surfaces);
+        assert.deepEqual(result.coverage.deferred, []);
+      }
+    });
+  }
+
   test(`${layout}: inheriting a candidate outcome keeps newer follow-up work`, async (t) => {
     const f = await fixture(t, layout);
     const surface = { id: "api", label: "API", disposition: "needs_follow_up" };

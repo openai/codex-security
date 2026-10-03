@@ -368,11 +368,40 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
-  // Older checkpoints can omit task IDs already assigned in their published output.
+  // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
     (source) => source.coverage.deferred as JsonObject[],
   );
+  const savedSurfaces = sources.flatMap(
+    (source) => source.coverage.surfaces as JsonObject[],
+  );
   for (const source of sources) {
+    const reservedSurfaceIds = new Set(
+      (source.coverage.surfaces as JsonObject[]).flatMap((row) =>
+        typeof row.id === "string" ? [row.id] : [],
+      ),
+    );
+    const surfaces = (source.coverage.surfaces as JsonObject[]).map((row) => {
+      if (typeof row.id === "string") return row;
+      const matching = savedSurfaces.find(
+        ({ id, ...content }) =>
+          typeof id === "string" &&
+          !reservedSurfaceIds.has(id) &&
+          isDeepStrictEqual(
+            { ...content, receiptRefs: content.receiptRefs ?? [] },
+            { ...row, receiptRefs: row.receiptRefs ?? [] },
+          ),
+      );
+      if (matching === undefined) return row;
+      const id = matching.id as string;
+      reservedSurfaceIds.add(id);
+      return { ...row, id };
+    });
+    const normalizedSurfaces = normalizeSurfaces(surfaces);
+    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
+    source.coverage.surfaces = surfaces.map((row, index) =>
+      typeof row.id === "string" ? row : normalizedSurfaces[index]!,
+    );
     const reservedIds = new Set(
       (source.coverage.deferred as JsonObject[]).flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
