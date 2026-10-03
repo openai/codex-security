@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import type { ThreatModel } from "./models.js";
-import { isOutsidePath } from "./prompt-files.js";
+import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import {
   bundledPluginRoot,
   codexSecurityStateDirectory,

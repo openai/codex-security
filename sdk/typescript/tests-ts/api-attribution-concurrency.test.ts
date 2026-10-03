@@ -7,25 +7,22 @@ import type {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { CodexSecurity } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { InternalSecurity } from "./support/internal-security.js";
 
 const fixtures = createApiTestFixtures();
-const InternalCodexSecurity = CodexSecurity as unknown as new (
-  config: Record<string, unknown>,
-  dependencies: Record<string, unknown>,
-  runtimeOptions?: { surface: "cli" | "sdk" },
-) => CodexSecurity;
 
-afterEach(async () => {
-  await fixtures.cleanup();
-});
+afterEach(fixtures.cleanup);
 
 describe("delegated scan attribution", () => {
-  test.each(["standard", "deep"] as const)(
-    "keeps overlapping CLI and SDK %s scans concurrent and correctly attributed",
-    async (mode) => {
+  test.each([
+    ["standard", true],
+    ["deep", true],
+    ["standard", false],
+  ] as const)(
+    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p",
+    async (mode, selectProgram) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
       const ambientHome = join(root, "ambient-home");
@@ -36,17 +33,22 @@ describe("delegated scan attribution", () => {
       let active = 0;
       let maximumActive = 0;
       const configPaths = new Set<string>();
-      const programs = ["daybreak_blue", "standard"] as const;
-      const { promise: concurrentScans, resolve: releaseConcurrentScans } =
-        Promise.withResolvers<void>();
+      const programs = selectProgram
+        ? (["daybreak_blue", "standard"] as const)
+        : ([undefined, undefined] as const);
+      const concurrentScans = Promise.withResolvers<void>();
 
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {
           const program = surface === "cli" ? programs[0] : programs[1];
-          const features = {
-            api_key_cyber_access_programs: surface === "cli",
-            ...(surface === "sdk" ? { api_key_model_discovery: false } : {}),
-          };
+          const features = selectProgram
+            ? {
+                api_key_cyber_access_programs: surface === "cli",
+                ...(surface === "sdk"
+                  ? { api_key_model_discovery: false }
+                  : {}),
+              }
+            : {};
           const scanDirectory = join(root, `${surface}-scan`);
           const gitDirectory = join(root, `${surface}-tools`);
           await mkdir(gitDirectory);
@@ -59,7 +61,7 @@ describe("delegated scan attribution", () => {
           await symlink(await realpath(hostGit!), git);
           const expectedGitDirectory = await realpath(gitDirectory);
           await mkdir(scanDirectory, { mode: 0o700 });
-          return new InternalCodexSecurity(
+          return new InternalSecurity(
             {
               pluginPath: PLUGIN_ROOT,
               ...(surface === "sdk" ? { codexOverrides: { features } } : {}),
@@ -108,7 +110,7 @@ describe("delegated scan attribution", () => {
                   ) {
                     active += 1;
                     maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) releaseConcurrentScans();
+                    if (active === 2) concurrentScans.resolve();
                     try {
                       const initialEnvironment = { ...options.env };
                       expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
@@ -145,11 +147,23 @@ describe("delegated scan attribution", () => {
                       expect(configPath).toBeString();
                       configPaths.add(configPath!);
                       const initialConfig = await readFile(configPath!, "utf8");
-                      expect(parseToml(initialConfig)).toMatchObject({
-                        codex_security: { cyber_access_program: program },
-                        features,
-                      });
-                      await concurrentScans;
+                      const runtimeConfig = parseToml(initialConfig);
+                      expect(runtimeConfig).toMatchObject({ features });
+                      if (program === undefined) {
+                        expect(runtimeConfig).not.toHaveProperty(
+                          "codex_security",
+                        );
+                        for (const config of [options.config, runtimeConfig]) {
+                          expect(config?.["features"]).not.toHaveProperty(
+                            "api_key_cyber_access_programs",
+                          );
+                        }
+                      } else {
+                        expect(runtimeConfig).toMatchObject({
+                          codex_security: { cyber_access_program: program },
+                        });
+                      }
+                      await concurrentScans.promise;
                       const sharedConfig = parseToml(
                         await readFile(
                           join(credentialHome, "config.toml"),
@@ -184,7 +198,7 @@ describe("delegated scan attribution", () => {
                 }),
               }),
             },
-            { surface },
+            surface === "sdk" && !selectProgram ? undefined : { surface },
           );
         }),
       );
@@ -194,7 +208,7 @@ describe("delegated scan attribution", () => {
           clients.map((client, index) =>
             client
               .run(repository, { mode, cyberAccessProgram: programs[index] })
-              .finally(releaseConcurrentScans),
+              .finally(concurrentScans.resolve),
           ),
         );
         for (const result of results) {
@@ -208,7 +222,7 @@ describe("delegated scan attribution", () => {
         expect(maximumActive).toBe(2);
         expect(configPaths.size).toBe(2);
       } finally {
-        releaseConcurrentScans();
+        concurrentScans.resolve();
         await Promise.all(clients.map(async (client) => await client.close()));
       }
     },

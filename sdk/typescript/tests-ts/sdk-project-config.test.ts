@@ -13,7 +13,8 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -82,9 +83,7 @@ test.each(["standard", "deep"] as const)(
     };
     const clientDependencies = {
       environment,
-      prepareRuntime: async () => {
-        throw new Error("Preflight must not initialize a runtime");
-      },
+      prepareRuntime: rejecting("Preflight must not initialize a runtime"),
     };
     await using direct = new TestClient(
       { codexOverrides: input.codex },

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -25,10 +25,10 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
-  createApiTestFixtures,
   failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -115,9 +115,7 @@ async function startPostScan(scenario: PostScanScenario) {
                 if (scenario.artifact !== "threatmodel.md")
                   manifest.scan.artifacts.push({
                     path: scenario.artifact,
-                    sha256: createHash("sha256")
-                      .update(await readFile(artifactPath))
-                      .digest("hex"),
+                    sha256: hash("sha256", await readFile(artifactPath)),
                     mediaType: scenario.artifact.endsWith(".bin")
                       ? "application/octet-stream"
                       : "application/json",
