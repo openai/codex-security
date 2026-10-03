@@ -460,7 +460,7 @@ describe("deep-review worklists", () => {
         (location === "unc" && !hasWindowsLoopbackShare),
     )(
       `documented PowerShell copy command preserves ${location} literal paths and worklist contents`,
-      () => {
+      async () => {
         const f = fixture();
         const launcher = windowsHelperFixture(f.root);
         const discovery = join(
@@ -493,7 +493,7 @@ describe("deep-review worklists", () => {
         for (const powershell of launcher.powershells) {
           rmSync(output, { force: true });
           writeFileSync(expandedOutput, "expanded output sentinel");
-          const result = launcher.run(
+          const result = await launcher.run(
             powershell,
             "skills/security-scan/references/scan-artifacts-and-ledger.md",
             {

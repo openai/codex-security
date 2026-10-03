@@ -844,7 +844,7 @@ describe("patch risk assessment contract", () => {
           for (const input of ["invalid", "valid", "stdin", "missing"]) {
             await writeFile(file, input === "invalid" ? "{}" : original);
             if (input === "missing") await rm(file);
-            const result = launcher.run(
+            const result = await launcher.run(
               powershell,
               "skills/assess-patch-risk/SKILL.md",
               {

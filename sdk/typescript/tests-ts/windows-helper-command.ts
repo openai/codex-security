@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -8,6 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 export function windowsHelperFixture(root: string) {
   const plugin = join(root, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
@@ -31,7 +31,7 @@ export function windowsHelperFixture(root: string) {
   return {
     plugin,
     powershells,
-    run(
+    async run(
       powershell: string,
       document: string,
       paths: Record<string, string>,
@@ -48,7 +48,7 @@ export function windowsHelperFixture(root: string) {
         "$ProgressPreference = 'SilentlyContinue'\n" +
         `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
         command;
-      const result = spawnSync(
+      const result = await runCommand(
         powershell,
         [
           "-NoLogo",
@@ -73,7 +73,7 @@ export function windowsHelperFixture(root: string) {
             USERNAME: "expanded-user",
             EXPAND: "expanded-bang",
           },
-          encoding: "utf8",
+          timeout: 30_000,
           input,
           windowsHide: true,
         },
