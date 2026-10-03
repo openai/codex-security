@@ -761,6 +761,7 @@
           }
         },
         "deferred": {
+          "description": "Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates.",
           "type": "array",
           "items": {
             "type": "object",
@@ -785,6 +786,26 @@
               "reason"
             ],
             "additionalProperties": true
+          }
+        },
+        "resolvedDeferred": {
+          "description": "On final Standard or diff drafts, close generic tasks by saved ID and completion reason. Reuse saved surface IDs for updates. Candidate tasks need findings or dispositions; redundant closure entries for those outcomes are ignored.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "reason": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "required": [
+              "id",
+              "reason"
+            ],
+            "additionalProperties": false
           }
         },
         "openQuestions": {

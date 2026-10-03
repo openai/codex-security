@@ -1,11 +1,11 @@
+import { sha256 } from "./support/finding-identity.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   appendFile,
-  mkdtemp,
   readFile,
   readdir,
-  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -39,15 +39,9 @@ const OPTIONS: PublishScanOptions = {
 };
 const CLAIM_COLLISION_ERROR =
   "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 function preparedPublication(
   count = 1,
@@ -154,7 +148,7 @@ function dependencies(
     tmpdir(),
     `codex-security-publication-test-${randomUUID()}`,
   );
-  temporaryDirectories.push(stateDirectory);
+  temporaryDirectories.track(stateDirectory);
   return {
     environment: {
       ...process.env,
@@ -805,10 +799,8 @@ describe("direct Linear API publication", () => {
     let started = 0;
     let completed = 0;
     let completedAtFirstIssueProgress: number | undefined;
-    let releaseFirstBatch: (() => void) | undefined;
-    const firstBatchStarted = new Promise<void>((resolve) => {
-      releaseFirstBatch = resolve;
-    });
+    const { promise: firstBatchStarted, resolve: releaseFirstBatch } =
+      Promise.withResolvers<void>();
     const result = await publishScanInternal(
       publication.scanDirectory,
       {
@@ -1263,10 +1255,9 @@ describe("connected Linear publication", () => {
 
   test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
     const publication = preparedPublication();
-    const stateDirectory = await mkdtemp(
-      join(tmpdir(), "codex-security-publication-environment-"),
+    const stateDirectory = await temporaryDirectories.create(
+      "codex-security-publication-environment-",
     );
-    temporaryDirectories.push(stateDirectory);
     const environment = {
       CODEX_HOME: "/existing/connected-codex-home",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -3121,10 +3112,9 @@ describe("connected Linear publication", () => {
   ] as const)(
     "cancellation stops %s and its signal-resistant Codex descendants",
     async (_name, ignoresSignal, signal, verifyTaskkill) => {
-      const directory = await mkdtemp(
-        join(tmpdir(), "codex-security-publication-cancel-"),
+      const directory = await temporaryDirectories.create(
+        "codex-security-publication-cancel-",
       );
-      temporaryDirectories.push(directory);
       const publication = preparedPublication(2);
       const parentPath = join(directory, "parent.pid");
       const descendantPath = join(directory, "descendant.pid");
@@ -3243,7 +3233,7 @@ describe("connected Linear publication", () => {
           "state",
           "publications",
           "linear",
-          `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
+          `${sha256(publication.scanId)}.json`,
         );
         const persisted = JSON.parse(await readFile(receipt, "utf8")) as {
           created: Array<{ issueIdentifier: string }>;
@@ -3265,10 +3255,9 @@ describe("connected Linear publication", () => {
   );
 
   test("streams dotted Linear events, ordered progress, and a partial-publication receipt", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "codex-security-publication-stream-"),
+    const directory = await temporaryDirectories.create(
+      "codex-security-publication-stream-",
     );
-    temporaryDirectories.push(directory);
     const publication = preparedPublication(3);
     const preload = join(directory, "codex-preload.cjs");
     await writeFile(
@@ -3408,7 +3397,7 @@ describe("connected Linear publication", () => {
       "state",
       "publications",
       "linear",
-      `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
+      `${sha256(publication.scanId)}.json`,
     );
     expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(result);
   });
@@ -3651,9 +3640,8 @@ describe("connected Linear publication", () => {
         failed: partialFailure ? 1 : 0,
       });
       expect(result.warnings).toEqual([
-        "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+        "Could not save the publication receipt: OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123. Linear issues were already created; do not retry publication.",
       ]);
-      expect(JSON.stringify(result)).not.toContain("SYNTHETIC_RECEIPT_SECRET");
       expect(progress.at(-1)).toEqual({
         type: "completed",
         created: expectedCreated.length,
@@ -3786,10 +3774,9 @@ describe("connected Linear publication", () => {
   });
 
   test("preserves both private receipts when the same scan is published concurrently", async () => {
-    const stateDirectory = await mkdtemp(
-      join(tmpdir(), "codex-security-concurrent-publication-receipts-"),
+    const stateDirectory = await temporaryDirectories.create(
+      "codex-security-concurrent-publication-receipts-",
     );
-    temporaryDirectories.push(stateDirectory);
     const publication = preparedPublication();
     let calls = 0;
     const injected = dependencies(
@@ -3816,9 +3803,7 @@ describe("connected Linear publication", () => {
       publishScanInternal(publication.scanDirectory, OPTIONS, injected),
     ]);
     const directory = join(stateDirectory, "publications", "linear");
-    const digest = createHash("sha256")
-      .update(publication.scanId)
-      .digest("hex");
+    const digest = sha256(publication.scanId);
     const attempts = (await readdir(directory)).filter(
       (name) => name.startsWith(`${digest}-`) && name.endsWith(".json"),
     );
@@ -3852,10 +3837,9 @@ describe("connected Linear publication", () => {
   });
 
   test("keeps publication receipts outside sealed scans and hashes unsafe scan IDs", async () => {
-    const stateDirectory = await mkdtemp(
-      join(tmpdir(), "codex-security-publication-receipt-"),
+    const stateDirectory = await temporaryDirectories.create(
+      "codex-security-publication-receipt-",
     );
-    temporaryDirectories.push(stateDirectory);
     const publication = preparedPublication(1, "../../outside/scan");
     const injected = dependencies(
       publication,
@@ -3871,9 +3855,7 @@ describe("connected Linear publication", () => {
       OPTIONS,
       injected,
     );
-    const digest = createHash("sha256")
-      .update("../../outside/scan")
-      .digest("hex");
+    const digest = sha256("../../outside/scan");
     const receipt = join(
       stateDirectory,
       "publications",

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -11,18 +11,22 @@ export const statePath = ".github/release-pr-state.json";
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
-const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\([^)]*\))?(!)?: (.+)$/u;
+const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\(([^)]*)\))?(!)?: (.+)$/u;
+
+function isReleaseTitle(title) {
+  const [, type, scope] = conventionalTitle.exec(title) ?? [];
+  return type === "release" || (type === "chore" && scope === "release");
+}
 
 function isReleasePull(pull) {
   return (
-    conventionalTitle.exec(pull.title)?.[1] === "release" ||
-    pull.head.ref.startsWith(releaseBranchPrefix)
+    isReleaseTitle(pull.title) || pull.head.ref.startsWith(releaseBranchPrefix)
   );
 }
 
 export function isBreakingChange(change) {
   return (
-    conventionalTitle.exec(change.title)?.[2] === "!" ||
+    conventionalTitle.exec(change.title)?.[3] === "!" ||
     /^(?:BREAKING CHANGE|BREAKING-CHANGE):\s+\S/mu.test(change.body ?? "") ||
     (change.labels ?? []).includes("breaking-change")
   );
@@ -47,7 +51,7 @@ function markdownText(value) {
 }
 
 function changeLine(change) {
-  const description = conventionalTitle.exec(change.title)?.[3] ?? change.title;
+  const description = conventionalTitle.exec(change.title)?.[4] ?? change.title;
   const reference = change.number
     ? `#${change.number}`
     : change.sha.slice(0, 7);
@@ -59,7 +63,7 @@ function visibleChanges(changes) {
     const type = conventionalTitle.exec(change.title)?.[1];
     return (
       !(change.labels ?? []).includes("skip-release-notes") &&
-      (change.breaking || !["release", "test"].includes(type))
+      (change.breaking || (type !== "test" && !isReleaseTitle(change.title)))
     );
   });
 }
@@ -110,10 +114,6 @@ function findSection(notes, id) {
   return { start, end, text: notes.slice(start, end) };
 }
 
-function hash(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 export function updateReleaseNotes(
   version,
   generated,
@@ -125,7 +125,10 @@ export function updateReleaseNotes(
   if (previousSections === undefined) {
     const blocks = sectionIds.map((id) => {
       const block = sectionBlock(id, generated[id]);
-      sections[id] = { generatedHash: hash(block), humanOwned: false };
+      sections[id] = {
+        generatedHash: hash("sha256", block),
+        humanOwned: false,
+      };
       return block;
     });
     return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
@@ -144,7 +147,7 @@ export function updateReleaseNotes(
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||
-        hash(block.text) !== previous.generatedHash);
+        hash("sha256", block.text) !== previous.generatedHash);
     if (humanOwned) {
       sections[id] = {
         generatedHash: previous?.generatedHash ?? null,
@@ -158,7 +161,7 @@ export function updateReleaseNotes(
     } else {
       notes = notes.slice(0, block.start) + next + notes.slice(block.end);
     }
-    sections[id] = { generatedHash: hash(next), humanOwned: false };
+    sections[id] = { generatedHash: hash("sha256", next), humanOwned: false };
   }
   return { notes, sections };
 }
@@ -206,10 +209,7 @@ export function createReleasePlan(history, previous = null) {
     mainSha,
     version,
     branch: `${releaseBranchPrefix}${baseVersion}`,
-    title:
-      changes.length > 0
-        ? `release: bump Codex Security to ${version}`
-        : "release: prepare the next Codex Security release",
+    title: `chore(release): ${version}`,
     changes,
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
@@ -333,14 +333,13 @@ function readReleaseBranch(repo, mainSha, headSha) {
 
 function initialPullBody(template) {
   const sections = {
-    Summary:
-      "Keep a draft release proposal current with changes merged into main.",
+    Summary: "Keep a release proposal current with changes merged into main.",
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Check required CI and Codex review on the current head before marking this draft ready. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
+      "The updater does not run package tests. Check required CI and Codex review on the current head before merging. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
     "Risk and rollout":
-      "This PR does not merge itself. Merging a nonempty proposal starts the existing CI and protected release process. An empty proposal leaves the package version unchanged. Review migration details and complete the public disclosure review before merging.",
+      "Merging this PR starts the existing CI and protected release process. Review migration details and complete the public disclosure review before merging.",
   };
   let body = template;
   for (const [heading, content] of Object.entries(sections)) {
@@ -390,9 +389,6 @@ function pullHoldReason(pull, branch) {
     pull.base.ref !== "main"
   ) {
     return "The release PR was closed or retargeted during the update. Review it before continuing.";
-  }
-  if (!pull.draft) {
-    return `Release PR #${pull.number} is ready for review. Convert it back to a draft to resume automatic updates.`;
   }
   return null;
 }
@@ -456,7 +452,7 @@ async function ensurePullRequest(
       title: plan.title,
       head: plan.branch,
       base: "main",
-      draft: true,
+      draft: false,
       body: initialPullBody(template),
     });
   }
@@ -478,8 +474,8 @@ async function ensurePullRequest(
     };
   }
   const marker = `<!-- release-pr-head: ${headSha} -->`;
-  const proposalMarker = `<!-- release-pr-proposal: ${hash(JSON.stringify(plan.files))} -->`;
-  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash(JSON.stringify(plan.generated))} -->`;
+  const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
+  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
   const comments = await github.list(
     `issues/${current.number}/comments?per_page=100`,
   );
@@ -546,12 +542,21 @@ export async function reconcileReleasePullRequest({
     if (holdReason) return { action: "held", reason: holdReason, dryRun, plan };
     if (pull && !headSha)
       throw new Error("The open release PR has no branch head.");
-    const changed =
+    if (plan.changes.length === 0)
+      return {
+        action: "unchanged",
+        reason:
+          "No changes have reached main since the current release version.",
+        dryRun,
+        plan,
+      };
+    const branchChanged =
       !headSha ||
       previous.mergeBase !== mainSha ||
       Object.entries(plan.files).some(
         ([path, content]) => repo.readFile(headSha, path) !== content,
       );
+    const changed = branchChanged || pull?.title !== plan.title;
     if (dryRun)
       return {
         action: !pull ? "would-create" : changed ? "would-update" : "unchanged",
@@ -561,7 +566,7 @@ export async function reconcileReleasePullRequest({
 
     let commitSha = headSha;
     let currentPulls;
-    if (changed) {
+    if (branchChanged) {
       if ((await branchHead(github, "main")) !== mainSha) continue;
       const tree = await github.request("POST", "git/trees", {
         base_tree: repo.git("rev-parse", `${mainSha}^{tree}`).trim(),

@@ -3428,7 +3428,6 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     )
     draft_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     draft_target = draft_manifest["scan"]["target"]
-    authored_snapshot_digest = draft_target["snapshotDigest"]
     draft_target["revision"] = "stale-revision"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(draft_manifest))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
@@ -3437,7 +3436,14 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     assert "revision" not in manifest["scan"]["target"]
     assert manifest["scan"]["target"]["baseRevision"] == diff_target["baseRevision"]
     assert manifest["scan"]["target"]["headRevision"] == diff_target["headRevision"]
-    assert manifest["scan"]["target"]["snapshotDigest"] == authored_snapshot_digest
+    expected_digest = hashlib.sha256(
+        f"codex-security-diff/v1\0commit\0{diff_target['baseRevision']}\0"
+        f"{diff_target['headRevision']}".encode()
+    ).hexdigest()
+    assert (
+        manifest["scan"]["target"]["snapshotDigest"]
+        == f"codex-security-snapshot/v1:sha256:{expected_digest}"
+    )
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
 
 
@@ -4060,10 +4066,7 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     (fixtures / "payload.txt").write_text("../outside\n")
     outside = tmp_path / "outside.txt"
     outside.write_text("must not be projected\n")
-    try:
-        (poc / "outside-link.txt").symlink_to(outside)
-    except OSError:
-        pass
+    (poc / "outside-link.txt").symlink_to(outside)
 
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["findings"][0]["artifactPaths"] == [
@@ -4126,6 +4129,110 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
 
 
+def commit_source_fixture(target: Path, source: bytes) -> str:
+    initialize_git_repository(target)
+    (target / "README.md").write_bytes(source)
+    # Stage the bytes verbatim so hosts that enable core.autocrlf keep the fixture line endings.
+    subprocess.run(["git", "-c", "core.autocrlf=false", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+)
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    finding_source_excerpt = namespace["finding_source_excerpt"]
+    target = tmp_path / "target"
+    revision = commit_source_fixture(
+        target,
+        "".join(
+            f"source line {line_number}{separator if line_number == 2 else ''}\n"
+            for line_number in range(1, 11)
+        ).encode(),
+    )
+
+    excerpt = finding_source_excerpt(
+        {"target_revision": revision, "target_snapshot_digest": None},
+        target,
+        [{"path": "README.md", "startLine": 5, "endLine": 5}],
+    )
+
+    assert excerpt == "\n".join(
+        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
+        for line_number in range(2, 9)
+    )
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    finding_source_excerpt = namespace["finding_source_excerpt"]
+    target = tmp_path / "target"
+    revision = commit_source_fixture(
+        target,
+        "".join(f"source line {line_number}{line_ending}" for line_number in range(1, 11)).encode(),
+    )
+
+    excerpt = finding_source_excerpt(
+        {"target_revision": revision, "target_snapshot_digest": None},
+        target,
+        [{"path": "README.md", "startLine": 5, "endLine": 5}],
+    )
+
+    assert excerpt == "\n".join(
+        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_lines"),
+    [
+        (b"first\nsecond", ["first", "second"]),
+        (b"first\nsecond\n", ["first", "second"]),
+        (b"first\rsecond\r", ["first", "second"]),
+        (b"first\r\nsecond\r\n", ["first", "second"]),
+        (b"first\r\nsecond\rthird\nfourth", ["first", "second", "third", "fourth"]),
+        (b"first\n\n", ["first", ""]),
+        (b"first\r\r\n", ["first", ""]),
+        (b"\r\n", [""]),
+    ],
+)
+def test_source_excerpt_preserves_final_lines(
+    tmp_path: Path, source: bytes, expected_lines: list[str]
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    finding_source_excerpt = namespace["finding_source_excerpt"]
+    target = tmp_path / "target"
+    revision = commit_source_fixture(target, source)
+    scan = {"target_revision": revision, "target_snapshot_digest": None}
+
+    excerpt = finding_source_excerpt(
+        scan,
+        target,
+        [{"path": "README.md", "startLine": len(expected_lines)}],
+    )
+
+    assert excerpt == "\n".join(
+        f"{line_number}  {line}" for line_number, line in enumerate(expected_lines, start=1)
+    )
+    assert (
+        finding_source_excerpt(
+            scan,
+            target,
+            [{"path": "README.md", "startLine": len(expected_lines) + 1}],
+        )
+        is None
+    )
+
+
 def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
     tmp_path: Path,
 ) -> None:
@@ -4176,7 +4283,6 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     scan_id = str(started["results"]["scanId"])
     contract = started["results"]["contract"]["target"]
     assert contract["allowedKinds"] == ["git_worktree"]
-    snapshot_digest = str(contract["requiredSnapshotDigest"])
     write_completed_contract(
         Path(str(started["results"]["scanDir"])),
         scan_id,

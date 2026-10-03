@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { readJson as readJsonFile } from "./support/json.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -105,17 +106,17 @@ function projectFindingDetails(details: JsonObject): string {
     "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
     "print(projection['build_report_markdown'](manifest, findings, coverage))",
   ].join("\n");
-  const result = Bun.spawnSync(
-    [python!, "-I", "-B", "-c", script, PLUGIN_ROOT, JSON.stringify(details)],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const result = runPython(python!, [
+    "-c",
+    script,
+    PLUGIN_ROOT,
+    JSON.stringify(details),
+  ]);
   expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
   return new TextDecoder().decode(result.stdout);
 }
 
-async function readJson(path: string): Promise<JsonObject> {
-  return JSON.parse(await readFile(path, "utf8")) as JsonObject;
-}
+const readJson = readJsonFile<JsonObject>;
 
 async function startMcp() {
   const child = spawn(
@@ -641,10 +642,7 @@ describe("bundled plugin finding detail contracts", () => {
       "else:",
       "    print('accepted')",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(new TextDecoder().decode(result.stdout)).toContain(
       "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: missing-evidence",
@@ -665,10 +663,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['_validate_finding'](finding, 'findings[0]')",
       "print('accepted')",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(new TextDecoder().decode(result.stdout)).toContain("accepted");
   });
@@ -690,10 +685,7 @@ describe("bundled plugin finding detail contracts", () => {
       "else:",
       "    print('accepted')",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(new TextDecoder().decode(result.stdout)).toContain(
       "code_evidence[0].id: duplicate code-evidence id",
@@ -722,10 +714,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
       "print(json.dumps({'originalDataFlow': findings['findings'][0]['attackPath']['dataFlow'], 'compatibleHasDataFlow': 'dataFlow' in compatible['findings'][0]['attackPath'], 'originalNested': findings['findings'][0]['attackPath']['dataflow']['evidenceRefs'], 'compatibleNested': compatible['findings'][0]['attackPath']['dataflow']['evidenceRefs'], 'originalReachability': findings['findings'][0]['attackPath']['reachability'], 'compatibleHasReachability': 'reachability' in compatible['findings'][0]['attackPath'], 'originalAttack': findings['findings'][0]['attackPath']['evidence_refs'], 'compatibleAttack': compatible['findings'][0]['attackPath']['evidence_refs'], 'originalValidation': findings['findings'][0]['validation']['evidence_refs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidence_refs'], 'compatibleHasCounterEvidence': 'counterEvidence' in compatible['findings'][0]['validation'], 'compatibleHasDisposition': 'disposition' in compatible['findings'][0]['validation'], 'compatibleHasLimitations': 'limitations' in compatible['findings'][0]['validation'], 'compatibleHasMethod': 'method' in compatible['findings'][0]['validation'], 'compatibleHasResult': 'result' in compatible['findings'][0]['validation'], 'compatibleHasRootCause': 'rootCause' in compatible['findings'][0], 'compatibleHasStatus': 'status' in compatible['findings'][0]['validation'], 'compatibleHasSummary': 'summary' in compatible['findings'][0]['validation'], 'originalMethod': findings['findings'][0]['validation']['method'], 'originalRootCauseSummary': findings['findings'][0]['rootCause']['summary'], 'originalSummary': findings['findings'][0]['validation']['summary'], 'originalLegacyCatalog': findings['findings'][0]['code_evidence'], 'compatibleLegacyCatalog': compatible['findings'][0]['code_evidence']}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       compatibleAttack: [],
@@ -776,10 +765,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
       "print(json.dumps({'originalValidation': finding['validation'], 'originalAttackPath': finding['attackPath'], 'compatibleValidation': compatible['findings'][0]['validation'], 'compatibleAttackPath': compatible['findings'][0]['attackPath']}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -812,10 +798,7 @@ describe("bundled plugin finding detail contracts", () => {
       "else:",
       "    print('accepted')",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(new TextDecoder().decode(result.stdout)).toContain(
@@ -845,10 +828,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
       "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'rootCause': findings['findings'][0].get('root_cause'), 'warnings': warnings}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -885,10 +865,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    results[name] = {'summary': findings['findings'][0]['summary'], 'warnings': warnings}",
       "print(json.dumps(results))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -933,10 +910,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    'compatibleDataflow': compatible['findings'][0]['attackPath']['dataflow']['evidence_refs'],",
       "}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -969,10 +943,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
       "print(json.dumps({'original': findings['findings'][0]['attackPath'], 'compatible': compatible['findings'][0]['attackPath']}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       original: {
@@ -1005,10 +976,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    results[field] = {'outcome': outcome, 'present': field in compatible['findings'][0]} ",
       "print(json.dumps(results))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -1033,10 +1001,7 @@ describe("bundled plugin finding detail contracts", () => {
       "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
       "print(json.dumps({'original': findings['findings'][0]['code_evidence'], 'compatible': compatible['findings'][0]['code_evidence']}))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
@@ -1074,10 +1039,7 @@ describe("bundled plugin finding detail contracts", () => {
       "regions = {location['physicalLocation']['artifactLocation']['uri']: location['physicalLocation']['region'] for location in result['locations']}",
       "print(json.dumps(regions, sort_keys=True))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject({

@@ -1,13 +1,7 @@
 import { JsonFloat, object, objectEntries, pythonRepr } from "./python-json";
 
 type SchemaType =
-  | "array"
-  | "boolean"
-  | "integer"
-  | "number"
-  | "object"
-  | "string"
-  | "null";
+  "array" | "boolean" | "integer" | "number" | "object" | "string" | "null";
 export interface ContractSchema {
   $ref?: string;
   type?: SchemaType | SchemaType[];

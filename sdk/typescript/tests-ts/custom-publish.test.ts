@@ -1,23 +1,16 @@
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, cp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { publishScanToCustomInternal as publishScanToCustom } from "../src/custom-publish.js";
 import type { FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const directories = createTemporaryDirectories({ canonical: false });
+afterEach(directories.cleanup);
 
 async function fixture() {
-  const scan = await mkdtemp(join(tmpdir(), "custom-publish-"));
-  directories.push(scan);
+  const scan = await directories.create("custom-publish-");
   await cp(join(PLUGIN_ROOT, "examples/completed-scan"), scan, {
     recursive: true,
   });

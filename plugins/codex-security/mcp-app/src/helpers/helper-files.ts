@@ -8,6 +8,25 @@ import {
 import { windowsBinding } from "../native";
 import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
 import { encodePosixPath } from "./posix-path";
+import { parsedPath } from "./resolve-security-md";
+
+export function pythonPath(path: string): string {
+  if (process.platform === "win32") return parsedPath(path);
+  const prefix =
+    path.startsWith("//") && !path.startsWith("///")
+      ? "//"
+      : path.startsWith("/")
+        ? "/"
+        : "";
+  // pathlib removes dot/empty components, but preserves symlink-sensitive "..".
+  return (
+    prefix +
+      path
+        .split("/")
+        .filter((part) => part && part !== ".")
+        .join("/") || "."
+  );
+}
 
 export function readFile(path: string | number): Buffer {
   if (typeof path === "number") return readFileSync(path);

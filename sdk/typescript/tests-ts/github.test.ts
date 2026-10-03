@@ -195,9 +195,8 @@ describe("GitHub code scanning import", () => {
     [403, "denied code scanning access"],
     [404, "not found or is not accessible"],
     [429, "rate limited"],
-    [503, "HTTP 503"],
   ] as const)(
-    "reports HTTP %i without exposing token-bearing diagnostics",
+    "reports actionable advice for HTTP %i",
     async (status, message) => {
       const failure = await importGitHubCodeScanningAlerts(
         { repository: "example/repository" },
@@ -215,6 +214,31 @@ describe("GitHub code scanning import", () => {
       );
     },
   );
+
+  test("preserves unclassified HTTP and transport error details", async () => {
+    const message = "Connection failed: token=SYNTHETIC_DIAGNOSTIC_VALUE";
+    const failure = Object.assign(new Error(message), {
+      request: { headers: { authorization: "SYNTHETIC_REQUEST_HEADER" } },
+    });
+    for (const status of [503, undefined]) {
+      const result = await importGitHubCodeScanningAlerts(
+        { repository: "example/repository" },
+        {
+          createGitHub: async () => {
+            if (status === undefined) throw failure;
+            return github(() => Response.json({ message }, { status }));
+          },
+        },
+      ).catch((error: Error) => error);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toContain(message);
+      if (status !== undefined)
+        expect((result as Error).message).toContain(`HTTP ${status}`);
+      expect((result as Error).message).not.toContain(
+        "SYNTHETIC_REQUEST_HEADER",
+      );
+    }
+  });
 
   test("validates selectors before authentication and supports cancellation", async () => {
     let authenticated = false;

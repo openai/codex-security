@@ -1,12 +1,6 @@
+import { pythonExecutable } from "./support/python.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -22,8 +16,11 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { TestClient } from "./support/api-client.js";
 
-const temporaryDirectories: string[] = [];
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const temporaryDirectories = createTemporaryDirectories();
 const EXTERNAL_PROVIDER_CASES = [
   [
     "OpenRouter",
@@ -41,19 +38,10 @@ const EXTERNAL_PROVIDER_CASES = [
   ],
 ] as const;
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-preflight-")),
-  );
-  temporaryDirectories.push(path);
+  const path = await temporaryDirectories.create("codex-security-preflight-");
   return path;
 }
 
@@ -87,6 +75,51 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([
+    ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["standard", "openai.gpt-5.6-cyber"],
+    ["deep", "openai.gpt-5.6-cyber"],
+  ] as const)(
+    "accepts a cost limit for a %s Bedrock %s scan without starting inference",
+    async (mode, model) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model_provider: "amazon-bedrock",
+            model,
+          },
+        },
+        {
+          environment: {
+            AWS_PROFILE: "synthetic-bedrock-profile",
+            AWS_REGION: "us-east-2",
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+          prepareRuntime: async () => {
+            throw new Error("Local preflight must not start the runtime");
+          },
+        },
+      );
+      await expect(
+        client.preflight(repository, { mode, maxCostUsd: 1 }),
+      ).resolves.toMatchObject({
+        mode,
+        modelProvider: "amazon-bedrock",
+        model,
+        maxCostUsd: 1,
+        authentication: {
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        },
+      });
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "loads trusted project config through a Windows path alias",
     async () => {
@@ -104,11 +137,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter =
-        process.env["PYTHON"] ??
-        Bun.which("python3") ??
-        Bun.which("python") ??
-        Bun.which("py");
+      const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
       const result = spawnSync(
         interpreter!,
@@ -371,7 +400,7 @@ describe("CodexSecurity preflight configuration", () => {
     );
   });
 
-  test("uses a root-read filesystem profile with only writable workspaces", () => {
+  test("separates writable scans from repository-scoped policy reads", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -400,6 +429,13 @@ describe("CodexSecurity preflight configuration", () => {
             ":workspace_roots": "write",
           },
         },
+        codex_security_policy: {
+          filesystem: {
+            ":minimal": "read",
+            ":workspace_roots": "read",
+          },
+          network: { enabled: false },
+        },
       },
     });
     expect(original).toMatchObject({
@@ -424,7 +460,21 @@ describe("CodexSecurity preflight configuration", () => {
           [credentialHome]: "read",
         },
       },
+      codex_security_policy: {
+        filesystem: {
+          ":minimal": "read",
+          ":workspace_roots": "read",
+        },
+        network: { enabled: false },
+      },
     });
+    const policyFilesystem = (
+      (config["permissions"] as JsonObject)[
+        "codex_security_policy"
+      ] as JsonObject
+    )["filesystem"] as JsonObject;
+    expect(policyFilesystem).not.toHaveProperty(":root");
+    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {

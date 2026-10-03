@@ -7,7 +7,8 @@ import {
   parseJsonBytes,
   pythonRepr,
 } from "./python-json";
-import { resolvedPath } from "./resolve-path";
+import { decodePosixBytes, encodePosixPath } from "./posix-path";
+import { resolvedPath } from "./resolve-security-md";
 import {
   childPath,
   discoverInputShards,
@@ -23,9 +24,7 @@ import {
 } from "./rank-worklists";
 
 type Command =
-  | "make-rank-pool-plan"
-  | "validate-rank-worker"
-  | "validate-rank-pool";
+  "make-rank-pool-plan" | "validate-rank-worker" | "validate-rank-pool";
 interface Worker {
   input_shards: string[];
   output_shards: string[];
@@ -40,8 +39,20 @@ const same = (left: string[], right: string[]) =>
 function requirePlanDirectory(plan: string, directory: string): void {
   const expected = childPath(dirname(plan), "rank_shards");
   const key = (value: string) => {
-    const path = resolvedPath(value, false);
-    return process.platform === "win32" ? path.toLowerCase() : path;
+    const windows = process.platform === "win32";
+    try {
+      const path = resolvedPath(
+        windows ? Buffer.from(value, "utf16le") : encodePosixPath(value),
+        false,
+      );
+      return windows
+        ? path.toString("utf16le").toLowerCase()
+        : decodePosixBytes(path);
+    } catch (error) {
+      if (windows && (error as NodeJS.ErrnoException).code === "ELOOP")
+        throw new Error(`Symlink loop from ${value}`);
+      throw error;
+    }
   };
   if (key(directory) !== key(expected))
     throw new Error(

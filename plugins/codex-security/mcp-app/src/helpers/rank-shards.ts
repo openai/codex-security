@@ -1,16 +1,14 @@
 import { statSync } from "node:fs";
-import { basename, sep } from "node:path";
+import { basename, sep, win32 } from "node:path";
 import { unixBinding, windowsBinding } from "../native";
 import {
   pathText,
   widePath,
   windowsFileSystem,
-  windowsJoin,
 } from "../../../native/windows-files.mjs";
-import { mkdir } from "./helper-files";
+import { mkdir, pythonPath } from "./helper-files";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import { pythonRepr } from "./python-json";
-import { parsedPath } from "./resolve-security-md";
 import {
   ArgumentError,
   argumentsFor,
@@ -24,14 +22,17 @@ import {
 } from "./rank-worklists";
 
 type Command =
-  | "make-rank-shards"
-  | "validate-rank-shard"
-  | "merge-rank-outputs";
+  "make-rank-shards" | "validate-rank-shard" | "merge-rank-outputs";
 
 export function childPath(directory: string, name: string): string {
-  return parsedPath(
+  return pythonPath(
     process.platform === "win32"
-      ? windowsJoin(directory, name)
+      ? win32.join(
+          directory.length === 2 && directory[1] === ":"
+            ? `${directory}.`
+            : directory,
+          name,
+        )
       : directory + sep + name,
   );
 }
