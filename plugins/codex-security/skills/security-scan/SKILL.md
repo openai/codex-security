@@ -33,9 +33,10 @@ Keep discovery, validation, and attack-path reasoning within this Standard workf
 In PowerShell, replace the placeholders inside single quotes with literal paths, doubling any single quote in a path. Keep the supplied `CODEX_SECURITY_TARGET_PATHS_FILE` value unchanged:
 
 ```powershell
-$env:scopePluginRoot = '<plugin_dir>'
-$env:scopeScanDir = '<scan_dir>'
-cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%scopeScanDir%\scan-manifest.json" --coverage "%scopeScanDir%\coverage.json""'
+$env:scopePluginRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('<plugin_dir>')
+$env:scopeScanDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('<scan_dir>')
+$env:scopeTargetPaths = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:CODEX_SECURITY_TARGET_PATHS_FILE)
+cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%scopeTargetPaths%" --manifest "%scopeScanDir%\scan-manifest.json" --coverage "%scopeScanDir%\coverage.json""'
 ```
 
-The two assigned variables are temporary values in the calling shell, not application settings. CMD expands the references once, preserving literal `%` and `!` in the paths.
+The assigned variables are temporary values in the calling shell, not application settings. Resolve paths against PowerShell's current location before CMD starts, including when that location is a UNC share. Resolution preserves literal path characters and leaves the supplied scope-file environment value unchanged. CMD expands the references once, preserving literal `%` and `!` in the paths.
