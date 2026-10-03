@@ -281,6 +281,34 @@ def test_inventory_rejects_line_breaks_before_serializing_paths(
     assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
 
 
+def test_inventory_reports_a_failed_ignored_tracked_listing(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    git(repository, "config", "core.repositoryformatversion", "1")
+    git(repository, "config", "extensions.exampleUnsupported", "true")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 2, result.stdout
+    assert "git ls-files" in result.stderr
+    assert not output.exists()
+
+
+def test_inventory_without_git_keeps_the_ripgrep_listing(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    # An empty CODEX_SECURITY_GIT selects no Git executable.
+    result = run_inventory(repository, ".", output, env={**os.environ, "CODEX_SECURITY_GIT": ""})
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == standard_inventory(repository, ".")
+
+
 def test_diff_inventory_includes_power_shell_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
