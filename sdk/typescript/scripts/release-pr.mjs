@@ -1,3 +1,4 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -223,11 +224,7 @@ export function createReleasePlan(history, previous = null) {
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
