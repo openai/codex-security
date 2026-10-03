@@ -8,7 +8,6 @@ import {
   realpath,
   rm,
   symlink,
-  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,6 +20,7 @@ import type {
   SeverityLevel,
 } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson, writeJson } from "./support/json.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
@@ -51,14 +51,6 @@ async function copyExample(): Promise<string> {
   await cp(EXAMPLE, scanDirectory, { recursive: true });
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   return scanDirectory;
-}
-
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
-
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function reseal(scanDirectory: string): Promise<void> {

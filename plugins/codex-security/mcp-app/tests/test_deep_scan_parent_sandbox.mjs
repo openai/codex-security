@@ -1,21 +1,12 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
+const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
+  await importSource(
     fileURLToPath(
       new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
     ),
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
   );
 
 const rootRead = {

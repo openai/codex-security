@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson } from "./support/json.js";
 
 type Finding = Record<string, unknown> & {
   ruleId: string;
@@ -93,10 +94,6 @@ afterEach(async () => {
       .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
-
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);

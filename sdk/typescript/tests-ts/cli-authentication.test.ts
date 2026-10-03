@@ -415,24 +415,51 @@ describe("CLI authentication", () => {
       expect(stderr.text()).toContain(
         `method="aws_credentials" source="${source}"`,
       );
+      expect(stderr.text()).toContain(
+        "OpenAI sign-in is not required for model access or local results",
+      );
       expect(stderr.text()).not.toContain("synthetic-");
       expect(stderr.text()).not.toContain("stored Codex credentials");
       expect(stderr.text()).not.toContain("--auth chatgpt");
     }
   });
 
-  test("provides provider-aware Amazon Bedrock authentication failure guidance", async () => {
-    for (const [detail, expected] of [
-      [
-        "401 invalid credentials for org-private",
-        "Check your Amazon Bedrock bearer token",
-      ],
-      [
-        "403 model access denied for org-private",
-        "Check your AWS identity and Bedrock model permissions",
-      ],
-    ] as const) {
+  test.each([
+    [
+      "401 invalid credentials for org-private",
+      "Check your Amazon Bedrock bearer token",
+      "unauthorized",
+    ],
+    [
+      "403 model access denied for org-private",
+      "Check your AWS identity and Bedrock model permissions",
+      "forbidden",
+    ],
+    [
+      "403 ExpiredTokenException: The security token included in the request has expired.",
+      "Refresh AWS_BEARER_TOKEN_BEDROCK",
+      "unauthorized",
+    ],
+    [
+      "UnrecognizedClientException: The security token included in the request is invalid.",
+      "Refresh AWS_BEARER_TOKEN_BEDROCK",
+      "unauthorized",
+    ],
+    [
+      "AccessDeniedException: Not authorized to invoke the selected model.",
+      "configured AWS region, and model ID",
+      "forbidden",
+    ],
+    [
+      "400 ThrottlingException: Too many tokens, please wait before trying again.",
+      "Check the model quota in the configured AWS region",
+      "rate_limited",
+    ],
+  ] as const)(
+    "preserves Bedrock failure details and recovery advice: %s",
+    async (detail, expected, classification) => {
       const stderr = capture(false);
+      const stdout = capture();
       const deps = dependencies({
         environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
       });
@@ -451,19 +478,141 @@ describe("CLI authentication", () => {
 
       expect(
         await main(
-          ["scan", "--codex", 'model_provider="amazon-bedrock"'],
-          capture().stream,
+          [
+            "scan",
+            "--codex",
+            'model_provider="amazon-bedrock"',
+            "--json",
+            "--verbose",
+            "--full-output",
+          ],
+          stdout.stream,
           stderr.stream,
           deps,
         ),
       ).toBe(2);
       expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).toContain(detail);
+      expect(stderr.text()).toContain(`classification="${classification}"`);
+      expect(JSON.parse(stdout.text()).error.message).toContain(detail);
+      expect(JSON.parse(stdout.text()).error.message).toContain(expected);
       expect(stderr.text()).toContain("AWS_BEARER_TOKEN_BEDROCK");
       expect(stderr.text()).not.toContain("synthetic-");
-      expect(stderr.text()).not.toContain("org-private");
       expect(stderr.text()).not.toContain("--auth chatgpt");
-    }
+    },
+  );
+
+  test("explains refreshing temporary AWS profile credentials without a stored OpenAI login", async () => {
+    const stderr = capture(false);
+    const deps = dependencies({
+      environment: { AWS_PROFILE: "synthetic-profile" },
+    });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        });
+        throw new CodexSecurityError(
+          "403 ExpiredTokenException: security token has expired",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    expect(
+      await main(
+        ["scan", "--codex", 'model_provider="amazon-bedrock"'],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("ExpiredTokenException");
+    expect(stderr.text()).toContain("AWS_PROFILE");
+    expect(stderr.text()).toContain("AWS_SESSION_TOKEN");
+    expect(stderr.text()).not.toContain(
+      "cannot access the configured Amazon Bedrock model",
+    );
+    expect(stderr.text()).not.toContain("codex-security login");
   });
+
+  test.each([
+    [
+      "UnrecognizedClientException: The security token included in the request is invalid.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "403 ExpiredTokenException: The security token included in the request has expired.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "401 NotAuthorized: You do not have permission to perform this action.",
+      "AWS identity and Bedrock model permissions, configured AWS region, and model ID",
+      "forbidden",
+    ],
+    [
+      "AccessDeniedException: Not authorized to invoke the selected model.",
+      "Check the configured provider auth command",
+      "forbidden",
+    ],
+    [
+      "400 ThrottlingException: Too many tokens, please wait before trying again.",
+      "Check the model quota in the configured AWS region",
+      "rate_limited",
+    ],
+  ] as const)(
+    "preserves command-authenticated Bedrock diagnostics in stderr and JSON: %s",
+    async (detail, expected, classification) => {
+      const stderr = capture(false);
+      const stdout = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.({ method: "command", verified: false });
+          throw new CodexSecurityError(detail);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+      expect(
+        await main(
+          [
+            "scan",
+            "--codex",
+            'model_provider="amazon-bedrock"',
+            "--codex",
+            'model_providers.amazon-bedrock.auth={command="synthetic-auth"}',
+            "--json",
+            "--verbose",
+            "--full-output",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+
+      const message = JSON.parse(stdout.text()).error.message;
+      for (const output of [stderr.text(), message]) {
+        expect(output).toContain(detail);
+        expect(output).toContain(expected);
+        expect(output).not.toContain("--auth chatgpt");
+        expect(output).not.toContain("codex-security login");
+        expect(output).not.toContain("stored ChatGPT credentials");
+        expect(output).not.toContain("AWS_BEARER_TOKEN_BEDROCK");
+        expect(output).not.toContain("AWS_SESSION_TOKEN");
+      }
+      expect(stderr.text()).toContain(`classification="${classification}"`);
+      expect(stderr.text()).toContain("Authentication: native Codex command");
+      expect(stderr.text()).toContain(
+        "OpenAI sign-in is not required for model access or local results",
+      );
+    },
+  );
 
   test("offers the existing interactive prompt when both sign-ins are available", async () => {
     for (const [argv, selection] of [
@@ -1225,12 +1374,14 @@ describe("skill authentication", () => {
     overrides,
     environment,
     ambientConfig,
+    storedCredentials = false,
   }: {
     command?: "validate" | "patch" | "verify-fix";
     auth?: "auto" | "chatgpt" | "api-key";
     overrides: readonly string[];
     environment?: NodeJS.ProcessEnv;
     ambientConfig?: string;
+    storedCredentials?: boolean;
   }) {
     const repository = join(stateDirectory, "repository");
     const ambientHome = join(stateDirectory, "ambient");
@@ -1239,6 +1390,16 @@ describe("skill authentication", () => {
     await mkdir(ambientHome);
     if (ambientConfig !== undefined) {
       await writeFile(join(ambientHome, "config.toml"), ambientConfig);
+    }
+    if (storedCredentials) {
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+        }),
+        { mode: 0o600 },
+      );
     }
     const stdout = capture();
     const stderr = capture();
@@ -1260,8 +1421,9 @@ describe("skill authentication", () => {
           SYNTHETIC_PROVIDER_LOG: log,
           SYNTHETIC_SKILL_COMMAND: command,
         },
-        onCodex: (args, output, environment, input) =>
-          runCodexSkillCommand(
+        onCodex: async (args, output, environment, input) => {
+          const originalOverrides = structuredClone(output?.codexOverrides);
+          const result = await runCodexSkillCommand(
             [
               fileURLToPath(
                 new URL("./fixtures/skill-provider-auth.mjs", import.meta.url),
@@ -1272,7 +1434,10 @@ describe("skill authentication", () => {
             { command: process.execPath },
             environment,
             input,
-          ),
+          );
+          expect(output?.codexOverrides).toEqual(originalOverrides);
+          return result;
+        },
       }),
     );
     const records = existsSync(log)
@@ -1281,6 +1446,11 @@ describe("skill authentication", () => {
           .split("\n")
           .map((line) => JSON.parse(line))
       : [];
+    if (ambientConfig !== undefined) {
+      expect(await readFile(join(ambientHome, "config.toml"), "utf8")).toBe(
+        ambientConfig,
+      );
+    }
     return {
       status,
       stderr: stderr.text(),
@@ -1544,6 +1714,90 @@ describe("skill authentication", () => {
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );
+    },
+  );
+
+  test.each(
+    (
+      [
+        ["validate", "override"],
+        ["patch", "override"],
+        ["verify-fix", "override"],
+        ["patch", "ambient"],
+        ["verify-fix", "ambient"],
+        ["patch", "profile"],
+        ["verify-fix", "profile"],
+      ] as const
+    ).flatMap(([command, source]) =>
+      [true, false, undefined].map(
+        (requiresOpenAiAuth) => [command, source, requiresOpenAiAuth] as const,
+      ),
+    ),
+  )(
+    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p)",
+    async (command, source, requiresOpenAiAuth) => {
+      const configuredEnvKey =
+        process.platform === "win32" ? "gateway_api_key" : "GATEWAY_API_KEY";
+      const environment = { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" };
+      const providerConfig = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        ...(requiresOpenAiAuth === undefined
+          ? {}
+          : { requires_openai_auth: requiresOpenAiAuth }),
+      };
+      const providerSettings = [
+        ...Object.entries(providerConfig).map(
+          ([key, value]) => `${key}=${JSON.stringify(value)}`,
+        ),
+        `env_key=${JSON.stringify(configuredEnvKey)}`,
+        ...(requiresOpenAiAuth === false
+          ? ['experimental_bearer_token="SYNTHETIC_FALLBACK_KEY"']
+          : []),
+      ];
+      const result = await runProviderSkill({
+        command,
+        auth: "chatgpt",
+        overrides:
+          source === "override"
+            ? [
+                'model_provider="gateway"',
+                ...providerSettings.map(
+                  (setting) => `model_providers.gateway.${setting}`,
+                ),
+              ]
+            : [],
+        ...(source === "override"
+          ? {}
+          : {
+              ambientConfig: [
+                ...(source === "profile"
+                  ? ['profile="gateway-profile"', "[profiles.gateway-profile]"]
+                  : []),
+                'model_provider="gateway"',
+                "[model_providers.gateway]",
+                ...providerSettings,
+              ].join("\n"),
+            }),
+        environment,
+        storedCredentials: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({});
+      expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+        gateway: { ...providerConfig, requires_openai_auth: true },
+      });
+      const providerOverride = result.launch.args.findLast((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      expect(parseToml(providerOverride)["model_providers"]).toEqual({
+        gateway: { ...providerConfig, requires_openai_auth: true },
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+      expect(environment.GATEWAY_API_KEY).toBe("SYNTHETIC_GATEWAY_KEY");
     },
   );
 

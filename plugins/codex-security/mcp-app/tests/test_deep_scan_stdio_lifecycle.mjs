@@ -1,3 +1,5 @@
+import { assertNoError, assertFlagPair } from "./assertions.mjs";
+import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -12,33 +14,18 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { build } from "esbuild";
+import { pathToFileURL } from "node:url";
+
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.mjs";
+import { consumeLines } from "./consume-lines.mjs";
 
 const execFileAsync = promisify(execFile);
-const mcpAppRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-const parentSandboxState = {
-  permissionProfile: {
-    type: "managed",
-    file_system: {
-      type: "restricted",
-      entries: [
-        {
-          path: { type: "special", value: { kind: "root" } },
-          access: "read",
-        },
-      ],
-    },
-    network: "restricted",
-  },
-  sandboxCwd: pathToFileURL(pluginRoot).href,
-};
+const parentSandboxState = readOnlyParentSandboxState(pluginRoot);
 
 if (process.platform === "win32") {
   console.log(
@@ -115,7 +102,7 @@ async function testDeepScanStdioLifecycle() {
     ].join("\n"),
   );
   await writePythonWrapper(pythonWrapperPath);
-  await bundleServer(serverBundlePath);
+  await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
     ...process.env,
@@ -874,21 +861,6 @@ async function testDeepScanStdioLifecycle() {
   }
 }
 
-async function bundleServer(outfile) {
-  await build({
-    bundle: true,
-    define: { "import.meta.url": "__filename" },
-    entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    outfile,
-    platform: "node",
-    target: "node20",
-  });
-}
-
 function startServer(serverPath, env) {
   const child = spawn(process.execPath, [serverPath, "--stdio"], {
     cwd: pluginRoot,
@@ -991,12 +963,6 @@ function toolCall(
       ...(turnMetadata ? { "x-codex-turn-metadata": turnMetadata } : {}),
     },
   };
-}
-
-function assertFlagPair(args, flag, value) {
-  const index = args.indexOf(flag);
-  assert.notEqual(index, -1, `missing ${flag}`);
-  assert.equal(args[index + 1], value);
 }
 
 function assertReadOnlyWorkerInvocation(args) {
@@ -1201,15 +1167,6 @@ async function writePythonWrapper(executablePath) {
   await chmod(executablePath, 0o755);
 }
 
-function assertNoError(response) {
-  assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(
-    response.result?.isError,
-    undefined,
-    response.result?.content?.map((item) => item.text).join(" "),
-  );
-}
-
 function assertCanceled(response, scanId, scanDir) {
   assertNoError(response);
   const instructions = response.result.structuredContent.instructions;
@@ -1287,19 +1244,4 @@ async function withTimeout(promise, timeoutMs, label) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-function consumeLines(buffer, consume) {
-  let newlineIndex = buffer.indexOf("\n");
-  while (newlineIndex >= 0) {
-    const line = buffer.slice(0, newlineIndex).trim();
-    buffer = buffer.slice(newlineIndex + 1);
-    if (line) consume(line);
-    newlineIndex = buffer.indexOf("\n");
-  }
-  return buffer;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

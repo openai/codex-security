@@ -1,4 +1,5 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const record = (value) =>
@@ -7,8 +8,10 @@ const record = (value) =>
     `${JSON.stringify(value)}\n`,
   );
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const configPath = join(process.env.CODEX_HOME, "config.toml");
 record({
   args: process.argv.slice(2),
+  config: existsSync(configPath) ? readFileSync(configPath, "utf8") : "",
   environment: {
     GATEWAY_API_KEY: process.env.GATEWAY_API_KEY,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,

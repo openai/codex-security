@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -90,8 +90,9 @@ export async function publishFindingsCsvToCloud(
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
-  const digest = sha256(source);
-  const scanId = `scan_csv_${sha256(
+  const digest = hash("sha256", source);
+  const scanId = `scan_csv_${hash(
+    "sha256",
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
   ).slice(0, 24)}`;
   const findings = rows.map((row) => csvRowFinding(row, scanId));
@@ -143,12 +144,12 @@ export async function publishFindingsCsvToCloud(
     artifacts: [
       {
         path: "findings.json",
-        sha256: sha256(findingsDocument),
+        sha256: hash("sha256", findingsDocument),
         mediaType: "application/json",
       },
       {
         path: "coverage.json",
-        sha256: sha256(coverageDocument),
+        sha256: hash("sha256", coverageDocument),
         mediaType: "application/json",
       },
       {
@@ -159,10 +160,6 @@ export async function publishFindingsCsvToCloud(
     ],
   };
   return publishCloudPayload(scan, findings, dependencies);
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 async function publishCloudPayload(

@@ -30,6 +30,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { isRecord } from "./record.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
@@ -56,6 +57,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanApprovalPolicy,
+  scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -1584,6 +1586,7 @@ export class CodexSecurity {
         maxCostUsd: options.maxCostUsd,
         deepScan: deepScanConfiguration?.settings,
         auth: options.auth,
+        cyberAccessProgram: options.cyberAccessProgram,
       });
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       if (options.safetyIdentifier !== undefined)
@@ -1790,6 +1793,7 @@ export class CodexSecurity {
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
+        modelProvider,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1934,10 +1938,15 @@ export class CodexSecurity {
       checkOpen();
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
+        runPostScan = () =>
+          thread.runStreamed(postScanPrompt, {
+            signal,
+            cyberAccessProgram: options.cyberAccessProgram,
+          });
       }
       const { events } = await thread.runStreamed(prompt, {
         signal,
+        cyberAccessProgram: options.cyberAccessProgram,
       });
       checkOpen();
 
@@ -1949,6 +1958,7 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
         authentication,
+        modelProvider,
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
@@ -2012,6 +2022,7 @@ export class CodexSecurity {
                     await validationThread.runStreamed(validationPrompt, {
                       outputSchema,
                       signal,
+                      cyberAccessProgram: options.cyberAccessProgram,
                     })
                   ).events,
                   onReconnect: (message, attempts) =>
@@ -2249,6 +2260,7 @@ export class CodexSecurity {
               ),
             environment,
             model,
+            cyberAccessProgram: options.cyberAccessProgram,
             signal,
           });
           result.repositoryFindings = (await listRepositoryFindings(
@@ -2742,6 +2754,7 @@ export class CodexSecurity {
     options: Pick<
       ScanOptions,
       | "auth"
+      | "cyberAccessProgram"
       | "safetyIdentifier"
       | "expectedPluginVersion"
       | "onAuthentication"
@@ -2821,11 +2834,23 @@ export class CodexSecurity {
           requestedConfig,
         );
       }
-      const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
+      const effectiveConfig = scanCyberAccessConfig(
+        runtime.effectiveConfig ?? requestedConfig,
+        options.cyberAccessProgram,
+      );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, preflightConfig);
+        await writeCodexConfig(runtime.configPath, {
+          ...preflightConfig,
+          ...(options.cyberAccessProgram === undefined
+            ? {}
+            : {
+                codex_security: {
+                  cyber_access_program: options.cyberAccessProgram,
+                },
+              }),
+        });
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
@@ -3190,6 +3215,7 @@ export class CodexSecurity {
               knowledgeBasePaths: options.knowledgeBasePaths,
               maxCostUsd: options.maxCostUsd,
               auth: options.auth,
+              cyberAccessProgram: options.cyberAccessProgram,
             }),
             mock: true,
           },
@@ -3335,6 +3361,15 @@ export class CodexSecurity {
       );
     }
     const deep = deepScanOptions(options);
+    if (
+      !ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
+        options.cyberAccessProgram,
+      ).success
+    ) {
+      throw new ConfigurationError(
+        "cyberAccessProgram must be standard, daybreak_blue, or daybreak_red.",
+      );
+    }
     const identifier = options.safetyIdentifier;
     if (
       identifier !== undefined &&
@@ -3644,6 +3679,7 @@ interface ScanEventRunOptions {
   pluginRoot: string;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
+  modelProvider?: unknown;
   workbenchValidated?: boolean;
   model?: string;
   expectedFilesTotal?: number;
@@ -3674,7 +3710,11 @@ export async function runScanEvents(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
-        if (!tacStatusReported) {
+        if (
+          !tacStatusReported &&
+          options.modelProvider !== "amazon-bedrock" &&
+          options.authentication?.method !== "aws_credentials"
+        ) {
           const tacStatus = trustedAccessStatusFromEvent(event);
           if (tacStatus !== null) {
             tacStatusReported = true;
@@ -3974,6 +4014,7 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
   discoveryPrompt?: string,
+  modelProvider?: unknown,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -3981,6 +4022,11 @@ function scanPrompt(
     discoveryPrompt ??
       `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
+    ...(modelProvider === "amazon-bedrock"
+      ? [
+          "This scan uses Amazon Bedrock with AWS authentication. Skip the ChatGPT account Daybreak access advisory, including get_codex_security_daybreak_access and get_tac_status; it does not check Bedrock model access or access to local scan results. OpenAI login is not required for this scan. Report any actual provider error unchanged.",
+        ]
+      : []),
     ...(mode === "deep"
       ? [
           `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
@@ -4091,6 +4137,7 @@ function scanRecipe({
   maxCostUsd,
   deepScan,
   auth,
+  cyberAccessProgram,
 }: {
   repository: string;
   target: NormalizedTarget;
@@ -4103,6 +4150,7 @@ function scanRecipe({
   maxCostUsd?: number;
   deepScan?: Required<DeepScanOptions>;
   auth?: ScanAuthMode;
+  cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
 }): JsonObject {
   return {
     repository,
@@ -4119,6 +4167,7 @@ function scanRecipe({
     pluginVersion,
     config,
     ...(auth === undefined ? {} : { auth }),
+    ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
@@ -4415,10 +4464,6 @@ function environmentApiKeyEntry(
   return null;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function reconnectAttempt(message: string): [number, number] | null {
   const match =
     /^Reconnecting(?:\.\.\.|…)[ \t]+([1-9]\d{0,2})\/([1-9]\d{0,2})(?=[ \t(]|$)/u.exec(
@@ -4475,6 +4520,19 @@ export function classifyConnectionFailure(
   if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
     return "unknown";
   }
+  if (
+    /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu.test(
+      message,
+    )
+  ) {
+    return "unauthorized";
+  }
+  if (
+    /\b(?:AccessDeniedException|NotAuthorized|OptInRequired)\b/iu.test(message)
+  ) {
+    return "forbidden";
+  }
+  if (/\bThrottlingException\b/iu.test(message)) return "rate_limited";
   if (
     /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
       message,
@@ -4660,7 +4718,13 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};
-    for (const key of ["goals", "multi_agent", "enable_fanout"]) {
+    for (const key of [
+      "goals",
+      "multi_agent",
+      "enable_fanout",
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ]) {
       if (typeof value[key] === "boolean") result[key] = value[key];
     }
     const multiAgent = value["multi_agent_v2"];
@@ -4714,10 +4778,22 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const result = executionConfig(config);
   // Keep the effective summary even when preflight filters the profile name.
-  const reasoningSummary =
-    resolveCodexProfile(config)["model_reasoning_summary"];
+  const resolved = resolveCodexProfile(config);
+  const reasoningSummary = resolved["model_reasoning_summary"];
   if (safeString(reasoningSummary)) {
     result["model_reasoning_summary"] = reasoningSummary;
+  }
+  const resolvedFeatures = capabilityFeatures(resolved["features"]);
+  for (const key of [
+    "api_key_cyber_access_programs",
+    "api_key_model_discovery",
+  ]) {
+    if (resolvedFeatures[key] !== undefined) {
+      result["features"] = {
+        ...(isRecord(result["features"]) ? result["features"] : {}),
+        [key]: resolvedFeatures[key],
+      };
+    }
   }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]

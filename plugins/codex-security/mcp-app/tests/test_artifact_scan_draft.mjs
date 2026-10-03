@@ -15,23 +15,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
-const bundled = await build({
+const module = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: path.dirname(new URL(import.meta.url).pathname),
-  bundle: true,
-  entryPoints: ["../src/artifact-scan-draft.ts"],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-
-const module = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
-);
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,

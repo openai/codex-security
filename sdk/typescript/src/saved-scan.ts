@@ -1,7 +1,8 @@
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { JsonObject, JsonValue } from "./config.js";
+import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
+import { isRecord as isJsonObject } from "./record.js";
 import { expandHome } from "./runtime.js";
 
 export type SavedScan = JsonObject & { scanId: string; scanDir: string };
@@ -21,7 +22,6 @@ export async function resolveWorkflowScan(
   );
   const workflow = context["workflow"];
   if (
-    workflow === undefined ||
     !isJsonObject(workflow) ||
     typeof workflow["scanId"] !== "string" ||
     typeof workflow["scanDir"] !== "string"
@@ -48,11 +48,7 @@ export async function resolveCompletedScan(
     ]);
     const scans = history["scans"];
     const latest = Array.isArray(scans) ? scans[0] : undefined;
-    if (
-      latest === undefined ||
-      !isJsonObject(latest) ||
-      typeof latest["scanId"] !== "string"
-    ) {
+    if (!isJsonObject(latest) || typeof latest["scanId"] !== "string") {
       throw new CodexSecurityError(
         "No completed saved scan was found for this repository.",
       );
@@ -65,20 +61,12 @@ export async function resolveCompletedScan(
     scanId,
   ]);
   const scan = context["scan"];
-  if (
-    scan === undefined ||
-    !isJsonObject(scan) ||
-    typeof scan["scanId"] !== "string"
-  ) {
+  if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {
     throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
   }
   scanId = scan["scanId"];
   const progress = scan["progress"];
-  if (
-    progress === undefined ||
-    !isJsonObject(progress) ||
-    progress["status"] !== "complete"
-  ) {
+  if (!isJsonObject(progress) || progress["status"] !== "complete") {
     throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
   }
   const storedDirectory = scan["scanDir"];
@@ -96,8 +84,4 @@ export async function resolveCompletedScan(
     );
   }
   return { ...scan, scanId, scanDir };
-}
-
-function isJsonObject(value: JsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

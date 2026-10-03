@@ -196,6 +196,39 @@ test("an explicit config flag overrides the operator-selected environment file",
   }
 });
 
+test.each([undefined, "standard", "daybreak_red"] as const)(
+  "scan resolves Cyber selection from project or CLI override: %s",
+  async (override) => {
+    const input = await fixture({
+      scan: { cyber_access_program: "daybreak_blue" },
+    });
+    let selected: ScanOptions | undefined;
+    expect(
+      await main(
+        [
+          "scan",
+          input.repository,
+          "-c",
+          input.config,
+          "--json",
+          ...(override === undefined
+            ? []
+            : ["--cyber-access-program", override]),
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: input.repository,
+          onTurn: (_target, options) => {
+            selected = options as ScanOptions;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(selected?.cyberAccessProgram).toBe(override ?? "daybreak_blue");
+  },
+);
+
 test("a missing operator-selected environment file fails without falling back", async () => {
   const input = await fixture({});
   let initialized = false;
@@ -693,6 +726,7 @@ test("rerun accepts replacement scan and validation files relative to the invoca
     config: {},
     requiresScanPrompt: true,
     validationMode: "custom",
+    cyberAccessProgram: "daybreak_blue",
   };
   let selected: ScanOptions | undefined;
   const stderr = capture();
@@ -723,6 +757,7 @@ test("rerun accepts replacement scan and validation files relative to the invoca
     scanPrompt: "Review the synthetic boundary.",
     validationPrompt: "Validate the synthetic boundary.",
     parentScanId: "saved",
+    cyberAccessProgram: "daybreak_blue",
   });
 });
 
