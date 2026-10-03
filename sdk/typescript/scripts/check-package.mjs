@@ -177,6 +177,8 @@ const allowedFiles = new Set([
     "scan-publication",
     "scan-registration",
     "scan-preparation",
+    "scan-semantics",
+    "semantic-models",
     "project-config",
     "project-config-schema",
     "prompt-files",
