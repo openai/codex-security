@@ -2585,6 +2585,10 @@ server failures return 500 (`internal_error`). Errors have an `error` code and,
 for expected failures, a `message`. Request bodies and provider error bodies
 are not logged.
 
+SDK findings API failures preserve the service's error code and message alongside
+the HTTP status. Responses without a recognized JSON error retain the HTTP-status
+diagnostic. Retry decisions continue to use the HTTP status and `Retry-After`.
+
 ### Embeddings and storage
 
 Set `OPENAI_API_KEY` in the repository-root `.env`, using `.env.example` as a
