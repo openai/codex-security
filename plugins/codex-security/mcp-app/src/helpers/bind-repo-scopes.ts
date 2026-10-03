@@ -1,5 +1,5 @@
 import { decodeUtf8 } from "./utf8";
-import { readFile, writeFile } from "./helper-files";
+import { filesystemErrorMessage, readFile, writeFile } from "./helper-files";
 import { object, parseJson, stringifyJson } from "./python-json";
 import {
   ArgumentError,
@@ -72,7 +72,7 @@ export function bindRepoScopesCommand(
     print(`Bound ${scopes.length} requested scopes into the scan contract`);
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = filesystemErrorMessage(error);
     print(
       error instanceof ArgumentError
         ? `${usage}\nbind-repo-scopes: error: ${message}`

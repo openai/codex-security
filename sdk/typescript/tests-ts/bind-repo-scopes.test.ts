@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -187,6 +188,40 @@ test("reads both aliased documents before the ordered writes", () => {
     includePaths: ["new"],
   });
 });
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "escapes terminal controls only in filesystem errors",
+  () => {
+    const f = fixture();
+    const manifest = join(f.root, "manifest-\u001b[2J.json");
+    renameSync(f.manifest, manifest);
+    f.manifest = manifest;
+    const before = [readFileSync(f.manifest), readFileSync(f.coverage)];
+    chmodSync(f.manifest, 0o444);
+    try {
+      const result = run(f);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("manifest-\\x1b[2J.json");
+      expect(result.stderr).not.toContain("\u001b");
+      expect([readFileSync(f.manifest), readFileSync(f.coverage)]).toEqual(
+        before,
+      );
+    } finally {
+      chmodSync(f.manifest, 0o644);
+    }
+
+    const scopes = join(f.root, "scopes-\u001b[2J.json");
+    renameSync(f.scopes, scopes);
+    f.scopes = scopes;
+    writeFileSync(scopes, "[]");
+    const invalid = run(f);
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toBe(
+      `Scopes file must contain a non-empty JSON string array: ${scopes}\n`,
+    );
+  },
+);
 
 test("expands home and relative paths through the existing helper arguments", () => {
   const f = fixture();
