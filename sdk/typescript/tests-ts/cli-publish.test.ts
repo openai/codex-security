@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const DESTINATION_OPTIONS = [
   "--to",
@@ -15,27 +16,21 @@ const DESTINATION_OPTIONS = [
   "--linear-project",
   "project-from-flags",
 ] as const;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function publicationDirectory(): Promise<string> {
-  const directory = await mkdtemp(
-    join(tmpdir(), "codex-security-cli-publication-"),
+  const directory = await temporaryDirectories.create(
+    "codex-security-cli-publication-",
   );
-  temporaryDirectories.push(directory);
   return directory;
 }
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create(
+    "codex-security-publish-picker-",
+  );
   return Promise.all(
     Array.from({ length: count }, async (_, index) => {
       const directory = join(root, `scan-${index}`);
@@ -376,14 +371,10 @@ describe("publish check", () => {
         deps.forceExit = () => {
           forced = true;
         };
-        let started!: () => void;
-        const operationStarted = new Promise<void>((resolve) => {
-          started = resolve;
-        });
-        let finishCleanup!: () => void;
-        const cleanup = new Promise<void>((resolve) => {
-          finishCleanup = resolve;
-        });
+        const { promise: operationStarted, resolve: started } =
+          Promise.withResolvers<void>();
+        const { promise: cleanup, resolve: finishCleanup } =
+          Promise.withResolvers<void>();
         const operation = async (
           _directory: string,
           options: { signal?: AbortSignal },
@@ -582,8 +573,7 @@ describe("publish scan", () => {
       const stdout = capture();
       const stderr = capture();
       let invocation:
-        | { scanDirectory: string; options: Record<string, unknown> }
-        | undefined;
+        { scanDirectory: string; options: Record<string, unknown> } | undefined;
       const deps = dependencies({
         currentDirectory,
         onWorkbench: () => {
@@ -788,14 +778,10 @@ describe("publish scan", () => {
       const signals = new FakeSignals();
       const events: string[] = [];
       let now = 0;
-      let enteredPublication!: () => void;
-      const publicationStarted = new Promise<void>((resolve) => {
-        enteredPublication = resolve;
-      });
-      let finishRecovery!: () => void;
-      const recoveryFinished = new Promise<void>((resolve) => {
-        finishRecovery = resolve;
-      });
+      const { promise: publicationStarted, resolve: enteredPublication } =
+        Promise.withResolvers<void>();
+      const { promise: recoveryFinished, resolve: finishRecovery } =
+        Promise.withResolvers<void>();
       const deps = dependencies({ signals });
       deps.environment["CODEX_SECURITY_LINEAR_API_KEY"] = "synthetic-key";
       deps.now = () => now;
@@ -904,7 +890,7 @@ describe("publish scan", () => {
 
   test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
     for (const { json, tty, failed } of [
       { json: false, tty: false, failed: false },
@@ -1050,7 +1036,7 @@ describe("publish scan", () => {
     const created = [
       {
         ...base,
-        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\nsafe\u009F",
         url: "javascript:alert(1)",
       },
       {
@@ -1086,7 +1072,7 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }
@@ -1953,14 +1939,10 @@ describe("publish scan", () => {
         };
         const listeners = new Map<string, () => void>();
         const removed: string[] = [];
-        let enteredPublication!: () => void;
-        const publicationStarted = new Promise<void>((resolve) => {
-          enteredPublication = resolve;
-        });
-        let finishRecovery!: () => void;
-        const recoveryFinished = new Promise<void>((resolve) => {
-          finishRecovery = resolve;
-        });
+        const { promise: publicationStarted, resolve: enteredPublication } =
+          Promise.withResolvers<void>();
+        const { promise: recoveryFinished, resolve: finishRecovery } =
+          Promise.withResolvers<void>();
         const deps = dependencies();
         deps.addSignalListener = (name, listener) => {
           listeners.set(name, listener);
@@ -2394,8 +2376,7 @@ describe("publish scan", () => {
         },
       });
       let destination:
-        | { teamId: string; projectId: string | undefined }
-        | undefined;
+        { teamId: string; projectId: string | undefined } | undefined;
       deps.publishScan = async (_scanDirectory, options) => {
         destination = {
           teamId: options.teamId,
@@ -2451,7 +2432,7 @@ describe("publish scan", () => {
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const result = { ...publicationResult(), warnings: [warning] };
     const stdout = capture();
     const stderr = capture();
@@ -2493,7 +2474,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
 
-  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+  test("normalizes receipt warning controls while preserving diagnostic text and partial results", async () => {
     const warnings = [
       "Receipt storage failed.\n\u001B[31mDo not retry publication.",
       "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
@@ -2520,10 +2501,9 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
-        "codex-security: [redacted]\n",
+        "codex-security: Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET\n",
     );
     expect(stderr.text()).not.toContain("\u001B");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {

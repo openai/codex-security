@@ -1,18 +1,12 @@
 import { spawnSync } from "node:child_process";
-import {
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { readJson } from "./support/json.js";
 
 type Finding = Record<string, unknown> & {
   ruleId: string;
@@ -84,19 +78,9 @@ type ScanFixture = {
   registration: Record<string, unknown>;
 };
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories();
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
+afterEach(temporaryDirectories.cleanup);
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);
@@ -125,10 +109,9 @@ async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   recipeFromStdin = false,
 ): Promise<ScanFixture> {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
+  const root = await temporaryDirectories.create(
+    "codex-security-scan-recovery-",
   );
-  temporaryDirectories.push(root);
   const python =
     process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
@@ -367,11 +350,9 @@ describe("malformed scan artifact recovery", () => {
         findings: Array<{ occurrenceId: string }>;
       }
     ).findings[0]!.occurrenceId;
-    const probe = spawnSync(
+    const probe = runNodePython(
       fixture.python,
       [
-        "-I",
-        "-B",
         "-c",
         [
           "import json, sys",
@@ -395,7 +376,6 @@ describe("malformed scan artifact recovery", () => {
         occurrenceId,
       ],
       {
-        encoding: "utf8",
         env: {
           PATH: process.env["PATH"],
           CODEX_SECURITY_STATE_DIR: fixture.stateDir,
@@ -445,28 +425,22 @@ describe("malformed scan artifact recovery", () => {
         );
       }
       if (kind === "nested") {
-        const copied = spawnSync(
-          fixture.python,
+        const copied = runNodePython(fixture.python, [
+          "-c",
           [
-            "-I",
-            "-B",
-            "-c",
-            [
-              "import sys",
-              "from pathlib import Path",
-              "sys.path.insert(0, sys.argv[1])",
-              "import workbench_target as target",
-              "source = Path(sys.argv[2])",
-              "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
-              "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
-              "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
-            ].join("\n"),
-            join(PLUGIN_ROOT, "scripts"),
-            fixture.repository,
-            join(fixture.stateDir, "checkout"),
-          ],
-          { encoding: "utf8" },
-        );
+            "import sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_target as target",
+            "source = Path(sys.argv[2])",
+            "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
+            "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
+            "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+          join(fixture.stateDir, "checkout"),
+        ]);
         expect(copied.status, copied.stderr).toBe(0);
       }
     }
@@ -723,17 +697,11 @@ describe("malformed scan artifact recovery", () => {
       await writeJson(path, document);
       const original = await readFile(path, "utf8");
 
-      const strict = spawnSync(
-        fixture.python,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-          "--scan-dir",
-          fixture.scanDir,
-        ],
-        { encoding: "utf8" },
-      );
+      const strict = runNodePython(fixture.python, [
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        fixture.scanDir,
+      ]);
       expect(strict.status).not.toBe(0);
       expect(strict.stderr).toContain("unknown code-evidence ids");
       expect(await readFile(path, "utf8")).toBe(original);
@@ -1294,17 +1262,11 @@ describe("malformed scan artifact recovery", () => {
     document.findings[0]!.identity.anchor = "Invalid Anchor";
     await writeJson(path, document);
 
-    const strict = spawnSync(
-      fixture.python,
-      [
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-        "--scan-dir",
-        fixture.scanDir,
-      ],
-      { encoding: "utf8" },
-    );
+    const strict = runNodePython(fixture.python, [
+      join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+      "--scan-dir",
+      fixture.scanDir,
+    ]);
 
     expect(strict.status).not.toBe(0);
     expect(strict.stderr).toContain("stable lowercase semantic slug");

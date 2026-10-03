@@ -505,7 +505,7 @@ describe("rank shard helpers", () => {
       symlinkSync(join(outside.root, "nested"), join(f.root, "link"));
       const directory = f.root + "/link/../shards";
       write(f.input, [candidate("a.py")]);
-      expect(make({ ...f, directory }).status).toBe(0);
+      expect(make({ ...f, directory, input: f.input + "/." }).status).toBe(0);
       expect(
         existsSync(join(outside.root, "shards", "rank-shard-0001.input.jsonl")),
       ).toBe(true);
@@ -514,7 +514,9 @@ describe("rank shard helpers", () => {
       const target = join(f.root, "target.jsonl");
       writeFileSync(target, "existing", { mode: 0o640 });
       symlinkSync(target, f.output);
-      expect(merge({ ...f, directory }).status).toBe(0);
+      expect(merge({ ...f, directory, output: f.output + "/./" }).status).toBe(
+        0,
+      );
       expect(statSync(target).mode & 0o777).toBe(0o640);
       expect(read(target)).toEqual([ranked(candidate("a.py"))]);
     },

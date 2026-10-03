@@ -11,13 +11,16 @@ interface ResolvePythonCommandOptions {
   platform?: PythonPlatform;
 }
 
-const MISSING_PYTHON_HELPER_MESSAGE = "Codex Security could not start its Python 3 helper. Reinstall or update Codex to restore its bundled Python runtime, or set the PYTHON environment variable to a working Python 3 executable, then restart Codex.";
+const MISSING_PYTHON_HELPER_MESSAGE =
+  "Codex Security could not start its Python 3 helper. Reinstall or update Codex to restore its bundled Python runtime, or set the PYTHON environment variable to a working Python 3 executable, then restart Codex.";
 
 /**
  * Resolve Python for each workbench invocation because Codex may finish installing
  * its primary runtime after the MCP server has already started.
  */
-export async function resolvePythonCommand(options: ResolvePythonCommandOptions = {}): Promise<string> {
+export async function resolvePythonCommand(
+  options: ResolvePythonCommandOptions = {},
+): Promise<string> {
   const configuredPython = options.configuredPython ?? process.env.PYTHON;
   if (configuredPython?.trim()) {
     return configuredPython.trim();
@@ -31,20 +34,22 @@ export async function resolvePythonCommand(options: ResolvePythonCommandOptions 
     "codex-runtimes",
     "codex-primary-runtime",
     "dependencies",
-    "python"
+    "python",
   );
-  const bundledPythonCandidates = platform === "win32"
-    ? [
-        pathImplementation.join(bundledPythonRoot, "python.exe"),
-        pathImplementation.join(bundledPythonRoot, "python", "python.exe"),
-        pathImplementation.join(bundledPythonRoot, "bin", "python.exe")
-      ]
-    : [
-        pathImplementation.join(bundledPythonRoot, "bin", "python3"),
-        pathImplementation.join(bundledPythonRoot, "bin", "python")
-      ];
-  const isUsableExecutable = options.isUsableExecutable
-    ?? ((candidate: string) => isUsablePythonExecutable(candidate, platform));
+  const bundledPythonCandidates =
+    platform === "win32"
+      ? [
+          pathImplementation.join(bundledPythonRoot, "python.exe"),
+          pathImplementation.join(bundledPythonRoot, "python", "python.exe"),
+          pathImplementation.join(bundledPythonRoot, "bin", "python.exe"),
+        ]
+      : [
+          pathImplementation.join(bundledPythonRoot, "bin", "python3"),
+          pathImplementation.join(bundledPythonRoot, "bin", "python"),
+        ];
+  const isUsableExecutable =
+    options.isUsableExecutable ??
+    ((candidate: string) => isUsablePythonExecutable(candidate, platform));
   for (const candidate of bundledPythonCandidates) {
     if (await isUsableExecutable(candidate)) {
       return candidate;
@@ -57,7 +62,10 @@ export async function resolvePythonCommand(options: ResolvePythonCommandOptions 
  * Windows does not use POSIX execute bits, so a regular .exe file is the most
  * reliable preflight available there. Actual spawn failures are normalized below.
  */
-export async function isUsablePythonExecutable(candidate: string, platform: PythonPlatform): Promise<boolean> {
+export async function isUsablePythonExecutable(
+  candidate: string,
+  platform: PythonPlatform,
+): Promise<boolean> {
   try {
     const candidateStat = await fs.stat(candidate);
     if (!candidateStat.isFile()) {
@@ -73,14 +81,17 @@ export async function isUsablePythonExecutable(candidate: string, platform: Pyth
 }
 
 /** Translate operating-system spawn failures without hiding Python process errors. */
-export function missingPythonHelperMessage(error: unknown, pythonCommand: string): string | undefined {
+export function missingPythonHelperMessage(
+  error: unknown,
+  pythonCommand: string,
+): string | undefined {
   if (
-    !error
-    || typeof error !== "object"
-    || !("code" in error)
-    || typeof error.code !== "string"
-    || !("path" in error)
-    || error.path !== pythonCommand
+    !error ||
+    typeof error !== "object" ||
+    !("code" in error) ||
+    typeof error.code !== "string" ||
+    !("path" in error) ||
+    error.path !== pythonCommand
   ) {
     return undefined;
   }

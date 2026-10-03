@@ -58,6 +58,51 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("pins one Codex version across the CLI, MCP app, and evals", async () => {
+    const directories = [
+      "sdk/typescript",
+      "plugins/codex-security/mcp-app",
+      "evals/triage-finding",
+    ];
+    const manifests = await Promise.all(
+      directories.map(async (directory) =>
+        JSON.parse(
+          await readFile(
+            new URL(`../../../${directory}/package.json`, import.meta.url),
+            "utf8",
+          ),
+        ),
+      ),
+    );
+    const version = manifests[0].dependencies["@openai/codex"];
+    expect(version).toBeTruthy();
+    for (const [index, directory] of directories.entries()) {
+      expect(manifests[index].dependencies["@openai/codex-sdk"]).toBe(version);
+      const lockfile = Bun.YAML.parse(
+        await readFile(
+          new URL(`../../../${directory}/pnpm-lock.yaml`, import.meta.url),
+          "utf8",
+        ),
+      ) as {
+        packages: Record<string, { os?: string[]; cpu?: string[] }>;
+      };
+      expect(
+        Object.keys(lockfile.packages).filter((name) =>
+          name.startsWith("@openai/codex-sdk@"),
+        ),
+      ).toEqual([`@openai/codex-sdk@${version}`]);
+      for (const [name, metadata] of Object.entries(lockfile.packages)) {
+        if (name.startsWith("@openai/codex@")) {
+          const platform =
+            metadata.os && metadata.cpu
+              ? `-${metadata.os[0]}-${metadata.cpu[0]}`
+              : "";
+          expect(name).toBe(`@openai/codex@${version}${platform}`);
+        }
+      }
+    }
+  });
+
   test("exports typed attack-path aliases", () => {
     const dataflow: AttackPathDataflow = {
       transformations: ["decode archive entry"],
@@ -119,19 +164,47 @@ describe("TypeScript package skeleton", () => {
       "22.13.0",
       "24",
     ]);
+    const verificationSteps = jobs["windows-verify"]!.steps!;
+    const shardPython = jobs["windows-test"]!.steps!.find(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const pythonSetup = verificationSteps.findIndex(({ uses }) =>
+      uses?.startsWith("actions/setup-python@"),
+    );
+    const packageInspection = verificationSteps.findIndex(
+      ({ run }) => run === "node scripts/check-package.mjs ../../dist/*.tgz",
+    );
+    expect(shardPython?.uses).toMatch(/^actions\/setup-python@[a-f0-9]{40}$/);
+    expect(pythonSetup).toBeGreaterThanOrEqual(0);
+    expect(pythonSetup).toBeLessThan(packageInspection);
+    expect(verificationSteps[pythonSetup]).toMatchObject({
+      uses: shardPython?.uses,
+      with: { "python-version": "3.12" },
+    });
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty("if");
+    expect(verificationSteps[pythonSetup]).not.toHaveProperty(
+      "continue-on-error",
+    );
+    expect([false, "false"]).not.toContain(
+      verificationSteps[pythonSetup]?.with?.["update-environment"],
+    );
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
+      "workflow-quality",
       "static-checks",
       "package",
       "test",
       "compatibility",
       "mcp",
+      "plugin-host",
       "plugin-source",
+      "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
       "static-checks",
+      "plugin-host",
       "windows-test",
       "windows-verify",
     ]);
@@ -237,6 +310,7 @@ describe("TypeScript package skeleton", () => {
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
+      ["Check MCP formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
       expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
@@ -261,6 +335,19 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
+  test("runs Windows native proofs with and without symbolic-link privileges", async () => {
+    const { jobs } = await workflow("native-windows.yml");
+    const job = jobs["primitives"]!;
+    expect(job.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe("required");
+    const restricted = job.steps!.find(
+      (step) => step.name === "Verify Windows proofs without symbolic links",
+    );
+    expect(restricted?.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe(
+      "disabled",
+    );
+    expect(restricted).not.toHaveProperty("continue-on-error");
+  });
+
   test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
     const ci = await workflow("node-ci.yml");
     const windows = ci.jobs["windows-test"]!.steps!;
@@ -275,7 +362,8 @@ describe("TypeScript package skeleton", () => {
     ).toMatchObject({
       if: "matrix.shard == 3 && runner.environment == 'github-hosted'",
       env: { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true" },
-      run: "bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
+      "timeout-minutes": 7,
+      run: "bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts",
     });
     const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([
@@ -360,8 +448,10 @@ describe("TypeScript package skeleton", () => {
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
 
-    expect(packageJson.scripts.build).toBe(
-      "node --run clean && tsc -p tsconfig.build.json && node scripts/build-dashboard.mjs",
+    expect(packageJson.scripts.build).not.toMatch(/\b(?:pnpm|npm|bun)\b/u);
+    expect(packageJson.scripts.build).toMatch(/^node --run clean &&/u);
+    expect(packageJson.scripts.build).toContain(
+      "node scripts/build-dashboard.mjs",
     );
     expect(packageJson.scripts["build:plugin"]).toBe(
       "node scripts/build-plugin.mjs",
@@ -378,7 +468,7 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("keeps production dependency audits non-blocking in CI and releases", async () => {
+  test("blocks CI and releases when the production dependency audit fails", async () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
       const { jobs } = await workflow(workflowName);
       const audits = Object.values(jobs)
@@ -386,7 +476,7 @@ describe("TypeScript package skeleton", () => {
         .filter((step) => step.name === "Audit production dependencies");
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {
-        expect(audit["continue-on-error"]).toBe(true);
+        expect(audit).not.toHaveProperty("continue-on-error");
         expect(audit.run).toMatch(
           /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
         );

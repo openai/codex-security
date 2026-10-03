@@ -19,10 +19,11 @@ import {
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
   matchScanFindings,
@@ -39,14 +40,7 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Pick<
-    ScanOptions,
-    | "auth"
-    | "knowledgeBasePaths"
-    | "scanPrompt"
-    | "postScanPrompt"
-    | "maxCostUsd"
-  >;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -120,6 +114,7 @@ export interface ComponentScanResult {
   findingCount?: number;
   sourceFindingCount?: number;
   deduplication?: ComponentDeduplicationSummary;
+  policyFailed?: boolean;
 }
 
 export async function runComponentScans(
@@ -157,6 +152,7 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config,
           environment,
           signal: options.signal,
@@ -222,7 +218,7 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
-              mode: "standard",
+              mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths,
               outputDir: receipt.outputDir,
               signal: options.signal,
@@ -236,7 +232,7 @@ export async function runComponentScans(
               receipt.coverage === "complete" ? "completed" : "incomplete";
           } catch (error) {
             receipt.status = "failed";
-            receipt.error = safeErrorMessage(error);
+            receipt.error = errorMessage(error);
           }
           notify(() =>
             options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
@@ -276,6 +272,7 @@ export async function runComponentScans(
       : join(output, "retry-components.json");
   if (retryPlanPath !== undefined)
     await writeJson(retryPlanPath, { components: retryComponents });
+  const failureSeverity = options.scanOptions?.failureSeverity;
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
@@ -291,6 +288,13 @@ export async function runComponentScans(
       0,
     ),
     deduplication,
+    ...(failureSeverity === undefined
+      ? {}
+      : {
+          policyFailed: [...results.values()].some((result) =>
+            result.hasFindingsAtOrAbove(failureSeverity),
+          ),
+        }),
   };
   await writeJson(summary.findingsPath, {
     documentType: "codex-security.component-findings",
@@ -366,6 +370,7 @@ async function deduplicateFindings(
         {
           allowHistoricalUncertainty: true,
           auth: options.scanOptions?.auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config ?? {},
           environment: options.environment,
           signal: options.signal,
@@ -389,7 +394,7 @@ async function deduplicateFindings(
   } catch (failure) {
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
-      : safeErrorMessage(failure);
+      : errorMessage(failure);
   }
   const remainSeparate = ({
     beforeOccurrenceId,

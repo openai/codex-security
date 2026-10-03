@@ -1,19 +1,16 @@
-import { createHash } from "node:crypto";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import type { Stats } from "node:fs";
 import {
   chmod,
   cp,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
-  rm,
   symlink,
   type FileHandle,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import fc from "fast-check";
@@ -21,35 +18,25 @@ import { ContractValidationError, loadContract } from "../src/index.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { propertyOptions } from "./support/property.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function copyExample(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-contract-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create("codex-security-contract-");
   const scanDir = join(root, "scan");
   await cp(EXAMPLE, scanDir, { recursive: true });
   if (process.platform !== "win32") await chmod(scanDir, 0o700);
   return scanDir;
 }
 
-async function readJson(path: string): Promise<Record<string, any>> {
-  return JSON.parse(await readFile(path, "utf8"));
-}
-
-async function writeJson(path: string, payload: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`);
-}
+const readJson = readJsonFile<Record<string, any>>;
 
 async function reseal(scanDir: string): Promise<void> {
   const manifestPath = join(scanDir, "scan-manifest.json");
@@ -57,41 +44,10 @@ async function reseal(scanDir: string): Promise<void> {
   for (const artifact of manifest["scan"]["artifacts"]) {
     const path = join(scanDir, artifact["path"]);
     try {
-      artifact["sha256"] = createHash("sha256")
-        .update(await readFile(path))
-        .digest("hex");
+      artifact["sha256"] = sha256(await readFile(path));
     } catch {}
   }
   await writeJson(manifestPath, manifest);
-}
-
-function setFindingIdentity(
-  manifest: Record<string, any>,
-  finding: Record<string, any>,
-): void {
-  const fingerprint = `codex-security/v1:sha256:${createHash("sha256")
-    .update(
-      [
-        "codex-security/v1",
-        manifest["scan"]["target"]["targetId"],
-        finding["ruleId"],
-        finding["identity"]["anchor"],
-        finding["identity"]["instance"] ?? "",
-      ].join("\0"),
-    )
-    .digest("hex")}`;
-  finding["fingerprints"] = {
-    algorithm: "codex-security/v1",
-    primary: fingerprint,
-  };
-  finding["findingId"] = `csf_${createHash("sha256")
-    .update(fingerprint)
-    .digest("hex")
-    .slice(0, 24)}`;
-  finding["occurrenceId"] = `occ_${createHash("sha256")
-    .update([manifest["scan"]["id"], fingerprint].join("\0"))
-    .digest("hex")
-    .slice(0, 24)}`;
 }
 
 function expectation(
@@ -130,7 +86,7 @@ describe("canonical scan contract", () => {
                 ...manifest["scan"]["artifacts"],
                 {
                   path: "artifacts/synthetic.bin",
-                  sha256: createHash("sha256").update(bytes).digest("hex"),
+                  sha256: sha256(bytes),
                   mediaType: "application/octet-stream",
                 },
               ],
@@ -167,7 +123,7 @@ describe("canonical scan contract", () => {
           const bytes = Buffer.from(name);
           const artifact = {
             path: `artifacts/${filename}`,
-            sha256: createHash("sha256").update(bytes).digest("hex"),
+            sha256: sha256(bytes),
             mediaType: "application/octet-stream",
           };
           const scan = {
@@ -201,16 +157,10 @@ describe("canonical scan contract", () => {
   });
 
   test("ships a completed example that passes tracking preflight", () => {
-    const result = Bun.spawnSync(
-      [
-        Bun.which("python3") ?? "python",
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
-        EXAMPLE,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(Bun.which("python3") ?? "python", [
+      join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
+      EXAMPLE,
+    ]);
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
   });
 
@@ -316,6 +266,28 @@ describe("canonical scan contract", () => {
       sameCheckedFileDevice(file, checked, opened, "linux", openReference),
     ).resolves.toBe(false);
     expect(inspected).toBe(windowsInspections);
+
+    device = referenceDevice = highDevice;
+    inode = referenceInode = identity.ino;
+    regular = referenceRegular = true;
+    await expect(
+      sameCheckedFileDevice(
+        file,
+        { path, metadata: identity },
+        { dev: highDevice, ino: identity.ino },
+        "win32",
+        openReference,
+      ),
+    ).resolves.toBe(true);
+    const largeInode = 2n ** 60n;
+    expect(Number(largeInode)).toBe(Number(largeInode + 1n));
+    await expect(
+      sameCheckedFileDevice(
+        file,
+        { path, metadata: { dev: identity.dev, ino: largeInode } },
+        { dev: identity.dev, ino: largeInode + 1n },
+      ),
+    ).resolves.toBe(false);
   });
 
   test("loads the unchanged plugin example with typed canonical names", async () => {
@@ -504,10 +476,9 @@ describe("canonical scan contract", () => {
   test.skipIf(process.platform === "win32")(
     "accepts a scan directory beneath a symlinked parent",
     async () => {
-      const root = await mkdtemp(
-        join(tmpdir(), "codex-security-contract-link-"),
+      const root = await temporaryDirectories.create(
+        "codex-security-contract-link-",
       );
-      temporaryDirectories.push(root);
       const parent = join(root, "actual-parent");
       const linkedParent = join(root, "linked-parent");
       await mkdir(parent, { mode: 0o700 });
@@ -535,10 +506,9 @@ describe("canonical scan contract", () => {
   });
 
   test("loads contract schemas larger than the previous size limit", async () => {
-    const pluginRoot = await mkdtemp(
-      join(tmpdir(), "codex-security-schema-large-"),
+    const pluginRoot = await temporaryDirectories.create(
+      "codex-security-schema-large-",
     );
-    temporaryDirectories.push(pluginRoot);
     await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
       recursive: true,
     });
@@ -588,10 +558,9 @@ describe("canonical scan contract", () => {
   });
 
   test("accepts valid schemas beyond the previous complexity limit", async () => {
-    const pluginRoot = await mkdtemp(
-      join(tmpdir(), "codex-security-schema-complex-"),
+    const pluginRoot = await temporaryDirectories.create(
+      "codex-security-schema-complex-",
     );
-    temporaryDirectories.push(pluginRoot);
     await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
       recursive: true,
     });
@@ -606,10 +575,9 @@ describe("canonical scan contract", () => {
   });
 
   test("does not expose attacker-controlled schema compilation errors", async () => {
-    const pluginRoot = await mkdtemp(
-      join(tmpdir(), "codex-security-schema-compile-"),
+    const pluginRoot = await temporaryDirectories.create(
+      "codex-security-schema-compile-",
     );
-    temporaryDirectories.push(pluginRoot);
     await mkdir(join(pluginRoot, "schemas"));
     const marker = "PRIVATE_SCHEMA_KEY";
     await writeJson(join(pluginRoot, "schemas", "scan-manifest.schema.json"), {
@@ -699,7 +667,6 @@ describe("canonical scan contract", () => {
     const python =
       process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    if (python === null) return;
     const program = [
       "import json, sys",
       "sys.path.insert(0, sys.argv[1])",
@@ -712,10 +679,11 @@ describe("canonical scan contract", () => {
       "    return True",
       "print(json.dumps([accepted(value) for value in ['artifacts/report.json.', 'artifacts/report.json ', 'artifacts/CON.txt', 'artifacts/report?.json', 'artifacts/report:stream']]))",
     ].join("\n");
-    const result = Bun.spawnSync(
-      [python, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, [
+      "-c",
+      program,
+      join(PLUGIN_ROOT, "scripts"),
+    ]);
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual([
@@ -788,18 +756,11 @@ describe("canonical scan contract", () => {
     const python =
       process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    if (python === null) return;
-    const result = Bun.spawnSync(
-      [
-        python,
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-        "--scan-dir",
-        await realpath(scanDir),
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, [
+      join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+      "--scan-dir",
+      await realpath(scanDir),
+    ]);
     const stderr = new TextDecoder().decode(result.stderr);
     expect(result.exitCode, stderr).not.toBe(0);
     expect(stderr).toContain("duplicate artifact path");
@@ -869,7 +830,7 @@ describe("canonical scan contract", () => {
       (candidate: Record<string, unknown>) =>
         candidate["path"] === "findings.json",
     );
-    artifact["sha256"] = createHash("sha256").update(findings).digest("hex");
+    artifact["sha256"] = sha256(findings);
     await writeJson(manifestPath, manifest);
 
     await expect(
@@ -1020,8 +981,8 @@ describe("canonical scan contract", () => {
     const second = structuredClone(first);
     first["identity"]["instance"] = "first-sink";
     second["identity"]["instance"] = "second-sink";
-    setFindingIdentity(manifest, first);
-    setFindingIdentity(manifest, second);
+    setFindingIdentity(manifest["scan"], first);
+    setFindingIdentity(manifest["scan"], second);
     findings["findings"].push(second);
     await writeJson(manifestPath, manifest);
     await writeJson(findingsPath, findings);

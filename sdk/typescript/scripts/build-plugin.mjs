@@ -11,16 +11,12 @@ import {
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(scriptDirectory, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-const publicManifest = ".codex-plugin/plugin.json";
 const execFileAsync = promisify(execFile);
-
-function sourcePath(root, relativePath) {
-  return join(root, ...relativePath.split("/"));
-}
 
 function validatePath(path) {
   const parts = path.split("/");
@@ -37,7 +33,7 @@ function validatePath(path) {
 }
 
 async function destinationFiles(root, prefix = "") {
-  const entries = await readdir(sourcePath(root, prefix), {
+  const entries = await readdir(join(root, prefix), {
     withFileTypes: true,
   });
   const files = [];
@@ -65,25 +61,7 @@ export async function buildBundledPlugin({
   source = join(repositoryRoot, "plugins", "codex-security"),
 } = {}) {
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
-  const { externalOwnedExact, shippedExact } = contract;
-  if (
-    !Array.isArray(externalOwnedExact) ||
-    !externalOwnedExact.every((path) => typeof path === "string") ||
-    !Array.isArray(shippedExact) ||
-    !shippedExact.every((path) => typeof path === "string")
-  ) {
-    throw new Error("Plugin projection contract contains invalid paths.");
-  }
-  if (!externalOwnedExact.includes(publicManifest)) {
-    throw new Error(
-      "Plugin projection contract must declare the public manifest as externally owned.",
-    );
-  }
-
-  const files = [
-    publicManifest,
-    ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-  ];
+  const files = pluginContractFiles(contract);
   files.forEach(validatePath);
   if (new Set(files).size !== files.length) {
     throw new Error("Plugin projection contract contains duplicate paths.");
@@ -92,7 +70,7 @@ export async function buildBundledPlugin({
   const copiedPaths = files.filter((path) => !path.startsWith("mcp/"));
   const sourceFiles = await Promise.all(
     copiedPaths.map(async (path) => {
-      const file = sourcePath(source, path);
+      const file = join(source, path);
       let metadata;
       try {
         metadata = await lstat(file);
@@ -113,19 +91,19 @@ export async function buildBundledPlugin({
 
   await rm(destination, { force: true, recursive: true });
   if (files.some((path) => path.startsWith("mcp/"))) {
-    const mcpApp = sourcePath(source, "mcp-app");
+    const mcpApp = join(source, "mcp-app");
     await execFileAsync(
       process.execPath,
       [
-        sourcePath(mcpApp, "scripts/build_mcp_app.mjs"),
+        join(mcpApp, "scripts/build_mcp_app.mjs"),
         "--output",
-        sourcePath(destination, "mcp"),
+        join(destination, "mcp"),
       ],
       { cwd: mcpApp, maxBuffer: 10 * 1024 * 1024 },
     );
   }
   for (const { file, mode, path } of sourceFiles) {
-    const output = sourcePath(destination, path);
+    const output = join(destination, path);
     await mkdir(dirname(output), { recursive: true });
     await copyFile(file, output);
     await chmod(output, mode);

@@ -5,16 +5,24 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
+  type DeduplicateRecordsInput,
+  type DeduplicateRecordsResult,
+  type DeduplicationReviewRequest,
+  type DeduplicationReviewRunner,
   estimateScanCost,
+  loadProjectConfig,
   matchScanFindings,
   planComponents,
   publishScanToCustom,
   publishScan,
   runComponentScans,
+  resolveProjectConfig,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type ProjectConfigInput,
   type SeverityClassification,
   type ScanSeverityClassification,
   type ScanCost,
@@ -24,6 +32,7 @@ import {
   type ScanOptions,
   type ScanProgress,
   type ScanResult,
+  type ScanSettings,
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
@@ -118,6 +127,35 @@ export async function scan(repository: string): Promise<ScanResult> {
   }
 }
 
+export function configuredScanOptions(
+  input: ProjectConfigInput = {
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { subagents_per_worker: 0, stop_after_consecutive_errors: 2 },
+    },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+  },
+): ScanSettings {
+  return resolveProjectConfig(input).options;
+}
+
+export async function scanFromFile(repository: string, file: string) {
+  const { config, options } = await loadProjectConfig(file);
+  await using client = new CodexSecurity(config);
+  const result = await client.run(repository, {
+    ...options,
+    postScanPromptFile: "follow-up.md",
+  });
+  return {
+    result,
+    failed:
+      options.failureSeverity !== undefined &&
+      result.hasFindingsAtOrAbove(options.failureSeverity),
+  };
+}
+
 export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {
   input_tokens: 10,
   output_tokens: 2,
@@ -185,3 +223,19 @@ export async function scanComponents(repository: string, outputDir: string) {
 
 // @ts-expect-error The model client is an internal test dependency.
 planComponents("synthetic-repository", { codex: {} });
+
+export async function dedupeRecords(
+  input: DeduplicateRecordsInput,
+  execute: (
+    request: DeduplicationReviewRequest,
+    signal?: AbortSignal,
+  ) => Promise<unknown>,
+  signal: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  const reviewRunner: DeduplicationReviewRunner = {
+    run(request, options) {
+      return execute(request, options?.signal);
+    },
+  };
+  return await deduplicateRecords(input, { reviewRunner, signal });
+}

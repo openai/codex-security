@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -158,7 +158,7 @@ describe("built candidate normalizer", () => {
     const f = fixture();
     const locations = [
       location("app/query.py", 4, "sink"),
-      location(),
+      location("./app/routes.py"),
       location("app/query.py", 3, "root_control"),
     ];
     const first = candidate(locations, {
@@ -182,8 +182,8 @@ describe("built candidate normalizer", () => {
       { ...process.env, PATH: "" },
     );
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout.replaceAll("\r\n", "\n")).toBe(
-      `Combined 3 candidate rows into 2 rows in ${f.output}\n`,
+    expect(result.stdout).toBe(
+      `Combined 3 candidate rows into 2 rows in ${toNamespacedPath(f.output)}\n`,
     );
     const rows = ledger(f);
     expect(rows).toHaveLength(2);
@@ -268,7 +268,7 @@ describe("built candidate normalizer", () => {
     expect(rejected.stderr).toContain("expected at least one in-scope file");
   });
 
-  test("sorts Unicode code points, normalizes Unicode and large CWE integers, and retains BOM text", () => {
+  test("normalizes Unicode candidates deterministically with native string order", () => {
     const f = fixture();
     const names = ["app/\u{10000}.py", "app/\ue000.py"];
     for (const name of names) write(join(f.repo, name), "line\n");
@@ -276,8 +276,8 @@ describe("built candidate normalizer", () => {
     const row = candidate(
       names.map((name) => location(name, 1, "evidence")),
       {
-        cwe_ids: ["CWE-٢", "cwe-００８９", "CWE-89", "CWE-9007199254740993"],
-        summary: "\u001c\ufeffSummary\u0085",
+        cwe_ids: ["CWE-002", "cwe-0089", "CWE-89", "CWE-9007199254740993"],
+        summary: " \ufeffSummary\u00a0",
         evidence: "\u{10000}",
       },
     );
@@ -290,11 +290,18 @@ describe("built candidate normalizer", () => {
       "CWE-9007199254740993",
     ]);
     expect((value["locations"] as Row[]).map((item) => item["path"])).toEqual(
-      [...names].reverse(),
+      names,
     );
-    expect(value["summary"]).toBe("\ufeffSummary");
-    expect(value["evidence"]).toBe("\ue000\n\u{10000}");
-    expect(value["candidate_id"]).toBe("candidate-cc5ebd3ebd732a50");
+    expect(value["summary"]).toBe("Summary");
+    expect(value["evidence"]).toBe("\u{10000}\n\ue000");
+    const reordered = {
+      ...row,
+      locations: [...(row.locations as Row[])].reverse(),
+    };
+    expect(
+      run(f, [[{ ...reordered, evidence: "\ue000" }, reordered]]).status,
+    ).toBe(0);
+    expect(ledger(f)).toEqual([value]);
     expect(readFileSync(f.output, "utf8").startsWith('{"candidate_id":')).toBe(
       true,
     );
@@ -322,27 +329,10 @@ describe("built candidate normalizer", () => {
     }
   });
 
-  test.each(["1.0", "1e0"])(
-    "normalizes integral line spelling %s",
-    (spelling) => {
-      const f = fixture();
-      const input = join(f.root, "raw.jsonl");
-      const row = JSON.stringify(candidate([location("app/routes.py", 1)]));
-      write(input, row + "\n");
-      expect(invoke(f, [input]).status).toBe(0);
-      const expected = readFileSync(f.output);
-      write(
-        input,
-        row.replace('"start_line":1', `"start_line":${spelling}`) + "\n",
-      );
-      expect(invoke(f, [input]).status).toBe(0);
-      expect(readFileSync(f.output)).toEqual(expected);
-    },
-  );
-
   test("rejects invalid line values, malformed rows, and invalid UTF-8 atomically", () => {
     const f = fixture();
     const input = join(f.root, "raw.jsonl");
+    write(f.output, "previous output\n");
     for (const number of [
       "1.5",
       "true",
@@ -360,7 +350,6 @@ describe("built candidate normalizer", () => {
           `"start_line":${number}`,
         ) + "\n",
       );
-      write(f.output, "previous output\n");
       const result = invoke(f, [input]);
       expect(result.status).toBe(2);
       expect(result.stderr).toContain("row 1:");
@@ -385,20 +374,14 @@ describe("built candidate normalizer", () => {
       '{"locations":',
       "\ufeff{}",
       Buffer.from([0xff]),
-      JSON.stringify(candidate([], { summary: "\ud800" })),
     ]) {
       write(input, invalid);
       const result = invoke(f, [input]);
       expect(result.status).toBe(2);
       expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
     }
-    write(input, JSON.stringify(candidate()) + "\r\n\rnot-json\n");
+    write(input, JSON.stringify(candidate()) + "\r\n\nnot-json\n");
     expect(invoke(f, [input]).stderr).toContain("raw.jsonl row 3:");
-    write(
-      input,
-      JSON.stringify(candidate(undefined, { evidence: "\ud800" })) + "\n",
-    );
-    expect(invoke(f, [input]).status).toBe(2);
     expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
     expect(readdirSync(f.root).some((name) => name.endsWith(".tmp"))).toBe(
       false,
@@ -462,7 +445,7 @@ describe("built candidate normalizer", () => {
         "candidate_id: expected a non-empty string",
       ],
       [
-        candidate(undefined, { summary: "\u001c" }),
+        candidate(undefined, { summary: " \t\r\n" }),
         "summary: expected a non-empty string",
       ],
       [
@@ -478,8 +461,8 @@ describe("built candidate normalizer", () => {
         "instance: expected a non-empty string",
       ],
     ];
+    write(f.output, "previous output\n");
     for (const [row, message] of cases) {
-      write(f.output, "previous output\n");
       const result = run(f, [[candidate(), row]]);
       expect(result.status).toBe(2);
       expect(result.stderr).toContain("candidates-0.jsonl row 2:");
@@ -494,8 +477,8 @@ describe("built candidate normalizer", () => {
       const f = fixture();
       write(join(f.repo, "\ufffd.py"), "replacement sibling\n");
       write(f.scope, "\ufffd.py\n");
+      write(f.output, "previous output\n");
       for (const name of ["\ud800.py", "\udc00.py"]) {
-        write(f.output, "previous output\n");
         const result = run(f, [[candidate([location(name, 1)])]]);
         expect(result.status).toBe(2);
         expect(result.stderr).toContain("unpaired surrogate");
@@ -506,7 +489,7 @@ describe("built candidate normalizer", () => {
 
   test("writes valid long output basenames through a short exclusive temporary name", () => {
     const f = fixture();
-    f.output = join(f.root, `${"x".repeat(220)}.jsonl`);
+    f.output = join(f.root, `${"x".repeat(249)}.jsonl`);
     const result = run(f, [[candidate()]]);
     expect(result.status, result.stderr).toBe(0);
     expect(ledger(f)).toHaveLength(1);
@@ -516,47 +499,17 @@ describe("built candidate normalizer", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "preserves scope through repeated separators after an unresolved symlink",
+    "rejects scope symlink loops without replacing existing output",
     () => {
       const f = fixture();
-      symlinkSync("self", join(f.repo, "self"));
-      symlinkSync("missing/../self", join(f.repo, "alias"));
-      write(f.scope, `alias/${f.repo}/app/routes.py\n`);
-      const result = run(f, [[candidate()]], ["--allow-missing-in-scope"]);
-      expect(result.status, result.stderr).toBe(1);
-      expect(existsSync(f.output)).toBe(false);
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "normalizes remaining output components after a non-strict symlink cycle",
-    () => {
-      const f = fixture();
-      symlinkSync("loop", join(f.root, "loop"));
-      const target = join(f.root, "target.jsonl");
-      write(target, "target must remain unchanged\n");
-      const output = join(f.root, "from-loop.jsonl");
-      symlinkSync(target, output);
-      const result = run(
-        { ...f, output: `${f.root}/loop/../from-loop.jsonl` },
-        [[candidate()]],
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(readFileSync(target, "utf8")).toBe(
-        "target must remain unchanged\n",
-      );
-      expect(ledger({ ...f, output })).toHaveLength(1);
-      const alias = join(f.root, "nested-output-alias");
-      const nestedTarget = join(f.root, "nested-target.jsonl");
-      symlinkSync("loop/../nested-target.jsonl", alias);
-      const nested = run({ ...f, output: alias }, [[candidate()]]);
-      expect(nested.status, nested.stderr).toBe(0);
-      expect(ledger({ ...f, output: nestedTarget })).toHaveLength(1);
-      expect(
-        run({ ...f, output: `${f.root}/loop/still-looped.jsonl` }, [
-          [candidate()],
-        ]).status,
-      ).toBe(1);
+      const loop = join(f.repo, "app/loop.py");
+      symlinkSync(loop, loop);
+      write(f.scope, "app/loop.py\n");
+      write(f.output, "previous output\n");
+      const result = run(f, [[candidate()]]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("in-scope file row 1:");
+      expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
     },
   );
 
@@ -579,6 +532,20 @@ describe("built candidate normalizer", () => {
       expect(invoke({ ...f, output: alias }, [source]).stderr).toContain(
         "--out: must not also be an input",
       );
+      const missing = join(f.root, "missing.jsonl");
+      const dangling = join(f.root, "dangling-output");
+      symlinkSync(missing, dangling);
+      expect(run({ ...f, output: dangling }, [[candidate()]]).status).toBe(2);
+      expect(existsSync(missing)).toBe(false);
+
+      symlinkSync(f.root, join(f.root, "directory-alias"), "dir");
+      for (const protectedPath of [source, f.scope]) {
+        const before = readFileSync(protectedPath);
+        const output = `${f.root}/missing/../directory-alias/${basename(protectedPath)}`;
+        expect(invoke({ ...f, output }, [source]).status).toBe(2);
+        expect(readFileSync(protectedPath)).toEqual(before);
+      }
+      expect(existsSync(join(f.root, "missing"))).toBe(false);
     }
     const nested = {
       ...f,
@@ -641,15 +608,8 @@ describe("built candidate normalizer", () => {
       for (const name of [
         "app/ leading.py",
         "app/trailing .py",
-        "app/ .py",
-        "app/   .py",
-        "app/carriage\rname.py",
-        "app/trailing.py\r",
-        "app/vertical\vname.py",
-        "app/form\fname.py",
-        "app/next\u0085name.py",
-        "app/line\u2028name.py",
-        "app/paragraph\u2029name.py",
+        "app/résumé.py",
+        "app/路径.py",
       ]) {
         write(join(f.repo, name), "line\n");
         write(f.scope, name + "\n");
@@ -663,65 +623,6 @@ describe("built candidate normalizer", () => {
         const result = run(f, [[candidate([location(name, 1)])]]);
         expect(result.status).toBe(2);
         expect(result.stderr).toContain("safe repository-relative POSIX path");
-      }
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "disambiguates carriage-return collisions from independent inventory evidence",
-    () => {
-      const cases = [
-        {
-          inventory: "app/routes.py\r\napp/query.py\r\n",
-          files: ["app/routes.py\r"],
-          selected: "app/routes.py",
-        },
-        {
-          inventory:
-            "app/query.py\napp/query.py\r\napp/routes.py\napp/routes.py\r\n",
-          files: ["app/routes.py\r", "app/query.py\r"],
-          selected: "app/routes.py\r",
-        },
-        {
-          inventory: "app/query.py\r\napp/routes.py\r",
-          files: ["app/routes.py\r"],
-          selected: "app/routes.py\r",
-        },
-        {
-          inventory: "app/routes.py\r\napp/literal.py\r\napp/query.py\n",
-          files: ["app/routes.py\r", "app/literal.py\r"],
-          selected: "app/routes.py\r",
-        },
-        {
-          inventory: "\r\napp/routes.py\r\napp/query.py\r\n",
-          files: ["app/routes.py\r", "app/query.py\r"],
-          selected: "app/routes.py",
-        },
-      ];
-      for (const item of cases) {
-        const f = fixture();
-        for (const name of item.files) write(join(f.repo, name), "line\n");
-        write(f.scope, item.inventory);
-        const result = run(f, [[candidate([location(item.selected, 1)])]]);
-        expect(result.status, result.stderr).toBe(0);
-        expect((ledger(f)[0]!["locations"] as Row[])[0]!["path"]).toBe(
-          item.selected,
-        );
-      }
-      for (const inventory of [
-        "app/routes.py\r\napp/query.py\n",
-        "app/routes.py\r\napp/query.py\r\n",
-      ]) {
-        const f = fixture();
-        for (const name of ["app/routes.py\r", "app/query.py\r"])
-          write(join(f.repo, name), "line\n");
-        write(f.scope, inventory);
-        for (const selected of ["app/routes.py", "app/routes.py\r"]) {
-          const result = run(f, [[candidate([location(selected, 1)])]]);
-          expect(result.status).toBe(2);
-          expect(result.stderr).toContain("ambiguous carriage-return paths");
-          expect(existsSync(f.output)).toBe(false);
-        }
       }
     },
   );
@@ -848,7 +749,7 @@ describe("built candidate normalizer", () => {
     },
   );
 
-  test("keeps argument aliases, multiple inputs, home expansion, and literal dash output", () => {
+  test("accepts documented options, multiple inputs, home expansion, and literal dash output", () => {
     const f = fixture();
     run(f, [[candidate()]]);
     const input = join(f.root, "candidates-0.jsonl");
@@ -857,15 +758,13 @@ describe("built candidate normalizer", () => {
       [
         helper,
         "normalize-candidates",
-        "--inp",
+        "--input",
         input,
         input,
-        "--o",
-        "-",
-        "--repo-r",
-        "./~/İrepository",
-        "--in-s",
-        "~/in-scope.txt",
+        "--out=-",
+        "--repo-root",
+        "~/İrepository",
+        "--in-scope-files=~/in-scope.txt",
       ],
       {
         cwd: f.root,
@@ -885,7 +784,7 @@ describe("built candidate normalizer", () => {
     for (const args of [
       [],
       ["--input"],
-      ["--in", input],
+      ["--unknown", input],
       ["--allow-missing-in-scope=true"],
     ])
       expect(

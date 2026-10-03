@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -720,8 +727,17 @@ describe("patch risk assessment contract", () => {
         );
       }
       const file = join(outside, "assessment with spaces.json");
-      if (process.platform !== "win32")
-        expect(validateText("", outside, [`${file}/.`]).status).toBe(0);
+      if (process.platform !== "win32") {
+        for (const suffix of ["/.", "///", "/./."])
+          expect(validateText("", outside, [file + suffix]).status).toBe(0);
+        await mkdir(join(outside, "child", "nested"), { recursive: true });
+        await symlink("child/nested", join(outside, "link"));
+        await writeFile(join(outside, "child", "assessment.json"), original);
+        await writeFile(join(outside, "assessment.json"), "wrong sibling");
+        expect(
+          validateText("", outside, ["link/../assessment.json/."]).status,
+        ).toBe(0);
+      }
       expect(validateText(original, outside).status).toBe(0);
       if (process.platform !== "win32") {
         const launched = spawnSync(

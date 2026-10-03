@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   Codex,
   type CodexOptions,
+  type CyberAccessProgram,
   type ModelReasoningEffort,
   type ThreadOptions,
   type TurnOptions,
@@ -21,7 +22,9 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   modelProviderConfigOverride,
+  resolveCodexProfile,
   resolveCommandAuthConfig,
+  scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -57,6 +60,7 @@ type ReadOnlyCodexThreadSource = Extract<
   | typeof CODEX_SECURITY_THREAD_SOURCES.scan
   | typeof CODEX_SECURITY_THREAD_SOURCES.scanComparison
   | typeof CODEX_SECURITY_THREAD_SOURCES.severityClassification
+  | typeof CODEX_SECURITY_THREAD_SOURCES.suggestOwners
 >;
 
 export interface ScanComparisonInput {
@@ -153,19 +157,15 @@ interface ReadOnlyCodex {
 export interface ReadOnlyCodexOptions {
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
+  /** @internal Cyber access program already selected by the calling scan. */
+  cyberAccessProgram?: CyberAccessProgram;
   config?: CodexSecurityConfig;
   /** @internal */
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
   reasoningEffort?:
-    | "minimal"
-    | "low"
-    | "medium"
-    | "high"
-    | "xhigh"
-    | "max"
-    | "ultra";
+    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -176,8 +176,12 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
   onProgress?: (progress: ScanComparisonProgress) => void;
 }
 
-interface CompletedScanMatchingOptions
-  extends Pick<ScanComparisonOptions, "environment" | "model" | "signal"> {
+interface CompletedScanMatchingOptions extends Pick<
+  ScanComparisonOptions,
+  "environment" | "model" | "signal"
+> {
+  /** @internal Cyber access program already selected by the calling scan. */
+  cyberAccessProgram?: CyberAccessProgram;
   scanId: string;
   repository: string;
   previousFindings: readonly Record<string, unknown>[];
@@ -348,6 +352,9 @@ export async function matchScanFindingsInternal(
     outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
       target: "draft-7",
     }),
+    ...(options.cyberAccessProgram === undefined
+      ? {}
+      : { cyberAccessProgram: options.cyberAccessProgram }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
   let prompt = comparisonPrompt(pages[0]!, 0, pages.length);
@@ -568,6 +575,18 @@ async function startReadOnlyCodexThread(
   }
   const sdkConfig = { ...config };
   if (commandAuth) delete sdkConfig["model_providers"];
+  const effectiveFeatures = resolveCodexProfile(
+    scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
+  )["features"] as JsonObject | undefined;
+  const cyberFeatures: JsonObject = {};
+  for (const feature of [
+    "api_key_cyber_access_programs",
+    "api_key_model_discovery",
+  ]) {
+    if (effectiveFeatures?.[feature] !== undefined) {
+      cyberFeatures[feature] = effectiveFeatures[feature];
+    }
+  }
   const environment =
     options.codex === undefined
       ? await comparisonEnvironment(
@@ -607,6 +626,7 @@ async function startReadOnlyCodexThread(
           codex_security_surface: runtimeOptions.surface,
         },
         features: {
+          ...cyberFeatures,
           apps: false,
           code_mode: false,
           code_mode_only: false,
@@ -649,6 +669,9 @@ export async function runReadOnlyCodex(
   const thread = await startReadOnlyCodexThread(options, runtimeOptions);
   const turn = await thread.run(prompt, {
     outputSchema,
+    ...(options.cyberAccessProgram === undefined
+      ? {}
+      : { cyberAccessProgram: options.cyberAccessProgram }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   return turn.finalResponse;
@@ -744,6 +767,7 @@ export async function matchCompletedScan(
   };
   const comparison = await (options.matchFindings ?? matchScanFindings)(input, {
     allowHistoricalUncertainty: true,
+    cyberAccessProgram: options.cyberAccessProgram,
     environment: options.environment,
     model: options.model,
     signal: options.signal,
@@ -796,9 +820,8 @@ function reconcileComparison(
       group.map(({ occurrenceId }) => [occurrenceId, index] as const),
     ),
   );
-  const semanticGroups = Map.groupBy(
-    response.matches,
-    (match) => groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
+  const semanticGroups = Map.groupBy(response.matches, (match) =>
+    groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
   );
   const orderedGroups = new Set([...semanticGroups.keys(), ...groups.keys()]);
   const matches = [...orderedGroups].flatMap((index) => {

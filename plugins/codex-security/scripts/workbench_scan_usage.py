@@ -174,18 +174,21 @@ def _scan_root_thread_ids(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     supplied_thread_id: str | None,
+    *,
+    include_owner_threads: bool = True,
 ) -> list[str]:
     candidates: list[str | None] = [supplied_thread_id]
-    if "continuation_thread_id" in scan.keys():
-        candidates.append(scan["continuation_thread_id"])
-    if "deep_scan_owner_thread_id" in scan.keys():
-        candidates.append(scan["deep_scan_owner_thread_id"])
-    workspace = connection.execute(
-        "SELECT thread_id FROM workspaces WHERE id = ?",
-        (scan["workspace_id"],),
-    ).fetchone()
-    if workspace is not None:
-        candidates.append(workspace["thread_id"])
+    if include_owner_threads:
+        if "continuation_thread_id" in scan.keys():
+            candidates.append(scan["continuation_thread_id"])
+        if "deep_scan_owner_thread_id" in scan.keys():
+            candidates.append(scan["deep_scan_owner_thread_id"])
+        workspace = connection.execute(
+            "SELECT thread_id FROM workspaces WHERE id = ?",
+            (scan["workspace_id"],),
+        ).fetchone()
+        if workspace is not None:
+            candidates.append(workspace["thread_id"])
     if scan["mode"] == "deep":
         candidates.extend(
             row["sdk_thread_id"]
@@ -206,6 +209,16 @@ def _scan_root_thread_ids(
             roots.append(candidate)
             seen.add(candidate)
     return roots
+
+
+def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
+    # CLI recipes identify dedicated executions; Desktop continuations can be shared.
+    return _scan_root_thread_ids(
+        connection,
+        scan,
+        scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
+        include_owner_threads=False,
+    )
 
 
 def _codex_state_database() -> Path | None:

@@ -1,9 +1,9 @@
 import { decodeUtf8 } from "./utf8";
 import { dirname } from "node:path";
-import { mkdir, readFile, writeFile } from "./helper-files";
+import { mkdir, pythonPath, readFile, writeFile } from "./helper-files";
 import { encodePosixPath } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
-import { expandHome, parsedPath } from "./resolve-security-md";
+import { expandHome } from "./resolve-security-md";
 
 export interface RankRow {
   path: string;
@@ -223,5 +223,5 @@ export function worklistPath(
   value: string,
   posixHome: string | undefined,
 ): string {
-  return parsedPath(expandHome(parsedPath(value), posixHome));
+  return pythonPath(expandHome(pythonPath(value), posixHome));
 }

@@ -1871,6 +1871,20 @@ The extraction root is not enforced.
             self.assertIn(expected, report)
         self.assertFalse((self.scan_dir / "report.html").exists())
 
+    def test_finalize_does_not_project_model_authored_runtime_status(self) -> None:
+        stale_status = "SDK finalization and sealing intentionally pending."
+        self.manifest["scan"]["scope"]["runtimeStatus"] = stale_status
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        manifest = self.read_json("scan-manifest.json")
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertEqual(manifest["scan"]["status"], "completed")
+        self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
+        self.assertNotIn(stale_status, report)
+        self.assertNotIn("Runtime or test status", report)
+
     def test_finalize_accepts_legacy_unstructured_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
         finding["validation"] = {"evidence": "legacy validation evidence"}
@@ -2949,18 +2963,26 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_finalizes_no_findings_scan(self) -> None:
+        self.manifest["scan"]["artifacts"] = []
         self.findings["findings"] = []
+        self.coverage["mode"] = "diff"
+        self.coverage["inventoryStrategy"] = "diff"
         self.coverage["surfaces"][0]["disposition"] = "no_issue_found"
         self.write_scan()
-        (self.scan_dir / "report.md").write_text(
-            "# Security Review: example/repo\n\n## Findings\n\nNo findings.\n",
-            encoding="utf-8",
-        )
+        (self.scan_dir / "report.md").unlink()
         FINALIZER.finalize_scan(self.scan_dir)
         findings = self.read_json("findings.json")
         self.assertEqual(findings["findings"], [])
+        self.assertTrue((self.scan_dir / "report.md").is_file())
         sarif = self.read_json("exports/results.sarif")
         self.assertEqual(sarif["runs"][0]["results"], [])
+
+    def test_rejects_empty_artifacts_with_existing_seal(self) -> None:
+        self.manifest["scan"]["sealedAt"] = self.manifest["scan"]["completedAt"]
+        self.manifest["scan"]["artifacts"] = []
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "requires artifact records"):
+            FINALIZER.finalize_scan(self.scan_dir)
 
     def test_sarif_encodes_location_as_relative_uri(self) -> None:
         self.finding["locations"][0]["path"] = "src/archive handlers/extract.py"

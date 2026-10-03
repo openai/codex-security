@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { Octokit } from "@octokit/core";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -226,9 +226,8 @@ export async function importGitHubCodeScanningAlerts(
       throw new CodexSecurityError(
         "GitHub request was rate limited. Wait and retry.",
       );
-    // Octokit errors can contain credential-bearing request headers.
     throw new CodexSecurityError(
-      `GitHub code scanning request failed${typeof status === "number" ? ` (HTTP ${status})` : ""}.`,
+      `GitHub code scanning request failed${typeof status === "number" ? ` (HTTP ${status})` : ""}: ${errorMessage(error)}`,
     );
   }
 }
