@@ -24,7 +24,7 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -57,6 +57,7 @@ import {
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -193,6 +194,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       await first.close();
     }
     const resumed = await makeClient(2);
+    const python = spyOn(runtime, "resolvePluginPython");
     try {
       const replacement = join(root, "replacement-instructions.md");
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
@@ -201,6 +203,9 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
+      expect(python).toHaveBeenCalledWith(
+        expect.objectContaining({ protectedRoot: repository }),
+      );
       if (original) expect(result.toJSON()).toEqual(original);
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(
@@ -211,6 +216,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         resumed.run(repository, { workflowId, mode: "deep" }),
       ).rejects.toThrow("already bound to a different");
     } finally {
+      python.mockRestore();
       await resumed.close();
     }
   },

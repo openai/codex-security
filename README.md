@@ -35,6 +35,22 @@ threat-model, and review documents stay outside the repository and may contain
 sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
 for headless generation, saved artifacts, and SDK usage.
 
+## Save and export threat models
+
+Scans and policy generation retain their threat model with the run and write
+a `threatmodel.md` copy when possible. Export the saved model without starting
+another analysis:
+
+```bash
+npx @openai/codex-security export --artifact threat-model
+npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output docs/threatmodel.md
+```
+
+The default source is the current repository's latest completed scan. Explicit
+scan IDs or result directories can export saved provisional models. See the
+[export guide](sdk/typescript/README.md#exports-and-ci) for policy results,
+stdout, and the offline TypeScript API.
+
 ## TypeScript SDK
 
 To suggest owners for existing findings from source and Git history, see

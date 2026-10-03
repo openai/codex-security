@@ -144,6 +144,7 @@ try {
     "findings.json",
     "coverage.json",
     "report.md",
+    "threatmodel.md",
     "drafts/checkpoint.json",
     "artifacts/deep_discovery/result.json",
     "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -189,7 +190,7 @@ try {
   const standalone = await save({
     targetPath: repository,
     storage: "persistent",
-    path: "threat_model.md",
+    path: "threatmodel.md",
     content,
   });
   assert.ok(
@@ -201,10 +202,25 @@ try {
       await read({
         targetPath: repository,
         storage: "persistent",
-        path: "threat_model.md",
+        path: "threatmodel.md",
       })
     ).content,
     content,
+  );
+  const legacyModel = "# Retained legacy model\n\nKeep this unchanged.\n";
+  await writeFile(
+    path.join(standalone.directory, "threat_model.md"),
+    legacyModel,
+  );
+  assert.equal(
+    (
+      await read({
+        targetPath: repository,
+        storage: "persistent",
+        path: "threat_model.md",
+      })
+    ).content,
+    legacyModel,
   );
   await rejected(() =>
     save({
@@ -242,8 +258,50 @@ try {
 
   await call("record_codex_security_scan_draft", {
     ...identity,
+    complete: false,
     findings: [],
-    threatModel: { summary: content },
+    threatModel: { format: "markdown", content, origin: "provided" },
+    coverage: {
+      completeness: "partial",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  const provisionalModel = await read({
+    ...identity,
+    storage: "persistent",
+    path: "threatmodel.md",
+  });
+  assert.equal(provisionalModel.content.slice(0, content.length), content);
+  const exportedModel = await call("export_codex_security_findings", {
+    scanId,
+    artifact: "threat-model",
+  });
+  assert.equal(exportedModel.export.format, "md");
+  assert.equal(
+    exportedModel.export.path,
+    path.join(scanDir, "exports", "threatmodel.md"),
+  );
+  assert.equal(
+    (await readFile(exportedModel.export.path, "utf8")).slice(
+      0,
+      content.length,
+    ),
+    content,
+  );
+  await rejected(() =>
+    call("export_codex_security_findings", {
+      scanId,
+      artifact: "threat-model",
+      format: "sarif",
+    }),
+  );
+
+  await call("record_codex_security_scan_draft", {
+    ...identity,
+    findings: [],
+    threatModel: { format: "markdown", content, origin: "provided" },
     coverage: {
       completeness: "complete",
       surfaces: [
@@ -258,6 +316,12 @@ try {
       deferred: [],
     },
   });
+  const projectedModel = await read({
+    ...identity,
+    storage: "persistent",
+    path: "threatmodel.md",
+  });
+  assert.equal(projectedModel.content.slice(0, content.length), content);
   execFileSync(
     process.env.PYTHON || "python3",
     [

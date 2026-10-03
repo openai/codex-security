@@ -790,10 +790,17 @@ describe("custom validation", () => {
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("security_scan` capability preflight");
+    expect(standard).toContain("use it for the same early model checkpoint");
+    expect(standard).toContain("retain the model in an early partial");
+    expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
+    expect(diff).toContain(
+      "Immediately save a `complete: false` semantic draft",
+    );
+    expect(diff).toContain('"format": "markdown", "content": "<model text>"');
     expect(diff).not.toContain("run `$validation` once");
     expect(diff).not.toContain("Call `complete_codex_security_scan` once");
     for (const prompt of [standard, diff]) {
