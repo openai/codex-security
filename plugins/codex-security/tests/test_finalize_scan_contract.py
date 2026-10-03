@@ -116,6 +116,10 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
             "deferred": [],
         }
 
+    def write_sealed_scan(self) -> None:
+        self.write_scan()
+        FINALIZER.finalize_scan(self.scan_dir)
+
     def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -362,8 +366,7 @@ The extraction root is not enforced.
         validate.assert_not_called()
 
     def test_sealed_rerun_rejects_malformed_unicode_extensions_without_mutating_files(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["extensions"]["note"] = "bad-" + chr(0xD800)
         self.write_json("findings.json", findings)
@@ -384,8 +387,7 @@ The extraction root is not enforced.
         self.assertEqual(before, after)
 
     def test_sealed_rerun_preserves_existing_document_bytes(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["summary"] = "é" * 128
         compact = (json.dumps(findings, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
@@ -407,8 +409,7 @@ The extraction root is not enforced.
         self.assertEqual(path.read_bytes(), compact)
 
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["codeEvidence"] = [
             {
@@ -437,8 +438,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
 
     def test_sealed_rerun_ignores_malformed_legacy_evidence_references(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = [
             {"id": "legacy-source", "code": "legacy_source()"}
@@ -468,8 +468,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_sealed_rerun_accepts_duplicate_legacy_evidence_ids(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = [
             {"id": "legacy-duplicate", "code": "first_legacy_source()"},
@@ -484,8 +483,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
 
     def test_sealed_rerun_ignores_non_string_legacy_validation_scalars(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["validation"] = {
             "method": [],
@@ -500,8 +498,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
 
     def test_sealed_rerun_accepts_formerly_free_form_finding_details(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["validation"] = {
             "evidence": {"kind": "trace"},
@@ -518,8 +515,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
 
     def test_sealed_rerun_ignores_blank_legacy_attack_path_details(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["attackPath"] = {
             field: ""
@@ -541,8 +537,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
 
     def test_sealed_rerun_rejects_nullable_canonical_evidence_catalog(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["codeEvidence"] = None
         self.rewrite_sealed_artifact("findings.json", findings)
@@ -715,8 +710,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rerun_regenerates_sarif_projection_without_mutating_seal(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         first_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
 
         source_root = self.scan_dir / "source"
@@ -751,8 +745,7 @@ The extraction root is not enforced.
             self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
 
     def test_sarif_only_entrypoint_exports_a_sealed_scan_without_mutating_it(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
         canonical = {
@@ -784,8 +777,7 @@ The extraction root is not enforced.
             {"path": "src/extract.py", "startLine": 41, "endLine": 44, "role": "root_control"},
         ]
         self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         canonical = {
             name: (self.scan_dir / name).read_bytes()
             for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
@@ -846,8 +838,7 @@ The extraction root is not enforced.
         self.coverage["mode"] = "deep_repository"
         self.finding["extensions"] = {"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}
         self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
 
         result = self.run_finalizer("--export-format", "csv")
 
@@ -863,8 +854,7 @@ The extraction root is not enforced.
         self.finding["extensions"] = {"candidateId": "DSS-146", "reportId": "DSS-146-rogue"}
         self.finding["locations"] = [{"path": "src/extract.py", "startLine": 41, "role": "sink"}]
         self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
 
         result = self.run_finalizer("--export-format", "csv")
 
@@ -885,8 +875,7 @@ The extraction root is not enforced.
                 self.coverage["mode"] = coverage_mode
                 self.finding["extensions"] = {field: f"legacy-{field}"}
                 self.findings["findings"] = [copy.deepcopy(self.finding)]
-                self.write_scan()
-                FINALIZER.finalize_scan(self.scan_dir)
+                self.write_sealed_scan()
 
                 result = self.run_finalizer("--export-format", "csv")
 
@@ -899,8 +888,7 @@ The extraction root is not enforced.
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
         self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
 
         result = self.run_finalizer("--export-format", "csv")
 
@@ -913,8 +901,7 @@ The extraction root is not enforced.
         self.finding["summary"] = "＝1+1"
         self.finding["remediation"] = " \t＋1+1"
         self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
 
         result = self.run_finalizer("--export-format", "csv")
 
@@ -943,8 +930,7 @@ The extraction root is not enforced.
                 self.assertIn("sealed artifact changed or is missing", result.stderr)
 
     def test_export_entrypoint_writes_external_output_and_rejects_artifact_overwrite(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.scan_dir / "findings.json"
         before = findings.read_bytes()
         output = self.scan_dir.parent / "findings.csv"
@@ -968,8 +954,7 @@ The extraction root is not enforced.
             "exports/sealed-findings.csv",
         ):
             with self.subTest(artifact_path=artifact_path):
-                self.write_scan()
-                FINALIZER.finalize_scan(self.scan_dir)
+                self.write_sealed_scan()
                 output = self.scan_dir / "exports" / "findings.csv"
                 output.parent.mkdir(parents=True, exist_ok=True)
                 sealed_export = b"SEALED_EXPORT_SENTINEL\n"
@@ -1006,8 +991,7 @@ The extraction root is not enforced.
                 self.assertEqual(output.read_bytes(), sealed_export)
 
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         alias = self.scan_dir.parent / self.scan_dir.name.swapcase()
         if alias == self.scan_dir or not alias.exists() or not alias.samefile(self.scan_dir):
             self.skipTest("filesystem is case-sensitive")
@@ -1038,8 +1022,7 @@ The extraction root is not enforced.
         self.assertEqual(output.read_bytes(), sealed_export)
 
     def test_export_entrypoint_rejects_symlink_aliased_scan_directories(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         output = self.scan_dir / "exports" / "findings.csv"
         protected_contents = b"PROTECTED_EXPORT_SENTINEL\n"
 
@@ -1088,8 +1071,7 @@ The extraction root is not enforced.
                 )
 
     def test_sarif_only_entrypoint_rejects_changed_sealed_artifact(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         self.write_json("findings.json", {"changed": True})
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
@@ -1101,8 +1083,7 @@ The extraction root is not enforced.
         self.assertFalse(sarif_path.exists())
 
     def test_sarif_only_entrypoint_rejects_invalid_source_root(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         source_file = self.scan_dir / "source-file"
         source_file.write_text("not a directory\n", encoding="utf-8")
 
@@ -1116,8 +1097,7 @@ The extraction root is not enforced.
                     self.assertEqual(result.stdout, "")
 
     def test_sarif_only_entrypoint_writes_external_output_atomically(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
         output = self.scan_dir.parent / "results.sarif"
@@ -1140,8 +1120,7 @@ The extraction root is not enforced.
         self.assertFalse(output.parent.exists())
 
     def test_sarif_only_entrypoint_rejects_sealed_artifact_output(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.scan_dir / "findings.json"
         before = findings.read_bytes()
 
@@ -1167,8 +1146,7 @@ The extraction root is not enforced.
 
     @unittest.skipIf(os.name == "nt", "backslash is a path separator on Windows")
     def test_sarif_only_entrypoint_accepts_posix_backslash_output_name(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         output = self.scan_dir.parent / "results\\v1.sarif"
 
         result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
@@ -1177,8 +1155,7 @@ The extraction root is not enforced.
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["version"], "2.1.0")
 
     def test_sarif_only_entrypoint_accepts_read_only_scan_directory(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
         sarif_path.parent.rmdir()
@@ -1244,8 +1221,7 @@ The extraction root is not enforced.
         self.assertEqual(payload, {"source": "original"})
 
     def test_sarif_projection_revalidates_sealed_findings(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["locations"][0]["path"] = "../../outside.py"
         self.write_json("findings.json", findings)
@@ -1259,8 +1235,7 @@ The extraction root is not enforced.
             FINALIZER.write_sarif_projection(self.scan_dir)
 
     def test_sarif_projection_uses_findings_read_before_seal_validation(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         original_summary = self.finding["summary"]
         replaced = self.read_json("findings.json")
         replaced["findings"][0]["summary"] = "Replaced after seal validation"
@@ -1287,8 +1262,7 @@ The extraction root is not enforced.
         self.assertNotIn("Replaced after seal validation", result["message"]["text"])
 
     def test_sarif_projection_hashes_the_findings_bytes_it_parsed(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings_path = self.scan_dir / "findings.json"
         sealed_bytes = findings_path.read_bytes()
         replaced = self.read_json("findings.json")
@@ -1342,8 +1316,7 @@ The extraction root is not enforced.
                 FINALIZER.finalize_scan(self.scan_dir)
 
     def test_sarif_projection_requires_canonical_sealed_artifacts(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         sealed_manifest = self.read_json("scan-manifest.json")
 
         for required_path in ("findings.json", "coverage.json"):
@@ -1379,8 +1352,7 @@ The extraction root is not enforced.
             FINALIZER.write_sarif_projection(self.scan_dir)
 
     def test_sarif_projection_revalidates_manifest_schema(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["startedAt"] = "not-a-time"
         self.write_json("scan-manifest.json", manifest)
@@ -1471,15 +1443,13 @@ The extraction root is not enforced.
         self.assertEqual(findings, original)
 
     def test_rejects_changed_canonical_artifact_after_sealing(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         (self.scan_dir / "findings.json").write_text("{}\n", encoding="utf-8")
         with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_sealed_findings_missing_derived_identity(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         sealed_manifest = self.read_json("scan-manifest.json")
         sealed_findings = self.read_json("findings.json")
 
@@ -1758,8 +1728,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_sealed_rerun_accepts_legacy_scalar_finding_details(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["validation"] = {
             "assertions": "The destination escapes the extraction root.",
@@ -1811,8 +1780,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
     def test_sealed_rerun_rejects_malformed_canonical_root_cause(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["rootCause"] = {"summary": []}
         self.rewrite_sealed_artifact("findings.json", findings)
@@ -1827,8 +1795,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
     def test_sealed_rerun_accepts_nullable_legacy_evidence_catalog(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = None
         self.rewrite_sealed_artifact("findings.json", findings)
@@ -1840,8 +1807,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
     def test_sealed_rerun_accepts_empty_legacy_root_cause(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["root_cause"] = ""
         self.rewrite_sealed_artifact("findings.json", findings)
@@ -1853,8 +1819,7 @@ The extraction root is not enforced.
         self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = [
             None,
@@ -1906,8 +1871,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_sealed_rerun_accepts_legacy_sequence_attack_path_details(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["attackPath"] = {
             "dataflow": ["archive entry path", "filesystem write"],
@@ -1938,8 +1902,7 @@ The extraction root is not enforced.
             FINALIZER._json_bytes({"score": float("nan")})
 
     def test_sealed_rerun_regenerates_reports_without_mutating_canonical_artifacts(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         canonical_before = {
             name: (self.scan_dir / name).read_bytes()
             for name in ("scan-manifest.json", "findings.json", "coverage.json")
@@ -2034,8 +1997,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rerun_preserves_additional_sealed_artifact_records(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         extra_path = self.scan_dir / "exports" / "extra.json"
         extra_path.parent.mkdir(parents=True, exist_ok=True)
         extra_path.write_text("{}\n", encoding="utf-8")
@@ -2371,8 +2333,7 @@ The extraction root is not enforced.
         self.assertFalse(warnings)
 
     def test_sealed_findings_keep_authored_identity_mismatches_strict(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["findingId"] = "csf_wrong"
         self.rewrite_sealed_artifact("findings.json", findings)
@@ -2496,8 +2457,7 @@ The extraction root is not enforced.
         self.assertEqual(manifest["scan"]["findingsRef"], "findings.json")
 
     def test_sealed_contract_refs_remain_strict(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["coverageRef"] = "not-the-coverage.json"
         self.write_json("scan-manifest.json", manifest)
@@ -2672,8 +2632,7 @@ The extraction root is not enforced.
 
     def test_sealed_coverage_mode_and_open_questions_remain_strict(self) -> None:
         self.coverage["openQuestions"] = [{"question": "Still valid before sealing."}]
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         coverage = self.read_json("coverage.json")
         coverage["mode"] = "scoped_path"
         coverage["openQuestions"] = ["invalid sealed row"]
@@ -2691,8 +2650,7 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_duplicate_artifact_paths(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["artifacts"].append(copy.deepcopy(manifest["scan"]["artifacts"][0]))
         self.write_json("scan-manifest.json", manifest)
