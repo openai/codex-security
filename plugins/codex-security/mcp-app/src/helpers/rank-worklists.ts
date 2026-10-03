@@ -29,18 +29,7 @@ export function loadRankRows(
   selection: boolean,
   label = selection ? "Rank output" : "Rank input",
 ): RankRow[] {
-  let contents: string;
-  try {
-    contents = decodeUtf8(readFile(path));
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ENOENT" || error.code === "ENOTDIR")
-    )
-      throw new Error(`${label} missing: ${path}`);
-    throw error;
-  }
+  const contents = decodeUtf8(readFile(path, label));
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();
   const fields = selection

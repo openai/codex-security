@@ -381,11 +381,13 @@ describe("rank pool helpers", () => {
     () => {
       const f = fixture(0);
       f.plan = join(f.root, "plan-\u001b[2J.json");
+      symlinkSync(f.plan, f.plan);
       for (const slot of [undefined, "1"]) {
         const missing = validate(f, slot);
         expect(missing.status).toBe(1);
         expect(missing.stderr).toBe(`Rank pool plan missing: ${f.plan}\n`);
       }
+      rmSync(f.plan);
       mkdirSync(f.plan);
       const collision = make(f);
       expect(collision.status).toBe(1);
