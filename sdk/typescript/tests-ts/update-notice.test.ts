@@ -9,6 +9,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { main } from "../src/cli.js";
 import { rejecting } from "./support/errors.js";
+import { responding } from "./support/responses.js";
 
 function registryResponse(version: unknown) {
   return async () => new Response(JSON.stringify({ version }));
@@ -198,8 +199,8 @@ describe("CLI update notice", () => {
   test("ignores unavailable registries and invalid registry responses", async () => {
     for (const fetchLatest of [
       rejecting("network unavailable"),
-      async () => new Response("unavailable", { status: 503 }),
-      async () => new Response("not JSON"),
+      responding("unavailable", 503),
+      responding("not JSON", 200),
     ]) {
       expect(
         await checkForUpdate({
