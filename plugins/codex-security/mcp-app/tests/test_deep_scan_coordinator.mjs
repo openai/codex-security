@@ -1,3 +1,4 @@
+import { deferred } from "./deferred.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -12,25 +13,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importModule } from "./import-module.mjs";
 import { testDeepScanDeadlines } from "./deep_scan_deadline_cases.mjs";
 import { testDeepScanPublication } from "./deep_scan_publication_cases.mjs";
 import { createDeepScanWorkerFailureCases } from "./deep_scan_worker_failure_cases.mjs";
 
-const bundle = await build({
-  bundle: true,
-  stdin: {
-    contents: `
-      export * from "./registry.ts";
-      export { classifyCodexWorkerError } from "./errors.ts";
-    `,
-    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
-  },
-  format: "esm",
-  loader: { ".md": "text" },
-  platform: "node",
-  write: false,
-});
 const {
   DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
@@ -39,9 +26,16 @@ const {
   DeepScanStartLock,
   classifyCodexWorkerError,
   startOrJoinDeepScanCoordinator,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = await importModule({
+  stdin: {
+    contents: `
+      export * from "./registry.ts";
+      export { classifyCodexWorkerError } from "./errors.ts";
+    `,
+    resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
+  },
+  loader: { ".md": "text" },
+});
 const temporaryRoots = [];
 async function testCappedQueueAndSerialDedup() {
   const fixture = await fixtureRun({
@@ -3093,10 +3087,7 @@ async function testJoinAndOrphanRules() {
   let starts = 0;
   let failures = 0;
   const existing = await startOrJoinDeepScanCoordinator({
-    begin: {
-      run: { ...fixture.run, persistedWorkerCount: 3 },
-      shouldStart: false,
-    },
+    run: { ...fixture.run, persistedWorkerCount: 3 },
     registry: {
       get: () => existingCoordinator,
       start: () => {
@@ -3124,7 +3115,7 @@ async function testJoinAndOrphanRules() {
     updatedAt: new Date().toISOString(),
   };
   const observed = await startOrJoinDeepScanCoordinator({
-    begin: { run: running, shouldStart: false },
+    run: running,
     registry: {
       get: () => undefined,
       start: () => {
@@ -3158,7 +3149,7 @@ async function testJoinAndOrphanRules() {
   let staleClaims = 0;
   const staleRunning = { ...running, updatedAt: "2026-01-01T00:00:00Z" };
   const staleObserver = await startOrJoinDeepScanCoordinator({
-    begin: { run: staleRunning, shouldStart: false },
+    run: staleRunning,
     registry: { get: () => undefined, start: () => existingCoordinator },
     options: {
       ...defaults,
@@ -3182,7 +3173,7 @@ async function testJoinAndOrphanRules() {
   );
 
   const recovered = await startOrJoinDeepScanCoordinator({
-    begin: { run: fixture.run, shouldStart: false },
+    run: fixture.run,
     registry: {
       get: () => undefined,
       start: (options) => {
@@ -3237,7 +3228,7 @@ async function testJoinAndOrphanRules() {
   const first = lock.run(async () => {
     await firstGate.promise;
     return await startOrJoinDeepScanCoordinator({
-      begin: { run: fixture.run, shouldStart: true },
+      run: fixture.run,
       registry,
       options,
     });
@@ -3245,7 +3236,7 @@ async function testJoinAndOrphanRules() {
   const second = lock.run(
     async () =>
       await startOrJoinDeepScanCoordinator({
-        begin: { run: fixture.run, shouldStart: false },
+        run: fixture.run,
         registry,
         options,
       }),
@@ -3361,7 +3352,7 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   const replacementExecutor = new FakeExecutor({ dedupNewFindings: [0] });
   const acceptedResult = await readFile(accepted.resultManifestPath, "utf8");
   const resumed = await startOrJoinDeepScanCoordinator({
-    begin: { run: structuredClone(store.run), shouldStart: false },
+    run: structuredClone(store.run),
     registry: new DeepScanCoordinatorRegistry(),
     options: {
       store,
@@ -3689,36 +3680,41 @@ async function testPersistedErrorLimitStopsBeforeRescheduling() {
     mergeState: "none",
     error: "transient_error: persisted worker failure",
   };
-  await mkdir(path.dirname(failedWorker.promptPath), { recursive: true });
-  await writeFile(failedWorker.promptPath, "persisted failed prompt\n");
-  const run = {
-    ...fixture.run,
-    phase: "discovery",
-    consecutiveErrors: 2,
-    dispatchedCount: 1,
-    persistedWorkers: [failedWorker],
-  };
-  const store = new FakeStore(run);
-  const executor = new FakeExecutor();
-  const coordinator = new DeepScanCoordinator({
-    run,
-    store,
-    executor,
-    pluginRoot: fixture.pluginRoot,
-    clock: immediateClock,
-  });
-  coordinator.start();
+  for (const promptExists of [false, true]) {
+    if (promptExists) {
+      await mkdir(path.dirname(failedWorker.promptPath), { recursive: true });
+      await writeFile(failedWorker.promptPath, "persisted failed prompt\n");
+    }
+    const run = {
+      ...fixture.run,
+      phase: "discovery",
+      consecutiveErrors: 2,
+      dispatchedCount: 1,
+      persistedWorkers: [failedWorker],
+    };
+    const store = new FakeStore(run);
+    const executor = new FakeExecutor();
+    const coordinator = new DeepScanCoordinator({
+      run,
+      store,
+      executor,
+      pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+    });
+    coordinator.start();
 
-  const terminal = await coordinator.wait(undefined, 5_000);
-  assert.equal(terminal?.status, "failed");
-  assert.equal(executor.discoveryCalls, 0);
-  assert.match(
-    terminal?.error ?? "",
-    /2 consecutive unsuccessful discovery workers/,
-  );
-  assert.match(terminal?.error ?? "", /persisted worker failure/);
-  assert.equal(terminal.manifestPath, undefined);
-  assert.equal(store.run.persistedWorkers[0].id, failedWorker.id);
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(terminal?.status, "failed");
+    assert.equal(executor.discoveryCalls, 0);
+    assert.match(
+      terminal?.error ?? "",
+      promptExists ? /2 consecutive unsuccessful discovery workers/ : /ENOENT/,
+    );
+    if (promptExists)
+      assert.match(terminal?.error ?? "", /persisted worker failure/);
+    assert.equal(terminal.manifestPath, undefined);
+    assert.equal(store.run.persistedWorkers[0].id, failedWorker.id);
+  }
 }
 
 async function testPersistedReducerErrorLimitStopsBeforeRescheduling() {
@@ -3851,7 +3847,7 @@ class FakeStore {
   publicationFailureMessages = [];
 
   async begin() {
-    return { run: structuredClone(this.run), shouldStart: true };
+    return structuredClone(this.run);
   }
 
   async get() {
@@ -4315,7 +4311,6 @@ class FakeExecutor {
         if (this.options.blockDiscoveryAfterWrite)
           await waitForAbort(request.signal);
         return {
-          finalResponse: "discovery complete",
           threadId,
           ...(this.options.discoveryDiagnostics
             ? { diagnostics: this.options.discoveryDiagnostics }
@@ -4353,7 +4348,6 @@ class FakeExecutor {
         (this.options.missingDedupResultsByLabel?.[reducerLabel] ?? 0)
       ) {
         return {
-          finalResponse: "dedup completed without recording its result",
           threadId,
           ...(this.options.dedupDiagnostics
             ? { diagnostics: this.options.dedupDiagnostics }
@@ -4383,7 +4377,6 @@ class FakeExecutor {
       this.dedupArtifactsWritten.resolve();
       if (this.options.blockDedupAfterWrite) await waitForAbort(request.signal);
       return {
-        finalResponse: "dedup complete",
         threadId,
         ...(this.options.dedupDiagnostics
           ? { diagnostics: this.options.dedupDiagnostics }
@@ -4561,14 +4554,6 @@ function abortError() {
   const error = new Error("aborted");
   error.name = "AbortError";
   return error;
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }
 
 async function eventually(predicate) {

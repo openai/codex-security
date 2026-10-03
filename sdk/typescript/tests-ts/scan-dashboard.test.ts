@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
@@ -312,7 +313,7 @@ describe("live scan dashboard", () => {
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
   });
 
-  test("navigates a long component list and shows sanitized failure details", () => {
+  test("navigates a long component list and shows original failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
     let interrupted = false;
@@ -323,7 +324,6 @@ describe("live scan dashboard", () => {
         presentation: "components",
         input,
         clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
         onInterrupt: () => {
           interrupted = true;
         },
@@ -351,7 +351,7 @@ describe("live scan dashboard", () => {
     input.emit("data", "\u001B[F");
     expect(frame()).toContain("Component 19");
     expect(frame()).not.toContain("Component 0 ");
-    expect(frame()).toContain("[redacted] unavailable");
+    expect(frame()).toContain("synthetic-secret unavailable");
     expect(frame()).not.toContain("Cost");
     expect(
       frame()
@@ -945,7 +945,7 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+  test("preserves chronological session events and strips terminal controls from activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
     const dashboard = new ScanDashboard(
@@ -955,7 +955,6 @@ describe("live scan dashboard", () => {
         input,
         color: true,
         clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
       },
     );
 
@@ -1029,7 +1028,7 @@ describe("live scan dashboard", () => {
     }
 
     let frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     expect(frame).toContain("d details");
 
     input.emit("data", "d");
@@ -1077,8 +1076,7 @@ describe("live scan dashboard", () => {
 
     input.emit("data", "d");
     frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
-    expect(frame).not.toContain("synthetic-secret");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     dashboard.stop();
   });
 
@@ -1272,7 +1270,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("/private/tmp/");
     expect(frame.match(/\[09:41:00\]/gu)).toHaveLength(1);
     expect(stderr.text()).toContain(
-      `\u001B]8;;file:///private/tmp/codex%20security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
+      `\u001B]8;;${pathToFileURL(target).href}\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
     );
     dashboard.stop();
   });
@@ -1340,9 +1338,11 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("`db.raw(  input  )`");
     expect(stderr.text()).toContain("\u001B[2mdb.raw(  input  )\u001B[22m");
     expect(stderr.text()).toContain(
-      "\u001B]8;;file:///tmp/report.md\u0007report\u001B]8;;\u0007",
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}\u0007report\u001B]8;;\u0007`,
     );
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/example.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/example.md").href}`,
+    );
 
     dashboard.record({
       id: "command-inline-code",
@@ -1355,7 +1355,7 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("redacts external Markdown link targets and rejects unsafe links", () => {
+  test("preserves external Markdown link targets and rejects unsafe links", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
@@ -1363,7 +1363,6 @@ describe("live scan dashboard", () => {
         repository: "/code/juice-shop",
         color: false,
         clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("secret-token", "[redacted]"),
       },
     );
 
@@ -1377,12 +1376,9 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    const frame = lastFrame(stderr);
-    expect(frame).toContain("See report, unsafe, and control.");
     expect(stderr.text()).toContain(
-      "\u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007",
+      "See \u001B]8;;https://example.com/report?token=secret-token\u0007report\u001B]8;;\u0007, unsafe, and control.",
     );
-    expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
     expect(stderr.text()).not.toContain("spoof");
     expect(stderr.text()).not.toContain("\u001B]8;;javascript:");
@@ -1395,11 +1391,13 @@ describe("live scan dashboard", () => {
       paths: [],
     });
     expect(lastFrame(stderr)).toContain("printf '[report](/tmp/report.md)'");
-    expect(stderr.text()).not.toContain("\u001B]8;;file:///tmp/report.md");
+    expect(stderr.text()).not.toContain(
+      `\u001B]8;;${pathToFileURL("/tmp/report.md").href}`,
+    );
     dashboard.stop();
   });
 
-  test("sanitizes complete activity descriptions before line wrapping", () => {
+  test("preserves credential-shaped activity descriptions across line wrapping", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 50, rows: 18 },
@@ -1407,8 +1405,6 @@ describe("live scan dashboard", () => {
         repository: "/code/juice-shop",
         color: false,
         clock: fakeClock(),
-        sanitize: (value) =>
-          value.includes("client_secret=") ? "[redacted]" : value,
       },
     );
 
@@ -1422,8 +1418,8 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    expect(lastFrame(stderr)).toContain("[redacted]");
-    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET_VALUE");
+    expect(lastFrame(stderr)).toContain("client_secret=");
+    expect(lastFrame(stderr)).toContain("SYNTHETIC_SECRET_VALUE");
     dashboard.stop();
   });
 

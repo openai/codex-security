@@ -10,6 +10,7 @@ import { PassThrough, Writable } from "node:stream";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import {
   deduplicateRecords,
+  recordsReviewAttribution,
   type DeduplicateRecordsInput,
 } from "../src/deduplication/records.js";
 import type { DeduplicationReviewRequest } from "../src/deduplication/review.js";
@@ -17,6 +18,41 @@ import { runRecordsProtocol } from "../src/deduplication/records-protocol.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import attributionFixtures from "./fixtures/records-review-attribution.json";
+
+test("attribution maps exact structured participants to sorted host identities", () => {
+  const references = new Map(
+    ["A", "B", "C", "D"].map((id) => [`finding-${id}`, id]),
+  );
+  for (const fixture of attributionFixtures) {
+    const participants = fixture.participants.map((id) => `finding-${id}`);
+    expect(
+      recordsReviewAttribution(
+        [...participants].reverse().concat(participants),
+        references,
+        new Map(fixture.anchors.map((id) => [id, []])),
+      ),
+    ).toEqual({ ...fixture.attribution, version: 1 });
+  }
+});
+
+test("attribution rejects absent, unknown, and context-only participants", () => {
+  const references = new Map([
+    ["finding-A", "A"],
+    ["finding-C", "C"],
+  ]);
+  const anchors = new Map([["A", ["C"]]]);
+  for (const participants of [
+    undefined,
+    [],
+    ["unknown"],
+    ["finding-C"],
+    ["finding-A", "unknown"],
+  ])
+    expect(() =>
+      recordsReviewAttribution(participants, references, anchors),
+    ).toThrow();
+});
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -93,6 +129,7 @@ test("records groups original observations and retrieved neighbors with unique r
         expect(review.trustedInstructions).toContain("approved repository");
         expect(review.findingSchema).toHaveProperty("required");
         expect(review).not.toHaveProperty("validate");
+        expect(review).not.toHaveProperty("findingIds");
         for (const finding of assigned(review))
           expect(finding.provenance).toHaveProperty(
             "revision",
@@ -116,6 +153,20 @@ test("records groups original observations and retrieved neighbors with unique r
     2,
   );
   expect(original).toEqual(input());
+  for (const request of requests) {
+    const participants = assigned(request).map((finding) =>
+      finding.provenance!.source!.slice("synthetic/".length),
+    );
+    expect(request.attribution).toEqual({
+      version: 1,
+      beneficiaryObservationIds: participants
+        .filter((id) => id !== "neighbor")
+        .sort(),
+      contextObservationIds: participants
+        .filter((id) => id === "neighbor")
+        .sort(),
+    });
+  }
 });
 
 test("records honors explicit observation neighborhoods and handles empty/isolated inputs without reviews", async () => {
@@ -171,6 +222,52 @@ test("candidate-only observations are grouped without becoming additional anchor
     "screening",
     "pair-review",
   ]);
+  for (const request of requests)
+    expect(request.attribution).toEqual({
+      version: 1,
+      beneficiaryObservationIds: ["a"],
+      contextObservationIds: ["b"],
+    });
+});
+
+test("records retries in a new invocation preserve membership with fresh review UUIDs", async () => {
+  const requests: DeduplicationReviewRequest[] = [];
+  const data: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [record("A", "same"), record("D", "same")],
+    candidateRelationships: [
+      { observationId: "A", candidateObservationIds: ["D"] },
+    ],
+  };
+  const failed = await deduplicateRecords(data, {
+    reviewRunner: {
+      async run(review) {
+        requests.push(review);
+        throw new Error("Remote acceptance unknown");
+      },
+    },
+  });
+  expect(failed.status).toBe("unresolved");
+  const completed = await deduplicateRecords(data, {
+    reviewRunner: {
+      async run(review) {
+        requests.push(review);
+        return answer(review);
+      },
+    },
+  });
+  expect(completed.status).toBe("completed");
+  expect(requests).toHaveLength(3);
+  expect(new Set(requests.map((request) => request.requestId)).size).toBe(3);
+  for (const request of requests) {
+    expect(request.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(request.attribution).toEqual({
+      ...attributionFixtures[3]!.attribution,
+      version: 1,
+    });
+  }
 });
 
 test.each([
@@ -327,9 +424,26 @@ function fakeHost(
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: input() };
 
 test("CLI records mode uses only the fake host, bypassing saved scans, persistence, auth, and updates", async () => {
-  const host = fakeHost((message, send) =>
-    send({ jsonrpc: "2.0", id: message.id, result: answer(message.params) }),
-  );
+  const host = fakeHost((message, send) => {
+    expect(message.jsonrpc).toBe("2.0");
+    expect(message.id).toBe(message.params.requestId);
+    expect(message.params.attribution?.version).toBe(1);
+    const participants = assigned(message.params).map((finding) =>
+      finding.provenance!.source!.slice("synthetic/".length),
+    );
+    expect(message.params.attribution).toEqual({
+      version: 1,
+      beneficiaryObservationIds: participants
+        .filter((id) => id !== "neighbor")
+        .sort(),
+      contextObservationIds: participants
+        .filter((id) => id === "neighbor")
+        .sort(),
+    });
+    // An older host can ignore additive metadata and use the original request.
+    const { attribution: _attribution, ...legacyRequest } = message.params;
+    send({ jsonrpc: "2.0", id: message.id, result: answer(legacyRequest) });
+  });
   const deps = dependencies();
   for (const key of Object.keys(deps)) {
     if (typeof deps[key as keyof typeof deps] === "function")
@@ -482,14 +596,36 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
   try {
     child.stdin.write(`${JSON.stringify(run)}\n`);
     let final: Message | undefined;
+    const reviews: DeduplicationReviewRequest[] = [];
     for await (const line of createInterface({ input: child.stdout })) {
       const message = JSON.parse(line) as Message;
-      if (message.method === "review.run")
+      if (message.method === "review.run") {
+        reviews.push(message.params);
+        expect(message.jsonrpc).toBe("2.0");
+        expect(message.id).toBe(message.params.requestId);
+        const participants = assigned(message.params).map((finding) =>
+          finding.provenance!.source!.slice("synthetic/".length),
+        );
+        expect(message.params.attribution).toEqual({
+          version: 1,
+          beneficiaryObservationIds: participants
+            .filter((id) => id !== "neighbor")
+            .sort(),
+          contextObservationIds: participants
+            .filter((id) => id === "neighbor")
+            .sort(),
+        });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: answer(message.params) })}\n`,
         );
-      else final = message;
+      } else final = message;
     }
+    expect(
+      reviews.filter((review) => review.stage === "screening"),
+    ).toHaveLength(4);
+    expect(
+      reviews.filter((review) => review.stage === "pair-review"),
+    ).toHaveLength(2);
     expect(await closed).toBe(0);
     expect(stderr).toBe("");
     expect(final).toMatchObject({
@@ -566,10 +702,8 @@ test.each(["result", "error"] as const)(
       const inputStream = new PassThrough();
       const messages: Message[] = [];
       let release!: () => void;
-      let started!: () => void;
-      const writing = new Promise<void>((resolve) => {
-        started = resolve;
-      });
+      const { promise: writing, resolve: started } =
+        Promise.withResolvers<void>();
       const output = new Writable({
         write(chunk, _encoding, callback) {
           messages.push(JSON.parse(chunk.toString()));

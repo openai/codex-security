@@ -23,7 +23,7 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
-import { enclosingGitWorktreeRoot } from "../src/targets.js";
+import { enclosingGitWorktreeRoot, gitMarkerRoot } from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -706,4 +706,23 @@ describe("scan target normalization", () => {
       canonicalProject,
     ]);
   });
+});
+
+test("finds Git boundaries through directory aliases and file inputs", async () => {
+  const repo = await repository();
+  const nested = join(repo, "nested");
+  await mkdir(join(nested, ".git"), { recursive: true });
+  const document = join(nested, "context.md");
+  await writeFile(document, "Synthetic context.\n");
+  const alias = join(repo, "..", "nested-alias");
+  await symlink(
+    nested,
+    alias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  expect(await gitMarkerRoot(alias, undefined, "nearest")).toBe(nested);
+  expect(await gitMarkerRoot(alias, undefined, "outermost")).toBe(repo);
+  expect(
+    await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
+  ).toBe(repo);
 });

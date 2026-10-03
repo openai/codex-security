@@ -122,7 +122,7 @@ describe("JUnit inventory comparison", () => {
     const expected = [
       ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
         ["isolated", "parallel"].map(
-          (mode) => `reports/runner-${os}-${mode}.xml`,
+          (mode) => `reports/runner-${os}-${mode}*.xml`,
         ),
       ),
       "reports/runner-windows-latest-shard-*.xml",

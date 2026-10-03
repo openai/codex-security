@@ -19,7 +19,7 @@ import {
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
@@ -152,6 +152,7 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config,
           environment,
           signal: options.signal,
@@ -231,7 +232,7 @@ export async function runComponentScans(
               receipt.coverage === "complete" ? "completed" : "incomplete";
           } catch (error) {
             receipt.status = "failed";
-            receipt.error = safeErrorMessage(error);
+            receipt.error = errorMessage(error);
           }
           notify(() =>
             options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
@@ -369,6 +370,7 @@ async function deduplicateFindings(
         {
           allowHistoricalUncertainty: true,
           auth: options.scanOptions?.auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config ?? {},
           environment: options.environment,
           signal: options.signal,
@@ -392,7 +394,7 @@ async function deduplicateFindings(
   } catch (failure) {
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
-      : safeErrorMessage(failure);
+      : errorMessage(failure);
   }
   const remainSeparate = ({
     beforeOccurrenceId,

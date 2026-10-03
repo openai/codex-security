@@ -191,7 +191,17 @@ describe("CLI workbench", () => {
         { scanId: "legacy" },
       ],
       [
-        ["scans", "compare", "before", "after", "--json"],
+        [
+          "scans",
+          "compare",
+          "before",
+          "after",
+          "--model",
+          "synthetic-model",
+          "--effort",
+          "high",
+          "--json",
+        ],
         [
           "compare-scans",
           "--before-scan-id",
@@ -209,7 +219,17 @@ describe("CLI workbench", () => {
         { comparable: true, summary: { persisting: 1, resolved: 1 } },
       ],
       [
-        ["scans", "match", "before", "after", "--json"],
+        [
+          "scans",
+          "match",
+          "before",
+          "after",
+          "--model",
+          "synthetic-model",
+          "--effort",
+          "high",
+          "--json",
+        ],
         [
           "compare-scans",
           "--before-scan-id",
@@ -479,6 +499,72 @@ describe("CLI workbench", () => {
     }
   });
 
+  test.each([
+    ["match", ["before", "after"]],
+    ["match", ["--all"]],
+    ["compare", ["before", "after"]],
+  ] as const)(
+    "forwards optional model settings for scans %s %j",
+    async (command, scanArgs) => {
+      for (const selection of [
+        [],
+        ["--model", "synthetic-model", "--effort", "high"],
+      ]) {
+        const selections: Array<{
+          model?: string;
+          reasoningEffort?: string;
+        }> = [];
+        const before = [{ occurrenceId: "before" }];
+        const after = [{ occurrenceId: "after" }];
+        expect(
+          await main(
+            ["scans", command, ...scanArgs, ...selection, "--json"],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              onWorkbench: (args): JsonObject => {
+                if (args[0] === "compare-scans") {
+                  return {
+                    matchingCached: false,
+                    matchingInputs: { before, after },
+                  };
+                }
+                if (args[0] === "list-unmatched-scan-pairs") {
+                  return {
+                    repository: "/current/repository",
+                    scanCount: 2,
+                    unavailableScans: 0,
+                    skippedPairs: 0,
+                    batches: [
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
+                    ],
+                  };
+                }
+                return {};
+              },
+              onMatch: async (_input, options) => {
+                selections.push({
+                  model: options?.model,
+                  reasoningEffort: options?.reasoningEffort,
+                });
+                return { matches: [], uncertain: [] };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(selections).toEqual([
+          selection.length === 0
+            ? { model: undefined, reasoningEffort: undefined }
+            : { model: "synthetic-model", reasoningEffort: "high" },
+        ]);
+      }
+    },
+  );
+
   test("requires two completed scans for a default comparison", async () => {
     const stderr = capture();
     expect(
@@ -677,14 +763,10 @@ describe("CLI workbench", () => {
     "debounces matching %s and allows a later %s to terminate a blocked workbench",
     async (first, second, delay, expectedExit) => {
       const signals = new FakeSignals();
-      let began!: () => void;
-      const started = new Promise<void>((resolve) => {
-        began = resolve;
-      });
-      let finish!: (value: JsonObject) => void;
-      const pending = new Promise<JsonObject>((resolve) => {
-        finish = resolve;
-      });
+      const { promise: started, resolve: began } =
+        Promise.withResolvers<void>();
+      const { promise: pending, resolve: finish } =
+        Promise.withResolvers<JsonObject>();
       let observedSignal: AbortSignal | undefined;
       const forced: string[] = [];
       let now = 0;
@@ -1227,6 +1309,40 @@ describe("CLI workbench", () => {
       expect(calls).toBe(0);
     }
   });
+
+  test.each(["scan-original", undefined])(
+    "rejects Markdown rerun output before loading scan %p",
+    async (scanId) => {
+      const stdout = capture();
+      const stderr = capture();
+      let workbenchCalls = 0;
+
+      expect(
+        await main(
+          [
+            "scans",
+            "rerun",
+            ...(scanId === undefined ? [] : [scanId]),
+            "--format",
+            "md",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: () => {
+              workbenchCalls += 1;
+              return {};
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(workbenchCalls).toBe(0);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Markdown output is not supported for scan results.",
+      );
+    },
+  );
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;

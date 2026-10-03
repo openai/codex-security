@@ -1,3 +1,4 @@
+import { finding, scanId, workerDraft } from "./scan-draft-fixture.mjs";
 import assert from "node:assert/strict";
 import {
   mkdir,
@@ -10,28 +11,17 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundled = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
   getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
-} = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundled.outputFiles[0].contents).toString("base64")
+} = await importSource(
+  new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
 );
 
-const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const validReduction = reduction([]);
 
 assert.equal(
@@ -542,20 +532,6 @@ function reduction(findings, extra = {}) {
   return { scanId, findings, ...extra };
 }
 
-function workerDraft(findings, extra = {}) {
-  return {
-    scanId,
-    findings,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-    ...extra,
-  };
-}
-
 function withSourceRefs(worker) {
   const { coverage: _coverage, ...result } = worker.result;
   return {
@@ -578,23 +554,5 @@ function retainedFinding(finding, sourceFindings) {
       sourceFindingIds: sourceFindings.map((source) => source.id),
       sourceFindings,
     },
-  };
-}
-
-function finding(id, repositoryPath) {
-  return {
-    ruleId: "cross-site-scripting." + id,
-    identity: { anchor: id },
-    title: "Unsafe request output " + id,
-    summary: "A request-controlled value reaches an HTML response.",
-    severity: { level: "high" },
-    confidence: {
-      level: "high",
-      rationale: "The source establishes reachability.",
-    },
-    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
-    locations: [{ path: repositoryPath, startLine: 1, endLine: 2 }],
-    remediation: "Encode request-controlled values before emitting HTML.",
-    provenance: { source: "local_plugin" },
   };
 }

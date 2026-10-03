@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
@@ -64,7 +65,6 @@ interface ScanDashboardOptions {
   showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
-  sanitize?: (value: string) => string;
   input?: DashboardInput;
   onInterrupt?: () => void;
 }
@@ -636,12 +636,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(
-            typeof line !== "string" && this.#view === "details"
-              ? text
-              : (this.#options.sanitize?.(text) ?? text),
-            width,
-          );
+          const clean = fitLine(text, width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -662,7 +657,6 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
-                  this.#options.sanitize,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -746,7 +740,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${fitLine(name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
     const table = this.#components
       .slice(first, first + rows)
       .map(({ receipt, dashboard }, index) => {
@@ -963,7 +957,6 @@ export class ScanDashboard {
       value: string,
       kind: DashboardActivityLine["kind"],
     ): void => {
-      value = this.#options.sanitize?.(value) ?? value;
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -1101,10 +1094,6 @@ function detailsText(value: unknown): string {
     .join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
     value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
@@ -1121,10 +1110,9 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
-  sanitize: ((value: string) => string) | undefined,
 ): string {
   for (const { label, target } of links ?? []) {
-    const safe = safeHyperlinkTarget(sanitize?.(target) ?? target);
+    const safe = safeHyperlinkTarget(target);
     if (safe !== undefined) {
       value = value.replace(
         label,

@@ -376,14 +376,10 @@ describe("publish check", () => {
         deps.forceExit = () => {
           forced = true;
         };
-        let started!: () => void;
-        const operationStarted = new Promise<void>((resolve) => {
-          started = resolve;
-        });
-        let finishCleanup!: () => void;
-        const cleanup = new Promise<void>((resolve) => {
-          finishCleanup = resolve;
-        });
+        const { promise: operationStarted, resolve: started } =
+          Promise.withResolvers<void>();
+        const { promise: cleanup, resolve: finishCleanup } =
+          Promise.withResolvers<void>();
         const operation = async (
           _directory: string,
           options: { signal?: AbortSignal },
@@ -787,14 +783,10 @@ describe("publish scan", () => {
       const signals = new FakeSignals();
       const events: string[] = [];
       let now = 0;
-      let enteredPublication!: () => void;
-      const publicationStarted = new Promise<void>((resolve) => {
-        enteredPublication = resolve;
-      });
-      let finishRecovery!: () => void;
-      const recoveryFinished = new Promise<void>((resolve) => {
-        finishRecovery = resolve;
-      });
+      const { promise: publicationStarted, resolve: enteredPublication } =
+        Promise.withResolvers<void>();
+      const { promise: recoveryFinished, resolve: finishRecovery } =
+        Promise.withResolvers<void>();
       const deps = dependencies({ signals });
       deps.environment["CODEX_SECURITY_LINEAR_API_KEY"] = "synthetic-key";
       deps.now = () => now;
@@ -903,7 +895,7 @@ describe("publish scan", () => {
 
   test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
     for (const { json, tty, failed } of [
       { json: false, tty: false, failed: false },
@@ -1049,7 +1041,7 @@ describe("publish scan", () => {
     const created = [
       {
         ...base,
-        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\nsafe\u009F",
         url: "javascript:alert(1)",
       },
       {
@@ -1085,7 +1077,7 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }
@@ -1952,14 +1944,10 @@ describe("publish scan", () => {
         };
         const listeners = new Map<string, () => void>();
         const removed: string[] = [];
-        let enteredPublication!: () => void;
-        const publicationStarted = new Promise<void>((resolve) => {
-          enteredPublication = resolve;
-        });
-        let finishRecovery!: () => void;
-        const recoveryFinished = new Promise<void>((resolve) => {
-          finishRecovery = resolve;
-        });
+        const { promise: publicationStarted, resolve: enteredPublication } =
+          Promise.withResolvers<void>();
+        const { promise: recoveryFinished, resolve: finishRecovery } =
+          Promise.withResolvers<void>();
         const deps = dependencies();
         deps.addSignalListener = (name, listener) => {
           listeners.set(name, listener);
@@ -2449,7 +2437,7 @@ describe("publish scan", () => {
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const result = { ...publicationResult(), warnings: [warning] };
     const stdout = capture();
     const stderr = capture();
@@ -2491,7 +2479,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
 
-  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+  test("normalizes receipt warning controls while preserving diagnostic text and partial results", async () => {
     const warnings = [
       "Receipt storage failed.\n\u001B[31mDo not retry publication.",
       "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
@@ -2518,10 +2506,9 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
-        "codex-security: [redacted]\n",
+        "codex-security: Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET\n",
     );
     expect(stderr.text()).not.toContain("\u001B");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {

@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -31,9 +32,10 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth"
+    "safetyIdentifier" | "postScanPrompt" | "auth" | "cyberAccessProgram"
   > = {},
   resolvedDeep = false,
+  modelProvider?: string,
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -100,6 +102,9 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(modelProvider === "amazon-bedrock"
+      ? { AWS_PROFILE: "synthetic-bedrock" }
+      : {}),
     ...(settings.safetyIdentifier === undefined
       ? {}
       : { OPENAI_API_KEY: "synthetic-resume-key" }),
@@ -110,7 +115,11 @@ async function interruptedScan(
     repository,
     target: { kind: "repository", paths: [] },
     mode,
-    config: { model: "gpt-5.6-sol", approval_policy: "never" },
+    config: {
+      model: "gpt-5.6-sol",
+      approval_policy: "never",
+      ...(modelProvider === undefined ? {} : { model_provider: modelProvider }),
+    },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
     ...settings,
@@ -397,6 +406,47 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
+test("resumed Bedrock scans retain provider context for the account advisory", async () => {
+  const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
+  const stdout = capture();
+  const stderr = capture();
+  const code = await main(
+    ["scans", "resume", f.scanId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      runWorkbench: f.command,
+      createSecurity: resumeClient(f, (options) => ({
+        startThread() {
+          throw new Error("Resume must not create a new thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          expect(options.env).toMatchObject({
+            AWS_PROFILE: "synthetic-bedrock",
+          });
+          expect(options.apiKey).toBeUndefined();
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+              throw new Error("Resumed Bedrock prompt captured");
+            },
+          };
+        },
+      })),
+    },
+  );
+  expect(code).not.toBe(0);
+  expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
+});
+
 function resumeClient(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
@@ -408,6 +458,12 @@ function resumeClient(
       environment: f.environment,
       prepareRuntime: async () => {
         const runtime = preparedRuntime(f.codexHome);
+        runtime.configPath = join(f.root, "resumed-runtime.toml");
+        runtime.environment = Object.fromEntries(
+          Object.entries(f.environment).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        );
         runtime.plugin.version = JSON.parse(
           await readFile(
             join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
@@ -834,6 +890,7 @@ test.each([
   async (auth, bulk) => {
     const settings = {
       auth,
+      cyberAccessProgram: "daybreak_blue" as const,
       safetyIdentifier:
         auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
@@ -873,6 +930,9 @@ test.each([
           );
           expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
           expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+          expect(options.config?.["features"]).toMatchObject({
+            api_key_cyber_access_programs: true,
+          });
           return {
             startThread() {
               throw new Error("Resume must use the original session.");
@@ -881,7 +941,10 @@ test.each([
               expect(threadId).toBe(f.threadId);
               return {
                 id: threadId,
-                async runStreamed(prompt) {
+                async runStreamed(prompt, turnOptions) {
+                  expect(turnOptions?.cyberAccessProgram).toBe(
+                    settings.cyberAccessProgram,
+                  );
                   prompts.push(prompt as string);
                   if (prompts.length === 1) {
                     expect(prompt).toContain(
@@ -894,6 +957,30 @@ test.each([
                     expect(deep).toContain("subagents = 0");
                     expect(deep).toContain("stop_after_consecutive_errors = 2");
                     expect(deep).toContain("max_time_hours = 1.5");
+                    const workerConfigPath =
+                      options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                    expect(workerConfigPath).toBe(
+                      join(f.root, "resumed-runtime.toml"),
+                    );
+                    const workerConfig = parseToml(
+                      await readFile(workerConfigPath!, "utf8"),
+                    );
+                    expect(workerConfig).toMatchObject({
+                      codex_security: {
+                        cyber_access_program: settings.cyberAccessProgram,
+                      },
+                      features: {
+                        api_key_cyber_access_programs: true,
+                      },
+                    });
+                    const saved = await f.command([
+                      "get-scan-recipe",
+                      "--scan-id",
+                      f.scanId,
+                    ]);
+                    expect(saved["recipe"]).toMatchObject({
+                      cyberAccessProgram: settings.cyberAccessProgram,
+                    });
                     await finishDiscovery(f);
                   }
                   return { events: completedEvents(threadId) };

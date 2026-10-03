@@ -12,7 +12,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
+import { InvalidTargetError, abortReason } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
@@ -753,12 +753,15 @@ async function gitOutput(
   return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
-async function gitMarkerRoot(
+export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let current = repository;
+  const canonical = await abortable(() => realpath(repository), signal);
+  let current = (await lstat(canonical)).isDirectory()
+    ? canonical
+    : dirname(canonical);
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -819,13 +822,6 @@ export async function abortable<T>(
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function expandHome(value: string): string {

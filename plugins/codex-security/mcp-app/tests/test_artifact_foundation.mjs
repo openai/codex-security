@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -38,12 +39,20 @@ const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
 );
 
+const context = {
+  root: path.join(fixture, "scan"),
+  repoRoot: path.join(fixture, "repository"),
+  layout: "scan",
+};
+const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
+
 try {
   await testSchemaSourceOfTruth();
+  await testWorkerThreatModelSchema();
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
-  await testAtomicReplaceAndAppend();
+  await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
 } finally {
@@ -51,6 +60,30 @@ try {
 }
 
 console.log("Codex Security compact artifact foundation tests passed");
+
+async function testWorkerThreatModelSchema() {
+  const schema = JSON.parse(
+    await readFile(
+      new URL(
+        "../../schemas/tools/worker-threat-model.schema.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+  assert.equal(
+    schema.$id,
+    "codex-security://schemas/tools/worker-threat-model.schema.json",
+  );
+  const input = schema.$defs.recordWorkerThreatModelInput;
+  assert.deepEqual(Object.keys(input.properties), ["content"]);
+  assert.deepEqual(input.required, ["content"]);
+  assert.equal(input.additionalProperties, false);
+  assert.equal(input.properties.content.type, "string");
+  assert.equal(input.properties.content.minLength, 1);
+  assert.equal(input.properties.content.pattern, "\\S");
+}
 
 async function testSchemaSourceOfTruth() {
   const common = JSON.parse(
@@ -201,7 +234,6 @@ async function testScanContext() {
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
-  assert.equal(context.targetSnapshotDigest, "sha256:fixture");
   assert.equal(context.handoffClaimToken, "fixture-claim");
   assert.equal(context.pluginRoot, "/fixture/plugin");
   assert.equal(context.pythonCommand, "python3");
@@ -301,12 +333,6 @@ async function testWorkerStandardLayout() {
 }
 
 async function testSafeJsonAndJsonl() {
-  const context = {
-    root: path.join(fixture, "scan"),
-    repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
-  };
-  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
     context,
     components,
@@ -381,13 +407,7 @@ async function testSafeJsonAndJsonl() {
   );
 }
 
-async function testAtomicReplaceAndAppend() {
-  const context = {
-    root: path.join(fixture, "scan"),
-    repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
-  };
-  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
+async function testAtomicReplacement() {
   const destination = await io.artifactDestination(
     context,
     components,
@@ -396,31 +416,20 @@ async function testAtomicReplaceAndAppend() {
   await io.replaceArtifactJsonl(destination, []);
   assert.equal(await readFile(destination, "utf8"), "");
 
-  await writeFile(destination, '{"candidate_id":"without-newline"}', "utf8");
-  await io.appendArtifactJsonl(destination, [{ candidate_id: "appended" }]);
-  assert.deepEqual(
-    await io.readArtifactJsonl(context, components, "discovery_candidates"),
-    [{ candidate_id: "without-newline" }, { candidate_id: "appended" }],
-  );
-
-  await io.replaceArtifactJsonl(destination, []);
+  const replacements = Array.from({ length: 12 }, (_, index) => ({
+    candidate_id: "concurrent-" + index,
+  }));
   await Promise.all(
-    Array.from({ length: 12 }, (_, index) =>
-      io.appendArtifactJsonl(destination, [
-        { candidate_id: "concurrent-" + index },
-      ]),
-    ),
+    replacements.map((row) => io.replaceArtifactJsonl(destination, [row])),
   );
-  const rows = await io.readArtifactJsonl(
-    context,
-    components,
-    "discovery_candidates",
-  );
-  assert.equal(rows.length, 12);
+  const written = JSON.parse(await readFile(destination, "utf8"));
   assert.deepEqual(
-    rows.map((row) => row.candidate_id).sort(),
-    Array.from({ length: 12 }, (_, index) => "concurrent-" + index).sort(),
+    written,
+    replacements.find((row) => row.candidate_id === written.candidate_id),
   );
+  assert.deepEqual(await readdir(path.dirname(destination)), [
+    "candidate_ledger.jsonl",
+  ]);
 }
 
 async function testBoundedPagination() {
@@ -455,11 +464,6 @@ async function testBoundedPagination() {
 }
 
 async function testUnsafeArtifacts() {
-  const context = {
-    root: path.join(fixture, "scan"),
-    repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
-  };
   for (const components of [
     [],
     ["..", "outside.json"],
@@ -492,5 +496,16 @@ async function testUnsafeArtifacts() {
   await assert.rejects(
     io.artifactDestination(context, ["linked.json"], "scan_manifest"),
     /not a regular file/,
+  );
+
+  const linkedRoot = path.join(fixture, "linked-root");
+  await symlink(context.root, linkedRoot);
+  await assert.rejects(
+    io.artifactDestination(
+      { ...context, root: linkedRoot },
+      ["scan_manifest.json"],
+      "scan_manifest",
+    ),
+    /safe regular directory|escaped|context/i,
   );
 }

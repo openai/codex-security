@@ -45,6 +45,7 @@ import {
   FakeSignals,
 } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readJson as readJsonFile } from "./support/json.js";
 
 const temporary: string[] = [];
 const components: ComponentPlan["components"] = [
@@ -104,9 +105,7 @@ async function largePlanningFixture() {
   return { ...paths, files: files.sort() };
 }
 
-async function json(path: string) {
-  return JSON.parse(await readFile(path, "utf8"));
-}
+const json = readJsonFile<any>;
 
 function finding(
   id: string,
@@ -303,10 +302,8 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   let active = 0,
     peak = 0,
     closed = 0;
-  let unblock!: () => void;
-  const bothStarted = new Promise<void>((resolve) => {
-    unblock = resolve;
-  });
+  const { promise: bothStarted, resolve: unblock } =
+    Promise.withResolvers<void>();
   const seen: ScanOptions[] = [];
   const summary = await scan(paths, {
     workers: 2,
@@ -369,13 +366,16 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   expect(await json(summary.summaryPath!)).toMatchObject({
     completeness: "partial",
     findingCount: 2,
+    components: expect.arrayContaining([
+      expect.objectContaining({
+        id: "component-1",
+        error: "Authorization: Bearer SYNTHETIC_SECRET_123",
+      }),
+    ]),
   });
   expect(await json(summary.retryPlanPath!)).toEqual({
     components: components.slice(0, 2),
   });
-  expect(await readFile(summary.summaryPath!, "utf8")).not.toContain(
-    "SYNTHETIC_SECRET_123",
-  );
   expect(
     await readFile(join(paths.outputDir, "component-2", "report.md"), "utf8"),
   ).toBe("Original report");
@@ -548,6 +548,42 @@ test.each([
     ).toBe(true);
   },
 );
+
+test("CLI escapes component failure controls while preserving the saved error", async () => {
+  const paths = await fixture();
+  const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      [
+        "scan-components",
+        paths.repository,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies({ currentDirectory: paths.root }),
+        createSecurity: client(async () => {
+          throw new Error(failure);
+        }),
+      },
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain(
+    "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
+  );
+  expect(stderr.text()).not.toContain("\u001b");
+  const result = JSON.parse(stdout.text());
+  expect(await json(result.summaryPath)).toMatchObject({
+    components: [expect.objectContaining({ error: failure })],
+  });
+});
 
 test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
   const paths = await fixture();
@@ -847,6 +883,7 @@ test("plans from a Git inventory without tools or ignored files", async () => {
   await mkdir(join(paths.repository, "ignored"));
   await writeFile(join(paths.repository, "ignored", "secret.txt"), "synthetic");
   const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_blue",
     codex: {
       startThread(options) {
         expect(options).toMatchObject({
@@ -860,6 +897,7 @@ test("plans from a Git inventory without tools or ignored files", async () => {
             expect(prompt).toContain("apps/api");
             expect(prompt).not.toContain("secret.txt");
             expect(options.outputSchema).toBeDefined();
+            expect(options.cyberAccessProgram).toBe("daybreak_blue");
             return {
               finalResponse: JSON.stringify({ components: [components[0]] }),
             };
@@ -930,11 +968,13 @@ test("plans large inventories in separate contexts and fills omissions within ea
   const batches: string[][] = [];
   let threads = 0;
   const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_red",
     codex: {
       startThread: () => {
         threads++;
         return {
-          run: async (prompt) => {
+          run: async (prompt, options) => {
+            expect(options.cyberAccessProgram).toBe("daybreak_red");
             expect(prompt.length).toBeLessThanOrEqual(1_048_576);
             const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
             batches.push(scopes);
@@ -1307,7 +1347,7 @@ test.each(["auto", "explicit", "file"])(
 );
 
 test.each(["auto", "chatgpt", "api-key"] as const)(
-  "CLI uses %s authentication for planning, scans, and matching",
+  "CLI uses %s authentication and the selected Cyber program for planning, scans, and matching",
   async (auth) => {
     const paths = await fixture();
     const environment = {
@@ -1321,21 +1361,29 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
       matched = false;
     const result = await cli(
       paths,
-      ["--auto", ...(auth === "auto" ? [] : ["--auth", auth])],
+      [
+        "--auto",
+        "--cyber-access-program",
+        "daybreak_blue",
+        ...(auth === "auto" ? [] : ["--auth", auth]),
+      ],
       {
         ...dependencies({ currentDirectory: paths.root, environment }),
         planComponents: async (_repository, options) => {
           expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
           planned = true;
           return { components: components.slice(0, 2) };
         },
         createSecurity: client(async (_repository, options) => {
           expect(options.auth).toBe(auth);
+          expect(options.cyberAccessProgram).toBe("daybreak_blue");
           return completed(options);
         }),
         matchFindings: async (_input, options) => {
           expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
           expect(options?.environment).toEqual(expectedEnvironment);
           matched = true;
           return noMatches;
@@ -1416,6 +1464,7 @@ test.each([false, true])(
   "CLI reports matching completion (failure: %j)",
   async (failMatching) => {
     const paths = await fixture();
+    const failure = "Authorization: Bearer SYNTHETIC_MATCH_SECRET_123";
     let calls = 0;
     const result = await cli(
       paths,
@@ -1437,8 +1486,7 @@ test.each([false, true])(
             model: "gpt-5.6-terra",
             model_reasoning_effort: "high",
           });
-          if (failMatching)
-            throw new Error("Authorization: Bearer SYNTHETIC_MATCH_SECRET_123");
+          if (failMatching) throw new Error(failure);
           return {
             matches: [
               match([before[0]!.occurrenceId], [after[0]!.occurrenceId]),
@@ -1459,8 +1507,11 @@ test.each([false, true])(
       failed: 0,
       deduplication: { status: failMatching ? "incomplete" : "completed" },
     });
-    expect(saved + result.stdout + result.stderr).not.toContain(
-      "SYNTHETIC_MATCH_SECRET_123",
+    expect(JSON.parse(saved).deduplication.error).toBe(
+      failMatching ? failure : undefined,
+    );
+    expect(JSON.parse(result.stdout).deduplication.error).toBe(
+      failMatching ? failure : undefined,
     );
   },
 );

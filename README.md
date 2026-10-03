@@ -96,13 +96,25 @@ classification operation; original scan severity stays unchanged. See [severity 
 
 ## Other providers
 
-To use another inference provider, set its API key and select a model:
+Amazon Bedrock uses native Codex support; no connector or adapter is needed.
+Select an AWS profile, the region where your account can invoke the model, and
+the Bedrock model ID:
 
 ```bash
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_PROFILE="security-scan"
 export AWS_REGION="us-east-2"
 npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+```
 
+Run the exports and scan in the same shell. Bedrock also accepts bearer tokens
+and the AWS credential chain. Native Bedrock scans and local result viewing or
+export do not require an OpenAI CLI login. Daybreak Blue and Red still need
+[approved model access](docs/bedrock.md#daybreak-blue-and-red). Hosted publication has its
+own authentication requirements. See [Bedrock setup and verification](docs/bedrock.md).
+
+For other inference providers, set the provider's API key and select a model:
+
+```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 

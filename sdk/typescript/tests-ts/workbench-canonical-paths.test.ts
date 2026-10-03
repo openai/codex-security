@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -155,6 +155,38 @@ describe("bundled workbench canonical paths", () => {
         repository,
       ),
     ).toEqual({ subjects: 2, locales: 2 });
+  });
+
+  test("discovers and runs host Git after a batch shim without a host binding", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const shims = join(root, "shims");
+    await mkdir(join(repository, ".git"), { recursive: true });
+    await mkdir(shims);
+    await writeFile(join(shims, "git.cmd"), "@exit /b 99\r\n");
+    await writeFile(join(shims, "git.bat"), "@exit /b 99\r\n");
+    const hostGit = Bun.which("git");
+    expect(hostGit).not.toBeNull();
+    const result = runPythonProbe(
+      [
+        "import json, os, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_target as target",
+        "os.environ.pop('CODEX_SECURITY_GIT', None)",
+        "os.environ['PATH'] = os.pathsep.join(sys.argv[3:])",
+        "result = target.git_command(Path(sys.argv[2]), '--version', text=True)",
+        "print(json.dumps({'code': result.returncode, 'version': result.stdout, 'command': result.args[0]}))",
+      ].join("\n"),
+      repository,
+      shims,
+      dirname(hostGit!),
+    );
+    expect(result["code"]).toBe(0);
+    expect(result["version"]).toMatch(/^git version /u);
+    expect(result["command"]).toBe(
+      join(await realpath(dirname(hostGit!)), basename(hostGit!)),
+    );
   });
 
   testPosix(

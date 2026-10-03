@@ -1,3 +1,4 @@
+import { asRecord } from "./record.js";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ArtifactContext } from "./artifact-io.js";
@@ -21,21 +22,11 @@ export interface ScanArtifactContextOptions {
   pythonCommand?: string;
 }
 
-export interface WorkerArtifactContextInput {
-  root: string;
-  repoRoot: string;
+export interface WorkerArtifactContextInput extends Omit<
+  ArtifactContext,
+  "layout"
+> {
   layout?: "worker" | "reducer";
-  scanId?: string;
-  scope?: string;
-  pluginRoot?: string;
-  pythonCommand?: string;
-  targetContract?: Readonly<Record<string, unknown>>;
-  targetRevision?: string;
-  targetSnapshotDigest?: string;
-  handoffClaimToken?: string;
-  status?: string;
-  mode?: string;
-  deepReducer?: ArtifactContext["deepReducer"];
 }
 
 /**
@@ -95,7 +86,6 @@ export async function createScanArtifactContext(
     "Codex Security scan " + scanId + " has no bound target context.",
   );
   const targetContract = asRecord(scan.contract);
-  const contractTarget = asRecord(targetContract?.target);
   return {
     root: await canonicalDirectory(
       rawRoot,
@@ -112,11 +102,6 @@ export async function createScanArtifactContext(
     ...defined("pythonCommand", options.pythonCommand),
     ...defined("targetContract", targetContract),
     ...defined("targetRevision", optionalString(scan.targetRevision)),
-    ...defined(
-      "targetSnapshotDigest",
-      optionalString(scan.targetSnapshotDigest) ??
-        optionalString(contractTarget?.requiredSnapshotDigest),
-    ),
     ...defined("handoffClaimToken", suppliedClaim ?? expectedClaim),
     ...defined("status", status),
     ...defined("mode", optionalString(scan.mode)),
@@ -149,7 +134,6 @@ export async function createWorkerArtifactContext(
     ...defined("pythonCommand", input.pythonCommand),
     ...defined("targetContract", input.targetContract),
     ...defined("targetRevision", input.targetRevision),
-    ...defined("targetSnapshotDigest", input.targetSnapshotDigest),
     ...defined("handoffClaimToken", input.handoffClaimToken),
     ...defined("status", input.status),
     ...defined("mode", input.mode),
@@ -205,12 +189,6 @@ function requireString(value: unknown, message: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 function defined<Key extends string, Value>(

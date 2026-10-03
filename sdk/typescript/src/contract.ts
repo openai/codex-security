@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, hash } from "node:crypto";
 import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
@@ -9,7 +9,8 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import { ContractValidationError } from "./errors.js";
+import { ContractValidationError, abortReason } from "./errors.js";
+import { isRecord as isJsonRecord } from "./record.js";
 import type {
   CoverageDocument,
   FindingsDocument,
@@ -136,7 +137,7 @@ export async function loadContractWithScanDirectory(
       }
       valid = result;
       if (!valid && filename === "findings.json") {
-        payload = legacySealedFindingsForValidation(payload);
+        payload = normalizePersistedFindings(payload);
         const compatibleResult = validate(payload);
         if (typeof compatibleResult !== "boolean") {
           throw new Error("asynchronous JSON Schema validation is unsupported");
@@ -208,16 +209,10 @@ export async function loadContractWithScanDirectory(
   };
 }
 
-export async function requireCanonicalScanDirectory(
-  scanDirectory: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return (await requireScanRoot(scanDirectory, signal)).path;
-}
-
 type JsonRecord = Record<string, unknown>;
 
-function legacySealedFindingsForValidation(payload: unknown): unknown {
+/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+export function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
@@ -294,7 +289,12 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
 
     const validation = finding["validation"];
     if (isJsonRecord(validation)) {
-      normalizeLegacyStringOrList(validation, "evidence");
+      if (
+        typeof validation["evidence"] !== "string" ||
+        validation["evidence"].length === 0
+      ) {
+        normalizeLegacyStringLists(validation, ["evidence"]);
+      }
       removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
       removeUnsupportedLegacyNullableStrings(validation, [
         "status",
@@ -350,10 +350,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
   return compatible;
 }
 
-function isJsonRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function normalizeLegacyStringLists(
   section: JsonRecord,
   fields: string[],
@@ -371,23 +367,6 @@ function normalizeLegacyStringLists(
       delete section[field];
     }
   }
-}
-
-function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
-  if (!(field in section)) return;
-  const value = section[field];
-  if (typeof value === "string") {
-    if (value.length === 0) delete section[field];
-    return;
-  }
-  if (!Array.isArray(value)) {
-    delete section[field];
-    return;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === "string" && item.length > 0,
-  );
-  section[field] = normalized;
 }
 
 function removeUnsupportedLegacyStrings(
@@ -491,7 +470,8 @@ function validateCanonicalContract(
       }
     }
 
-    const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    const fingerprint = `codex-security/v1:sha256:${hash(
+      "sha256",
       [
         "codex-security/v1",
         manifest.scan.target.targetId,
@@ -500,8 +480,9 @@ function validateCanonicalContract(
         finding.identity.instance ?? "",
       ].join("\0"),
     )}`;
-    const findingId = `csf_${sha256Text(fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${sha256Text(
+    const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
+    const occurrenceId = `occ_${hash(
+      "sha256",
       [manifest.scan.id, fingerprint].join("\0"),
     ).slice(0, 24)}`;
     if (finding.findingId !== findingId) {
@@ -520,10 +501,6 @@ function validateCanonicalContract(
       );
     }
   }
-}
-
-function sha256Text(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export async function requireScanFile(
@@ -935,10 +912,7 @@ async function readScanJson(
   );
   try {
     const bytes = await file.readFile({ signal });
-    documentDigests.set(
-      relativePath,
-      createHash("sha256").update(bytes).digest("hex"),
-    );
+    documentDigests.set(relativePath, hash("sha256", bytes));
     return parseJson(join(scanDir, relativePath), bytes);
   } catch (error) {
     throwIfAborted(signal);
@@ -990,7 +964,7 @@ function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
       { cause: error },
     );
   }
-  if (!isRecord(payload)) {
+  if (!isJsonRecord(payload)) {
     throw new ContractValidationError(`${path}: expected a JSON object.`);
   }
   validateParsedJson(payload, path);
@@ -1025,7 +999,7 @@ function validateParsedJson(value: unknown, context: string): void {
     }
     return;
   }
-  if (isRecord(value)) {
+  if (isJsonRecord(value)) {
     for (const [key, item] of Object.entries(value)) {
       if (!isWellFormedUnicode(key)) {
         throw new ContractValidationError(
@@ -1195,10 +1169,7 @@ export async function sameCheckedFileDevice(
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
-  throw (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
+  throw abortReason(signal);
 }
 
 function validRfc3339DateTime(value: string): boolean {
@@ -1295,10 +1266,6 @@ function isContained(root: string, candidate: string): boolean {
     child === "" ||
     (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function nodeErrorCode(error: unknown): string | undefined {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, spyOn, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import {
   main,
   readSkillCommandOutput,
@@ -138,10 +139,9 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain(
           `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
-        expect(help.text()).toContain(
-          "--effort <minimal|low|medium|high|xhigh|max>",
-        );
-        expect(help.text()).toContain("--codex <array>");
+        expect(help.text()).toContain("--effort <effort>");
+        expect(help.text()).toContain("--model <model>");
+        expect(help.text()).toContain("--codex <key=value>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
         expect(help.text()).toContain("analytics.enabled=false");
@@ -844,6 +844,89 @@ describe("CLI skill commands", () => {
     }
   });
 
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) => [
+      [command, ["--codex", 'model="synthetic-model"'], "xhigh"] as const,
+      [
+        command,
+        ["--model", "synthetic-model", "--effort", "high"],
+        "high",
+      ] as const,
+    ]),
+  )(
+    "passes custom inference settings and authentication to %s with %j (%s effort)",
+    async (command, selection, effort) => {
+      const providerConfiguration = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        env_key: "SYNTHETIC_GATEWAY_KEY",
+      };
+      const overrides = [
+        'model_provider="synthetic"',
+        ...Object.entries(providerConfiguration).map(
+          ([key, value]) =>
+            `model_providers.synthetic.${key}=${JSON.stringify(value)}`,
+        ),
+      ];
+      const stderr = capture();
+      let invocation: readonly string[] = [];
+      expect(
+        await main(
+          [
+            command,
+            "Synthetic finding",
+            ...selection,
+            ...overrides.flatMap((override) => ["--codex", override]),
+          ],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            environment: { SYNTHETIC_GATEWAY_KEY: "SYNTHETIC_VALUE" },
+            onCodex: (args, output, environment) => {
+              invocation = args;
+              expect(output?.modelProvider).toBe("synthetic");
+              expect(output?.providerConfiguration).toEqual(
+                providerConfiguration,
+              );
+              expect(environment?.["SYNTHETIC_GATEWAY_KEY"]).toBe(
+                "SYNTHETIC_VALUE",
+              );
+              if (command === "verify-fix") {
+                output?.stdout.write(
+                  JSON.stringify({
+                    results: [
+                      {
+                        id: "finding-1",
+                        status: "fixed",
+                        evidence: "Synthetic verification",
+                      },
+                    ],
+                  }),
+                );
+              }
+              return 0;
+            },
+          }),
+        ),
+        stderr.text(),
+      ).toBe(0);
+      expect(invocation).toContain('model="synthetic-model"');
+      expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
+      expect(invocation).toContain('model_provider="synthetic"');
+      expect(
+        parseToml(
+          invocation.find((arg) => arg.startsWith("model_providers="))!,
+        ),
+      ).toEqual({ model_providers: { synthetic: providerConfiguration } });
+      expect(invocation).toContain(
+        command === "verify-fix"
+          ? 'approval_policy="on-request"'
+          : 'approval_policy="never"',
+      );
+    },
+  );
+
   test.each(["validate", "patch", "verify-fix"] as const)(
     "passes explicit analytics settings to %s",
     async (command) => {
@@ -893,7 +976,7 @@ describe("CLI skill commands", () => {
       }
 
       for (const override of [
-        'model_provider="synthetic"',
+        'sandbox_mode="danger-full-access"',
         "features.goals=false",
         "analytics.unrelated=false",
         "analytics.enabled=false",
@@ -927,36 +1010,50 @@ describe("CLI skill commands", () => {
     },
   );
 
-  test("selects reasoning effort directly for validation and patching", async () => {
-    for (const command of ["validate", "patch"] as const) {
-      let invocation: readonly string[] = [];
-      const stderr = capture();
-
-      expect(
-        await main(
-          [
-            command,
-            "a candidate finding",
-            "--effort",
-            "max",
-            "--codex",
-            'model="gpt-5.6-terra"',
-          ],
-          capture().stream,
-          stderr.stream,
-          dependencies({
-            onCodex: (args) => {
-              invocation = args;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(0);
-      expect(invocation).toContain('model="gpt-5.6-terra"');
-      expect(invocation).toContain('model_reasoning_effort="max"');
-      expect(stderr.text()).toBe(
-        command === "patch" ? "Patch applied. Files changed: 1.\n" : "",
-      );
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "selects the model and reasoning effort directly for %s",
+    async (command) => {
+      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+        let invocation: readonly string[] = [];
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              command,
+              "a candidate finding",
+              ...(model === "gpt-6-astra"
+                ? ["--model", model]
+                : [`--model=${model}`]),
+              "--effort",
+              "max",
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              onCodex: (args, output) => {
+                invocation = args;
+                if (command === "verify-fix") {
+                  output?.stdout.write(
+                    JSON.stringify({
+                      results: [
+                        {
+                          id: "finding-1",
+                          status: "fixed",
+                          evidence: "The fix is present.",
+                        },
+                      ],
+                    }),
+                  );
+                }
+                return 0;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(invocation).toContain(`model="${model}"`);
+        expect(invocation).toContain('model_reasoning_effort="max"');
+      }
 
       for (const [options, message] of [
         [
@@ -967,10 +1064,15 @@ describe("CLI skill commands", () => {
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
           "--effort conflicts with --codex model_reasoning_effort",
         ],
+        [
+          ["--model", "gpt-6.1-sol", "--codex", 'model="gpt-6-astra"'],
+          "--model conflicts with --codex model",
+        ],
+        [["--model", "  "], "model must be a nonempty string"],
+        [["--model"], "Missing value for flag: --model"],
       ] as const) {
         let started = false;
         const invalidStderr = capture();
-
         expect(
           await main(
             [command, "a candidate finding", ...options],
@@ -987,8 +1089,8 @@ describe("CLI skill commands", () => {
         expect(invalidStderr.text()).toContain(message);
         expect(started).toBe(false);
       }
-    }
-  });
+    },
+  );
 
   test("rejects empty and non-file skill inputs before launching Codex", async () => {
     const directory = await mkdtemp(
@@ -1282,7 +1384,7 @@ process.stdout.write(JSON.stringify({
     },
   );
 
-  test("forwards only completed skill output and redacts subprocess diagnostics", async () => {
+  test("forwards completed skill output and classifies authentication failures", async () => {
     const cases = [
       {
         source:
@@ -1547,7 +1649,7 @@ lines.on("line", (line) => {
     );
   });
 
-  test("redacts app-server patch failures", async () => {
+  test("classifies app-server patch authentication failures", async () => {
     const source = [
       'const readline=require("node:readline");',
       "const lines=readline.createInterface({input:process.stdin});",

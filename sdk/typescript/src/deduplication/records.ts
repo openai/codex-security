@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID, hash } from "node:crypto";
 import { z } from "incur";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
@@ -14,7 +14,39 @@ import {
   screeningFindingFormatInstructions,
   pairFindingFormatInstructions,
 } from "./deduplication-prompts.js";
-import type { DeduplicationReviewRunner } from "./review.js";
+import type {
+  DeduplicationReviewAttribution,
+  DeduplicationReviewRunner,
+} from "./review.js";
+
+export function recordsReviewAttribution(
+  findingIds: readonly string[] | undefined,
+  references: ReadonlyMap<string, string>,
+  anchors: ReadonlyMap<string, readonly string[]>,
+): DeduplicationReviewAttribution {
+  if (!findingIds?.length)
+    throw new Error("Records review is missing its comparison participants.");
+  const participants = new Set(
+    findingIds.map((findingId) => {
+      const observationId = references.get(findingId);
+      if (observationId === undefined)
+        throw new Error(`Unknown records review finding ID: ${findingId}`);
+      return observationId;
+    }),
+  );
+  const beneficiaryObservationIds = [...participants]
+    .filter((id) => anchors.has(id))
+    .sort();
+  if (beneficiaryObservationIds.length === 0)
+    throw new Error("Records review has no incoming observation participants.");
+  return {
+    version: 1,
+    beneficiaryObservationIds,
+    contextObservationIds: [...participants]
+      .filter((id) => !anchors.has(id))
+      .sort(),
+  };
+}
 
 const id = z.string().min(1);
 const record = z
@@ -79,10 +111,7 @@ export async function deduplicateRecords(
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
-    const findingId = `csf_${createHash("sha256")
-      .update(entry.id)
-      .digest("hex")
-      .slice(0, 24)}`;
+    const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }
@@ -117,7 +146,11 @@ export async function deduplicateRecords(
     observations.get(id)!,
   );
   const reviewer = new CodexDeduplicationReviewer({
-    async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
+    async run<T>({
+      validate,
+      findingIds,
+      ...review
+    }: CodexReview<T>): Promise<T> {
       try {
         return await abortable(async () => {
           options.signal?.throwIfAborted();
@@ -126,6 +159,11 @@ export async function deduplicateRecords(
               {
                 ...review,
                 requestId: randomUUID(),
+                attribution: recordsReviewAttribution(
+                  findingIds,
+                  references,
+                  relationships,
+                ),
                 trustedInstructions: [
                   sourceReviewInstructions,
                   review.stage === "screening"

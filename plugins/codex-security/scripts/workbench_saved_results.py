@@ -37,6 +37,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from workbench_constants import PHASES
+from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
 _PUBLISHED_OUTPUTS = (
@@ -651,15 +652,9 @@ def merge_saved_results(
     target = {"kind": target_kind, **binding["target"]}
     if target["kind"] == "git_diff" and "snapshotDigest" not in target:
         diff_kind = {"commit": "commit", "branch_diff": "range"}[binding["coverageMode"]]
-        digest = hashlib.sha256(
-            b"codex-security-diff/v1\0"
-            + diff_kind.encode()
-            + b"\0"
-            + target["baseRevision"].encode()
-            + b"\0"
-            + target["headRevision"].encode()
-        ).hexdigest()
-        target["snapshotDigest"] = f"codex-security-snapshot/v1:sha256:{digest}"
+        target["snapshotDigest"] = committed_diff_snapshot_digest(
+            diff_kind, target["baseRevision"], target["headRevision"]
+        )
     manifest = (
         copy.deepcopy(parent_manifest)
         if parent_manifest
@@ -1190,6 +1185,7 @@ def preserve_scan_results_locked(
 
     existing_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
+    existing = None
     if scan["seal_manifest_digest"] is not None or (
         isinstance(existing_scan, dict)
         and (
@@ -1221,7 +1217,10 @@ def preserve_scan_results_locked(
                 return True
             if recovery_source_digests is None:
                 raise ContractError("Stopped scan sources changed after terminal publication.")
-    binding = {**db.workbench_completion_binding(scan, scan["completed_at"]), "status": outcome}
+    binding = {
+        **db.workbench_completion_binding(scan, scan["completed_at"], existing),
+        "status": outcome,
+    }
     documents = merge_saved_results(
         scan_dir,
         scan_id,
@@ -1439,15 +1438,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
-        # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
-        copied_manifest = copy.deepcopy(manifest)
-        copied_findings = copy.deepcopy(findings)
-        copied_coverage = copy.deepcopy(coverage)
-        _populate_unsealed_manifest_envelope(copied_manifest, copied_manifest["scan"], binding)
-        _populate_unsealed_artifact_envelope(
-            copied_manifest, copied_findings, copied_coverage, binding
-        )
-        _validate_completion_binding(copied_manifest, copied_findings, copied_coverage, binding)
+        # Save scan IDs without sealing the draft.
+        _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
+        _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
+        _validate_completion_binding(manifest, findings, coverage, binding)
         for filename, document in (
             ("findings.json", findings),
             ("coverage.json", coverage),

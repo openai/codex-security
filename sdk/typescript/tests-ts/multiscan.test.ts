@@ -307,6 +307,50 @@ describe("multiscan", () => {
     );
   });
 
+  test("CLI escapes bulk failure controls while preserving the saved receipt", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "failure");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const failure = "Bulk failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    expect(
+      await main(
+        [
+          "bulk-scan",
+          paths.input,
+          "--output-dir",
+          paths.output,
+          "--max-attempts",
+          "1",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        {
+          ...deps,
+          createSecurity: (config) => ({
+            ...deps.createSecurity(config),
+            run: async () => {
+              throw new Error(failure);
+            },
+          }),
+        },
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "Bulk failed: token=SYNTHETIC_VALUE [2J continued\n",
+    );
+    expect(stderr.text()).not.toContain("\u001b");
+    expect(await results(JSON.parse(stdout.text()).resultsPath)).toMatchObject([
+      { status: "failed", error: failure },
+    ]);
+  });
+
   test("recovery skips untouched rows and saves an interrupted ledger tail before appending", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "tail");
@@ -1394,10 +1438,8 @@ describe("multiscan", () => {
     let maximum = 0;
     let created = 0;
     let closed = 0;
-    let release!: () => void;
-    const simultaneous = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: simultaneous, resolve: release } =
+      Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
       expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
       active += 1;
@@ -1448,14 +1490,9 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nexclusive,${source.path},${source.revision}\n`,
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
       started();
       await finish;
@@ -1736,14 +1773,9 @@ describe("multiscan", () => {
         mode: 0o600,
       },
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     let active = 0;
     let maximum = 0;
     const security = client(async (_repository, scanOptions = {}) => {
@@ -1779,14 +1811,9 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nreplacement,${source.path},${source.revision}\n`,
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     const first = runMultiscan(
       options(
         paths,
@@ -1943,24 +1970,8 @@ describe("multiscan", () => {
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
-    const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
+    const failure = "temporary failure: token=SYNTHETIC_MULTISCAN_TOKEN";
     const knowledgeBasePaths = ["architecture.md"];
-    const proxyUrl =
-      "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
-    const queryUrl =
-      "https://proxy.test/v1/responses?api_key=SYNTHETIC_MULTISCAN_QUERY_123&safe=1";
-    const shortAuthorization = "Bearer abc123";
-    const suffixedSecret = "SYNTHETIC_SUFFIXED_CLIENT_SECRET_123";
-    const suffixedToken = "SYNTHETIC_SUFFIXED_ACCESS_TOKEN_123";
-    const suffixedQuery = "SYNTHETIC_SUFFIXED_QUERY_SECRET_123";
-    const quotedSecret = "SYNTHETIC correct horse battery staple";
-    const opaqueAuthorization = "SYNTHETIC opaque authorization secret";
-    const npmAuthorization = "SYNTHETIC_NPM_AUTH_VALUE_123";
-    const customAuthorization = "SYNTHETIC_CUSTOM_AUTHORIZATION_123";
-    const suffixedAuthorization = "SYNTHETIC_SUFFIXED_AUTHORIZATION_123";
-    const paddedAuthorization = "SYNTHETIC_PADDED_AUTHORIZATION_TOKEN==";
-    const keyedAuthorization = "SYNTHETIC_KEYED_AUTHORIZATION_SECRET_123";
-    const camelCaseSecret = "SYNTHETIC_CAMEL_CASE_CLIENT_SECRET_123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -1974,9 +1985,7 @@ describe("multiscan", () => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
           if (attempts === 1) {
-            throw new Error(
-              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} Authorization: Custom key=${keyedAuthorization} clientSecretValue=${camelCaseSecret} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
-            );
+            throw new Error(failure);
           }
           return await completedScan(scanOptions.outputDir!);
         }),
@@ -1987,12 +1996,9 @@ describe("multiscan", () => {
     expect(attempts).toBe(2);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "retry", status: "failed", attempt: 1 },
+      { id: "retry", status: "failed", attempt: 1, error: failure },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
-    const ledger = await readFile(summary.resultsPath, "utf8");
-    expect(ledger).toContain('"error":"[redacted]"');
-    expect(ledger).not.toContain("SYNTHETIC");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {

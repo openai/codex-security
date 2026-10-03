@@ -5,7 +5,7 @@ import {
   RatelimitedLinearError,
 } from "@linear/sdk";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 
 export type LinearClientFactory<
   Method extends keyof LinearClient = "issue" | "projects",
@@ -143,9 +143,8 @@ export async function importLinearIssues(options: {
         "Linear request was rate limited. Wait and retry.",
       );
     }
-    const message = safeErrorMessage(error);
     throw new CodexSecurityError(
-      `Linear request failed: ${message.includes(credential) ? "[redacted]" : message}`,
+      `Linear request failed: ${errorMessage(error)}`,
     );
   }
 }

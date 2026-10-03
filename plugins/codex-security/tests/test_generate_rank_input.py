@@ -173,6 +173,35 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     )
 
 
+def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    source = "value = " + " + ".join(["x"] * 10000) + "\n"
+    (repo / "src" / "generated.py").write_text(source, encoding="utf-8")
+    (repo / "src" / "normal.py").write_text("value = 1\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli(
+        "make-repo-rank-input",
+        "--repo",
+        str(repo),
+        "--scope",
+        "src",
+        "--preview-bytes",
+        "128",
+        "--out",
+        str(output),
+    )
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["src/generated.py", "src/normal.py"]
+    preview = rows[0]["preview"]
+    assert preview
+    assert source.startswith(preview)
+    assert len(preview.encode("utf-8")) <= 128
+    assert rows[1]["preview"] == "value = 1"
+
+
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
 def test_rank_input_bounds_large_text_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
@@ -293,6 +322,52 @@ def test_rank_input_includes_objective_c(tmp_path: Path, mode: str) -> None:
             "preview": changed,
         }
     ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
+def test_rank_input_includes_cpp_headers(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    include = repo / "include"
+    include.mkdir(parents=True)
+    initialize_repo(repo)
+    names = ["base.h", "base.hpp", "lower.hh", "lower.hxx", "upper.HH", "upper.HXX"]
+    for name in names:
+        (include / name).write_text("inline int before() { return 1; }\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    for name in names:
+        (include / name).write_text("inline int after() { return 2; }\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode in {"revisions", "staged"}:
+        git(repo, "add", ".")
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "include"]
+    else:
+        diff_mode = "revisions" if mode == "revisions" else "local-patch"
+        arguments = [
+            "make-diff-rank-input",
+            "--repo",
+            str(repo),
+            "--base",
+            base,
+            "--mode",
+            diff_mode,
+        ]
+        if mode == "revisions":
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == [f"include/{name}" for name in sorted(names)]
+    for row in rows:
+        assert row["area"] == ("include" if mode == "repo" else "diff")
+        assert "function after" in row["preview"]
+        assert "before" not in row["preview"]
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
