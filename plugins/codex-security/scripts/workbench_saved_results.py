@@ -1205,6 +1205,11 @@ def merge_saved_results(
         manifest["scan"].pop("complete", None)
         if "complete" in parent:
             manifest["scan"]["complete"] = parent["complete"]
+        for key in ("scope", "threatModel"):
+            if isinstance(parent.get(key), dict):
+                manifest["scan"][key] = copy.deepcopy(parent[key])
+        if isinstance(manifest["scan"].get("scope"), dict):
+            manifest["scan"]["scope"].update(copy.deepcopy(binding["scope"]))
     coverage = (
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]

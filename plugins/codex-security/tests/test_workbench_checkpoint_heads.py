@@ -495,6 +495,8 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest_path = scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["complete"] = complete is False
+    manifest["scan"]["scope"]["limitations"] = ["The dependency boundary is still unreviewed."]
+    manifest["scan"]["threatModel"] = {"summary": "The earlier threat model."}
     manifest_path.write_text(json.dumps(manifest))
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     if complete is False:
@@ -505,6 +507,8 @@ def test_completion_checks_selected_parent_checkpoint(
         "scanId": scan_id,
         "findings": json.loads((scan_dir / "findings.json").read_text())["findings"],
         "coverage": coverage,
+        "scope": {"limitations": ["Only static analysis was performed."]},
+        "threatModel": {"summary": "The reviewed threat model."},
     }
     if complete is not None:
         draft["complete"] = complete
@@ -545,6 +549,53 @@ def test_completion_checks_selected_parent_checkpoint(
         completed = json.loads(manifest_path.read_text())["scan"]
         assert completed.get("complete", True) is True
         assert completed["sealedAt"]
+        assert completed["scope"] == {**manifest["scan"]["scope"], **draft["scope"]}
+        assert completed["threatModel"] == draft["threatModel"]
+        assert completed["target"] == manifest["scan"]["target"]
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("complete", [False, True, None])
+def test_selected_parent_retains_semantic_context_through_frozen_recovery(
+    tmp_path: Path, checkpoint_scan, stopped: bool, complete: bool | None
+) -> None:
+    scan_id, _, closed, binding = checkpoint_scan
+    write_saved_parent(tmp_path, closed, 100)
+    manifest_path = tmp_path / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"].update(
+        target=binding["target"],
+        scope={**binding["scope"], "limitations": ["The earlier limitation."]},
+        threatModel={"summary": "The earlier threat model."},
+    )
+    manifest_path.write_text(json.dumps(manifest))
+    selected = saved_draft(scan_id, complete=complete)
+    if complete is None:
+        selected.pop("complete")
+    selected["scope"] = {
+        "includePaths": ["stale-path"],
+        "excludePaths": ["stale-exclusion"],
+        "limitations": ["Only static analysis was performed."],
+    }
+    selected["threatModel"] = {
+        "summary": "The reviewed threat model.",
+        "assumptions": ["The caller controls request fields."],
+    }
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(tmp_path / name, ns=(100, 100))
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", selected)
+    os.utime(checkpoint, ns=(200, 200))
+    select(tmp_path, checkpoint, 300)
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], [], stopped=stopped, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, stopped=stopped)
+    repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, stopped=stopped)
+    for result in (first, replay, repeated):
+        scan = result[0]["scan"]
+        assert scan["threatModel"] == selected["threatModel"]
+        assert scan["scope"] == {**selected["scope"], **binding["scope"]}
+        assert scan["target"] == binding["target"]
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
