@@ -362,8 +362,14 @@ describe("deep-review worklists", () => {
   test("reports missing input and preserves argument parsing status", () => {
     const f = fixture();
     writeFileSync(f.output, "previous output\n");
+    const inputs = [f.input, join(f.output, "child.jsonl")];
+    if (process.platform !== "win32") {
+      const loop = join(f.root, "loop-\x1b[2J.jsonl");
+      symlinkSync(loop, loop);
+      inputs.push(loop);
+    }
     for (const selection of [false, true]) {
-      for (const input of [f.input, join(f.output, "child.jsonl")]) {
+      for (const input of inputs) {
         const result = run({ ...f, input }, selection);
         expect(result.status).toBe(1);
         expect(result.stderr).toBe(
