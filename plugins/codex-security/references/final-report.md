@@ -85,7 +85,7 @@ After the scope bullets, include a compact `### Scan Summary` table when the sca
 
 `## Threat Model`
 
-Use the completed canonical `threatModel` when one exists. In any workflow that produced only `<context_dir>/threat_model.md`, including Workbench-backed diff scans, preserve that text exactly as `{ "summary": "<completed model text>" }` and include it in the canonical draft. Use the field mapping and scenario reconciliation in `threat-model.md` when building a generated canonical model; do not regenerate it from the final finding list. Preserve source citations, capability boundaries, deployment assumptions, and material unknowns. Finalization reads only the canonical threat-model object when projecting this section.
+Use the completed canonical `threatModel` when one exists. For a workflow that produced a Markdown model, retain the text exactly as `{ "format": "markdown", "content": "<completed model text>" }` in the canonical draft. A historical `<context_dir>/threat_model.md` may supply missing canonical content; it must not override a later canonical model. Use the field mapping and scenario reconciliation in `threat-model.md` when building a generated structured model; do not regenerate it from the final finding list. Preserve source citations, capability boundaries, deployment assumptions, and material unknowns. Finalization reads the canonical model when projecting this section and the root-level `threatmodel.md`. Exporting that saved model does not perform another analysis.
 
 `## Findings`
 

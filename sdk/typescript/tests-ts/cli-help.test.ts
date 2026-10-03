@@ -156,7 +156,8 @@ describe("CLI help", () => {
     expect(JSON.parse(schema)).toMatchObject({
       options: {
         properties: {
-          exportFormat: { enum: ["csv", "json", "sarif"], default: "sarif" },
+          artifact: { enum: ["findings", "threat-model"], default: "findings" },
+          exportFormat: { enum: ["csv", "json", "sarif", "md"] },
         },
       },
     });

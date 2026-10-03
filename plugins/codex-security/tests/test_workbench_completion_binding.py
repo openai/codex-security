@@ -1053,6 +1053,55 @@ def test_deep_completion_retries_transient_report_failure_within_one_invocation(
     assert (scan_dir / "report.md").is_file()
 
 
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("already_completed", [False, True])
+def test_completion_persists_optional_model_projection_warnings(
+    tmp_path: Path, mode: str, already_completed: bool
+) -> None:
+    start = (
+        _start_deep_scan_with_draft_findings if mode == "deep" else _start_scan_with_draft_findings
+    )
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    model = {"summary": "Queue producers and consumers cross a service boundary."}
+    manifest["scan"]["threatModel"] = model
+    manifest_path.write_text(json.dumps(manifest))
+    document = scan_dir / "threatmodel.md"
+    if already_completed:
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+        assert completed["warnings"] == []
+    else:
+        document.write_text("# Provisional model\n")
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    document.unlink()
+    document.mkdir()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert completed["threatModelAvailable"] is True
+    assert "threatModelPath" not in completed
+    assert "threatModel" not in completed["artifacts"]
+    warnings = completed["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Automatic threat model save failed:")
+    assert json.loads(manifest_path.read_text())["scan"]["threatModel"] == model
+    if already_completed:
+        assert {name: (scan_dir / name).read_bytes() for name in before} == before
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"] == warnings
+    )
+    assert (
+        run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]["warnings"]
+        == warnings
+    )
+
+
 def test_completion_recovers_malformed_finding_identity(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())

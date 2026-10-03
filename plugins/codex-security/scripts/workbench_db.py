@@ -1448,22 +1448,9 @@ def complete_scan_locked(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
-        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        require_recorded_manifest_digest(scan, scan_dir)
-        verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
-        try:
-            manifest, _, _ = finalize_scan(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-            )
-        except ContractError as exc:
-            raise SystemExit(str(exc)) from exc
-        verify_manifest_binding(scan, manifest)
-        manifest_digest = published_manifest_digest(scan_dir, manifest)
-        pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
-        if cost_json is not None and scan["recipe_json"] is not None:
-            scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
-        return scan_context(connection, scan["id"])
+        return saved_results.refresh_completed_scan(
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+        )
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
     handoff.require_current_continuation(
@@ -1560,7 +1547,9 @@ def complete_scan_locked(
             )
         add_warning()
         wrote = True
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(
+            prepared, projection_warnings=warnings
+        )
     except ContractError as exc:
         if wrote or (
             scan["mode"] == "deep"
@@ -2763,6 +2752,9 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
+    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
+    if path := model_fields.get("threatModelPath"):
+        artifacts["threatModel"] = path
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
@@ -2826,6 +2818,7 @@ def scan_result(
     )
     return {
         "artifacts": artifacts,
+        **model_fields,
         "canceledAt": scan["canceled_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),

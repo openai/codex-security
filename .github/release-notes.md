@@ -1,4 +1,4 @@
-<!-- release-version: 0.1.33 -->
+<!-- release-version: 0.2.0 -->
 
 <!-- release-section: highlights:start -->
 ## Highlights
@@ -54,10 +54,13 @@
 - bump @types/node to 26.6.3 ([#1199](https://github.com/openai/codex-security/pull/1199))
 - bump Codex CLI and SDK to 0.162.0-alpha.9 ([#1198](https://github.com/openai/codex-security/pull/1198))
 - include server-rendered templates in scan inventories ([#1197](https://github.com/openai/codex-security/pull/1197))
+- save models with results and support offline export ([#1133](https://github.com/openai/codex-security/pull/1133))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+Review migration steps for these breaking changes:
+
+- save models with results and support offline export ([#1133](https://github.com/openai/codex-security/pull/1133))
 <!-- release-section: upgrades:end -->
