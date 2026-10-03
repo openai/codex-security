@@ -1543,9 +1543,5 @@ def sql_statements(script: str) -> list[str]:
     return statements
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

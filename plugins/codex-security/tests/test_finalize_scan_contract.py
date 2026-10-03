@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import csv
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -14,25 +13,15 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from types import ModuleType
 from unittest import mock
 
+from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
 
-def load_finalizer() -> ModuleType:
-    script = Path(__file__).resolve().parent.parent / "scripts" / "finalize_scan_contract.py"
-    spec = importlib.util.spec_from_file_location("finalize_scan_contract", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-FINALIZER = load_finalizer()
+FINALIZER = load_script("finalize_scan_contract")
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
 
 
-class FinalizeScanContractTest(unittest.TestCase):
+class FinalizeScanContractTest(ScanFixtureTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.scan_dir = Path(self.temp_dir.name).resolve()
@@ -127,9 +116,6 @@ class FinalizeScanContractTest(unittest.TestCase):
             "deferred": [],
         }
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
     def write_scan(self) -> None:
         self.write_json("scan-manifest.json", self.manifest)
         self.write_json("findings.json", self.findings)
@@ -166,9 +152,6 @@ The extraction root is not enforced.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    def read_json(self, relative_path: str) -> dict[str, object]:
-        return json.loads((self.scan_dir / relative_path).read_text(encoding="utf-8"))
-
     def completion_binding(self) -> dict[str, object]:
         return {
             "scanId": "scan_001",
@@ -195,9 +178,7 @@ The extraction root is not enforced.
         artifacts = manifest["scan"]["artifacts"]
         for artifact in artifacts:
             if artifact["path"] == relative_path:
-                artifact["sha256"] = FINALIZER._sha256_bytes(
-                    (self.scan_dir / relative_path).read_bytes()
-                )
+                artifact["sha256"] = self.sha256_file(relative_path)
                 break
         else:
             raise AssertionError(f"missing sealed artifact: {relative_path}")
@@ -375,7 +356,7 @@ The extraction root is not enforced.
         manifest = self.read_json("scan-manifest.json")
         for artifact in manifest["scan"]["artifacts"]:
             if artifact["path"] == "findings.json":
-                artifact["sha256"] = FINALIZER._sha256_file(self.scan_dir / "findings.json")
+                artifact["sha256"] = self.sha256_file("findings.json")
                 break
         self.write_json("scan-manifest.json", manifest)
         before = {
@@ -401,7 +382,7 @@ The extraction root is not enforced.
         manifest = self.read_json("scan-manifest.json")
         for artifact in manifest["scan"]["artifacts"]:
             if artifact["path"] == "findings.json":
-                artifact["sha256"] = FINALIZER._sha256_bytes(compact)
+                artifact["sha256"] = hashlib.sha256(compact).hexdigest()
                 break
         self.write_json("scan-manifest.json", manifest)
         self.assertGreater(len(FINALIZER._json_bytes(findings)), len(compact))
@@ -645,9 +626,7 @@ The extraction root is not enforced.
             for artifact in manifest["scan"]["artifacts"]
             if artifact["path"] == "coverage.json"
         )
-        coverage_artifact["sha256"] = FINALIZER._sha256_bytes(
-            (self.scan_dir / "coverage.json").read_bytes()
-        )
+        coverage_artifact["sha256"] = self.sha256_file("coverage.json")
         self.write_json("scan-manifest.json", manifest)
 
         with self.assertRaisesRegex(
@@ -1494,7 +1473,7 @@ The extraction root is not enforced.
         manifest = self.read_json("scan-manifest.json")
         for artifact in manifest["scan"]["artifacts"]:
             if artifact["path"] == "findings.json":
-                artifact["sha256"] = FINALIZER._sha256_file(self.scan_dir / "findings.json")
+                artifact["sha256"] = self.sha256_file("findings.json")
         self.write_json("scan-manifest.json", manifest)
 
         with self.assertRaisesRegex(FINALIZER.ContractError, "safe repository-relative"):
@@ -1662,28 +1641,7 @@ The extraction root is not enforced.
         self.coverage["surfaces"][0]["disposition"] = "no_issue_found"
         self.write_scan()
 
-        backend = mock.Mock()
-
-        def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
-            return os.open(scan_dir / relative_path, os.O_RDONLY)
-
-        def atomic_write(
-            scan_dir: Path,
-            relative_path: str,
-            payload: bytes,
-            *,
-            expected_root_identity: tuple[int, int] | None = None,
-        ) -> None:
-            path = scan_dir / relative_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(payload)
-
-        def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
-            (scan_dir / relative_path).unlink(missing_ok=True)
-
-        backend.open_read_fd.side_effect = open_read_fd
-        backend.atomic_write.side_effect = atomic_write
-        backend.unlink_if_exists.side_effect = unlink_if_exists
+        backend = windows_file_backend()
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
@@ -1754,7 +1712,7 @@ The extraction root is not enforced.
                 self.write_json("findings.json", findings)
                 for artifact in manifest["scan"]["artifacts"]:
                     if artifact["path"] == "findings.json":
-                        artifact["sha256"] = FINALIZER._sha256_file(self.scan_dir / "findings.json")
+                        artifact["sha256"] = self.sha256_file("findings.json")
                 self.write_json("scan-manifest.json", manifest)
 
                 with self.assertRaisesRegex(FINALIZER.ContractError, field):
@@ -2350,7 +2308,7 @@ The extraction root is not enforced.
         manifest = self.read_json("scan-manifest.json")
         for artifact in manifest["scan"]["artifacts"]:
             if artifact["path"] == "coverage.json":
-                artifact["sha256"] = FINALIZER._sha256_file(self.scan_dir / "coverage.json")
+                artifact["sha256"] = self.sha256_file("coverage.json")
             elif artifact["path"] == receipt_ref:
                 artifact["path"] = legacy_ref
         self.write_json("scan-manifest.json", manifest)
