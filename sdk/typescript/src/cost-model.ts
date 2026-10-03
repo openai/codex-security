@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 
 export interface ScanCost {
   model: string;
@@ -140,9 +141,9 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
     canonicalCacheWrite === 0 &&
-    isTokenCount(input) &&
-    isTokenCount(cached) &&
-    isTokenCount(legacyCacheWrite) &&
+    isSafeNonNegativeInteger(input) &&
+    isSafeNonNegativeInteger(cached) &&
+    isSafeNonNegativeInteger(legacyCacheWrite) &&
     legacyCacheWrite > 0 &&
     cached + legacyCacheWrite <= input
       ? legacyCacheWrite
@@ -150,11 +151,11 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (
-    !isTokenCount(input) ||
-    !isTokenCount(cached) ||
-    !isTokenCount(cacheWrite) ||
-    !isTokenCount(output) ||
-    !isTokenCount(reasoning) ||
+    !isSafeNonNegativeInteger(input) ||
+    !isSafeNonNegativeInteger(cached) ||
+    !isSafeNonNegativeInteger(cacheWrite) ||
+    !isSafeNonNegativeInteger(output) ||
+    !isSafeNonNegativeInteger(reasoning) ||
     cached + cacheWrite > input ||
     reasoning > output
   ) {
@@ -338,8 +339,4 @@ export function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 9,
   }).format(value);
-}
-
-function isTokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

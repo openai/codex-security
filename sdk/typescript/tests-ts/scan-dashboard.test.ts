@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
@@ -316,7 +316,7 @@ describe("live scan dashboard", () => {
   test("navigates a long component list and shows original failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
+    const onInterrupt = mock();
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       {
@@ -324,9 +324,7 @@ describe("live scan dashboard", () => {
         presentation: "components",
         input,
         clock: fakeClock(),
-        onInterrupt: () => {
-          interrupted = true;
-        },
+        onInterrupt,
       },
     );
     const receipts: ComponentReceipt[] = Array.from(
@@ -361,7 +359,7 @@ describe("live scan dashboard", () => {
     input.emit("data", "\r");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
   });
 
@@ -412,31 +410,23 @@ describe("live scan dashboard", () => {
   test("restores terminal state when dashboard initialization fails", () => {
     const input = new DashboardTestInput();
     const output: string[] = [];
-    let timerCleared = false;
+    const clearIntervalMock = mock();
     const dashboard = new ScanDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
       {
         repository: "/synthetic/repository",
         input,
         clock: {
           ...fakeClock(),
-          clearInterval: () => {
-            timerCleared = true;
-          },
+          clearInterval: clearIntervalMock,
         },
       },
     );
 
     expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
-    expect(timerCleared).toBe(true);
+    expect(clearIntervalMock).toHaveBeenCalled();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
     expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
@@ -474,13 +464,7 @@ describe("live scan dashboard", () => {
     };
     const dashboard = new ScanDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
       { repository: "/synthetic/repository", input, clock: fakeClock() },
     );
@@ -802,15 +786,13 @@ describe("live scan dashboard", () => {
   test("scrolls through history while keeping terminal text selectable", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
+    const onInterrupt = mock();
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       {
         repository: "/code/juice-shop",
         input,
-        onInterrupt: () => {
-          interrupted = true;
-        },
+        onInterrupt,
         clock: fakeClock(),
       },
     );
@@ -858,7 +840,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("ACTIVITY");
 
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
@@ -1563,3 +1545,13 @@ describe("live scan dashboard", () => {
     );
   });
 });
+
+function failingDashboardOutput(output: string[]) {
+  return (chunk: string): boolean => {
+    output.push(chunk);
+    if (chunk.includes("\u001B[H")) {
+      throw new Error("Dashboard rendering failed.");
+    }
+    return true;
+  };
+}

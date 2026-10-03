@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
@@ -94,17 +95,12 @@ export function scanProgressUpdatesFromEvent(
 }
 
 function scanProgressFromMarker(marker: string): ScanProgress | null {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(marker.slice(SCAN_PROGRESS_PREFIX.length));
-  } catch {
-    return null;
-  }
+  const payload = parseJson(() => marker.slice(SCAN_PROGRESS_PREFIX.length));
   if (
     !isRecord(payload) ||
     !isScanPhase(payload["phase"]) ||
-    !isProgressCount(payload["filesCompleted"]) ||
-    !isProgressCount(payload["filesTotal"]) ||
+    !isSafeNonNegativeInteger(payload["filesCompleted"]) ||
+    !isSafeNonNegativeInteger(payload["filesTotal"]) ||
     payload["filesCompleted"] > payload["filesTotal"]
   ) {
     return null;
@@ -126,12 +122,7 @@ function preflightStatus(
   ) {
     return null;
   }
-  let payload: unknown;
-  try {
-    payload = JSON.parse(item["aggregated_output"]);
-  } catch {
-    return null;
-  }
+  const payload = parseJson(() => item["aggregated_output"] as string);
   if (
     !isRecord(payload) ||
     (payload["profile"] !== "security_scan" &&
@@ -167,7 +158,7 @@ function preflightStatus(
   const configuredSlots =
     capacity.length === 1 &&
     capacityResult !== undefined &&
-    isProgressCount(capacityResult["actual"])
+    isSafeNonNegativeInteger(capacityResult["actual"])
       ? capacityResult["actual"]
       : null;
   return { kind: "preflight", delegation, configuredSlots };
@@ -182,18 +173,13 @@ function dispatchStatus(
     .filter((line) => line.startsWith(WORKER_STATUS_PREFIX));
   const marker = markers[0];
   if (markers.length !== 1 || marker === undefined) return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(marker.slice(WORKER_STATUS_PREFIX.length));
-  } catch {
-    return null;
-  }
+  const payload = parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length));
   if (
     !isRecord(payload) ||
     typeof payload["phase"] !== "string" ||
     !WORKER_PHASES.has(payload["phase"]) ||
-    !isProgressCount(payload["planned"]) ||
-    !isProgressCount(payload["started"]) ||
+    !isSafeNonNegativeInteger(payload["planned"]) ||
+    !isSafeNonNegativeInteger(payload["started"]) ||
     payload["started"] > payload["planned"]
   ) {
     return null;
@@ -204,10 +190,6 @@ function dispatchStatus(
     planned: payload["planned"],
     started: payload["started"],
   };
-}
-
-function isProgressCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isScanPhase(value: unknown): value is ScanPhase {

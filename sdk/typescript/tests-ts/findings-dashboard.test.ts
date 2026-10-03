@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { pollDashboard } from "../dashboard/polling.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
+import { throwing } from "./support/errors.js";
 
 const snapshot: DashboardSnapshot = {
   overview: { findings: 0, groups: 0 },
@@ -14,23 +15,19 @@ const snapshot: DashboardSnapshot = {
 };
 
 function clock() {
-  let tick = () => {};
-  let interval = 0;
-  let cleared = false;
+  const timers = {
+    setInterval: mock((_callback: () => void, _milliseconds: number) => {
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }),
+    clearInterval: mock(),
+  };
   return {
-    timers: {
-      setInterval(callback: () => void, milliseconds: number) {
-        tick = callback;
-        interval = milliseconds;
-        return 1 as unknown as ReturnType<typeof setInterval>;
-      },
-      clearInterval() {
-        cleared = true;
-      },
-    } as Pick<typeof globalThis, "setInterval" | "clearInterval">,
-    tick: () => tick(),
-    interval: () => interval,
-    cleared: () => cleared,
+    timers: timers as unknown as NonNullable<
+      Parameters<typeof pollDashboard>[3]
+    >,
+    tick: () => timers.setInterval.mock.lastCall?.[0](),
+    interval: () => timers.setInterval.mock.lastCall?.[1] ?? 0,
+    cleared: () => timers.clearInterval.mock.calls.length > 0,
   };
 }
 
@@ -38,18 +35,15 @@ test("dashboard polls immediately and every five seconds without overlapping req
   const timer = clock();
   const calls: AbortSignal[] = [];
   const received: DashboardSnapshot[] = [];
-  let resolve!: (value: DashboardSnapshot) => void;
+  let pending!: PromiseWithResolvers<DashboardSnapshot>;
   const stop = pollDashboard(
     (signal) => {
       calls.push(signal);
-      return new Promise((done) => {
-        resolve = done;
-      });
+      pending = Promise.withResolvers<DashboardSnapshot>();
+      return pending.promise;
     },
     (value) => received.push(value),
-    () => {
-      throw new Error("Unexpected poll failure");
-    },
+    throwing("Unexpected poll failure"),
     timer.timers,
   );
   try {
@@ -57,7 +51,7 @@ test("dashboard polls immediately and every five seconds without overlapping req
     expect(timer.interval()).toBe(5_000);
     timer.tick();
     expect(calls).toHaveLength(1);
-    resolve(snapshot);
+    pending.resolve(snapshot);
     await Promise.resolve();
     expect(received).toEqual([snapshot]);
     timer.tick();
@@ -67,7 +61,7 @@ test("dashboard polls immediately and every five seconds without overlapping req
   }
   expect(timer.cleared()).toBe(true);
   expect(calls.every((signal) => signal.aborted)).toBe(true);
-  resolve(snapshot);
+  pending.resolve(snapshot);
   await Promise.resolve();
   expect(received).toHaveLength(1);
 });
@@ -103,20 +97,15 @@ test("dashboard reports refresh errors and retries on the next polling tick", as
 test("disposing an old selection suppresses late errors as well as late responses", async () => {
   const timer = clock();
   const errors: unknown[] = [];
-  let reject!: (reason: Error) => void;
+  const pending = Promise.withResolvers<DashboardSnapshot>();
   const stop = pollDashboard(
-    () =>
-      new Promise((_resolve, fail) => {
-        reject = fail;
-      }),
-    () => {
-      throw new Error("Unexpected data");
-    },
+    () => pending.promise,
+    throwing("Unexpected data"),
     (error) => errors.push(error),
     timer.timers,
   );
   stop();
-  reject(new Error("Old request failed"));
+  pending.reject(new Error("Old request failed"));
   await Promise.resolve();
   expect(errors).toEqual([]);
 });
