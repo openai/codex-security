@@ -25,6 +25,7 @@ from finalize_scan_contract import (
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
     _read_json,
+    _read_saved_threat_model,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
@@ -38,6 +39,7 @@ from finalize_scan_contract import (
     finding_candidate_id,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
+    write_threat_model_projection_if_possible,
 )
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
@@ -48,6 +50,7 @@ _PUBLISHED_OUTPUTS = (
     "coverage.json",
     "scan-manifest.json",
     "report.md",
+    "threatmodel.md",
     "report.html",
     "exports/results.sarif",
 )
@@ -57,6 +60,61 @@ _PUBLICATION_FOLLOW_UP_WARNING = (
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
+
+
+def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
+    scan_dir = Path(scan["scan_dir"])
+    fields: dict[str, Any] = {"threatModelAvailable": False}
+    try:
+        db.require_recorded_manifest_digest(scan, scan_dir)
+        db.verify_manifest_binding(
+            scan, _read_scan_local_json(scan_dir, db.ARTIFACTS["manifest"], "scan manifest")
+        )
+        saved_model = _read_saved_threat_model(scan_dir)
+        if saved_model is not None:
+            description = saved_model[0]
+            fields.update(
+                threatModelAvailable=True,
+                threatModelProvenance=description["provenance"],
+            )
+            if description["path"] is not None:
+                fields["threatModelPath"] = description["path"]
+    except (ContractError, OSError, SystemExit):
+        # Unavailable optional model data must not prevent reading the saved scan.
+        pass
+    return fields
+
+
+def refresh_completed_scan(
+    db: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    cost_json: str | None,
+) -> dict[str, Any]:
+    warnings = json.loads(scan["completion_warnings_json"])
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    try:
+        manifest, _, _ = finalize_scan(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            projection_warnings=warnings,
+        )
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    manifest_digest = db.published_manifest_digest(scan_dir, manifest)
+    db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
+    if cost_json is not None and scan["recipe_json"] is not None:
+        db.scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
+    if warnings != json.loads(scan["completion_warnings_json"]):
+        with connection:
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(warnings), scan["id"]),
+            )
+    return db.scan_context(connection, scan["id"])
 
 
 def _encoded(value: Any) -> bytes:
@@ -320,6 +378,23 @@ def _source_digests(value: Any, error: str) -> dict[str, str]:
     return value
 
 
+def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
+        sources = _source_digests(
+            value["sources"], "Saved stopped-scan source digests are malformed."
+        )
+        model_source = value.get("threatModelSource")
+        if not isinstance(model_source, str) or model_source not in sources:
+            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+        return sources, model_source
+    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
+
+
+def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
+    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+    return json.dumps(state, sort_keys=True)
+
+
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -343,12 +418,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
 
         if manifest_path is None:
             if frozen_sources is not None:
-                return bool(
-                    _source_digests(
-                        json.loads(frozen_sources),
-                        "Frozen stopped-scan source digests are malformed.",
-                    )
-                )
+                return bool(_retained_source_state(json.loads(frozen_sources))[0])
             return has_saved_source()
         if scan["seal_manifest_digest"] is None:
             try:
@@ -395,9 +465,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
-        frozen_sources = _source_digests(
-            json.loads(raw_frozen_sources), "Saved stopped-scan source digests are malformed."
-        )
+        frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
         include_parent = False
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
@@ -850,6 +918,8 @@ def merge_saved_results(
     reason: str,
     frozen_source_digests: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
+    frozen_model_source: str | None = None,
+    selected_model_source: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1210,6 +1280,16 @@ def merge_saved_results(
                 manifest["scan"][key] = copy.deepcopy(parent[key])
         if isinstance(manifest["scan"].get("scope"), dict):
             manifest["scan"]["scope"].update(copy.deepcopy(binding["scope"]))
+    if frozen_model_source is not None:
+        # Publication retries retain the choice made with the frozen source set.
+        model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
+        if not isinstance(model, dict):
+            raise ContractError("Frozen stopped-scan model source is unavailable.")
+        manifest["scan"]["threatModel"] = copy.deepcopy(model)
+        if paths[frozen_model_source] is not None:
+            manifest["scan"]["threatModel"]["origin"] = "recovered"
+        if selected_model_source is not None:
+            selected_model_source[:] = [frozen_model_source]
     coverage = (
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
@@ -1645,7 +1725,36 @@ def merge_saved_results(
             and "threatModel" not in manifest["scan"]
             and isinstance(draft.get("threatModel"), dict)
         ):
-            manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
+            model = draft["threatModel"]
+            model_path = relative
+            checkpoint_dir = Path(relative).parent
+            prefer_worker_head = worker_id is not None and (
+                checkpoint_dir.name == "checkpoints" or draft.get("complete") is False
+            )
+            if worker_id is not None:
+                if checkpoint_dir.name != "checkpoints":
+                    checkpoint_dir /= "checkpoints"
+                selected_models = [
+                    path
+                    for path in selected_observations
+                    if Path(path).parent == checkpoint_dir
+                    and isinstance(drafts_by_path[path].get("threatModel"), dict)
+                ]
+                if selected_models:
+                    head_path = max(selected_models, key=source_order.__getitem__)
+                    current = drafts_by_path[head_path]
+                    # A terminal checkpoint is committed before result.json is replaced.
+                    # Use the admitted observation, including its frozen ordering on retries.
+                    if not prefer_worker_head and current.get("complete") is not False:
+                        prefer_worker_head = source_order[head_path] >= source_order[relative]
+                    if prefer_worker_head:
+                        model = current["threatModel"]
+                        model_path = head_path
+            manifest["scan"]["threatModel"] = copy.deepcopy(model)
+            if worker_id is not None:
+                manifest["scan"]["threatModel"]["origin"] = "recovered"
+            if selected_model_source is not None and worker_id is not None:
+                selected_model_source[:] = [model_path]
         for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
@@ -1952,6 +2061,9 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
+                if relative == "threatmodel.md":
+                    # This optional projection will not replace an unsafe destination.
+                    continue
                 raise
             snapshots[relative] = None
         finally:
@@ -1983,13 +2095,17 @@ def preserve_scan_results_locked(
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
+    model_source: list[str] = []
+    saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
+    if raw_frozen_sources is not None:
+        frozen_source_digests, saved_model_source = _retained_source_state(
+            json.loads(raw_frozen_sources)
+        )
+        if saved_model_source is not None:
+            model_source.append(saved_model_source)
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
-    elif raw_frozen_sources is not None:
-        frozen_source_digests = _source_digests(
-            json.loads(raw_frozen_sources), "Saved stopped-scan source digests are malformed."
-        )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -2045,7 +2161,7 @@ def preserve_scan_results_locked(
                 "updated_at = ? WHERE id = ? AND status = 'failed'",
                 (
                     digest,
-                    json.dumps(retained_sources, sort_keys=True),
+                    _encode_retained_sources(retained_sources, model_source),
                     json.dumps(list(dict.fromkeys(warnings))),
                     timestamp,
                     scan_id,
@@ -2068,7 +2184,9 @@ def preserve_scan_results_locked(
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
         existing, existing_findings, _ = finalize_scan(
-            scan_dir, expected_coverage_mode=db.expected_coverage_mode(scan)
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            projection_warnings=warnings,
         )
         db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
@@ -2082,6 +2200,7 @@ def preserve_scan_results_locked(
                     raw_frozen_sources is not None
                     and scan["seal_manifest_digest"] is not None
                     and not publication_follow_up_warnings
+                    and warnings == stored_warnings
                 ):
                     return True
                 record_publication(existing, existing_findings)
@@ -2092,6 +2211,8 @@ def preserve_scan_results_locked(
         **db.workbench_completion_binding(scan, scan["completed_at"], existing),
         "status": outcome,
     }
+    if recovery_source_digests is not None:
+        model_source.clear()
     documents = merge_saved_results(
         scan_dir,
         scan_id,
@@ -2107,6 +2228,8 @@ def preserve_scan_results_locked(
             f"{scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=frozen_source_digests,
+        frozen_model_source=model_source[0] if model_source else None,
+        selected_model_source=model_source,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
@@ -2128,7 +2251,9 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None:
+    if frozen_source_digests is None or (
+        recovery_source_digests is None and saved_model_source is None and model_source
+    ):
         retained_sources = _source_digests(
             documents[0].get("scan", {}).get("preservedSources"),
             "Stopped scan source digests could not be frozen.",
@@ -2136,8 +2261,12 @@ def preserve_scan_results_locked(
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "
-                "WHERE id = ? AND retained_source_digests_json IS NULL",
-                (json.dumps(retained_sources, sort_keys=True), scan_id),
+                "WHERE id = ? AND retained_source_digests_json IS ?",
+                (
+                    _encode_retained_sources(retained_sources, model_source),
+                    scan_id,
+                    raw_frozen_sources,
+                ),
             )
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -2148,7 +2277,9 @@ def preserve_scan_results_locked(
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(
+            prepared, projection_warnings=warnings
+        )
         db.verify_manifest_binding(scan, manifest)
         record_publication(manifest, findings)
     except BaseException:
@@ -2330,9 +2461,17 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
-        if scan["mode"] == "standard":
+        model_only_checkpoint = (
+            manifest["scan"].get("complete") is False
+            and isinstance(manifest["scan"].get("threatModel"), dict)
+            and not findings.get("findings")
+            and not coverage.get("surfaces")
+            and not coverage.get("deferred")
+        )
+        if scan["mode"] == "standard" and not model_only_checkpoint:
             phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
             earlier = PHASES[: PHASES.index(phase)]
             placeholders = ",".join("?" for _ in earlier)
@@ -2353,7 +2492,11 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                         )
             except sqlite3.Error as exc:
                 print(f"Could not save scan progress: {exc}", file=sys.stderr)
-    return {"scanId": scan_id, "status": "draft_written"}
+    return {
+        "scanId": scan_id,
+        "status": "draft_written",
+        **({"warnings": [model_warning]} if model_warning else {}),
+    }
 
 
 def _scan_draft_digest(scan_dir: Path) -> str:
@@ -2366,9 +2509,10 @@ def _scan_draft_digest(scan_dir: Path) -> str:
         except FileNotFoundError:
             digest.update(b"missing\0")
             continue
-        _, contents = _read_scan_local_json_bytes(scan_dir, filename, filename)
         digest.update(b"present\0")
-        digest.update(contents)
+        descriptor = open_scan_local_file_descriptor(scan_dir, filename, filename)
+        with os.fdopen(descriptor, "rb") as handle:
+            digest.update(handle.read())
         digest.update(b"\0")
     return digest.hexdigest()
 

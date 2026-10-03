@@ -867,26 +867,32 @@ def build_report_markdown(
             "",
             "## Threat Model",
             "",
+        ]
+    )
+    content = threat_model.get("content")
+    if threat_model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+        lines.append(content)
+    else:
+        lines.append(
             _text(
                 threat_model.get("summary"),
                 "No explicit canonical threat-model summary was recorded.",
+            )
+        )
+        for heading, key, fallback in (
+            ("Assets", "assets", "No assets were recorded."),
+            ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
+            (
+                "Attacker Capabilities",
+                "attackerCapabilities",
+                "No attacker capabilities were recorded.",
             ),
-        ]
-    )
-    for heading, key, fallback in (
-        ("Assets", "assets", "No assets were recorded."),
-        ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
-        (
-            "Attacker Capabilities",
-            "attackerCapabilities",
-            "No attacker capabilities were recorded.",
-        ),
-        ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
-        ("Assumptions", "assumptions", "No assumptions were recorded."),
-    ):
-        values = _strings(threat_model.get(key))
-        if values:
-            lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+            ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
+            ("Assumptions", "assumptions", "No assumptions were recorded."),
+        ):
+            values = _strings(threat_model.get(key))
+            if values:
+                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:
