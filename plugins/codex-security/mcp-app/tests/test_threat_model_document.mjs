@@ -209,7 +209,7 @@ test("overlapping draft projections retain the latest committed model", async (t
     pluginRoot,
     pythonCommand: "fixture-python",
     targetRevision: "example-revision",
-    targetSnapshotDigest: "example-snapshot",
+    targetContract: { requiredSnapshotDigest: "example-snapshot" },
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
   const latestModel = { format: "markdown", content: "# Latest model\n" };
@@ -233,7 +233,10 @@ test("overlapping draft projections retain the latest committed model", async (t
     });
     const input = await firstStarted.promise;
     assert.equal(input.provenance.revision, context.targetRevision);
-    assert.equal(input.provenance.snapshotDigest, context.targetSnapshotDigest);
+    assert.equal(
+      input.provenance.snapshotDigest,
+      context.targetContract.requiredSnapshotDigest,
+    );
     const latest = recordCodexSecurityWorkerScanDraft(context, {
       scanId,
       complete: false,

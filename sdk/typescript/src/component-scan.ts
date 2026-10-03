@@ -154,6 +154,7 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config,
           environment,
           signal: options.signal,
@@ -381,6 +382,7 @@ async function deduplicateFindings(
         {
           allowHistoricalUncertainty: true,
           auth: options.scanOptions?.auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config ?? {},
           environment: options.environment,
           signal: options.signal,

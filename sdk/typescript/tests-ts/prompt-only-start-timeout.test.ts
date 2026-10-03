@@ -15,7 +15,7 @@ test("gives prompt-only scan startup the five-minute scan timeout", async () => 
     execFileHelper!,
     "workbenchScriptPath",
     "PLUGIN_ROOT",
-    "isJsonObject2",
+    "isRecord",
     `${source}\nreturn executeWorkbench;`,
   )(
     async (

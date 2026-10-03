@@ -866,14 +866,6 @@ def simple_language_outline(text: str, suffix: str) -> list[str]:
             match = re.match(r"^class\s+([A-Za-z_]\w*)", line)
             if match:
                 add(f"class {match.group(1)}")
-        elif suffix == ".rb":
-            match = re.match(r"^(class|module)\s+([A-Z]\w*(?:::[A-Z]\w*)*)", line)
-            if match:
-                add(f"{match.group(1)} {match.group(2)}")
-                continue
-            match = re.match(r"^def\s+(?:self\.)?([^\s(]+)", line)
-            if match:
-                add(f"function {match.group(1)}")
         elif suffix in {".ex", ".exs"}:
             match = re.match(r"^defmodule\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)", line)
             if match:

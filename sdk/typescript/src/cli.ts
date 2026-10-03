@@ -84,6 +84,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
+import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -350,6 +351,7 @@ const VALUE_OPTIONS = new Set([
   "--concurrency",
   "--auth",
   "--safety-identifier",
+  "--cyber-access-program",
   "--path",
   "--component",
   "--components-file",
@@ -1684,10 +1686,7 @@ export async function main(
       return 2;
     }
     const controller = new AbortController();
-    const interrupt = () => controller.abort("SIGINT");
-    const terminate = () => controller.abort("SIGTERM");
-    dependencies.addSignalListener("SIGINT", interrupt);
-    dependencies.addSignalListener("SIGTERM", terminate);
+    const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
       const code = await runRecordsProtocol(
@@ -1702,8 +1701,7 @@ export async function main(
             ? 143
             : code;
     } finally {
-      dependencies.removeSignalListener("SIGINT", interrupt);
-      dependencies.removeSignalListener("SIGTERM", terminate);
+      removeSignals();
     }
     // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
     if (output === process.stdout) process.exit(exitCode);
@@ -2264,7 +2262,6 @@ export async function main(
             scanId,
           ]);
           if (
-            recipe !== undefined &&
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
             isJsonObject(recipe["import"])
@@ -2771,7 +2768,6 @@ export async function main(
               scanId.length === 0 ||
               typeof directory !== "string" ||
               directory.length === 0 ||
-              progress === undefined ||
               !isJsonObject(progress) ||
               progress["status"] !== "complete"
             ) {
@@ -3071,10 +3067,7 @@ export async function main(
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = (): void => controller.abort("SIGINT");
-      const onTerminate = (): void => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
@@ -3088,8 +3081,7 @@ export async function main(
         reportPublicationError(error, controller.signal.reason);
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
@@ -3141,10 +3133,7 @@ export async function main(
       .optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = () => controller.abort("SIGINT");
-      const onTerminate = () => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         return await (
           dependencies.importGitHubAlerts ?? importGitHubCodeScanningAlerts
@@ -3174,8 +3163,7 @@ export async function main(
         }
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
@@ -3408,6 +3396,7 @@ export async function main(
             .describe(
               "Reuse completed work in the named local findings workflow.",
             ),
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
@@ -3571,6 +3560,7 @@ export async function main(
             {
               auth: options.auth,
               target: scope.target,
+              cyberAccessProgram: options.cyberAccessProgram,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
               validationPromptFile: options.validationPromptFile,
@@ -3755,10 +3745,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(
@@ -3797,8 +3784,7 @@ export async function main(
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -3845,10 +3831,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (
             (options.scan === undefined) ===
@@ -3899,8 +3882,7 @@ export async function main(
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -3969,10 +3951,7 @@ export async function main(
         if (options.records)
           throw new CodexSecurityError("Use dedupe --records alone.");
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (options.findingsUrl === undefined)
             throw new CodexSecurityError(
@@ -4029,8 +4008,7 @@ export async function main(
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -4050,6 +4028,7 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
@@ -4142,12 +4121,7 @@ export async function main(
         };
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
+
         dependencies.addSignalListener("SIGINT", onInterrupt);
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
@@ -4161,6 +4135,7 @@ export async function main(
             project,
             {
               auth: options.auth,
+              cyberAccessProgram: options.cyberAccessProgram,
               outputDir: options.outputDir,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
@@ -4291,7 +4266,7 @@ export async function main(
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed ||
             result.incomplete ||
             result.deduplication?.status === "incomplete"
@@ -4302,7 +4277,7 @@ export async function main(
           return { ...result };
         } catch (error) {
           stopDashboard();
-          exitCode = interruptedExitCode() ?? 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
           stopDashboard();
@@ -4409,16 +4384,8 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = (): void => controller.abort("SIGINT");
-        const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (options.recover && args.input === undefined) {
@@ -4623,7 +4590,7 @@ export async function main(
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed > 0 || result.incomplete > 0
               ? 2
               : result.policyFailed
@@ -4632,14 +4599,13 @@ export async function main(
           return { ...result };
         } catch (error) {
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -5673,10 +5639,7 @@ export async function main(
                 "scan"
               ] as ScanLogSource);
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           return await (dependencies.sendFeedback ?? sendFeedback)({
             ...options,
@@ -5692,8 +5655,7 @@ export async function main(
           }
           throw error;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -5919,10 +5881,7 @@ async function runScanImport(
   dependencies: CliDependencies,
 ): Promise<ScanOutcome> {
   const controller = new AbortController();
-  const onInterrupt = () => controller.abort("SIGINT");
-  const onTerminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  const removeSignals = listenForAbort(dependencies, controller);
   try {
     const result = await (dependencies.importScan ?? importScan)(
       { ...options, signal: controller.signal },
@@ -5948,8 +5907,7 @@ async function runScanImport(
       error: message,
     };
   } finally {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
+    removeSignals();
   }
 }
 
@@ -6153,6 +6111,15 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
+  const cyberAccessProgram =
+    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
+      recipe["cyberAccessProgram"],
+    );
+  if (!cyberAccessProgram.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid Cyber access program.",
+    );
+  }
   if (!auth.success)
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid authentication choice.",
@@ -6189,6 +6156,7 @@ async function prepareScanArgumentsFromRecipe(
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: cyberAccessProgram.data,
     target:
       paths.length > 0
         ? paths
@@ -8242,11 +8210,7 @@ async function executeScan(
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
-    if (
-      analytics !== undefined &&
-      isJsonObject(analytics) &&
-      analytics["enabled"] !== undefined
-    ) {
+    if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
@@ -8448,6 +8412,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        const bedrock =
+          providerOptions.provider === "amazon-bedrock" ||
+          authentication.method === "aws_credentials";
         diagnostic("authentication.selected", {
           requested: auth ?? DEFAULT_SCAN_AUTH,
           method: authentication.method,
@@ -8465,6 +8432,11 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
+          if (bedrock) {
+            dashboard.note(
+              "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+            );
+          }
           return;
         }
         progress?.stopTimer();
@@ -8483,6 +8455,11 @@ async function executeScan(
           progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
+        }
+        if (bedrock) {
+          progress?.stage(
+            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+          );
         }
         progress?.startTimer("Preparing scan");
       },
@@ -8670,7 +8647,11 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure, selectedAuthentication);
+        : scanFailureMessage(
+            failure,
+            selectedAuthentication,
+            providerOptions.provider,
+          );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -9005,16 +8986,49 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
+  provider?: string,
 ): string {
   // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
-  //
-  // The advice branches below still replace the underlying text rather than
-  // appending it. That is deliberate: upstream authentication and authorization
-  // errors can name the organization or project, which must not reach stderr or
-  // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const classification = classifyConnectionFailure(error);
+  if (
+    provider === "amazon-bedrock" ||
+    authentication?.method === "aws_credentials"
+  ) {
+    const detail = diagnosticValue(error);
+    switch (classification) {
+      case "unauthorized":
+        if (authentication?.method === "command") {
+          return `${detail}\n${authenticationFailureMessage(authentication)}`;
+        }
+        if (authentication?.method === "aws_credentials") {
+          return (
+            `${detail}\n${authenticationFailureMessage(authentication)} ` +
+            (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
+              ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
+              : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
+          );
+        }
+        return `${detail}\nAmazon Bedrock authentication failed. Check the credentials configured for the selected provider.`;
+      case "forbidden":
+        if (authentication?.method === "command") {
+          return (
+            `${detail}\nThe configured provider auth command's credentials cannot access the Amazon Bedrock model. ` +
+            "Check the configured provider auth command, AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+          );
+        }
+        return (
+          `${detail}\nThe AWS credentials${authentication?.method === "aws_credentials" ? ` from ${authentication.source}` : ""} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+        );
+      case "rate_limited":
+        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
+      default:
+        return detail;
+    }
+  }
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9032,18 +9046,12 @@ function scanFailureMessage(
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
-  switch (classifyConnectionFailure(error)) {
+  switch (classification) {
     case "unauthorized":
       return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
-          "Check your AWS identity and Bedrock model permissions."
-        );
       }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
@@ -9689,10 +9697,6 @@ function interruptedExit(
   return ctrlC ? 130 : 143;
 }
 
-function isJsonObject(value: JsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function invokedAsMain(): boolean {
   const entrypoint = process.argv[1];
   if (entrypoint === undefined) return false;
@@ -9704,6 +9708,13 @@ function invokedAsMain(): boolean {
   }
 }
 
+const interruptedExitCode = (signal: AbortSignal): number | undefined =>
+  signal.reason === "SIGINT"
+    ? 130
+    : signal.reason === "SIGTERM"
+      ? 143
+      : undefined;
+
 if (invokedAsMain()) {
   void main().then(
     (exitCode) => {
@@ -9714,4 +9725,21 @@ if (invokedAsMain()) {
       process.exitCode = 2;
     },
   );
+}
+
+function listenForAbort(
+  dependencies: Pick<
+    CliDependencies,
+    "addSignalListener" | "removeSignalListener"
+  >,
+  controller: AbortController,
+): () => void {
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  return () => {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  };
 }

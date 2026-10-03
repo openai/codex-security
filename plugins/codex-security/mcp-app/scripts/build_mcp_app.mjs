@@ -64,37 +64,34 @@ export async function buildMcpApp({ output, native = "universal" }) {
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
-    try {
-      await build({
-        bundle: true,
-        define: { "import.meta.url": "__filename" },
-        entryPoints: [join(root, entryPoint)],
-        external: ["fsevents"],
-        format: "cjs",
-        loader: { ".md": "text" },
-        logLevel: "info",
-        logOverride: { "empty-import-meta": "silent" },
-        outfile: bundle,
-        platform: "node",
-        target: "node20",
-      });
-      const runtime = brotliCompressSync(await readFile(bundle), {
-        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
-      });
-      const chunkPrefix = name + ".mjs.br.part-";
-      await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
-      for (
-        let offset = 0, index = 0;
-        offset < runtime.length;
-        offset += maxChunkBytes, index += 1
-      ) {
-        await writeFile(
-          join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
-          runtime.subarray(offset, offset + maxChunkBytes),
-        );
-      }
-    } finally {
-      await rm(bundle, { force: true });
+    const result = await build({
+      bundle: true,
+      define: { "import.meta.url": "__filename" },
+      entryPoints: [join(root, entryPoint)],
+      external: ["fsevents"],
+      format: "cjs",
+      loader: { ".md": "text" },
+      logLevel: "info",
+      logOverride: { "empty-import-meta": "silent" },
+      outfile: bundle,
+      platform: "node",
+      target: "node20",
+      write: false,
+    });
+    const runtime = brotliCompressSync(result.outputFiles[0].contents, {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
+    });
+    const chunkPrefix = name + ".mjs.br.part-";
+    await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
+    for (
+      let offset = 0, index = 0;
+      offset < runtime.length;
+      offset += maxChunkBytes, index += 1
+    ) {
+      await writeFile(
+        join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
+        runtime.subarray(offset, offset + maxChunkBytes),
+      );
     }
   }
 }

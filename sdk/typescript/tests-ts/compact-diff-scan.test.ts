@@ -1,4 +1,5 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { git } from "./git-fixture.js";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -34,20 +35,6 @@ function createRepository(): { root: string; repository: string } {
   mkdirSync(repository);
   git(repository, "init", "-q");
   return { root, repository };
-}
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
 }
 
 function writeSource(
@@ -378,23 +365,26 @@ describe("compact diff scan", () => {
         .map((entry) => JSON.stringify(entry))
         .join("\n") + "\n",
     );
-    const args = [
-      "--input",
-      input,
-      "--out",
-      output,
-      "--repo-root",
-      repository,
-      "--in-scope-files",
-      inventory,
-    ];
-
-    expect(python("normalize_candidates.py", ...args).status).toBe(2);
-    const accepted = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const normalize = (...options: string[]) =>
+      spawnSync(
+        process.execPath,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          repository,
+          "--in-scope-files",
+          inventory,
+          ...options,
+        ],
+        { encoding: "utf8" },
+      );
+    expect(normalize().status).toBe(2);
+    const accepted = normalize("--allow-missing-in-scope");
     expect(accepted.status, accepted.stderr).toBe(0);
     const contents = readFileSync(output, "utf8");
     expect(contents).toContain("Résumé: missing guard");
@@ -408,11 +398,7 @@ describe("compact diff scan", () => {
     ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
-    const escaped = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const escaped = normalize("--allow-missing-in-scope");
     expect(escaped.status).toBe(2);
     expect(escaped.stderr).toContain("in-scope file row 1");
   });

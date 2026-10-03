@@ -159,9 +159,9 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
 
 @pytest.mark.parametrize("head_available", [True, False], ids=["head", "fallback"])
 @pytest.mark.parametrize("legacy_retry", [False, True], ids=["new-freeze", "legacy-freeze"])
-@pytest.mark.parametrize("result_available", [False, True], ids=["unreadable", "stale-result"])
+@pytest.mark.parametrize("result_state", ["unreadable", "incomplete", "complete"])
 def test_stopped_model_selection_survives_publication_retry(
-    tmp_path: Path, head_available: bool, legacy_retry: bool, result_available: bool
+    tmp_path: Path, head_available: bool, legacy_retry: bool, result_state: str
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
@@ -169,7 +169,7 @@ def test_stopped_model_selection_survives_publication_retry(
     contract_dir.mkdir()
     write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
     checkpoint = json.loads(result_path.read_text())
-    checkpoint["complete"] = False
+    checkpoint["complete"] = result_state == "complete"
     checkpoint["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     checkpoint_dir = result_path.parent / "checkpoints"
     for summary in ("Queue producers cross a boundary.", "Queue consumers cross a boundary."):
@@ -179,13 +179,16 @@ def test_stopped_model_selection_survives_publication_retry(
     head_path = result_path.parent / "checkpoint-head.json"
     if head_available:
         head_path.write_text(json.dumps({"checkpoint": selected.name}))
-    if result_available:
+    if result_state != "unreadable":
         stale = {**checkpoint, "threatModel": {"summary": "The earlier worker model."}}
         result_path.write_text(json.dumps(stale))
         if not head_available:
             selected = result_path
     else:
         result_path.write_text("{incomplete")
+    if head_available and result_state == "complete":
+        os.utime(result_path, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(head_path, ns=(2_000_000_000, 2_000_000_000))
     expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -1736,6 +1739,52 @@ def test_stopped_findings_cannot_enter_remediation(
 
     assert blocked["returncode"] != 0
     assert "successfully completed scans" in blocked["stderr"]
+
+
+@pytest.mark.parametrize("explicit_complete", [True, False], ids=["explicit", "default"])
+@pytest.mark.parametrize("newer_head", [True, False], ids=["newer-head", "newer-result"])
+def test_complete_worker_model_uses_latest_terminal_source(
+    tmp_path: Path, newer_head: bool, explicit_complete: bool
+) -> None:
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    result = json.loads(result_path.read_text())
+    checkpoint = copy.deepcopy(result)
+    if explicit_complete:
+        checkpoint["complete"] = True
+    checkpoint["threatModel"] = {"summary": "The revised completed worker model."}
+    head = write_checkpoint(result_path.parent / "checkpoints", checkpoint)
+    head_path = result_path.parent / "checkpoint-head.json"
+    head_path.write_text(json.dumps({"checkpoint": head.name}))
+    # Timestamp ordering represents an interruption between head and result publication,
+    # or a successfully replaced result whose older head remains available.
+    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
+    head_time = 3_000_000_000 if newer_head else 1_000_000_000
+    os.utime(head_path, ns=(head_time, head_time))
+
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped after the worker completed.",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+
+    expected = checkpoint["threatModel"] if newer_head else result["threatModel"]
+    published = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert published["threatModel"] == {**expected, "origin": "recovered"}
+    assert expected["summary"] in (scan_dir / "threatmodel.md").read_text()
+    if newer_head:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            frozen = json.loads(
+                connection.execute(
+                    "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                ).fetchone()[0]
+            )
+        assert frozen["threatModelSource"] == head.relative_to(scan_dir).as_posix()
+        assert frozen["sources"] == published["preservedSources"]
 
 
 def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path) -> None:

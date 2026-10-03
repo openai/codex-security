@@ -5,16 +5,13 @@ import { promises as fs } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { applicationRoot, buildServer } from "./build-server.mjs";
 
-const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
 const exec = promisify(execFile);
@@ -36,19 +33,11 @@ const temporaryDirectories = [];
 
 await fs.mkdir(repository);
 await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
-await build({
-  bundle: true,
+await buildServer(bundle, {
   define: {
     __dirname: JSON.stringify(applicationRoot),
     "import.meta.url": "__filename",
   },
-  entryPoints: [path.join(applicationRoot, "main.ts")],
-  external: ["fsevents"],
-  format: "cjs",
-  loader: { ".md": "text" },
-  logLevel: "silent",
-  outfile: bundle,
-  platform: "node",
 });
 await build({
   bundle: true,

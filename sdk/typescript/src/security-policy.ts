@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -337,7 +337,10 @@ export async function readSecurityPolicySnapshot(
           `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change guidance outside the selected component. Fix the link before drafting a policy.`,
         );
       const links = { links: alias.links, destination: alias.destination };
-      inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
+      inherited.push([
+        policyPath,
+        `link:${hash("sha256", JSON.stringify(links))}`,
+      ]);
       metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
         throw error;
@@ -357,14 +360,14 @@ export async function readSecurityPolicySnapshot(
         gitMetadataPaths,
       );
       const content = await readPolicyFile(canonical);
-      inherited.push([policyPath, digest(content)]);
+      inherited.push([policyPath, hash("sha256", content)]);
     }
     directory = join(directory, part);
   }
   signal?.throwIfAborted();
   return {
     previousContent,
-    inheritedPolicySha256: digest(JSON.stringify(inherited)),
+    inheritedPolicySha256: hash("sha256", JSON.stringify(inherited)),
   };
 }
 
@@ -896,7 +899,7 @@ export async function runSecurityPolicyStages(options: {
     createdAt: new Date().toISOString(),
     revision: options.revision,
     previousPolicySha256:
-      previousContent === null ? null : digest(previousContent),
+      previousContent === null ? null : hash("sha256", previousContent),
     inheritedPolicySha256,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
@@ -998,6 +1001,7 @@ export async function runSecurityPolicyStages(options: {
   manifest.reviewNotes = reviewNotes;
   await saveManifest();
   const savedThreatModelPath = await saveModelDocument();
+
   return {
     ...target,
     outputDir,
@@ -1153,8 +1157,4 @@ function diffLabel(path: string): string {
   )
     return path;
   return formatSecurityPolicyText(JSON.stringify(path));
-}
-
-function digest(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }

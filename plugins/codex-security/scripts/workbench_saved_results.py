@@ -909,28 +909,34 @@ def merge_saved_results(
             prefer_worker_head = worker_id is not None and (
                 checkpoint_dir.name == "checkpoints" or draft.get("complete") is False
             )
-            if prefer_worker_head:
+            if worker_id is not None:
                 if checkpoint_dir.name != "checkpoints":
                     checkpoint_dir /= "checkpoints"
                 try:
+                    head_relative = (checkpoint_dir.parent / "checkpoint-head.json").as_posix()
                     head = _read_scan_local_json(
-                        scan_dir,
-                        (checkpoint_dir.parent / "checkpoint-head.json").as_posix(),
-                        "Saved worker checkpoint head",
+                        scan_dir, head_relative, "Saved worker checkpoint head"
                     ).get("checkpoint")
                     if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{64}\.json", head):
                         head_path = (checkpoint_dir / head).as_posix()
                         current = drafts_by_path.get(head_path, {})
                         if isinstance(current.get("threatModel"), dict):
-                            model = current["threatModel"]
-                            model_path = head_path
+                            # A terminal checkpoint is committed before result.json is replaced.
+                            # Keep a newer completed result authoritative over an older head.
+                            if not prefer_worker_head and current.get("complete") is not False:
+                                prefer_worker_head = (
+                                    scan_dir / head_relative
+                                ).stat().st_mtime_ns > (scan_dir / relative).stat().st_mtime_ns
+                            if prefer_worker_head:
+                                model = current["threatModel"]
+                                model_path = head_path
                 except (ContractError, OSError, ValueError):
                     # If the optional head cannot be read, retain the admitted checkpoint model.
                     pass
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
             if worker_id is not None:
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
-            if selected_model_source is not None and prefer_worker_head:
+            if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
         for value in draft["findings"]:
             if relative == "parent" and parent_manifest:

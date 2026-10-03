@@ -1554,10 +1554,8 @@ describe("multiscan", () => {
     let maximum = 0;
     let created = 0;
     let closed = 0;
-    let release!: () => void;
-    const simultaneous = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: simultaneous, resolve: release } =
+      Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
       expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
       active += 1;
@@ -1608,14 +1606,9 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nexclusive,${source.path},${source.revision}\n`,
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
       started();
       await finish;
@@ -1896,14 +1889,9 @@ describe("multiscan", () => {
         mode: 0o600,
       },
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     let active = 0;
     let maximum = 0;
     const security = client(async (_repository, scanOptions = {}) => {
@@ -1939,14 +1927,9 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nreplacement,${source.path},${source.revision}\n`,
     );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: running, resolve: started } =
+      Promise.withResolvers<void>();
+    const { promise: finish, resolve: release } = Promise.withResolvers<void>();
     const first = runMultiscan(
       options(
         paths,

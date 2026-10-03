@@ -14,6 +14,7 @@ import {
 import { dirname, join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+
 import {
   prepareScanArtifactRestorer,
   type ScanArtifactRestorer,
@@ -25,6 +26,7 @@ import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
   createApiTestFixtures,
+  failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
 
@@ -50,13 +52,6 @@ interface PostScanScenario {
     restorer: ScanArtifactRestorer,
     context: PostScanContext,
   ): ScanArtifactRestorer;
-}
-
-async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-  yield {
-    type: "turn.failed",
-    error: { message: "Could not draft fixes." },
-  };
 }
 
 async function startPostScan(scenario: PostScanScenario) {
@@ -103,7 +98,8 @@ async function startPostScan(scenario: PostScanScenario) {
       createCodex: () => ({
         startThread: () => ({
           id: "thread-1",
-          async runStreamed() {
+          async runStreamed(_input, options) {
+            expect(options.cyberAccessProgram).toBe("daybreak_blue");
             turns += 1;
             if (turns === 1) {
               await copyCompletedScan(root);
@@ -140,7 +136,9 @@ async function startPostScan(scenario: PostScanScenario) {
             if (scenario.artifact === "threatmodel.md")
               original = await readFile(artifactPath);
             await scenario.mutate(context);
-            return { events: scenario.followUpEvents?.() ?? failedEvents() };
+            return {
+              events: scenario.followUpEvents?.() ?? failedPostScanEvents(),
+            };
           },
         }),
       }),
@@ -148,6 +146,7 @@ async function startPostScan(scenario: PostScanScenario) {
   );
   const scan = client.run(repository, {
     postScanPrompt: "Draft confirmed fixes.",
+    cyberAccessProgram: "daybreak_blue",
   });
   return {
     client,

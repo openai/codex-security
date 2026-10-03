@@ -1764,10 +1764,8 @@ describe("CodexSecurity policy API", () => {
 
   test("close cancels an owner-question callback even if it never settles", async () => {
     const f = await setup();
-    let entered!: () => void;
-    const waiting = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
+    const { promise: waiting, resolve: entered } =
+      Promise.withResolvers<void>();
     let promptSignal: AbortSignal | undefined;
     const generation = f.security.generatePolicy(f.repository, {
       outputDir: f.outputDir,

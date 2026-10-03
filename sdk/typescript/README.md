@@ -45,6 +45,36 @@ make extra model calls; see [Progress and cost](#progress-and-cost).
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
 
+### Select a Cyber access program
+
+For the built-in OpenAI provider, select `standard`, `daybreak_blue`, or
+`daybreak_red` per scan:
+
+```ts
+await security.run("/path/to/repository", {
+  auth: "api-key",
+  cyberAccessProgram: "daybreak_blue",
+});
+```
+
+```sh
+codex-security scan . --auth api-key --cyber-access-program daybreak_blue
+```
+
+`scan-components` accepts the same flag. Project files use
+`scan.cyber_access_program`, including for bulk scans. An explicit CLI or SDK
+selection overrides the project setting. Omission preserves Codex defaults;
+`standard` explicitly selects the standard program.
+
+The selection applies to Deep Scan discovery and reducer workers, resumed
+workers, custom validation, and post-scan turns. Saved scan recipes retain it
+for resume and rerun. Automatic component planning and finding matching also
+use the selected program. API-key selection enables Codex's experimental Cyber
+support unless the effective native configuration explicitly disables
+`features.api_key_cyber_access_programs`.
+Explicit disables and API entitlement failures remain errors. Selecting a
+program does not grant access; the API verifies the key's entitlement.
+
 ### Validate an existing finding
 
 ```ts
@@ -252,16 +282,68 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+```
 
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+### Amazon Bedrock
+
+Bedrock uses Codex's native provider; no custom connector or adapter is needed.
+Choose an AWS identity and a region with access to the exact Bedrock model ID:
+
+```bash
+export AWS_PROFILE="security-scan"
 export AWS_REGION="us-east-2"
 npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
-Bedrock also accepts AWS access keys, profiles, web identity, container
-credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
-a Bedrock model with `--model`; OpenAI models such as `openai.gpt-5.6-luna`
-support `--max-cost`.
+For an AWS account with approved Daybreak Blue access in `us-east-2`:
+
+```bash
+npx @openai/codex-security scan . --provider amazon-bedrock \
+  --model openai.gpt-daybreak-blue-5.6-sol --effort high
+```
+
+For separately approved Daybreak Red model access in the same region:
+
+```bash
+npx @openai/codex-security scan . --provider amazon-bedrock \
+  --model openai.gpt-5.6-cyber --effort high
+```
+
+Both require OpenAI approval/enrollment followed by AWS model-access provisioning.
+Red requires separate Red approval and the model-specific approval for
+GPT-5.6-Cyber; Blue access does not include it. Contact your AWS account team.
+See the AWS model cards for
+[Blue](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html)
+and [Red](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html),
+and [OpenAI's access overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview).
+
+Run the exports and CLI command in the same shell, job, or container. Environment
+changes in another terminal or a completed subprocess do not reach the scan.
+Instead of a profile, you can use `AWS_BEARER_TOKEN_BEDROCK`, AWS access keys, web
+identity, container credentials, or the default AWS credential chain. Temporary
+access keys require all three of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+and `AWS_SESSION_TOKEN`. Set `AWS_REGION` for the selected model's region and
+avoid mixing a profile with unrelated credential environment variables.
+
+Once model access is provisioned, native Bedrock scans, including Deep Scan
+workers, use AWS authentication without a separate `codex-security login` or
+OpenAI API key. AWS still controls whether that identity can invoke the model.
+Reading local reports, `scans show`, and `export` requires no cloud login.
+[Publishing to Cloud](#publish-findings-to-cloud) is a separate operation that
+requires ChatGPT credentials; AWS inference credentials do not grant that access.
+
+`info` and `scan --dry-run` inspect local configuration and inputs. They do not
+verify AWS credentials or invoke the model. A model-metadata or OpenAI access
+advisory does not establish Bedrock access; use the actual inference result.
+An AWS authentication error or model-access denial must be resolved for the
+selected AWS identity, model, and region. See the
+[Bedrock verification guide](../../docs/bedrock.md) for a live scan recipe.
+
+OpenAI models such as `openai.gpt-5.6-luna` support `--max-cost`. The exact
+`openai.gpt-daybreak-blue-5.6-sol` ID has AWS Standard commercial in-region price
+estimates, including short/long-context ranges and the included AWS fee. These
+estimates enable `--max-cost`; they are not billing totals or a guaranteed bill
+limit. This pricing entry does not change other Bedrock models' estimates.
 
 Bedrock scans, including Deep Scan workers, default to
 `model_reasoning_summary = "none"` because some Bedrock models reject
@@ -270,7 +352,10 @@ settings in `--codex` overrides or the selected Codex profile take precedence.
 For standard scans on older CLI versions, append
 `--codex 'model_reasoning_summary="none"'` to your scan command if Bedrock
 reports that `reasoning.summary` is unsupported. Deep scans require a CLI
-version that forwards this setting to workers.
+version that forwards this setting to discovery and reducer workers, including
+resumed workers. Version `0.1.27` and later includes that fix.
+
+### OpenAI credentials
 
 On Windows, set the API key in PowerShell:
 

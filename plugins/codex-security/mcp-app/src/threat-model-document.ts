@@ -59,7 +59,7 @@ async function writeCurrentThreatModelDocument(
         scanId: context.scanId,
         target: context.repoRoot,
         revision: context.targetRevision,
-        snapshotDigest: context.targetSnapshotDigest,
+        snapshotDigest: context.targetContract?.requiredSnapshotDigest,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined
