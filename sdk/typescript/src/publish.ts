@@ -841,7 +841,7 @@ function reportPublicationProgress(
 ): void {
   if (observer === undefined) return;
   try {
-    observer(event);
+    void Promise.resolve(observer(event)).catch(() => {});
   } catch {
     // Optional progress reporting must not stop issue publication.
   }

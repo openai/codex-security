@@ -3507,40 +3507,45 @@ describe("connected Linear publication", () => {
     );
   });
 
-  test("does not allow a failing progress observer to stop issue publication", async () => {
-    const publication = preparedPublication();
-    let observations = 0;
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      {
-        ...OPTIONS,
-        onProgress: () => {
-          observations += 1;
-          throw new Error("The optional progress display failed.");
-        },
-      },
-      dependencies(
-        publication,
-        {},
+  test.each(["synchronous", "asynchronous"])(
+    "ignores %s progress observer failures during publication",
+    async (failure) => {
+      const publication = preparedPublication();
+      let observations = 0;
+      const result = await publishScanInternal(
+        publication.scanDirectory,
         {
-          runCodex: async (_codex, _args, _input, _environment, onEvent) => {
-            const event = JSON.parse(
-              issueEvent(publication.issues[0]!),
-            ) as unknown;
-            onEvent!(event);
-            return {
-              exitCode: 0,
-              stdout: JSON.stringify(event),
-              stderr: "",
-            };
+          ...OPTIONS,
+          onProgress: () => {
+            observations += 1;
+            const error = new Error("The optional progress display failed.");
+            if (failure === "asynchronous") return Promise.reject(error);
+            throw error;
           },
         },
-      ),
-    );
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_codex, _args, _input, _environment, onEvent) => {
+              const event = JSON.parse(
+                issueEvent(publication.issues[0]!),
+              ) as unknown;
+              onEvent!(event);
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify(event),
+                stderr: "",
+              };
+            },
+          },
+        ),
+      );
 
-    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
-    expect(observations).toBe(4);
-  });
+      expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+      expect(observations).toBe(4);
+    },
+  );
 
   test("does not start Codex or write a receipt when the scan has no findings", async () => {
     const publication = preparedPublication(0);
