@@ -116,6 +116,20 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
             "deferred": [],
         }
 
+    def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(Path(FINALIZER.__file__)),
+                "--scan-dir",
+                str(self.scan_dir),
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def write_scan(self) -> None:
         self.write_json("scan-manifest.json", self.manifest)
         self.write_json("findings.json", self.findings)
@@ -746,18 +760,7 @@ The extraction root is not enforced.
             for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
         }
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--sarif-only")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         sarif = json.loads(result.stdout)
@@ -846,19 +849,7 @@ The extraction root is not enforced.
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--export-format", "csv")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
@@ -875,19 +866,7 @@ The extraction root is not enforced.
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--export-format", "csv")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
@@ -909,19 +888,7 @@ The extraction root is not enforced.
                 self.write_scan()
                 FINALIZER.finalize_scan(self.scan_dir)
 
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(FINALIZER.__file__)),
-                        "--scan-dir",
-                        str(self.scan_dir),
-                        "--export-format",
-                        "csv",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                result = self.run_finalizer("--export-format", "csv")
 
                 self.assertEqual(result.returncode, 0, result.stderr)
                 reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
@@ -935,19 +902,7 @@ The extraction root is not enforced.
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--export-format", "csv")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         reader = csv.DictReader(io.StringIO(result.stdout, newline=""))
@@ -961,19 +916,7 @@ The extraction root is not enforced.
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--export-format", "csv")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         row = next(csv.DictReader(io.StringIO(result.stdout, newline="")))
@@ -985,19 +928,7 @@ The extraction root is not enforced.
         self.write_scan()
         for export_format in ("json", "csv"):
             with self.subTest(export_format=export_format, state="unsealed"):
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(FINALIZER.__file__)),
-                        "--scan-dir",
-                        str(self.scan_dir),
-                        "--export-format",
-                        export_format,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                result = self.run_finalizer("--export-format", export_format)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
                     f"{export_format.upper()} export requires a sealed scan", result.stderr
@@ -1007,19 +938,7 @@ The extraction root is not enforced.
         self.write_json("findings.json", {"changed": True})
         for export_format in ("json", "csv"):
             with self.subTest(export_format=export_format, state="tampered"):
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(FINALIZER.__file__)),
-                        "--scan-dir",
-                        str(self.scan_dir),
-                        "--export-format",
-                        export_format,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                result = self.run_finalizer("--export-format", export_format)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("sealed artifact changed or is missing", result.stderr)
 
@@ -1030,36 +949,8 @@ The extraction root is not enforced.
         before = findings.read_bytes()
         output = self.scan_dir.parent / "findings.csv"
 
-        exported = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-                "--export-output",
-                str(output),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        rejected = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "json",
-                "--export-output",
-                str(findings),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        exported = self.run_finalizer("--export-format", "csv", "--export-output", str(output))
+        rejected = self.run_finalizer("--export-format", "json", "--export-output", str(findings))
 
         self.assertEqual(exported.returncode, 0, exported.stderr)
         self.assertTrue(output.read_text().startswith("occurrence_id,finding_id,title,summary"))
@@ -1100,20 +991,11 @@ The extraction root is not enforced.
                 )
                 self.write_json("scan-manifest.json", manifest)
 
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(FINALIZER.__file__)),
-                        "--scan-dir",
-                        str(self.scan_dir),
-                        "--export-format",
-                        "csv",
-                        "--export-output",
-                        str(output),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                result = self.run_finalizer(
+                    "--export-format",
+                    "csv",
+                    "--export-output",
+                    str(output),
                 )
 
                 self.assertNotEqual(result.returncode, 0)
@@ -1144,20 +1026,11 @@ The extraction root is not enforced.
         )
         self.write_json("scan-manifest.json", manifest)
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-format",
-                "csv",
-                "--export-output",
-                str(alias / "exports" / "findings.csv"),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        result = self.run_finalizer(
+            "--export-format",
+            "csv",
+            "--export-output",
+            str(alias / "exports" / "findings.csv"),
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -1180,20 +1053,11 @@ The extraction root is not enforced.
             for alias in (direct_alias, parent_alias / self.scan_dir.name):
                 with self.subTest(alias=str(alias)):
                     output.write_bytes(protected_contents)
-                    result = subprocess.run(
-                        [
-                            sys.executable,
-                            str(Path(FINALIZER.__file__)),
-                            "--scan-dir",
-                            str(self.scan_dir),
-                            "--export-format",
-                            "csv",
-                            "--export-output",
-                            str(alias / "exports" / "findings.csv"),
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
+                    result = self.run_finalizer(
+                        "--export-format",
+                        "csv",
+                        "--export-output",
+                        str(alias / "exports" / "findings.csv"),
                     )
 
                     self.assertNotEqual(result.returncode, 0)
@@ -1214,18 +1078,7 @@ The extraction root is not enforced.
                     for name in ("scan-manifest.json", "findings.json", "coverage.json")
                 }
 
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(FINALIZER.__file__)),
-                        "--scan-dir",
-                        str(self.scan_dir),
-                        *arguments,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                result = self.run_finalizer(*arguments)
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("requires", result.stderr)
@@ -1241,18 +1094,7 @@ The extraction root is not enforced.
         sarif_path = self.scan_dir / "exports" / "results.sarif"
         sarif_path.unlink()
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--sarif-only")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("sealed artifact changed or is missing", result.stderr)
@@ -1267,20 +1109,7 @@ The extraction root is not enforced.
         for source_root in (self.scan_dir / "missing-source", source_file):
             for export_args in (("--sarif-only",), ("--export-format", "sarif")):
                 with self.subTest(source_root=str(source_root), export_args=export_args):
-                    result = subprocess.run(
-                        [
-                            sys.executable,
-                            str(Path(FINALIZER.__file__)),
-                            "--scan-dir",
-                            str(self.scan_dir),
-                            *export_args,
-                            "--source-root",
-                            str(source_root),
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    result = self.run_finalizer(*export_args, "--source-root", str(source_root))
 
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("source root: expected an existing directory", result.stderr)
@@ -1293,20 +1122,7 @@ The extraction root is not enforced.
         sarif_path.unlink()
         output = self.scan_dir.parent / "results.sarif"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-                "--sarif-output",
-                str(output),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
@@ -1317,20 +1133,7 @@ The extraction root is not enforced.
         self.write_scan()
         output = self.scan_dir / "exports" / "results.sarif"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-                "--sarif-output",
-                str(output),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SARIF projection requires a sealed scan", result.stderr)
@@ -1368,20 +1171,7 @@ The extraction root is not enforced.
         FINALIZER.finalize_scan(self.scan_dir)
         output = self.scan_dir.parent / "results\\v1.sarif"
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-                "--sarif-output",
-                str(output),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["version"], "2.1.0")
@@ -1394,18 +1184,7 @@ The extraction root is not enforced.
         sarif_path.parent.rmdir()
         self.scan_dir.chmod(0o500)
         try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(FINALIZER.__file__)),
-                    "--scan-dir",
-                    str(self.scan_dir),
-                    "--sarif-only",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self.run_finalizer("--sarif-only")
         finally:
             self.scan_dir.chmod(0o700)
 

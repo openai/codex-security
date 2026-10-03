@@ -1146,6 +1146,29 @@ def normalize_pre_release_execution_profile_migrations(
         )
 
 
+def move_pre_release_migration(
+    connection: sqlite3.Connection, old_version: int, new_version: int, name: str
+) -> None:
+    migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = ?", (old_version,)
+    ).fetchone()
+    if migration is None or migration["name"] != name:
+        return
+    if (
+        connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (new_version,)
+        ).fetchone()
+        is not None
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported pre-release migration history."
+        )
+    connection.execute(
+        "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
+        (new_version, old_version, name),
+    )
+
+
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
     connection.execute(
@@ -1153,64 +1176,12 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         ("index finding identity and comparison history",),
     )
 
-    completion_warning_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 25"
-    ).fetchone()
-    if (
-        completion_warning_migration is not None
-        and completion_warning_migration["name"] == "persist scan completion warnings"
-    ):
-        if (
-            connection.execute("SELECT 1 FROM schema_migrations WHERE version = 26").fetchone()
-            is not None
-        ):
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 26 WHERE version = 25 AND name = ?",
-            ("persist scan completion warnings",),
-        )
-
-    phase_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 12"
-    ).fetchone()
-    if (
-        phase_progress_migration is not None
-        and phase_progress_migration["name"] == "phase-specific scan progress"
-    ):
-        target_migration = connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 20"
-        ).fetchone()
-        if target_migration is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
-            ("phase-specific scan progress",),
-        )
+    move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
+    move_pre_release_migration(connection, 12, 20, "phase-specific scan progress")
 
     normalize_pre_release_execution_profile_migrations(connection, timestamp)
 
-    preflight_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 13"
-    ).fetchone()
-    if (
-        preflight_progress_migration is not None
-        and preflight_progress_migration["name"] == "current scan preflight state"
-    ):
-        target_migration = connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 21"
-        ).fetchone()
-        if target_migration is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 21 WHERE version = 13 AND name = ?",
-            ("current scan preflight state",),
-        )
+    move_pre_release_migration(connection, 13, 21, "current scan preflight state")
 
     delivered_claim_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 18"
