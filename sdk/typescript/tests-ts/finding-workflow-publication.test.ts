@@ -382,9 +382,9 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         pendingWrite: JSON.parse(init.body as string),
       });
       bodies.push(init.body as string);
-      if (bodies.length === 1 && failure === "before-write")
+      if (bodies.length <= 3 && failure === "before-write")
         return new Response("", { status: 503 });
-      if (bodies.length === 1 && failure === "lost-ack")
+      if (bodies.length <= 3 && failure === "lost-ack")
         return new Response("incomplete acknowledgement", { status: 201 });
       return Response.json([]);
     };
@@ -400,7 +400,13 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
     expect(
       await deduplicateScanInternal(document.scanId, options, dependencies),
     ).toEqual(result);
-    expect(bodies).toHaveLength(failure === "before-post" ? 1 : 2);
+    expect(bodies).toHaveLength(
+      failure === "before-post"
+        ? 1
+        : failure === "before-write" || failure === "lost-ack"
+          ? 4
+          : 2,
+    );
     expect(new Set(bodies).size).toBe(1);
     expect(reviews).toBe(2);
     expect(lookups).toBe(1);

@@ -1,5 +1,5 @@
+import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
-import { resolvedPath } from "./resolve-path";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -11,28 +11,17 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { encodePosixPath, SymlinkLoopError } from "./posix-path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { parseArgs } from "node:util";
+import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import {
   expandHome,
-  HomeExpansionError,
-  parsedPath,
+  resolvedPath as resolveFilePath,
+  windowsFiles,
   windowsRelativePath,
 } from "./resolve-security-md";
-import { windowsBinding } from "../native";
-import {
-  pathText,
-  widePath,
-  windowsFileSystem,
-} from "../../../native/windows-files.mjs";
+import { pathText, widePath } from "../../../native/windows-files.mjs";
 
-import { object } from "./python-json";
-
-const trim = (value: string) =>
-  value.replace(
-    /^[\p{White_Space}\u001c-\u001f]+|[\p{White_Space}\u001c-\u001f]+$/gu,
-    "",
-  );
 const roles = [
   "entrypoint",
   "entrypoint/wrapper",
@@ -51,6 +40,8 @@ const fields = new Set([
   "context",
   "instance",
 ]);
+const locationFields = new Set(["path", "start_line", "end_line", "role"]);
+const jsonFields = [...fields, ...locationFields].sort();
 type Row = Record<string, unknown>;
 interface Location {
   path: string;
@@ -68,52 +59,35 @@ interface Candidate {
 }
 
 function compare(left: string, right: string): number {
-  const a = Array.from(left, (value) => value.codePointAt(0)!);
-  const b = Array.from(right, (value) => value.codePointAt(0)!);
-  for (let index = 0; index < Math.min(a.length, b.length); index++) {
-    if (a[index] !== b[index]) return a[index]! - b[index]!;
-  }
-  return a.length - b.length;
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function stableJson(value: unknown): string {
-  if (typeof value === "string") {
-    if (/[\ud800-\udfff]/u.test(value))
-      throw new Error("UTF-8 cannot encode an unpaired surrogate");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (object(value))
-    return `{${Object.keys(value)
-      .sort(compare)
-      .map((key) => `${stableJson(key)}:${stableJson(value[key])}`)
-      .join(",")}}`;
-  return JSON.stringify(value);
+  return JSON.stringify(value, jsonFields);
 }
 
 const windows = process.platform === "win32";
-const windowsFiles = () => windowsFileSystem(windowsBinding());
 const fsPath = (value: string) =>
   windows ? widePath(value) : encodePosixPath(value);
 const readFile = (path: string) =>
   windows ? windowsFiles().readFile(fsPath(path)) : readFileSync(fsPath(path));
 const stat = (path: string) =>
   windows ? windowsFiles().stat(fsPath(path)) : statSync(fsPath(path));
-const pathKey = (value: string) =>
-  process.platform === "win32" ? value.toLowerCase() : value;
+const pathKey = (value: string) => (windows ? value.toLowerCase() : value);
+
+function resolvedPath(value: string, strict = true): string {
+  const path = resolveFilePath(fsPath(value), strict);
+  return windows ? pathText(path) : decodePosixBytes(path);
+}
 
 function inside(path: string, root: string, allowMissing = false): string {
-  let result: string | undefined;
-  if (windows) {
-    const bytes = windowsRelativePath(
-      widePath(path),
-      widePath(root),
-      allowMissing,
-    );
-    result = bytes === undefined ? undefined : pathText(bytes);
-  } else {
-    result = relative(root, path);
-  }
+  const result = windows
+    ? windowsRelativePath(
+        widePath(path),
+        widePath(root),
+        allowMissing,
+      )?.toString("utf16le")
+    : relative(root, path);
   if (
     result === undefined ||
     isAbsolute(result) ||
@@ -127,17 +101,16 @@ function inside(path: string, root: string, allowMissing = false): string {
 function relativeFile(value: unknown, root: string): [string, string] {
   if (typeof value !== "string" || value === "" || value.includes("\0"))
     throw new Error("path: expected a non-empty repository-relative path");
-  const raw =
-    process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+  const raw = windows ? value.replaceAll("\\", "/") : value;
   if (
     raw.startsWith("/") ||
     raw.split("/").includes("..") ||
-    (process.platform === "win32" && /^[A-Za-z]:/u.test(raw))
+    (windows && /^[A-Za-z]:/u.test(raw))
   )
     throw new Error(
       "path: expected a repository-relative path without traversal",
     );
-  const path = resolvedPath(`${root}${sep}${raw}`);
+  const path = resolvedPath(join(root, raw));
   const name = inside(path, root);
   if (!stat(path).isFile()) throw new Error("path: expected a regular file");
   return [name, path];
@@ -148,72 +121,17 @@ function readScope(
   root: string,
   allowMissing: boolean,
 ): Set<string> {
-  const contents = decodeUtf8(readFile(path));
-  const lines = contents.split("\n");
-  const listed = new Set(lines);
-  const isFile = (value: string) => {
-    try {
-      relativeFile(value, root);
-      return true;
-    } catch (error) {
-      if (error instanceof SymlinkLoopError) throw error;
-      return false;
-    }
-  };
-  const carriage = new Map<string, [boolean, boolean]>();
-  if (process.platform !== "win32") {
-    for (const line of lines) {
-      if (line.endsWith("\r") && line !== "\r")
-        carriage.set(line, [isFile(line), isFile(line.slice(0, -1))]);
-    }
-  }
-  const crlf =
-    lines.includes("\r") ||
-    [...carriage.values()].some(([literal, stripped]) => stripped && !literal);
-  const literalEvidence = [...carriage.values()].some(
-    ([literal, stripped]) => literal && !stripped,
-  );
+  const lines = decodeUtf8(readFile(path)).split(/\r?\n/u);
   const scope = new Set<string>();
-  for (const [index, original] of lines.entries()) {
-    let line = original;
-    if (process.platform === "win32" || line === "\r") {
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-    } else if (line.endsWith("\r")) {
-      const [literal, stripped] = carriage.get(line)!;
-      if (stripped && !literal) line = line.slice(0, -1);
-      else if (stripped && literal) {
-        if (
-          (index === lines.length - 1 && !contents.endsWith("\n")) ||
-          listed.has(line.slice(0, -1))
-        ) {
-          // An unterminated row or a separately listed sibling preserves CR.
-        } else if (crlf && !literalEvidence) line = line.slice(0, -1);
-        else if (!(literalEvidence && !crlf))
-          throw new Error(
-            `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
-          );
-      } else if (!literal && crlf) line = line.slice(0, -1);
-    }
+  for (const [index, line] of lines.entries()) {
     if (line === "") continue;
     try {
       scope.add(relativeFile(line, root)[0]);
     } catch (error) {
-      if (error instanceof SymlinkLoopError) throw error;
       if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") {
-        if (
-          line.startsWith("/") ||
-          line.split("/").includes("..") ||
-          line.includes("\0")
-        )
-          throw new Error(
-            `in-scope file row ${index + 1}: unsafe deleted path`,
-          );
         try {
-          scope.add(
-            inside(resolvedPath(`${root}${sep}${line}`, false), root, true),
-          );
+          scope.add(inside(resolvedPath(join(root, line), false), root, true));
         } catch (error) {
-          if (error instanceof SymlinkLoopError) throw error;
           throw new Error(
             `in-scope file row ${index + 1}: path escapes repository`,
           );
@@ -235,9 +153,9 @@ function textField(
 ): string | undefined {
   const value = row[field];
   if ((value === undefined || value === null) && !required) return undefined;
-  if (typeof value !== "string" || trim(value) === "")
+  if (typeof value !== "string" || value.trim() === "")
     throw new Error(`${field}: expected a non-empty string`);
-  return trim(value);
+  return value.trim();
 }
 
 function cweIds(row: Row): string[] {
@@ -247,19 +165,10 @@ function cweIds(row: Row): string[] {
   for (const value of values) {
     if (typeof value !== "string")
       throw new Error("cwe_ids: expected CWE strings");
-    const match = /^CWE-(\p{Decimal_Number}+)$/iu.exec(trim(value));
+    const match = /^CWE-(\d+)$/iu.exec(value.trim());
     if (match === null)
       throw new Error(`cwe_ids: unsupported value ${JSON.stringify(value)}`);
-    const digits = Array.from(match[1]!, (digit) => {
-      let point = digit.codePointAt(0)!;
-      let offset = 0;
-      while (/\p{Decimal_Number}/u.test(String.fromCodePoint(point - 1))) {
-        point--;
-        offset++;
-      }
-      return String(offset % 10);
-    }).join("");
-    const number = BigInt(digits);
+    const number = BigInt(match[1]!);
     if (number < 1n)
       throw new Error(`cwe_ids: unsupported value ${JSON.stringify(value)}`);
     found.add(number);
@@ -286,18 +195,12 @@ function normalizeLocations(
   for (const item of row.locations) {
     if (!object(item)) throw new Error("locations: expected location objects");
     const unknown = Object.keys(item)
-      .filter(
-        (key) => !["path", "start_line", "end_line", "role"].includes(key),
-      )
-      .sort(compare);
+      .filter((key) => !locationFields.has(key))
+      .sort();
     if (unknown.length)
       throw new Error(`locations: unsupported fields ${unknown.join(", ")}`);
     const [name, source] = relativeFile(item.path, root);
-    if (
-      trim(name) === "" ||
-      name.includes("\\") ||
-      name.split("/").some((part) => part.includes(":"))
-    )
+    if (name.trim() === "" || name.includes("\\") || name.includes(":"))
       throw new Error("path: expected a safe repository-relative POSIX path");
     const start = positiveLine(item.start_line, "start_line");
     const end = positiveLine(
@@ -345,7 +248,7 @@ function normalizeCandidate(
 ): Candidate {
   const unknown = Object.keys(row)
     .filter((key) => !fields.has(key))
-    .sort(compare);
+    .sort();
   if (unknown.length)
     throw new Error(`unsupported fields ${unknown.join(", ")}`);
   if ("candidate_id" in row) textField(row, "candidate_id");
@@ -358,112 +261,65 @@ function normalizeCandidate(
     summary: textField(row, "summary")!,
     evidence: textField(row, "evidence")!,
   };
-  const context = textField(row, "context", false);
-  if (context !== undefined) result.context = context;
-  const instance = textField(row, "instance", false);
-  if (instance !== undefined) result.instance = instance;
+  for (const field of ["context", "instance"] as const) {
+    const value = textField(row, field, false);
+    if (value !== undefined) result[field] = value;
+  }
   return result;
 }
 
-function combine(rows: Candidate[]): (Candidate & { candidate_id: string })[] {
-  const groups = new Map<string, Candidate[]>();
-  for (const row of rows) {
-    const key = stableJson({
-      cwe_ids: row.cwe_ids,
-      locations: row.locations,
-      instance: row.instance ?? null,
+function combine(groups: Map<string, Candidate[]>) {
+  return [...groups]
+    .sort(([a], [b]) => compare(a, b))
+    .map(([key, group]) => {
+      const merged = (field: "summary" | "evidence" | "context") =>
+        [
+          ...new Set(
+            group
+              .map((row) => row[field])
+              .filter((value): value is string => value !== undefined),
+          ),
+        ]
+          .sort()
+          .join("\n");
+      const result = {
+        ...group[0]!,
+        candidate_id: `candidate-${createHash("sha256").update(key).digest("hex").slice(0, 16)}`,
+        summary: merged("summary"),
+        evidence: merged("evidence"),
+      };
+      const context = merged("context");
+      if (context !== "") result.context = context;
+      return result;
     });
-    const group = groups.get(key) ?? [];
-    group.push(row);
-    groups.set(key, group);
-  }
-  return [...groups.keys()].sort(compare).map((key) => {
-    const group = groups.get(key)!;
-    const merged = (field: "summary" | "evidence" | "context") =>
-      [
-        ...new Set(
-          group
-            .map((row) => row[field])
-            .filter((value): value is string => value !== undefined),
-        ),
-      ]
-        .sort(compare)
-        .join("\n");
-    const result = {
-      ...group[0]!,
-      candidate_id: `candidate-${createHash("sha256").update(key).digest("hex").slice(0, 16)}`,
-      summary: merged("summary"),
-      evidence: merged("evidence"),
-    };
-    const context = merged("context");
-    if (context !== "") result.context = context;
-    return result;
-  });
 }
 
-function argumentsFor(args: string[]): Record<string, string[] | boolean> {
-  const names = [
-    "input",
-    "out",
-    "repo-root",
-    "in-scope-files",
-    "allow-missing-in-scope",
-    "help",
-  ];
-  function option(value: string): string | undefined {
-    if (value === "-h") return "help";
-    if (value.startsWith("--") && value !== "--") {
-      const name = value.slice(2).split("=", 1)[0]!;
-      const matches = names.filter((item) => item.startsWith(name));
-      if (matches.includes(name)) return name;
-      if (matches.length === 1) return matches[0];
-      if (matches.length > 1) throw new Error(`ambiguous option: ${value}`);
+function argumentsFor(args: string[]) {
+  const { values, tokens } = parseArgs({
+    args,
+    allowPositionals: true,
+    tokens: true,
+    options: {
+      input: { type: "string", multiple: true },
+      out: { type: "string" },
+      "repo-root": { type: "string" },
+      "in-scope-files": { type: "string" },
+      "allow-missing-in-scope": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  let collectingInputs = false;
+  for (const token of tokens) {
+    if (token.kind === "option") collectingInputs = token.name === "input";
+    else if (token.kind === "positional") {
+      if (!collectingInputs)
+        throw new Error(`unrecognized argument: ${token.value}`);
+      values.input!.push(token.value);
     }
-    if (
-      !value.startsWith("-") ||
-      value === "-" ||
-      (!value.startsWith("-h") &&
-        (value.includes(" ") ||
-          /^-(?:\p{Decimal_Number}+|\p{Decimal_Number}*\.\p{Decimal_Number}+)\n?$/u.test(
-            value,
-          )))
-    )
-      return undefined;
-    throw new Error(`unrecognized argument: ${value}`);
   }
-  const values: Record<string, string[] | boolean> = {};
-  for (let index = 0; index < args.length; index++) {
-    const argument = args[index]!;
-    const name = option(argument);
-    if (name === undefined)
-      throw new Error(`unrecognized argument: ${argument}`);
-    const equals = argument.indexOf("=");
-    if (name === "help" || name === "allow-missing-in-scope") {
-      if (equals !== -1)
-        throw new Error(`argument --${name} does not take a value`);
-      values[name] = true;
-      if (name === "help") return values;
-      continue;
-    }
-    const found: string[] = [];
-    if (equals !== -1) found.push(argument.slice(equals + 1));
-    else {
-      while (
-        index + 1 < args.length &&
-        option(args[index + 1]!) === undefined
-      ) {
-        found.push(args[++index]!);
-        if (name !== "input") break;
-      }
-    }
-    if (found.length === 0)
-      throw new Error(
-        `argument --${name}: expected ${name === "input" ? "at least one argument" : "one argument"}`,
-      );
-    values[name] = found;
-  }
-  for (const name of ["input", "out", "repo-root", "in-scope-files"]) {
-    if (values[name] === undefined) throw new Error(`--${name} is required`);
+  if (!values.help) {
+    for (const name of ["input", "out", "repo-root", "in-scope-files"] as const)
+      if (values[name] === undefined) throw new Error(`--${name} is required`);
   }
   return values;
 }
@@ -483,17 +339,20 @@ export function normalizeCandidatesCommand(
       );
       return 0;
     }
-    const paths = (name: string, strict = true) =>
-      (values[name] as string[]).map((value) =>
-        resolvedPath(expandHome(parsedPath(value), posixHome), strict),
-      );
-    const root = paths("repo-root")[0]!;
+    const resolve = (value: string, strict = true) =>
+      resolvedPath(expandHome(value, posixHome), strict);
+    const root = resolve(values["repo-root"]!);
     if (!stat(root).isDirectory())
       throw new Error("--repo-root: expected a directory");
-    const output = paths("out", false)[0]!;
-    const scopePath = paths("in-scope-files")[0]!;
+    const output = resolve(values.out!, false);
+    const scopePath = resolve(values["in-scope-files"]!);
     const inputs = [
-      ...new Map(paths("input").map((path) => [pathKey(path), path])).values(),
+      ...new Map(
+        values.input!.map((value) => {
+          const path = resolve(value);
+          return [pathKey(path), path];
+        }),
+      ).values(),
     ].sort((a, b) => compare(pathKey(a), pathKey(b)));
     if (inputs.some((path) => pathKey(path) === pathKey(output)))
       throw new Error("--out: must not also be an input");
@@ -502,76 +361,79 @@ export function normalizeCandidatesCommand(
     const scope = readScope(
       scopePath,
       root,
-      values["allow-missing-in-scope"] === true,
+      values["allow-missing-in-scope"] ?? false,
     );
     const lineCounts = new Map<string, number>();
-    const rows: Candidate[] = [];
+    const groups = new Map<string, Candidate[]>();
+    let rowCount = 0;
     for (const source of inputs) {
-      const lines = decodeUtf8(readFile(source)).split(/\r\n|[\r\n]/u);
+      const lines = decodeUtf8(readFile(source)).split(/\r?\n/u);
       for (const [index, line] of lines.entries()) {
-        if (trim(line) === "") continue;
+        if (line.trim() === "") continue;
+        let candidate: Candidate;
         try {
           const row: unknown = JSON.parse(line);
           if (!object(row)) throw new Error("expected a JSON object");
-          rows.push(normalizeCandidate(row, root, scope, lineCounts));
+          candidate = normalizeCandidate(row, root, scope, lineCounts);
         } catch (error) {
-          if (error instanceof SymlinkLoopError) throw error;
           throw new Error(
             `${source} row ${index + 1}: ${(error as Error).message}`,
           );
         }
+        const key = stableJson({
+          cwe_ids: candidate.cwe_ids,
+          locations: candidate.locations,
+          instance: candidate.instance ?? null,
+        });
+        const group = groups.get(key) ?? [];
+        group.push(candidate);
+        groups.set(key, group);
+        rowCount++;
       }
     }
-    const combined = combine(rows);
+    const combined = combine(groups);
     if (windows) windowsFiles().mkdir(fsPath(dirname(output)));
     else mkdirSync(fsPath(dirname(output)), { recursive: true });
-    const temporary = join(
-      dirname(output),
-      `.${basename(output)}.${randomBytes(6).toString("base64url")}.tmp`,
+    const temporary = fsPath(
+      join(
+        dirname(output),
+        `.candidates-${randomBytes(6).toString("base64url")}.tmp`,
+      ),
     );
     let created = false;
+    function* contents() {
+      created = true;
+      for (const row of combined) yield Buffer.from(`${stableJson(row)}\n`);
+    }
     try {
       if (windows) {
-        function* contents() {
-          created = true;
-          for (const row of combined)
-            yield Buffer.from(`${stableJson(row)}\r\n`);
-        }
-        windowsFiles().writeFile(fsPath(temporary), contents(), true);
-        windowsFiles().rename(fsPath(temporary), fsPath(output));
+        windowsFiles().writeFile(temporary, contents(), true);
+        windowsFiles().rename(temporary, fsPath(output));
       } else {
-        const descriptor = openSync(fsPath(temporary), "wx", 0o600);
-        created = true;
+        const descriptor = openSync(temporary, "wx", 0o600);
         try {
-          for (const row of combined)
-            writeFileSync(descriptor, `${stableJson(row)}\n`, "utf8");
+          for (const chunk of contents()) writeFileSync(descriptor, chunk);
         } finally {
           closeSync(descriptor);
         }
-        renameSync(fsPath(temporary), fsPath(output));
+        renameSync(temporary, fsPath(output));
       }
     } finally {
       try {
         if (created) {
-          if (windows) windowsFiles().unlink(fsPath(temporary));
-          else unlinkSync(fsPath(temporary));
+          if (windows) windowsFiles().unlink(temporary);
+          else unlinkSync(temporary);
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    const message = `Combined ${rows.length} candidate rows into ${combined.length} rows in ${output}\n`;
-    process.stdout.write(
-      process.platform === "win32"
-        ? message.replace(/\n/gu, "\r\n")
-        : encodePosixPath(message),
+    console.log(
+      `Combined ${rowCount} candidate rows into ${combined.length} rows in ${output}`,
     );
     return 0;
   } catch (error) {
     console.error(`normalize_candidates: ${(error as Error).message}`);
-    return error instanceof SymlinkLoopError ||
-      error instanceof HomeExpansionError
-      ? 1
-      : 2;
+    return 2;
   }
 }

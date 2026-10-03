@@ -14,6 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, win32 } from "node:path";
+import { isRecord } from "./record.js";
 import {
   InternalLinearError,
   NetworkLinearError,
@@ -26,7 +27,6 @@ import {
   CodexSecurityError,
   ConfigurationError,
   errorMessage,
-  safeErrorMessage,
 } from "./errors.js";
 import {
   createLinearClient,
@@ -215,8 +215,7 @@ type PublicationHandoffEvidence = {
 );
 
 type PublicationEvidence =
-  | PublicationEventEvidence
-  | PublicationHandoffEvidence;
+  PublicationEventEvidence | PublicationHandoffEvidence;
 
 type CompletedPublicationEvent = Extract<
   PublicationEventEvidence,
@@ -480,7 +479,7 @@ export async function publishScanInternal(
       );
       eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
     } catch (error) {
-      eventLogNotice = `Could not preserve Linear connector-event evidence: ${safeErrorMessage(error)}.`;
+      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
     }
   };
   if (handoffResults.indeterminate) {
@@ -494,7 +493,7 @@ export async function publishScanInternal(
       await saveReceipt(result, environment);
     } catch (error) {
       result.warnings.push(
-        `Could not save the initial indeterminate publication receipt: ${safeErrorMessage(error)}.`,
+        `Could not save the initial indeterminate publication receipt: ${errorMessage(error)}.`,
       );
     }
   }
@@ -561,7 +560,7 @@ export async function publishScanInternal(
     if (result.created.length === 0 || options.signal?.aborted) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
-      `Could not save the publication receipt: ${safeErrorMessage(error)}. Linear issues were already created; do not retry publication.`,
+      `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
   options.signal?.throwIfAborted();
@@ -797,7 +796,7 @@ async function publishLinearApiIssues(
           outcome = { issueIdentifier: result.identifier, url: result.url };
         } catch (error) {
           outcome = {
-            error: safeErrorMessage(error),
+            error: errorMessage(error),
             ...(mutationSucceeded ||
             error instanceof InternalLinearError ||
             error instanceof NetworkLinearError ||
@@ -829,7 +828,7 @@ async function publishLinearApiIssues(
     );
     if (rejected !== undefined) {
       throw new CodexSecurityError(
-        `Could not preserve created Linear issues: ${safeErrorMessage(rejected.reason)}. The publication handoff remains at ${handoffFile}; recover it before retrying to avoid creating duplicate issues.`,
+        `Could not preserve created Linear issues: ${errorMessage(rejected.reason)}. The publication handoff remains at ${handoffFile}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: rejected.reason },
       );
     }
@@ -1558,10 +1557,8 @@ async function runPublicationCodex(
     const cleanup = (): void => {
       signal?.removeEventListener("abort", onAbort);
       activePublicationProcesses.delete(child);
-      if (forcedTermination !== undefined) {
-        clearTimeout(forcedTermination);
-        forcedTermination = undefined;
-      }
+      clearTimeout(forcedTermination);
+      forcedTermination = undefined;
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted === true) onAbort();
@@ -1604,7 +1601,7 @@ async function runPublicationCodex(
         }
         cleanup();
         resolve({
-          exitCode: terminationSignal === null ? code ?? 1 : 1,
+          exitCode: terminationSignal === null ? (code ?? 1) : 1,
           stdout,
           stderr,
           ...(terminationSignal === null ? {} : { terminatedBySignal: true }),
@@ -1743,8 +1740,4 @@ async function writePublicationReceipt(
     encoding: "utf8",
     mode: 0o600,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

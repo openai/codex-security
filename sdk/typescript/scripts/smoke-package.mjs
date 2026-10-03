@@ -7,24 +7,21 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+import { resolveNpm } from "./package-smoke-npm.mjs";
 
-const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
+const {
+  commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
+  installTimeoutMs: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS,
+} = packageSmokeTimeouts();
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -76,14 +73,20 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
+  {
+    cwd,
+    env,
+    capture = false,
+    windowsVerbatimArguments = false,
+    timeout = PACKAGE_SMOKE_TIMEOUT_MS,
+  } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
     env,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
-    timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+    timeout,
     killSignal: "SIGKILL",
     windowsVerbatimArguments,
     windowsHide: true,
@@ -91,7 +94,7 @@ function run(
 
   if (result.error?.code === "ETIMEDOUT") {
     throw new Error(
-      `Package smoke command timed out after ${PACKAGE_SMOKE_TIMEOUT_MS} ms: ${command}.`,
+      `Package smoke command timed out after ${timeout} ms: ${command}.`,
       { cause: result.error },
     );
   }
@@ -106,39 +109,6 @@ function run(
   }
 
   return result.stdout ?? "";
-}
-
-async function resolveNpm() {
-  const nodeDirectory = dirname(process.execPath);
-  const candidates = [
-    process.env.npm_execpath,
-    resolve(nodeDirectory, "../lib/node_modules/npm/bin/npm-cli.js"),
-    resolve(nodeDirectory, "node_modules/npm/bin/npm-cli.js"),
-    resolve(nodeDirectory, "../node_modules/npm/bin/npm-cli.js"),
-  ];
-
-  for (const candidate of new Set(candidates)) {
-    if (
-      typeof candidate !== "string" ||
-      basename(candidate).toLowerCase() !== "npm-cli.js"
-    ) {
-      continue;
-    }
-
-    try {
-      if ((await stat(candidate)).isFile()) {
-        return { command: process.execPath, args: [candidate] };
-      }
-    } catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
-    }
-  }
-
-  if (process.platform === "win32") {
-    throw new Error("The Node.js installation does not include the npm CLI.");
-  }
-
-  return { command: "npm", args: [] };
 }
 
 async function pluginFiles(directory) {
@@ -214,8 +184,8 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
   const windows = process.platform === "win32";
   const initialized = spawnSync(
     windows
-      ? process.env.ComSpec ??
-          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      ? (process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"))
       : mcpLauncher,
     windows
       ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]
@@ -374,7 +344,7 @@ try {
       `typescript@${packageManifest.devDependencies.typescript}`,
       `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
-    { cwd: consumer },
+    { cwd: consumer, timeout: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS },
   );
 
   const installedRoot = join(
@@ -430,15 +400,30 @@ if (process.platform !== "win32") {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
       }
+      if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
+        throw new Error("The installed package does not export generatePolicy.");
+      }
       const result = await sdk.matchScanFindings({ before: [], after: [] });
       if (result.matches.length !== 0 || result.uncertain.length !== 0) {
         throw new Error("Empty finding comparison did not return an empty result.");
-      }`,
+      }       const assert = await import("node:assert/strict");
+       const { writeFile } = await import("node:fs/promises");
+       const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
+       await writeFile("scan.json", JSON.stringify(input));
+       const loaded = await sdk.loadProjectConfig("scan.json");
+       const resolved = sdk.resolveProjectConfig(input);
+       assert.deepEqual(loaded.config, resolved.config);
+       assert.deepEqual(loaded.options, resolved.options);
+       assert.equal(loaded.options.subagents, 0);
+       assert.equal(loaded.options.failureSeverity, "high");
+       assert.equal(loaded.sources["scan.deep.subagents_per_worker"], "project");
+       assert.equal(loaded.sources["output.directory"], "default");
+       assert.equal(Object.isFrozen(loaded.sources), true);`,
     ],
     { cwd: consumer },
   );
@@ -507,8 +492,17 @@ if (process.platform !== "win32") {
     "npm must create the published codex-security executable shim.",
   );
 
+  const launchEnvironment = {
+    ...process.env,
+    NODE_OPTIONS: "--preserve-symlinks-main --no-experimental-detect-module",
+    NODE_USE_ENV_PROXY: undefined,
+  };
   function runInstalledCli(argument) {
-    const options = { cwd: consumer, capture: true };
+    const options = {
+      cwd: consumer,
+      capture: true,
+      env: launchEnvironment,
+    };
     if (process.platform === "win32") {
       return run(
         process.env.ComSpec ?? "cmd.exe",
@@ -523,10 +517,119 @@ if (process.platform !== "win32") {
   const version = runInstalledCli("--version");
   assert.equal(version.trim(), packageManifest.version);
 
+  const preload = join(consumer, "unavailable-cwd.mjs");
+  await writeFile(
+    preload,
+    [
+      "const originalCwd = process.cwd;",
+      'Object.defineProperty(process, "cwd", {',
+      "  value() {",
+      '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
+      '      throw new Error("working directory is unavailable");',
+      "    }",
+      "    return originalCwd.call(process);",
+      "  },",
+      "});\n",
+    ].join("\n"),
+  );
+  const failed = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(preload).href,
+      process.platform === "win32" ? launcher : shim,
+      "scan",
+    ],
+    {
+      cwd: consumer,
+      env: launchEnvironment,
+      encoding: "utf8",
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(failed.status, 2, failed.stderr);
+  assert.equal(failed.stdout, "");
+  assert.equal(failed.stderr, "working directory is unavailable\n");
+
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
   assert.match(help, /\bdedupe\b/u);
+  assert.match(help, /\bpolicy\b/u);
+  const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
+    cwd: consumer,
+    capture: true,
+  });
+  assert.match(policyHelp, /SECURITY\.md/u);
+  const policyTarget = join(consumer, "policy-target");
+  await mkdir(policyTarget);
+  const policyPreflight = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--auth",
+        "chatgpt",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(
+    policyPreflight.targetPath,
+    join(await realpath(policyTarget), "SECURITY.md"),
+  );
+  assert.equal(policyPreflight.dryRun, true);
+  assert.deepEqual(await readdir(policyTarget), []);
+
+  const starterPath = join(consumer, "codex-security.yaml");
+  const starter = JSON.parse(
+    run(process.execPath, [launcher, "init", "--json"], {
+      cwd: consumer,
+      capture: true,
+    }),
+  );
+  // Compare file identities across symlink aliases and Windows short names.
+  const canonicalStarterPath = await realpath(starterPath);
+  assert.equal(await realpath(starter.path), canonicalStarterPath);
+  for (const args of [["-c", starterPath], []]) {
+    const info = JSON.parse(
+      run(process.execPath, [launcher, "info", ...args, "--json"], {
+        cwd: consumer,
+        capture: true,
+        env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
+      }),
+    );
+    assert.equal(await realpath(info.configuration.path), canonicalStarterPath);
+    assert.equal(info.configuration.settings.mode, "standard");
+    assert.equal(info.configuration.sources["scan.mode"], "default");
+  }
+
+  const nestedDirectory = join(consumer, "settings");
+  await mkdir(nestedDirectory);
+  const nestedPath = join(nestedDirectory, "security.json");
+  run(process.execPath, [launcher, "init", nestedPath, "--json"], {
+    cwd: consumer,
+    capture: true,
+  });
+  const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
+  assert.equal(
+    await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
+    await realpath(
+      join(installedRoot, "schemas", "project-config.schema.json"),
+    ),
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(
@@ -675,6 +778,7 @@ if (process.platform !== "win32") {
   try {
     const base = `http://127.0.0.1:${dashboardServer.address().port}`;
     for (const [path, contentType] of [
+      ["/", "text/html"],
       ["/dashboard", "text/html"],
       ["/dashboard/app.js", "text/javascript"],
       ["/dashboard/app.css", "text/css"],

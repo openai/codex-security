@@ -5,6 +5,8 @@ description: Use when Codex is already in the validation phase of a security sca
 
 # Security Validation
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Take candidate findings from discovery and produce the strongest evidence-backed validation assessment you can. Prefer targeted, non-interactive reproduction or falsification when it is feasible and proportionate, but use focused code tracing when dynamic execution is blocked by missing services, unavailable infrastructure, or excessive setup relative to the candidate and scan scope.

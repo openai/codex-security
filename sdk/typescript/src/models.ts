@@ -283,11 +283,7 @@ export interface CoverageDocument {
     | "deep_repository";
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
-    | "repository"
-    | "scoped_path"
-    | "diff"
-    | "directory"
-    | "custom";
+    "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
   surfaces: {
@@ -315,6 +311,13 @@ export interface CoverageDocument {
     paths?: string[];
     surfaceIds?: string[];
     [k: string]: unknown;
+  }[];
+  /**
+   * Completed generic review tasks, with their saved IDs and completion reasons.
+   */
+  resolvedDeferred?: {
+    id: string;
+    reason: string;
   }[];
   openQuestions?: {
     question: string;

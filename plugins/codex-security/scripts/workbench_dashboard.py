@@ -40,10 +40,24 @@ RECORDS = {
     "groups": GROUP_RECORDS,
 }
 
+SORT_COLUMNS = {
+    "activity": "updatedAt",
+    "newest": "createdAt",
+    "title": "casefold(title)",
+    "repository": "casefold(repository_label(repositoryIds))",
+    "severity": "CASE severity WHEN 'informational' THEN 0 WHEN 'low' THEN 1 "
+    "WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'critical' THEN 4 END",
+    "members": "memberCount",
+}
+
+
+def repository_ids(value: str) -> list[str]:
+    return sorted(json.loads(value), key=lambda name: (name.casefold(), name))
+
 
 def item(row: sqlite3.Row) -> dict[str, Any]:
     result = dict(row)
-    result["repositoryIds"] = json.loads(result["repositoryIds"])
+    result["repositoryIds"] = repository_ids(result["repositoryIds"])
     return result
 
 
@@ -77,10 +91,13 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
     """One snapshot, no artifact reads, model calls, or writes."""
     view = query["view"]
     records = RECORDS[view]
+    connection.create_function("casefold", 1, str.casefold, deterministic=True)
+    connection.create_function(
+        "repository_label", 1, lambda value: ", ".join(repository_ids(value)), deterministic=True
+    )
     clauses: list[str] = []
     values: list[Any] = []
     if query.get("query"):
-        connection.create_function("casefold", 1, str.casefold, deterministic=True)
         columns = ["id", "title", "repositoryIds"]
         clauses.append(
             "("
@@ -92,7 +109,11 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
         clauses.append("EXISTS (SELECT 1 FROM json_each(repositoryIds) WHERE value = ?)")
         values.append(query["repository"])
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    order = "createdAt DESC, id" if query["sort"] == "newest" else "updatedAt DESC, id"
+    direction = {"asc": "ASC", "desc": "DESC"}[query.get("direction", "desc")]
+    order = f"{SORT_COLUMNS[query['sort']]} {direction}"
+    if view == "findings" and query["sort"] == "activity":
+        order += f", {SORT_COLUMNS['severity']} DESC"
+    order += ", id"
     connection.execute("BEGIN")
     with connection:
         repositories = connection.execute("""

@@ -19,15 +19,9 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         deep,
         "_dependencies",
-        deep.DeepScanDependencies(
-            **{
-                name: workbench_api[
-                    "preserve_stopped_results_after_transition"
-                    if name == "preserve_stopped_results"
-                    else name
-                ]
-                for name in deep.DeepScanDependencies.__dataclass_fields__
-            }
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
         ),
     )
 
@@ -164,7 +158,8 @@ def assert_published_aggregate(scan):
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     for finding in findings:
         for field in ("findingId", "occurrenceId", "fingerprints"):
-            assert finding.pop(field)
+            value = finding.pop(field)
+            assert value
     assert findings == scan.findings
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for field in ("documentType", "schemaVersion", "scanId"):

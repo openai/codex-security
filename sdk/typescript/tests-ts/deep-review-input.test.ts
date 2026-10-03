@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -313,6 +314,24 @@ describe("deep-review worklists", () => {
     );
     expect(read(join(f.root, "nested", "output.jsonl"))).toHaveLength(1);
   });
+  test.each([false, true])(
+    "removes pathlib dot and empty components from input and output (selection=%s)",
+    (selection) => {
+      const f = fixture();
+      write(f.input, [selection ? ranked("a.py") : candidate("a.py")]);
+      for (const suffix of ["/.", "///", "/./."]) {
+        const result = run(
+          { ...f, input: f.input + suffix, output: f.output + suffix },
+          selection,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe(
+          `${selection ? "Selected 1 of 1" : "Copied 1"} rows into ${f.output}${newline}`,
+        );
+        expect(read(f.output)).toEqual([{ path: "a.py", area: "src" }]);
+      }
+    },
+  );
   test("reports missing input and preserves argument parsing status", () => {
     const f = fixture();
     writeFileSync(f.output, "previous output\n");
@@ -349,6 +368,34 @@ describe("deep-review worklists", () => {
       expect(run({ ...f, input: inputLink }, false).status).toBe(0);
       expect(read(target)).toHaveLength(1);
       expect(statSync(target).mode & 0o777).toBe(0o640);
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    "preserves symlink-sensitive parent traversal for both input and output",
+    () => {
+      const f = fixture();
+      const child = join(f.root, "child");
+      mkdirSync(join(child, "nested"), { recursive: true });
+      symlinkSync(join(child, "nested"), join(f.root, "link"));
+      write(f.input, [candidate("wrong.py")]);
+      writeFileSync(f.output, "output sentinel");
+      const input = join(child, "input.jsonl");
+      for (const selection of [false, true]) {
+        write(input, [selection ? ranked("right.py") : candidate("right.py")]);
+        const result = run(
+          {
+            ...f,
+            input: "link/../input.jsonl/.",
+            output: "link/../output.jsonl/.",
+          },
+          selection,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(read(join(child, "output.jsonl"))).toEqual([
+          { path: "right.py", area: "src" },
+        ]);
+        expect(readFileSync(f.output, "utf8")).toBe("output sentinel");
+      }
     },
   );
   test.skipIf(process.platform === "win32")(

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
@@ -79,10 +80,7 @@ export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
   const selectedProfile = selectedScanProfile(config);
-  const model =
-    selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
-      ? selectedProfile["model"]
-      : config["model"];
+  const model = scanModel(config);
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
@@ -102,6 +100,14 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+export function scanModel(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model")
+    ? selectedProfile["model"]
+    : config["model"];
 }
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
@@ -128,7 +134,7 @@ export function resolveCommandAuthConfig(
   config: JsonObject,
   home: string,
 ): JsonObject {
-  const resolved = cloneJson(config);
+  const resolved = structuredClone(config);
   const providers = resolved["model_providers"];
   if (isObject(providers)) {
     for (const provider of Object.values(providers)) {
@@ -153,7 +159,8 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
-function inlineToml(value: JsonValue): string {
+/** @internal Serialize one Codex CLI override value without flattening its keys. */
+export function inlineToml(value: JsonValue): string {
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
@@ -186,6 +193,36 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const resolved = deepMerge(
+    structuredClone(config),
+    selectedScanProfile(config) ?? {},
+  );
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
+/** @internal */
+export function scanCyberAccessConfig(
+  config: JsonObject,
+  program: CyberAccessProgram | undefined,
+): JsonObject {
+  if (program === undefined) return config;
+  const resolved = resolveCodexProfile(config);
+  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  return {
+    ...config,
+    features: {
+      ...(isObject(config["features"]) ? config["features"] : {}),
+      // Explicit selections opt in to upstream API-key support. Keep a user's
+      // explicit disable so Codex can report it instead of silently dropping it.
+      api_key_cyber_access_programs:
+        features["api_key_cyber_access_programs"] ?? true,
+    },
+  };
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
@@ -193,7 +230,7 @@ export async function mergedCodexConfig(
     throw new ConfigurationError("codexOverrides must be an object.");
   }
   validateOverrideKeys(config.codexOverrides ?? {});
-  const overrides = cloneJson(config.codexOverrides ?? {});
+  const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
@@ -205,7 +242,12 @@ export async function mergedCodexConfig(
       }
     }
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
+  }
+  return deepMerge(defaults, overrides);
 }
 
 function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
@@ -311,6 +353,11 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
     const profileFeatures = profile["features"];
     if (profileFeatures !== undefined && !isObject(profileFeatures)) {
       throw new ConfigurationError(
@@ -334,14 +381,8 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
         "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
     );
   }
-  if ("features" in overrides) {
-    const features = overrides["features"];
-    if (!isObject(features)) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features must remain a table containing features.multi_agent_v2.",
-      );
-    }
+  const features = overrides["features"];
+  if (isObject(features)) {
     if ("multi_agent_v2" in features) {
       const multiAgentV2 = features["multi_agent_v2"];
       if (!isObject(multiAgentV2)) {
@@ -389,6 +430,15 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
   }
 }
 
+export function mergeCodexOverrides(
+  base: JsonObject,
+  overrides: JsonObject,
+): JsonObject {
+  validateOverrideKeys(base);
+  validateOverrideKeys(overrides);
+  return deepMerge(structuredClone(base), overrides);
+}
+
 /** @internal */
 export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
   for (const [key, value] of Object.entries(overrides)) {
@@ -396,13 +446,9 @@ export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
     base[key] =
       isObject(value) && isObject(existing)
         ? deepMerge({ ...existing }, value)
-        : cloneJson(value);
+        : structuredClone(value);
   }
   return base;
-}
-
-function cloneJson<T extends JsonValue>(value: T): T {
-  return structuredClone(value);
 }
 
 function deepFreezeJson(value: JsonValue): void {

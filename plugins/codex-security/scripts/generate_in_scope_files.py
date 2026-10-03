@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_target import git_blob_bytes, git_command
+
 
 class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
@@ -86,11 +90,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     command = [
         "rg",
         "--files",
+        "--null",
         "--hidden",
         "--path-separator",
         "/",
+        # Prune Git metadata and its contents even when the scope starts inside .git.
         "--glob",
-        "!.git/**",
+        "!**/.git",
+        "--glob",
+        "!**/.git/**",
         "--",
         scope,
     ]
@@ -115,21 +123,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         if (repository / ".git").exists():
             try:
-                tracked = subprocess.run(
-                    [
-                        "git",
-                        "ls-files",
-                        "--cached",
-                        "--ignored",
-                        "--exclude-standard",
-                        "-z",
-                        "--",
-                        scope,
-                    ],
-                    cwd=repository,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
+                tracked = git_command(
+                    repository,
+                    "ls-files",
+                    "--cached",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                    scope,
+                    text=False,
                 )
             except OSError:
                 tracked = None
@@ -138,29 +141,33 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for path in tracked.stdout.split(b"\0"):
                     candidate = repository / os.fsdecode(path)
                     if path and candidate.is_file() and not candidate.is_symlink():
-                        inventory.write(prefix + path + b"\n")
+                        inventory.write(prefix + path + b"\0")
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        rows: list[bytes] = []
+        for path in inventory.read().split(b"\0"):
+            if not path:
+                continue
+            if b"\n" in path or b"\r" in path:
+                raise InventoryError(
+                    "Repository contains a path that cannot fit in the file inventory"
+                )
+            rows.append(path + b"\n")
 
-    return write_inventory(output, rows)
+    return write_inventory(output, sorted(set(rows)))
 
 
 def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "diff",
-            "--raw",
-            "-z",
-            "--diff-filter=ACMRD",
-            f"{base}..{head}",
-        ],
-        capture_output=True,
-        check=True,
+    result = git_command(
+        repository,
+        "diff",
+        "--raw",
+        "-z",
+        "--diff-filter=ACMRD",
+        f"{base}..{head}",
+        text=False,
     )
+    result.check_returncode()
     fields = result.stdout.split(b"\0")
     changed: list[tuple[Path, str]] = []
     index = 0
@@ -186,15 +193,13 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from generate_rank_input import git_changed_paths, path_is_excluded
+    from generate_rank_input import git_changed_paths, path_is_diff_excluded
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,
         TEXT_CODE_EXTENSIONS,
         is_binary_sample,
         preview_for,
     )
-    from workbench_target import git_blob_bytes
 
     rows: list[bytes] = []
     try:
@@ -206,7 +211,7 @@ def generate_diff_in_scope_files(
         eligible = [
             (path, status)
             for path, status in changed
-            if not path_is_excluded(path.relative_to(repository))
+            if not path_is_diff_excluded(path.relative_to(repository))
             and path.suffix.lower() in TEXT_CODE_EXTENSIONS
         ]
         revision_paths = [

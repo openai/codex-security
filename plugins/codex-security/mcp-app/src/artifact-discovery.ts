@@ -10,11 +10,11 @@ import {
   artifactDestination,
   paginateArtifactRows,
   readArtifactJsonl,
-  readArtifactText
+  readArtifactText,
 } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
-  type SchemaDocument
+  type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
@@ -23,7 +23,7 @@ const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
 const discoverySchemaDocuments = [
   discoveryCandidateDefinitions,
-  discoveryCandidatesToolSchema
+  discoveryCandidatesToolSchema,
 ] as SchemaDocument[];
 
 export type RawDiscoveryLocationRole =
@@ -60,51 +60,40 @@ export interface ListCodexSecurityCandidatesInput {
   limit?: number;
 }
 
-export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1>
-  & Record<string, unknown>;
+export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
+  Record<string, unknown>;
 
 /** Every exposed validator is derived from the checked-in JSON Schema source. */
-export const rawDiscoveryLocationSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "rawDiscoveryLocation"
-) as z.ZodType<RawDiscoveryLocation>;
-
-export const rawDiscoveryCandidateSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "rawDiscoveryCandidate"
-) as z.ZodType<RawDiscoveryCandidate>;
-
 export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidateDefinitions.$id,
-  "discoveryCandidate"
+  "discoveryCandidate",
 ) as z.ZodType<CompactDiscoveryCandidate>;
 
 export const discoveryCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidatesToolSchema.$id,
-  "recordDiscoveryCandidatesInput"
+  "recordDiscoveryCandidatesInput",
 ) as z.ZodType<DiscoveryCandidatesInput>;
 
 export const workbenchDiscoveryCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidatesToolSchema.$id,
-  "workbenchRecordDiscoveryCandidatesInput"
+  "workbenchRecordDiscoveryCandidatesInput",
 ) as z.ZodType<DiscoveryCandidatesInput & { scanId: string }>;
 
 export const listCodexSecurityCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidatesToolSchema.$id,
-  "listCandidatesInput"
+  "listCandidatesInput",
 ) as z.ZodType<ListCodexSecurityCandidatesInput>;
 
-export const workbenchListCodexSecurityCandidatesInputSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidatesToolSchema.$id,
-  "workbenchListCandidatesInput"
-) as z.ZodType<ListCodexSecurityCandidatesInput & { scanId: string }>;
+export const workbenchListCodexSecurityCandidatesInputSchema =
+  loadArtifactZodSchema(
+    discoverySchemaDocuments,
+    discoveryCandidatesToolSchema.$id,
+    "workbenchListCandidatesInput",
+  ) as z.ZodType<ListCodexSecurityCandidatesInput & { scanId: string }>;
 
 export interface RecordCodexSecurityDiscoveryCandidatesResult {
   operation: "replace";
@@ -122,42 +111,53 @@ export interface ListCodexSecurityCandidatesResult {
  */
 export async function recordCodexSecurityDiscoveryCandidates(
   input: DiscoveryCandidatesInput,
-  context: ArtifactContext
+  context: ArtifactContext,
 ): Promise<RecordCodexSecurityDiscoveryCandidatesResult> {
   const { candidates } = discoveryCandidatesInputSchema.parse(input);
   const pluginRoot = context.pluginRoot?.trim();
   if (!pluginRoot) {
     throw new Error(
-      "discovery candidates: the plugin runtime is not bound to this scan; "
-      + "restore the scan context before retrying."
+      "discovery candidates: the plugin runtime is not bound to this scan; " +
+        "restore the scan context before retrying.",
     );
   }
 
   const inventoryComponents = [...discoveryComponents, "in_scope_files.txt"];
-  const candidateComponents = [...discoveryComponents, "candidate_ledger.jsonl"];
+  const candidateComponents = [
+    ...discoveryComponents,
+    "candidate_ledger.jsonl",
+  ];
 
   // Verify the inventory is a context-bound regular file before normalization.
-  await readArtifactText(context, inventoryComponents, "discovery review inventory");
+  await readArtifactText(
+    context,
+    inventoryComponents,
+    "discovery review inventory",
+  );
   const inventoryPath = await artifactDestination(
     context,
     inventoryComponents,
-    "discovery review inventory"
+    "discovery review inventory",
   );
-  const destination = await artifactDestination(context, candidateComponents, discoveryLabel);
+  const destination = await artifactDestination(
+    context,
+    candidateComponents,
+    discoveryLabel,
+  );
   const temporaryDirectory = await fs.mkdtemp(
-    join(dirname(destination), ".discovery-candidates-")
+    join(dirname(destination), ".discovery-candidates-"),
   );
   const temporaryInput = join(temporaryDirectory, "candidates.jsonl");
 
   try {
     await fs.chmod(temporaryDirectory, 0o700);
-    const content = candidates.length === 0
-      ? ""
-      : `${candidates.map((candidate) => JSON.stringify(candidate)).join("\n")}\n`;
+    const content = candidates
+      .map((candidate) => `${JSON.stringify(candidate)}\n`)
+      .join("");
     await fs.writeFile(temporaryInput, content, {
       encoding: "utf8",
       flag: "wx",
-      mode: 0o600
+      mode: 0o600,
     });
 
     try {
@@ -174,13 +174,13 @@ export async function recordCodexSecurityDiscoveryCandidates(
           context.repoRoot,
           "--in-scope-files",
           inventoryPath,
-          ...(context.mode === "diff" ? ["--allow-missing-in-scope"] : [])
+          ...(context.mode === "diff" ? ["--allow-missing-in-scope"] : []),
         ],
         {
           cwd: pluginRoot,
           encoding: "utf8",
-          shell: false
-        }
+          shell: false,
+        },
       );
     } catch (error) {
       throw discoveryNormalizationError(error, [
@@ -189,7 +189,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
         [inventoryPath, "the assigned review inventory"],
         [destination, "the candidate set"],
         [context.repoRoot, "the repository"],
-        [pluginRoot, "the plugin runtime"]
+        [pluginRoot, "the plugin runtime"],
       ]);
     }
 
@@ -197,55 +197,59 @@ export async function recordCodexSecurityDiscoveryCandidates(
       context,
       candidateComponents,
       discoveryLabel,
-      candidateSchemaV1
+      candidateSchemaV1,
     );
     return {
       operation: "replace",
-      candidatesRecorded: normalized.length
+      candidatesRecorded: normalized.length,
     };
   } finally {
-    await fs.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    await fs
+      .rm(temporaryDirectory, { recursive: true, force: true })
+      .catch(() => undefined);
   }
 }
 
 /** Read the actual compact ledger, including records added by later shared phases. */
 export async function listCodexSecurityCandidates(
   input: ListCodexSecurityCandidatesInput,
-  context: ArtifactContext
+  context: ArtifactContext,
 ): Promise<ListCodexSecurityCandidatesResult> {
   const page = listCodexSecurityCandidatesInputSchema.parse(input);
   const rows = await readArtifactJsonl(
     context,
     [...discoveryComponents, "candidate_ledger.jsonl"],
     discoveryLabel,
-    compactDiscoveryCandidateSchema
+    compactDiscoveryCandidateSchema,
   );
   return paginateArtifactRows(rows, page, discoveryLabel);
 }
 
 function discoveryNormalizationError(
   error: unknown,
-  privateValues: Array<readonly [string, string]>
+  privateValues: Array<readonly [string, string]>,
 ): Error {
-  const stderr = error && typeof error === "object" && "stderr" in error
-    ? error.stderr
-    : undefined;
-  let detail = typeof stderr === "string"
-    ? stderr.trim()
-    : Buffer.isBuffer(stderr)
-      ? stderr.toString("utf8").trim()
-      : "";
+  const stderr =
+    error && typeof error === "object" && "stderr" in error
+      ? error.stderr
+      : undefined;
+  let detail =
+    typeof stderr === "string"
+      ? stderr.trim()
+      : Buffer.isBuffer(stderr)
+        ? stderr.toString("utf8").trim()
+        : "";
 
   if (!detail) {
     return new Error(
-      `${discoveryLabel}: normalization could not be confirmed; `
-      + "read the current candidate set before retrying.",
-      { cause: error }
+      `${discoveryLabel}: normalization could not be confirmed; ` +
+        "read the current candidate set before retrying.",
+      { cause: error },
     );
   }
 
   for (const [source, replacement] of [...privateValues].sort(
-    ([left], [right]) => right.length - left.length
+    ([left], [right]) => right.length - left.length,
   )) {
     if (source) detail = detail.replaceAll(source, replacement);
   }

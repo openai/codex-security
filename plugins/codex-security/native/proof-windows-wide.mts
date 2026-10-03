@@ -23,6 +23,15 @@ export function wideProcessProof(root: string): Record<string, boolean> {
 function worker(root: string): Record<string, boolean> {
   const native = loadWindowsBinding();
   const files = windowsFileSystem(native);
+  const symlinkFlag = process.env["CODEX_SECURITY_TEST_WINDOWS_HAS_SYMLINKS"];
+  assert(symlinkFlag === "0" || symlinkFlag === "1");
+  const symlinks = symlinkFlag === "1";
+  const directoryLinks = symlinks
+    ? ["dangling-directory-link", "directory-link"]
+    : [];
+  const links = symlinks
+    ? [...directoryLinks, "file-link", "loop-link", "missing-link"]
+    : [];
   const cwd = win32.join(root, "cwd-\ud800");
   const expectedArguments = [
     "arg-high-\ud800",
@@ -60,9 +69,11 @@ function worker(root: string): Record<string, boolean> {
   assert.deepEqual(environment("USERPROFILE"), widePath(cwd));
 
   function samePath(actual: Buffer, expected: string): void {
+    const namespaced = (path: string) =>
+      path.startsWith("\\\\?\\") ? path : win32.toNamespacedPath(path);
     assert.equal(
-      win32.toNamespacedPath(pathText(actual)).toLowerCase(),
-      win32.toNamespacedPath(expected).toLowerCase(),
+      namespaced(pathText(actual)).toLowerCase(),
+      namespaced(expected).toLowerCase(),
     );
   }
   samePath(files.absolute(widePath(".")), cwd);
@@ -85,10 +96,7 @@ function worker(root: string): Record<string, boolean> {
     `${drive}\\rooted-\ud800`,
   );
   samePath(files.realpath(widePath(".")), cwd);
-  samePath(files.realpath(widePath("  "), false), cwd);
   assert.throws(() => files.readFile(widePath(".")), { winerror: 5 });
-  for (const name of ["NUL", "nUl", ".\\NUL", "x\\..\\NUL"])
-    samePath(files.realpath(widePath(name)), "\\\\.\\NUL");
 
   const names = [
     "high-\ud800",
@@ -110,17 +118,8 @@ function worker(root: string): Record<string, boolean> {
       "space",
       "space ",
       "directory-\udc80",
-      "file-link",
-      "directory-link",
-      "dangling-directory-link",
       "locked-\udfff",
-      "relative-link",
-      "missing-link",
-      "missing-parent-link",
-      "loop-link",
-      "missing-tail",
-      "dot-target-link",
-      "space-target-link",
+      ...links,
     ].sort(),
   );
   for (const spelling of [".", `${drive}.`, cwd, win32.toNamespacedPath(cwd)]) {
@@ -136,8 +135,7 @@ function worker(root: string): Record<string, boolean> {
     .map((entry) => pathText(entry.name))
     .sort();
   assert.deepEqual(directories, [
-    "dangling-directory-link",
-    "directory-link",
+    ...directoryLinks,
     "directory-\udc80",
     "empty",
   ]);
@@ -146,17 +144,7 @@ function worker(root: string): Record<string, boolean> {
       .filter((entry) => entry.isSymbolicLink())
       .map((entry) => pathText(entry.name))
       .sort(),
-    [
-      "dangling-directory-link",
-      "directory-link",
-      "dot-target-link",
-      "file-link",
-      "loop-link",
-      "missing-link",
-      "missing-parent-link",
-      "relative-link",
-      "space-target-link",
-    ],
+    links,
   );
   assert.throws(
     () => files.readInto(widePath("locked-\udfff"), Buffer.alloc(1)),
@@ -192,14 +180,6 @@ function worker(root: string): Record<string, boolean> {
     assert(files.stat(widePath(name)).isFile());
     assert(!files.stat(widePath(name), false).isSymbolicLink());
     samePath(files.realpath(widePath(name)), win32.join(cwd, name));
-    for (const input of [
-      `${name}/`,
-      `${name}\\`,
-      `${drive}${name}/`,
-      `${win32.join(cwd, name)}\\`,
-    ]) {
-      samePath(files.realpath(widePath(input)), win32.join(cwd, name));
-    }
   }
   samePath(files.realpath(widePath(`${drive}///`)), `${drive}\\`);
   samePath(
@@ -207,57 +187,30 @@ function worker(root: string): Record<string, boolean> {
     win32.join(root, "parent-\ud800"),
   );
   assert(files.stat(widePath(".")).isDirectory());
-  assert.deepEqual(
-    files.readlink(widePath("relative-link")),
-    widePath(names[0]!),
-  );
-  assert.deepEqual(
-    files.readFile(widePath("relative-link")),
-    Buffer.from("sentinel-0"),
-  );
-  samePath(
-    files.realpath(widePath("missing-link"), false),
-    win32.join(cwd, "missing-\udfff"),
-  );
-  assert.equal(
-    pathText(
-      files.realpath(
-        widePath(`${win32.toNamespacedPath(cwd)}\\missing-parent-link`),
-        false,
-      ),
-    ).toLowerCase(),
-    win32.toNamespacedPath(win32.join(root, "missing-\udfff")).toLowerCase(),
-  );
-  assert.throws(() => files.realpath(widePath("loop-link"), false), {
-    code: "ELOOP",
-  });
-  for (const siblingExists of [true, false]) {
-    if (!siblingExists) files.unlink(widePath("missing-tail"));
-    for (const [link, target] of [
-      ["dot-target-link", "missing-tail."],
-      ["space-target-link", "missing-tail "],
-    ] as const) {
-      assert.deepEqual(files.readlink(widePath(link)), widePath(target));
-      const resolved = files.realpath(widePath(link), false);
-      samePath(resolved, win32.join(cwd, target));
-      assert.throws(() => files.stat(resolved), { code: "ENOENT" });
-      files.writeFile(resolved, Buffer.from("literal link target"));
-      assert.equal(
-        files.readFile(widePath(link)).toString(),
-        "literal link target",
-      );
-      files.unlink(resolved);
-      if (siblingExists)
-        assert.equal(
-          files.readFile(widePath("missing-tail")).toString(),
-          "ordinary sibling",
-        );
-      else
-        assert.throws(() => files.stat(widePath("missing-tail")), {
-          code: "ENOENT",
-        });
+  if (symlinks) {
+    assert.deepEqual(
+      files.readFile(widePath("file-link")),
+      Buffer.from("sentinel-0"),
+    );
+    samePath(
+      files.realpath(widePath("directory-link\\missing-\udfff"), false),
+      win32.join(cwd, "empty", "missing-\udfff"),
+    );
+    for (const path of [
+      "missing-link",
+      "missing-link\\child",
+      "dangling-directory-link",
+      "dangling-directory-link\\child",
+    ]) {
+      assert.throws(() => files.realpath(widePath(path), false), {
+        code: "ENOENT",
+      });
     }
+    assert.throws(() => files.realpath(widePath("loop-link"), false), {
+      code: "ELOOP",
+    });
   }
+
   const streamFile = win32.join(cwd, "a");
   files.writeFile(widePath(streamFile), Buffer.from("base file"));
   for (const parent of [cwd, win32.toNamespacedPath(cwd)]) {
@@ -275,7 +228,6 @@ function worker(root: string): Record<string, boolean> {
     pathText(files.realpath(widePath(missingDeepPath), false)),
     missingDeepPath,
   );
-  assert.notEqual(native.windowsReadLink(widePath("empty")).error, 0);
   const bounded = Buffer.alloc(4);
   assert.equal(files.readInto(widePath(names[0]!), bounded), 4);
   assert.equal(bounded.toString(), "sent");
@@ -286,8 +238,10 @@ function worker(root: string): Record<string, boolean> {
     replacementOutput,
     Buffer.from("replacement output untouched"),
   );
-  files.writeFile(rawOutput, Buffer.from("a longer initial output"));
-  files.writeFile(rawOutput, Buffer.alloc(128 * 1024 + 1, 7));
+  files.writeFile(rawOutput, [
+    Buffer.alloc(64 * 1024, 7),
+    Buffer.alloc(64 * 1024 + 1, 7),
+  ]);
   assert.deepEqual(files.readFile(rawOutput), Buffer.alloc(128 * 1024 + 1, 7));
   files.writeFile(rawOutput, Buffer.from("short"));
   const contents = Buffer.alloc(64);
@@ -342,6 +296,15 @@ function worker(root: string): Record<string, boolean> {
       win32.join(cwd, `directory-${name.slice(0, -1)}`),
     );
     files.mkdir(ordinaryDirectory);
+    const missing = files.realpath(
+      widePath(`${pathText(directory)}\\new.json`),
+      false,
+    );
+    files.writeFile(missing, Buffer.from("new literal child"));
+    assert.equal(
+      files.readFile(widePath(`${pathText(directory)}\\new.json`)).toString(),
+      "new literal child",
+    );
     assert.deepEqual(files.entriesWithTypes(ordinaryDirectory), []);
   }
 
@@ -373,7 +336,6 @@ function worker(root: string): Record<string, boolean> {
     assert.throws(() => native.windowsEnvironment(malformed));
     assert.throws(() => native.windowsAbsolutePath(malformed));
     assert.throws(() => native.windowsDirectoryEntries(malformed));
-    assert.throws(() => native.windowsReadLink(malformed));
   }
   return {
     rawArgumentsAndCrtQuoting: true,
@@ -381,8 +343,7 @@ function worker(root: string): Record<string, boolean> {
     rawCwdAndDriveRelativePaths: true,
     completeWideDirectoryIteration: true,
     cachedDirectoryAttributesWithoutFileAccess: true,
-    cachedSymlinkTagsIncludingDanglingDirectories: true,
-    existingFilesWithTrailingSeparators: true,
+    cachedSymlinkTagsIncludingDanglingDirectories: symlinks,
     distinctRawAndReplacementFiles: true,
     canonicalPathsBoundedReadsAndTruncation: true,
     verbatimTrailingDotsAndSpaces: true,

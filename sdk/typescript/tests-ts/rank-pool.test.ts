@@ -325,6 +325,7 @@ describe("rank pool helpers", () => {
     );
     expect(make({ ...f, directory: join(f.root, "alias") }).status).toBe(0);
     complete(f);
+    expect(validate({ ...f, plan: f.plan + sep + "." }).status).toBe(0);
     expect(
       validate({
         ...f,
@@ -337,6 +338,15 @@ describe("rank pool helpers", () => {
         directory: f.root + sep + "missing" + sep + ".." + sep + "rank_shards",
       }).status,
     ).toBe(process.platform === "win32" ? 0 : 1);
+  });
+
+  test("rejects looping shard aliases without replacing the plan", () => {
+    const f = fixture();
+    const loop = join(f.root, "loop");
+    symlinkSync(loop, loop, process.platform === "win32" ? "junction" : "dir");
+    writeFileSync(f.plan, "preserve plan");
+    expect(make({ ...f, directory: loop }).status).toBe(1);
+    expect(readFileSync(f.plan, "utf8")).toBe("preserve plan");
   });
 
   test("checks shard existence and names before loading a missing or malformed plan", () => {

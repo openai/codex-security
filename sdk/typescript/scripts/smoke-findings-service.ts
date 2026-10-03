@@ -53,22 +53,20 @@ const findings: Finding[] = [
     ...example,
     extensions: { ...example.extensions, smokeGroup: "duplicate" },
   },
-  ...[1, 2, 3].map(
-    (index): Finding => ({
-      ...example,
-      findingId: `csf_${"f".repeat(23)}${index}`,
-      occurrenceId: `occ_${"f".repeat(23)}${index}`,
-      fingerprints: {
-        ...example.fingerprints,
-        primary: `codex-security/v1:sha256:${"f".repeat(63)}${index}`,
-      },
-      title: `Synthetic finding ${index}`,
-      extensions: {
-        ...example.extensions,
-        smokeGroup: index < 3 ? "duplicate" : "distinct",
-      },
-    }),
-  ),
+  ...[1, 2, 3].map((index): Finding => ({
+    ...example,
+    findingId: `csf_${"f".repeat(23)}${index}`,
+    occurrenceId: `occ_${"f".repeat(23)}${index}`,
+    fingerprints: {
+      ...example.fingerprints,
+      primary: `codex-security/v1:sha256:${"f".repeat(63)}${index}`,
+    },
+    title: `Synthetic finding ${index}`,
+    extensions: {
+      ...example.extensions,
+      smokeGroup: index < 3 ? "duplicate" : "distinct",
+    },
+  })),
 ];
 const ids = findings.map((finding) => finding.findingId);
 

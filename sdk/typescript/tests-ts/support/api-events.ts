@@ -1,10 +1,10 @@
-import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, cp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
+import { createTemporaryDirectories } from "./temporary-directories.js";
 
 type PreparedRuntime = Awaited<
   ReturnType<
@@ -37,6 +37,7 @@ export type ScanObserverName = Parameters<
 type ScanEventOptions = Pick<
   Parameters<typeof runScanEvents>[0],
   | "authentication"
+  | "modelProvider"
   | "expectedFilesTotal"
   | "onActivity"
   | "onObserverError"
@@ -49,16 +50,10 @@ type ScanEventOptions = Pick<
 > & { abortController?: AbortController };
 
 export function createApiTestFixtures() {
-  const temporaryDirectories: string[] = [];
+  const temporaryDirectories = createTemporaryDirectories();
 
   return {
-    async cleanup(): Promise<void> {
-      await Promise.all(
-        temporaryDirectories
-          .splice(0)
-          .map((path) => rm(path, { recursive: true, force: true })),
-      );
-    },
+    cleanup: temporaryDirectories.cleanup,
 
     async copyCompletedScan(root: string): Promise<string> {
       const scanDir = join(root, "scan");
@@ -71,12 +66,15 @@ export function createApiTestFixtures() {
     },
 
     async temporaryDirectory(): Promise<string> {
-      const path = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-api-")),
-      );
-      temporaryDirectories.push(path);
-      return path;
+      return temporaryDirectories.create("codex-security-api-");
     },
+  };
+}
+
+export async function* failedPostScanEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
   };
 }
 

@@ -1,4 +1,4 @@
-import { createHash, X509Certificate } from "node:crypto";
+import { X509Certificate, hash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -509,8 +509,7 @@ export function verifyPublishedRelease(metadata, archive, expected) {
   assertExpectedGitHead(metadata, expected.gitHead);
 
   const integrity = metadata["dist.integrity"] ?? metadata.dist?.integrity;
-  const expectedIntegrity =
-    "sha512-" + createHash("sha512").update(archive).digest("base64");
+  const expectedIntegrity = "sha512-" + hash("sha512", archive, "base64");
   if (integrity !== expectedIntegrity) {
     throw new Error(
       "Published npm integrity must match the verified release artifact.",
@@ -527,7 +526,7 @@ export function verifyPublishedRelease(metadata, archive, expected) {
     version,
     gitHead: expected.gitHead,
     integrity: expectedIntegrity,
-    sha256: createHash("sha256").update(archive).digest("hex"),
+    sha256: hash("sha256", archive),
   };
 }
 
@@ -538,7 +537,7 @@ export function verifyGitHubPublishedRelease(
   provenance,
 ) {
   const version = releaseVersion(metadata);
-  const sha512 = createHash("sha512").update(archive).digest("hex");
+  const sha512 = hash("sha512", archive);
   if (
     provenance?.version !== version ||
     provenance.gitHead !== expected.gitHead ||
@@ -631,7 +630,7 @@ export function verifySignatureAudit(report, archive, expected) {
     throw new Error("The verified SLSA provenance statement is invalid.");
   }
 
-  const sha512 = createHash("sha512").update(archive).digest("hex");
+  const sha512 = hash("sha512", archive);
   const expectedSubject = `pkg:npm/%40openai/codex-security@${version}`;
   if (
     !Array.isArray(statement.subject) ||
@@ -802,8 +801,7 @@ export function verifyGitHubRelease(
     throw new Error("Existing GitHub Release must be published and stable.");
   }
 
-  const expectedDigest =
-    "sha256:" + createHash("sha256").update(archive).digest("hex");
+  const expectedDigest = "sha256:" + hash("sha256", archive);
   const asset = Array.isArray(release.assets)
     ? release.assets.find((candidate) => candidate?.name === assetName)
     : undefined;
@@ -811,8 +809,7 @@ export function verifyGitHubRelease(
   const downloadedDigest =
     downloadedArchive === undefined
       ? undefined
-      : "sha256:" +
-        createHash("sha256").update(downloadedArchive).digest("hex");
+      : "sha256:" + hash("sha256", downloadedArchive);
   if (
     asset === undefined ||
     (publishedDigest != null && publishedDigest !== expectedDigest) ||

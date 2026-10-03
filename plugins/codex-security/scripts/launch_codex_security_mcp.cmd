@@ -46,11 +46,10 @@ if defined CODEX_CLI_PATH for %%I in ("%CODEX_CLI_PATH%") do if exist "%%~dpIcua
   goto run
 )
 
-rem Search PATH explicitly: helper mode runs inside the scanned repository.
-for /f "delims=" %%N in ('"%SystemRoot%\System32\where.exe" $PATH:node 2^>nul') do (
-  set "CODEX_SECURITY_MCP_NODE=%%N"
-  goto run
-)
+rem Resolve Node from PATH once and launch that exact executable.
+set "CODEX_SECURITY_MCP_SEARCH_PATH=%PATH:"=%"
+for %%I in (node.exe) do set "CODEX_SECURITY_MCP_NODE=%%~$CODEX_SECURITY_MCP_SEARCH_PATH:I"
+if defined CODEX_SECURITY_MCP_NODE goto run
 
 echo Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime. 1>&2
 exit /b 127

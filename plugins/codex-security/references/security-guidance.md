@@ -4,6 +4,8 @@
 
 ## Resolve
 
+Read `artifact-storage.md` for the applicable storage rules. When using its artifact MCP, request `--out -`, consume the result directly, and save the exact output as `security_guidance.md` through `save_codex_security_artifact` if required; do not pass the persistent artifact path to the helper.
+
 Compile the full `SECURITY.md` policy for a file or directory with:
 
 ```

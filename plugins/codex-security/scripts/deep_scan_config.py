@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 from pathlib import Path
@@ -13,12 +14,15 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
-DEFAULT_WORKERS = 4
-DEFAULT_SUBAGENTS = 3
-DEFAULT_STOP_AFTER_NO_NEW = 4
-DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
-DEFAULT_MAX_DISCOVERY_RUNS = 40
-DEFAULT_MAX_TIME_HOURS = 96
+DEFAULTS = json.loads(
+    Path(__file__).with_name("deep_scan_defaults.json").read_text(encoding="utf-8")
+)
+DEFAULT_WORKERS = DEFAULTS["workers"]
+DEFAULT_SUBAGENTS = DEFAULTS["subagents"]
+DEFAULT_STOP_AFTER_NO_NEW = DEFAULTS["stopAfterNoNew"]
+DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
+DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
+DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
 CONFIG_KEYS = {
     "workers",
@@ -130,8 +134,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--available-parallelism", type=int, required=True)
     args = parser.parse_args()
-    import json
-
     print(json.dumps(resolve_deep_scan_config(args.available_parallelism), sort_keys=True))
 
 
