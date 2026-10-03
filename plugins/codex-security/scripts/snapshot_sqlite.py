@@ -16,6 +16,12 @@ def main() -> None:
     source = args.source.expanduser().resolve(strict=True)
     destination = args.destination.expanduser().absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.samefile(source):
+        parser.error(
+            f"destination {destination} and source {source} refer to the same "
+            "database file; snapshotting a database onto itself cannot make "
+            "progress"
+        )
     with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as source_connection:
         with sqlite3.connect(destination) as destination_connection:
             source_connection.backup(destination_connection)

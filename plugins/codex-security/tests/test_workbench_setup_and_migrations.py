@@ -44,6 +44,38 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
+def test_sqlite_snapshot_rejects_snapshotting_a_database_onto_itself(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+    completed = subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(source)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "refer to the same database file" in completed.stderr
+
+
+def test_sqlite_snapshot_rejects_destination_aliased_to_the_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    alias = tmp_path / "alias.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+    os.link(source, alias)
+    completed = subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(alias)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "refer to the same database file" in completed.stderr
+
+
 def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     completion_lock = namespace["scan_completion_lock"]
