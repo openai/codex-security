@@ -1541,6 +1541,15 @@ def merge_saved_results(
     }
     for _, draft, owner in all_sources:
         surfaces = draft["coverage"].get("surfaces", [])
+        by_id: dict[str, dict[str, Any]] = {}
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
+                continue
+            if identity in by_id and surface != by_id[identity]:
+                ambiguous_surface_ids.add((owner, identity))
+            by_id[identity] = surface
+    for _, draft, owner in all_sources:
+        surfaces = draft["coverage"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if (
                 isinstance(surface, dict)
