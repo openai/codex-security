@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash as cryptoHash } from "node:crypto";
 import type { TurnOptions } from "@openai/codex-sdk";
 import { describe, expect, test } from "bun:test";
 import {
@@ -15,6 +15,17 @@ import {
 } from "../src/scan-comparison.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
+const evidenceRequest = (
+  beforeOccurrenceIds: string[],
+  afterOccurrenceIds: string[] = [],
+  offset = 0,
+) => ({ kind: "evidence", beforeOccurrenceIds, afterOccurrenceIds, offset });
+
+const evidenceResponse = (...args: Parameters<typeof evidenceRequest>) => ({
+  ...empty,
+  request: evidenceRequest(...args),
+});
+
 const confirmedPair = (
   before: string,
   after: string,
@@ -422,15 +433,7 @@ describe("finding catalogue", () => {
         if (index === 0) {
           expect(data<CatalogueData>(prompt).findings.before).toHaveLength(2);
           expect(prompt).not.toContain("EARLIER_EVIDENCE");
-          return {
-            ...empty,
-            request: {
-              kind: "evidence",
-              beforeOccurrenceIds: ["old-b"],
-              afterOccurrenceIds: ["new"],
-              offset: 0,
-            },
-          };
+          return evidenceResponse(["old-b"], ["new"]);
         }
         const evidence = JSON.parse(
           data<EvidenceData>(prompt).content,
@@ -506,15 +509,7 @@ describe("finding catalogue", () => {
     ).toEqual(response);
     expect(direct.prompts).toHaveLength(1);
 
-    const evidence = conversation(() => ({
-      ...empty,
-      request: {
-        kind: "evidence",
-        beforeOccurrenceIds: ["old"],
-        afterOccurrenceIds: ["new"],
-        offset: 0,
-      },
-    }));
+    const evidence = conversation(() => evidenceResponse(["old"], ["new"]));
     await expect(
       matchScanFindingsInternal(
         input,
@@ -694,16 +689,7 @@ describe("finding catalogue", () => {
     const pieces: string[] = [];
     let offset = 0;
     const observed = conversation((prompt, index) => {
-      if (index === 0)
-        return {
-          ...empty,
-          request: {
-            kind: "evidence",
-            beforeOccurrenceIds: ["old"],
-            afterOccurrenceIds: [],
-            offset: 0,
-          },
-        };
+      if (index === 0) return evidenceResponse(["old"]);
       const page = data<EvidenceData>(prompt);
       expect(page.offset).toBe(offset);
       pieces.push(page.content);
@@ -726,16 +712,7 @@ describe("finding catalogue", () => {
   test("does not finish unrelated evidence when confirming another match", async () => {
     const proposed = confirmedPair("old", "new");
     const observed = conversation((prompt, index) => {
-      if (index === 0)
-        return {
-          ...empty,
-          request: {
-            kind: "evidence",
-            beforeOccurrenceIds: ["other"],
-            afterOccurrenceIds: [],
-            offset: 0,
-          },
-        };
+      if (index === 0) return evidenceResponse(["other"]);
       expect(data<EvidenceData>(prompt).nextOffset).not.toBeNull();
       return proposed;
     });
@@ -786,8 +763,7 @@ describe("finding catalogue", () => {
       { before: [original], after: [finding("new")] },
       { codex: observed.codex },
     );
-    const hash = (value: string) =>
-      createHash("sha256").update(value).digest("hex");
+    const hash = (value: string) => cryptoHash("sha256", value);
     expect(pieces.length).toBeGreaterThan(1);
     expect(hash(pieces.join(""))).toBe(
       hash(JSON.stringify({ before: [original], after: [] })),
@@ -804,15 +780,7 @@ describe("finding catalogue", () => {
     const reads = { a: 0, b: 0 };
     const pieces: Record<Id, string[]> = { a: [], b: [] };
     const offsets = new Map<Id, number | null>();
-    const request = (id: Id, offset = 0) => ({
-      ...empty,
-      request: {
-        kind: "evidence",
-        beforeOccurrenceIds: [id],
-        afterOccurrenceIds: [],
-        offset,
-      },
-    });
+    const request = (id: Id, offset = 0) => evidenceResponse([id], [], offset);
     const before = ids.map((id) =>
       finding(id, {
         codeEvidence: [
@@ -878,44 +846,16 @@ describe("finding catalogue", () => {
   );
 
   test.each([
-    [
-      "no findings",
-      {
-        kind: "evidence",
-        beforeOccurrenceIds: [],
-        afterOccurrenceIds: [],
-        offset: 0,
-      },
-      "outside its findings",
-    ],
-    [
-      "another finding",
-      {
-        kind: "evidence",
-        beforeOccurrenceIds: ["outside"],
-        afterOccurrenceIds: [],
-        offset: 0,
-      },
-      "outside its findings",
-    ],
+    ["no findings", evidenceRequest([]), "outside its findings"],
+    ["another finding", evidenceRequest(["outside"]), "outside its findings"],
     [
       "a nonzero first offset",
-      {
-        kind: "evidence",
-        beforeOccurrenceIds: ["old"],
-        afterOccurrenceIds: [],
-        offset: 1,
-      },
+      evidenceRequest(["old"], [], 1),
       "invalid evidence offset",
     ],
     [
       "an invalid offset",
-      {
-        kind: "evidence",
-        beforeOccurrenceIds: ["old"],
-        afterOccurrenceIds: [],
-        offset: 999,
-      },
+      evidenceRequest(["old"], [], 999),
       "invalid evidence offset",
     ],
     [
@@ -935,12 +875,7 @@ describe("finding catalogue", () => {
   });
 
   test("stops a repeated request and honors cancellation between turns", async () => {
-    const request = {
-      kind: "evidence",
-      beforeOccurrenceIds: ["old"],
-      afterOccurrenceIds: [],
-      offset: 0,
-    };
+    const request = evidenceRequest(["old"]);
     const repeated = conversation(() => ({ ...empty, request }));
     const input = { before: [finding("old")], after: [finding("new")] };
     await expect(
@@ -969,15 +904,7 @@ describe("finding catalogue", () => {
       const request = (
         beforeOccurrenceIds: string[],
         afterOccurrenceIds: string[] = [],
-      ) => ({
-        ...empty,
-        request: {
-          kind: "evidence",
-          beforeOccurrenceIds,
-          afterOccurrenceIds,
-          offset: 0,
-        },
-      });
+      ) => evidenceResponse(beforeOccurrenceIds, afterOccurrenceIds);
       const requests =
         scenario === "alternating"
           ? [request(["a"]), request([], ["new"]), request(["a"])]
@@ -999,15 +926,8 @@ describe("finding catalogue", () => {
     const ids = ["a", "b", "c", "d"];
     const sentBefore: string[] = [];
     const sentAfter: string[] = [];
-    const request = (beforeOccurrenceIds: string[]) => ({
-      ...empty,
-      request: {
-        kind: "evidence",
-        beforeOccurrenceIds,
-        afterOccurrenceIds: ["new"],
-        offset: 0,
-      },
-    });
+    const request = (beforeOccurrenceIds: string[]) =>
+      evidenceResponse(beforeOccurrenceIds, ["new"]);
     const observed = conversation((prompt, index) => {
       if (index > 0) {
         const payload = data<EvidenceData>(prompt);
@@ -1036,15 +956,8 @@ describe("finding catalogue", () => {
       codeEvidence: "x".repeat(2 * (1 << 20)) + "🙂",
     });
     const pieces: string[] = [];
-    const request = (beforeOccurrenceIds: string[], offset = 0) => ({
-      ...empty,
-      request: {
-        kind: "evidence",
-        beforeOccurrenceIds,
-        afterOccurrenceIds: [],
-        offset,
-      },
-    });
+    const request = (beforeOccurrenceIds: string[], offset = 0) =>
+      evidenceResponse(beforeOccurrenceIds, [], offset);
     const observed = conversation((prompt, index) => {
       if (index === 0) return request(["small"]);
       const payload = data<EvidenceData>(prompt);

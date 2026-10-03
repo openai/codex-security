@@ -7,6 +7,7 @@ import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
   codexSecurityStateDirectory,
+  workbenchEnvironment,
   resolvePluginPython,
   runWorkbench,
   type WorkbenchCommandOptions,
@@ -183,10 +184,7 @@ export class FindingWorkflow {
         environment: this.environment,
         configuredPath: this.pythonPath,
       }),
-      environment: {
-        ...this.environment,
-        CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(this.environment),
-      },
+      environment: workbenchEnvironment(this.environment),
       failureMessage: "Could not save or resume the findings workflow",
     }))();
     return await this.workbench(await this.options, args, input);

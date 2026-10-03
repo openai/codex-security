@@ -1,6 +1,6 @@
 import { findingFingerprint, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
-import { chmod, cp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
@@ -18,20 +18,20 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
-
-const directories = createTemporaryDirectories({ canonical: false });
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "classify-scan-",
+  false,
+);
 const destination = { destination: "linear", teamId: "team-example" } as const;
-afterEach(directories.cleanup);
+afterEach(cleanup);
 
 async function fixture() {
-  const root = await directories.create("classify-scan-");
+  const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDirectory, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   const manifest = JSON.parse(
     await readFile(join(scanDirectory, "scan-manifest.json"), "utf8"),

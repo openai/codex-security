@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
@@ -13,6 +13,7 @@ import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { rejecting } from "./support/errors.js";
 
 const servers: Server[] = [];
 const directories: string[] = [];
@@ -130,9 +131,7 @@ async function dashboard(
 test("dashboard serves only findings and groups, and never calls an embedding provider", async () => {
   const { store } = await fixture();
   const base = await start(store, {
-    async embed() {
-      throw new Error("Read-only dashboard called embeddings");
-    },
+    embed: rejecting("Read-only dashboard called embeddings"),
   });
   for (const path of ["/", "/dashboard"]) {
     const redirect = await fetch(`${base}${path}`, { redirect: "manual" });
@@ -620,9 +619,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
 test("rolls back the entire dedupe batch if a finding is missing and rejects invalid groups", async () => {
   const { store, environment } = await fixture();
   const base = await start(store, {
-    embed: async () => {
-      throw new Error("Grouping must not embed");
-    },
+    embed: rejecting("Grouping must not embed"),
   });
   await store.insert([embedded(1), embedded(2), embedded(3)]);
   const [a, b, c] = [1, 2, 3].map((index) => finding(index).findingId) as [
@@ -936,12 +933,9 @@ test("imports persist repository associations and keep untagged findings in expl
 
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
   const { store } = await fixture();
-  let calls = 0;
+  const embed = mock<() => Promise<never[]>>().mockResolvedValue([]);
   const base = await start(store, {
-    async embed() {
-      calls++;
-      return [];
-    },
+    embed,
   });
   for (const body of [
     "not json",
@@ -993,7 +987,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "not_found" });
   }
-  expect(calls).toBe(0);
+  expect(embed).toHaveBeenCalledTimes(0);
 });
 
 test("embedding failure leaves no partial findings or vectors", async () => {
