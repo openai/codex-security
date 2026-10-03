@@ -191,7 +191,8 @@ export async function runPolicyCommand(
     if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Architecture: ${display(draft.specificationPath)}`);
-      write(`Threat model: ${display(draft.threatModelPath)}`);
+      if (draft.threatModelPath !== null)
+        write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
           "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
@@ -213,6 +214,7 @@ export async function runPolicyCommand(
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
         threatModelPath: draft.threatModelPath,
+        threatModel: draft.threatModel,
         customPlugin: draft.customPlugin,
         reviewNotes: draft.reviewNotes,
         cost,

@@ -244,6 +244,12 @@ async function testDeepScanStdioLifecycle() {
       true,
     );
     assertReadOnlyWorkerInvocation(startedWorker.argv);
+    assert.equal(
+      startedWorker.argv.includes(
+        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
+      ),
+      true,
+    );
 
     // Discovery progress is admitted once the first complete Standard worker is active.
     const discoveryProgress = await server.request(
@@ -859,6 +865,12 @@ async function testDeepScanStdioLifecycle() {
         restartStartIndex,
       );
       for (const execution of executions) {
+        assert.equal(
+          execution.argv.includes(
+            `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
+          ),
+          true,
+        );
         assert.equal(
           execution.argv.includes('model_reasoning_summary="none"'),
           true,

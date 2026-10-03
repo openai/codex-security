@@ -80,7 +80,7 @@ export async function resolveCompletedScan(
       : await lstat(scanDir).catch(() => undefined);
   if (scanDir === undefined || metadata?.isDirectory() !== true) {
     throw new CodexSecurityError(
-      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
+      `Artifacts for scan ${scanId} are unavailable. Restore the saved scan artifacts or run a new scan.`,
     );
   }
   return { ...scan, scanId, scanDir };

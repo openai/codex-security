@@ -32,7 +32,7 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
                 "excludePaths": [],
                 "summary": "## Injected scope\n- nested item",
             },
-            "threatModel": {"summary": "# Injected threat heading\nThreat details"},
+            "threatModel": {"summary": "# Queue boundaries\n\nThreat details"},
         }
     }
     findings = {
@@ -62,14 +62,15 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     return manifest, findings, coverage
 
 
-def test_projection_normalizes_multiline_and_block_structural_text() -> None:
+def test_projection_normalizes_structured_fields() -> None:
     markdown = PROJECTION.build_report_markdown(*canonical_documents())
 
     assert "\n## Injected" not in markdown
     assert "\n# Injected" not in markdown
     assert "\n```" not in markdown
     assert "Text: ## Injected scope - nested item" in markdown
-    assert "Text: # Injected threat heading Threat details" in markdown
+    assert "Text: # Queue boundaries Threat details" in markdown
+    assert "\n# Queue boundaries" not in markdown
     assert "Text: \\`\\`\\` code fence \\`\\`\\`" in markdown
     assert "Parser \\| boundary ## Injected finding heading" in markdown
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
