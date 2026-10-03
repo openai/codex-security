@@ -5,10 +5,11 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { delimiter, join, normalize, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join, normalize, relative, resolve } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -30,6 +31,7 @@ import {
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  ScanResult,
   VERSION,
 } from "../src/index.js";
 import {
@@ -59,6 +61,21 @@ import { runCommand } from "./support/shell.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+
+function scanResultAt(
+  scanDir: string,
+  levels: Parameters<typeof fakeResult>[0],
+): ScanResult {
+  const base = fakeResult(levels);
+  return new ScanResult({
+    manifest: base.manifest,
+    findings: base.findings,
+    coverage: base.coverage,
+    scanDir,
+    threadId: base.threadId,
+    turnResult: base.turnResult,
+  });
+}
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -112,6 +129,394 @@ describe("CLI", () => {
     ).toBe(0);
     expect(options).toMatchObject({ safetyIdentifier: "synthetic-user" });
     expect(stderr.text()).not.toContain("synthetic-user");
+  });
+
+  test("validates each finding with the scan client before closing it", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    try {
+      const result = scanResultAt(scanDir, ["high", "low"]);
+      const repository = await realpath(tmpdir());
+      const stdout = capture();
+      const lifecycle: string[] = [];
+      const validated: unknown[] = [];
+      let scanSignal: AbortSignal | undefined;
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--validate",
+            "--safety-identifier",
+            "synthetic-user",
+            "--fail-on-severity",
+            "high",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result,
+            currentDirectory: repository,
+            onTurn: (_repository, options) => {
+              lifecycle.push("scan");
+              scanSignal = (options as ScanOptions).signal;
+            },
+            onValidate: async (options) => {
+              lifecycle.push("validate");
+              validated.push(options.finding);
+              expect(options).toMatchObject({
+                repositoryPath: repository,
+                scanId: "scan",
+                safetyIdentifier: "synthetic-user",
+                signal: scanSignal,
+              });
+              expect(options.outputDir).toBeUndefined();
+              return {
+                disposition: "suppressed",
+                report: "# Supplemental assessment",
+                outputDir: join(repository, `evidence-${validated.length}`),
+                threadId: "validation-thread",
+              };
+            },
+            onClose: () => {
+              lifecycle.push("close");
+            },
+          }),
+        ),
+      ).toBe(1);
+      expect(validated).toEqual(result.findings.findings);
+      expect(lifecycle).toEqual(["scan", "validate", "validate", "close"]);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        validation: {
+          status: "complete",
+          findings: 2,
+          reportPath: join(scanDir, "validation.md"),
+        },
+      });
+      const report = await readFile(join(scanDir, "validation.md"), "utf8");
+      expect(report).toContain("# Supplemental assessment");
+      expect(report).toContain(join(repository, "evidence-1"));
+      expect(report).toContain(join(repository, "evidence-2"));
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not overwrite a validation path created during the scan", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const outsideDir = await mkdtemp(
+      join(tmpdir(), "scan-validation-outside-"),
+    );
+    const reportPath = join(scanDir, "validation.md");
+    const outsidePath = join(outsideDir, "outside.txt");
+    try {
+      await writeFile(outsidePath, "keep");
+      if (process.platform === "win32") {
+        await writeFile(reportPath, "keep");
+      } else {
+        await symlink(outsidePath, reportPath);
+      }
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: await realpath(tmpdir()),
+          }),
+        ),
+      ).toBe(0);
+      const output = JSON.parse(stdout.text());
+      expect(output).toMatchObject({ validation: { status: "complete" } });
+      expect(output.validation.reportPath).not.toBe(reportPath);
+      expect(await readFile(output.validation.reportPath, "utf8")).toContain(
+        "Additional evidence is needed.",
+      );
+      expect(await readFile(reportPath, "utf8")).toBe("keep");
+      expect(await readFile(outsidePath, "utf8")).toBe("keep");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retains a completed scan when follow-up validation fails", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const stdout = capture();
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: await realpath(tmpdir()),
+            onValidate: async () => {
+              throw new Error("validation failed");
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { status: "completed" } },
+        validation: { status: "failed", message: "validation failed" },
+      });
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
+  test("skips standalone model calls when the scan has no findings", async () => {
+    let validations = 0;
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          currentDirectory: await realpath(tmpdir()),
+          onValidate: async () => {
+            validations += 1;
+            throw new Error("No findings to validate");
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(validations).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      validation: { status: "complete", findings: 0 },
+    });
+  });
+
+  test("does not report success or patch findings when validation rejects a changed target", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const repository = await realpath(tmpdir());
+    let patches = 0;
+    const stdout = capture();
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--patch", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: repository,
+            onValidate: async () => {
+              throw new Error("The recorded scan target changed.");
+            },
+            onCodex: () => {
+              patches += 1;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(patches).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { status: "completed" } },
+        validation: { status: "failed" },
+      });
+      expect(await readFile(join(scanDir, "validation.md"), "utf8")).toBe("");
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["directory link", "home-relative"])(
+    "uses the same canonical %s repository for scanning and validation",
+    async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), "scan-validation-link-"));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
+      const canonical = await realpath(repository);
+      await symlink(
+        repository,
+        join(root, "linked"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const repositories: string[] = [];
+      try {
+        expect(
+          await main(
+            [
+              "scan",
+              kind === "directory link"
+                ? "linked"
+                : `~/${relative(homedir(), repository)}`,
+              "--validate",
+              "--json",
+            ],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              result: scanResultAt(scanDir, ["high"]),
+              currentDirectory: root,
+              onTurn: (path) => {
+                repositories.push(path);
+              },
+              onValidate: async (options) => {
+                repositories.push(options.repositoryPath);
+                return {
+                  disposition: "deferred",
+                  report: "Assessment",
+                  outputDir: join(root, "evidence"),
+                  threadId: null,
+                };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(repositories).toEqual([canonical, canonical]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["failure", "SIGINT", "SIGTERM"])(
+    "retains completed assessments and stops patching after validation %s",
+    async (signal) => {
+      const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
+      const signals = new FakeSignals();
+      const stdout = capture();
+      let validations = 0;
+      let commands = 0;
+      const exitCode =
+        signal === "failure" ? 2 : signal === "SIGINT" ? 130 : 143;
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--patch", "--json"],
+            stdout.stream,
+            capture().stream,
+            dependencies({
+              signals,
+              result: scanResultAt(scanDir, ["high", "low"]),
+              currentDirectory: repository,
+              onValidate: async ({ signal: abort }) => {
+                validations += 1;
+                if (validations === 1) {
+                  return {
+                    disposition: "reportable",
+                    report: "Completed first assessment.",
+                    outputDir: join(root, "first-evidence"),
+                    threadId: "first",
+                  };
+                }
+                expect(
+                  await readFile(join(scanDir, "validation.md"), "utf8"),
+                ).toContain("Completed first assessment.");
+                if (signal === "failure")
+                  throw new Error("Second assessment failed.");
+                signals.emit(signal);
+                abort!.throwIfAborted();
+                throw new Error("unreachable");
+              },
+              onCodex: () => {
+                commands += 1;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(exitCode);
+        expect(validations).toBe(2);
+        expect(commands).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { status: "completed" } },
+          validation: {
+            status: "failed",
+            findings: 1,
+            reportPath: join(scanDir, "validation.md"),
+            ...(signal === "failure" ? {} : { exitCode }),
+          },
+        });
+        const report = await readFile(join(scanDir, "validation.md"), "utf8");
+        expect(report).toContain("Completed first assessment.");
+        expect(report).toContain(join(root, "first-evidence"));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("keeps earlier reports when retrying validation for a completed workflow scan", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scan-validation-retry-"));
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    const paths: string[] = [];
+    const deps = dependencies({
+      result: scanResultAt(scanDir, ["high"]),
+      currentDirectory: repository,
+      onValidate: async (options) => {
+        expect(options.workflowId).toBe("validation-retry");
+        return {
+          disposition: "deferred",
+          report: "Saved assessment.",
+          outputDir: join(root, "evidence"),
+          threadId: "validation",
+        };
+      },
+    });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const stdout = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--workflow-id",
+              "validation-retry",
+              "--validate",
+              "--json",
+            ],
+            stdout.stream,
+            capture().stream,
+            deps,
+          ),
+        ).toBe(0);
+        const output = JSON.parse(stdout.text());
+        expect(output.validation.status).toBe("complete");
+        paths.push(output.validation.reportPath);
+      }
+      expect(paths[0]).toBe(join(scanDir, "validation.md"));
+      expect(paths[1]).not.toBe(paths[0]);
+      expect(await readFile(paths[0]!, "utf8")).toBe(
+        await readFile(paths[1]!, "utf8"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a cost limit the standalone validator cannot enforce", async () => {
+    let started = false;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--max-cost", "1", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ onRun: () => (started = true) }),
+      ),
+    ).toBe(2);
+    expect(started).toBe(false);
+    expect(stderr.text()).toContain(
+      "standalone validation is not cost-tracked",
+    );
   });
 
   test("exposes Incur help, schemas, manifests, and completions", async () => {
@@ -169,6 +574,7 @@ describe("CLI", () => {
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
+          validate: { type: "boolean", default: false },
           patchSeverity: { enum: ["critical", "high", "medium", "low"] },
           createPr: { type: "boolean" },
           headless: { type: "boolean" },
@@ -1793,6 +2199,7 @@ describe("CLI", () => {
       });
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         async run(_repository, options) {
           if (scenario === "archive") {
             options?.onOutputArchived?.("/tmp/previous-results");
@@ -1820,6 +2227,7 @@ describe("CLI", () => {
     const deps = dependencies();
     const result = fakeResult();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         expect(options?.workflowId).toBe("scan-workflow");
         return result;
@@ -1862,6 +2270,7 @@ describe("CLI", () => {
       activeTimers.delete(timer);
     };
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         expect(activeTimers.size).toBe(1);
         options?.onAuthentication?.({
@@ -3026,6 +3435,7 @@ describe("CLI", () => {
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
     });
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
@@ -3606,6 +4016,7 @@ describe("CLI", () => {
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
     });
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError(
           "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
@@ -3637,6 +4048,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError(
           "Provider failed for tenant=tenant-private request_id=req-internal",
@@ -3749,6 +4161,7 @@ describe("CLI", () => {
         const stderr = capture();
         const deps = dependencies();
         deps.createSecurity = () => ({
+          ...dependencies().createSecurity({}),
           run: async () => {
             throw new CodexSecurityError(message);
           },
@@ -3782,6 +4195,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onWarning?.(
             'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
@@ -3824,6 +4238,7 @@ describe("CLI", () => {
     const deps = dependencies();
     const separators = "\u0085\u2028\u2029";
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onOutputDirReady?.(
           `/tmp/scan${separators}codex-security: debug: forged`,
@@ -3870,6 +4285,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onOutputArchived?.(
           "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
@@ -3915,6 +4331,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onObserverError?.(
           "onWorkerStatus",
@@ -4000,6 +4417,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         const callbacks = options as {
           onScanStarted?: () => void;
@@ -4028,6 +4446,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onScanStarted?.();
         options?.onReconnect?.(2, 5, {
@@ -4056,6 +4475,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onReconnect?.(1, 5, { reason: "network" });
         options?.onReconnect?.(2, 5, { reason: "authentication" });
@@ -4085,6 +4505,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(message);
         },
@@ -4109,6 +4530,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(message);
         },
@@ -4144,6 +4566,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(message);
         },
@@ -4172,6 +4595,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError(
           `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
@@ -4210,6 +4634,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(message);
         },
@@ -4280,6 +4705,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw failure;
         },
@@ -4316,6 +4742,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(detail);
         },
@@ -4336,6 +4763,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError(
           `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
@@ -4364,6 +4792,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError(
           [
@@ -4521,6 +4950,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onWarning?.(warning, { kind: "target_changed" });
           return fakeResult();
@@ -4552,6 +4982,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onWarning?.(warning);
           return fakeResult();
@@ -4573,6 +5004,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onWarning?.(
           "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
@@ -4605,6 +5037,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onTrustedAccessStatus?.("granted");
         return fakeResult();
@@ -4628,6 +5061,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onWarning?.(
           "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
@@ -4653,6 +5087,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onWarning?.(
           "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
@@ -4684,6 +5119,7 @@ describe("CLI", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onWarning?.(warning);
           return fakeResult();
@@ -4706,6 +5142,7 @@ describe("CLI", () => {
     const stderr = capture();
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onObserverError?.(
           "onWorkerStatus",
@@ -5407,6 +5844,7 @@ describe("CLI", () => {
     const stderr = capture();
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError("invalid scan request");
       },
@@ -5427,6 +5865,7 @@ describe("CLI", () => {
     const stderr = capture();
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new CodexSecurityError("invalid scan request");
       },
@@ -5473,6 +5912,7 @@ describe("CLI", () => {
     const stderr = capture();
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new OutputInsideProtectedRootError(output, worktree);
       },
@@ -5523,6 +5963,7 @@ describe("CLI", () => {
     const stderr = capture();
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new OutputInsideProtectedRootError(
           temporary,
@@ -5556,6 +5997,7 @@ describe("CLI", () => {
     const partial = "/tmp/codex-security-partial";
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onOutputDirReady?.(partial);
         throw new OutputInsideProtectedRootError(
@@ -5587,6 +6029,7 @@ describe("CLI", () => {
     const output = `${protectedRoot}/results_sk-proj-SYNTHETIC_OUTPUT_KEY_123`;
     const failing = dependencies();
     failing.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         throw new OutputInsideProtectedRootError(output, protectedRoot);
       },
@@ -5622,6 +6065,7 @@ describe("CLI", () => {
       const stderr = capture();
       const failing = dependencies();
       failing.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw failure;
         },

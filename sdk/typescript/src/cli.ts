@@ -5,7 +5,7 @@ import {
   execFileSync,
   spawn,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants,
@@ -20,6 +20,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -242,6 +243,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  normalizeRepository,
   type ScanTarget,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -1017,6 +1019,7 @@ interface ScanArguments extends ResolvedScanSettings {
   pluginPath?: string;
   pythonPath?: string;
   patch?: boolean;
+  validate?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
   showCost?: boolean;
@@ -1157,7 +1160,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
-  ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
@@ -3558,6 +3561,10 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Patch and verify confirmed findings after the scan."),
+          validate: z
+            .boolean()
+            .default(false)
+            .describe("Run standalone finding validation after the scan."),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -3598,10 +3605,16 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine((options) => !options.validate || !options.dryRun, {
+          message: "--validate cannot be combined with --dry-run.",
+        })
         .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
+          (options) =>
+            !options.mock ||
+            (!options.dryRun && !options.patch && !options.validate),
           {
-            message: "--mock cannot be combined with --dry-run or --patch.",
+            message:
+              "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
       output: scanOutputSchema,
@@ -3666,6 +3679,11 @@ export async function main(
               "--archive-existing requires --output-dir.",
             );
           }
+          if (options.validate && settings.maxCostUsd !== undefined) {
+            throw new CodexSecurityError(
+              "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
+            );
+          }
           outcome = await runScan(
             {
               ...settings,
@@ -3679,6 +3697,7 @@ export async function main(
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               patch: options.patch,
+              validate: options.validate,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
               showCost: options.showCost,
@@ -8252,8 +8271,7 @@ async function executeScan(
   dependencies.addSignalListener("SIGINT", onInterrupt);
   dependencies.addSignalListener("SIGTERM", onTerminate);
 
-  let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
-    null;
+  let security: ReturnType<CliDependencies["createSecurity"]> | null = null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
@@ -8262,6 +8280,8 @@ async function executeScan(
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
+  let validation: Record<string, unknown> | undefined;
+  let validationExitCode = 0;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8269,6 +8289,12 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    if (arguments_.validate) {
+      repository = await normalizeRepository(
+        resolve(directory, expandHome(repository)),
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
@@ -8683,6 +8709,79 @@ async function executeScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
+      if (arguments_.validate) {
+        const findings = result.findings.findings;
+        if (targetWarnings.length > 0) {
+          validation = {
+            status: "skipped",
+            reason: "The scan target changed during execution.",
+          };
+        } else if (findings.length === 0) {
+          validation = { status: "complete", findings: 0 };
+        } else {
+          stopPresentation();
+          try {
+            progress?.stage(`Validating ${findings.length} scan findings`);
+          } catch {}
+          try {
+            const scanDirectory = result.scanDir;
+            let reportPath = join(scanDirectory, "validation.md");
+            const report = await open(reportPath, "wx", 0o600).catch(
+              async (error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+                  throw error;
+                reportPath = join(
+                  scanDirectory,
+                  `validation-${randomUUID()}.md`,
+                );
+                return await open(reportPath, "wx", 0o600);
+              },
+            );
+            validation = { status: "failed", findings: 0, reportPath };
+            let completed = 0;
+            try {
+              for (const finding of findings) {
+                const assessment = await security.validate({
+                  repositoryPath: repository,
+                  scanId: result.manifest.scan.id,
+                  workflowId: arguments_.workflowId,
+                  finding,
+                  auth,
+                  safetyIdentifier: arguments_.safetyIdentifier,
+                  signal: preparationAbortController.signal,
+                });
+                await report.writeFile(
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                );
+                completed += 1;
+                validation = { ...validation, findings: completed };
+              }
+            } finally {
+              await report.close();
+            }
+            validation = {
+              status: "complete",
+              findings: findings.length,
+              reportPath,
+            };
+            try {
+              progress?.stage(`Finding validation saved to ${reportPath}`);
+            } catch {}
+          } catch (error) {
+            validationExitCode = 2;
+            const message = safeErrorMessage(error);
+            validation = { ...validation, status: "failed", message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${message}\n`,
+            );
+            if (validation["reportPath"] !== undefined) {
+              errorOutput.write(
+                `Partial validation report: ${validation["reportPath"]}\n`,
+              );
+            }
+          }
+        }
+      }
     }
   } catch (error) {
     failed = true;
@@ -8712,6 +8811,19 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    if (result !== null && arguments_.validate) {
+      const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
+      errorOutput.write(
+        `codex-security: Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.\n`,
+      );
+      return {
+        exitCode,
+        data: {
+          ...result.toJSON(),
+          validation: { ...validation, status: "failed", exitCode },
+        },
+      };
+    }
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -8814,6 +8926,7 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
+  if (validation !== undefined) scanData = { ...scanData, validation };
   const incomplete = result.coverage.completeness !== "complete";
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
@@ -8851,6 +8964,9 @@ async function executeScan(
     progress?.stopTimer();
     return { exitCode, data: scanData };
   };
+  if (validationExitCode !== 0) {
+    return completedScan(validationExitCode);
+  }
   if (targetWarnings.length > 0) {
     errorOutput.write(
       "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",

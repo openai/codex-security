@@ -331,6 +331,21 @@ def remediation_checkout_snapshot(
     return revision, content_digest
 
 
+def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
+    _, current_digest = remediation_checkout_snapshot(scan)
+    if scan["diff_target_kind"] == "working_tree":
+        expected_digest = scan["diff_content_digest"]
+    elif scan["diff_target_kind"] in {"commit", "range"}:
+        expected_digest = clean_worktree_content_digest()
+    else:
+        expected_digest = scan["target_snapshot_digest"]
+    if current_digest != expected_digest:
+        raise SystemExit(
+            "Scan target contents changed since the scan. "
+            "Run a new scan before validating its findings."
+        )
+
+
 def worktree_content_digest_for_context(
     repository: Path,
     pathspec: str,

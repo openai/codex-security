@@ -133,6 +133,7 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    require_scan_target_unchanged,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -3394,6 +3395,8 @@ def main() -> None:
         elif args.command == "record-deep-scan-publication-failure":
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
+            if args.check_target:
+                require_scan_target_unchanged(require_scan(connection, args.scan_id))
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))

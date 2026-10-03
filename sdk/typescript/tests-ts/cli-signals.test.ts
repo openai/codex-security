@@ -45,6 +45,7 @@ describe("CLI signals", () => {
     const signals = new FakeSignals();
     const deps = dependencies({ signals });
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         signals.emit("SIGINT");
         const signal = (options as { signal?: AbortSignal }).signal;
@@ -93,6 +94,7 @@ describe("CLI signals", () => {
     deps.writeSynchronously = (_stream, value) => synchronousWrites.push(value);
     deps.forceExit = (signal) => forced.push(signal);
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         signals.emit("SIGINT");
         signals.emit("SIGINT");
@@ -122,6 +124,7 @@ describe("CLI signals", () => {
     deps.now = () => now;
     deps.forceExit = (signal) => forced.push(signal);
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         signals.emit("SIGINT");
         now = 100;
@@ -147,6 +150,7 @@ describe("CLI signals", () => {
     };
     deps.forceExit = (signal) => forced.push(signal);
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async () => {
         signals.emit("SIGINT");
         now = 1_000;

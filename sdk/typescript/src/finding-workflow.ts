@@ -63,9 +63,11 @@ export class FindingWorkflow {
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     private readonly pythonPath?: string,
+    options?: WorkbenchCommandOptions,
   ) {
     if (!id.trim())
       throw new CodexSecurityError("workflowId must be a nonempty string.");
+    if (options !== undefined) this.options = Promise.resolve(options);
   }
 
   async protectArtifacts(scanDir: string): Promise<void> {

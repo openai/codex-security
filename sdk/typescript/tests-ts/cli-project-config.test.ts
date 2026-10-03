@@ -422,6 +422,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   deps.createSecurity = (native) => {
     expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
     return {
+      ...dependencies().createSecurity({}),
       preflight: async () => fakePreflight(),
       close: async () => {},
       run: async (_repository, options = {}) => {

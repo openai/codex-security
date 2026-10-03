@@ -165,6 +165,7 @@ function client(
   close = async () => {},
 ) {
   return () => ({
+    ...dependencies().createSecurity({}),
     run: async (repository: string, options: ScanOptions = {}) =>
       run(repository, options),
     preflight: async (repository: string) => fakePreflight(repository),

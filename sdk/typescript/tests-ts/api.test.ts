@@ -54,6 +54,7 @@ import {
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   resolveCodexCommand,
+  resolvePluginPython,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
@@ -431,24 +432,42 @@ describe("CodexSecurity finding validation", () => {
   async function validationClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       validationEvents(),
+    pluginRoot = PLUGIN_ROOT,
+    pythonPath = "/managed/python",
+    fixtureRoot?: string,
   ) {
-    const root = await temporaryDirectory();
+    const root = fixtureRoot ?? (await temporaryDirectory());
     const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
+    const codexHome = await temporaryDirectory();
     const stateDirectory = join(root, "state");
-    await Promise.all([mkdir(repository), mkdir(codexHome)]);
+    await mkdir(repository, { recursive: true });
     const captured: {
       codex?: CodexOptions;
       thread?: ThreadOptions;
       prompt?: string;
     } = {};
-    const workbench = mock(async () => ({}));
+    const workbench = mock(
+      async (
+        _options: WorkbenchCommandOptions,
+        _args: readonly string[],
+        _input?: string,
+      ): Promise<JsonObject> => ({
+        scan: { targetPath: repository },
+      }),
+    );
     const environment = {
+      ...Object.fromEntries(
+        ["PATH", "SystemRoot", "TEMP", "TMP"].flatMap((name) =>
+          process.env[name] === undefined ? [] : [[name, process.env[name]!]],
+        ),
+      ),
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       OPENAI_API_KEY: "synthetic-validation-key",
     };
     const client = new TestClient(
       {
+        pluginPath: pluginRoot,
+        pythonPath,
         codexOverrides: {
           model: "test-model",
           model_reasoning_effort: "high",
@@ -458,11 +477,15 @@ describe("CodexSecurity finding validation", () => {
       },
       {
         environment,
-        prepareRuntime: async () => ({
-          ...preparedRuntime(codexHome),
-          environment,
-        }),
-        resolvePluginPython: async () => "/managed/python",
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          return {
+            ...runtime,
+            plugin: { ...runtime.plugin, pluginRoot },
+            environment,
+          };
+        },
+        resolvePluginPython: async ({ configuredPath } = {}) => configuredPath!,
         runWorkbench: workbench,
         createCodex: (options) => {
           captured.codex = options;
@@ -486,7 +509,7 @@ describe("CodexSecurity finding validation", () => {
       finding: "Candidate finding",
       outputDir: join(root, "validation"),
     };
-    return { client, options, stateDirectory, captured, workbench };
+    return { client, options, stateDirectory, captured, workbench, root };
   }
 
   test.each(["text", "object"])(
@@ -517,6 +540,7 @@ describe("CodexSecurity finding validation", () => {
         ...options,
         finding,
         auth: "api-key",
+        safetyIdentifier: "synthetic-validation-user",
       });
       expect(result).toEqual({
         ...assessment,
@@ -546,9 +570,80 @@ describe("CodexSecurity finding validation", () => {
       });
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
+      expect(captured.codex?.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+        "synthetic-validation-user",
+      );
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
         options.repositoryPath,
       );
+    },
+  );
+
+  test("checks recorded targets through the selected validation runtime before and after the model", async () => {
+    const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
+    const {
+      client: security,
+      options,
+      workbench,
+      captured,
+      stateDirectory,
+    } = await validationClient(undefined, pluginRoot);
+    await using client = security;
+    const controller = new AbortController();
+    await client.validate({
+      ...options,
+      scanId: "recorded-scan",
+      signal: controller.signal,
+    });
+    expect(workbench).toHaveBeenCalledTimes(2);
+    for (const [runtime, args] of workbench.mock.calls) {
+      expect(runtime).toMatchObject({
+        python: "/managed/python",
+        pluginRoot,
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+      });
+      expect(runtime.signal?.aborted).toBe(false);
+      expect(args).toEqual([
+        "get-scan",
+        "--scan-id",
+        "recorded-scan",
+        "--check-target",
+      ]);
+    }
+    expect(captured.prompt).toContain(
+      JSON.stringify(join(pluginRoot, "skills", "validation", "SKILL.md")),
+    );
+  });
+
+  test.each(["before", "after", "different repository"])(
+    "rejects a recorded target mismatch %s validation",
+    async (phase) => {
+      const {
+        client: security,
+        options,
+        workbench,
+        captured,
+      } = await validationClient();
+      await using client = security;
+      let checks = 0;
+      workbench.mockImplementation(async () => {
+        checks += 1;
+        if (phase === "before" || (phase === "after" && checks === 2)) {
+          throw new Error("The recorded scan target changed.");
+        }
+        return {
+          scan: {
+            targetPath:
+              phase === "different repository"
+                ? join(options.repositoryPath, "other")
+                : options.repositoryPath,
+          },
+        };
+      });
+      await expect(
+        client.validate({ ...options, scanId: "recorded-scan" }),
+      ).rejects.toThrow(/scan target/);
+      expect(captured.prompt !== undefined).toBe(phase === "after");
     },
   );
 
@@ -557,6 +652,7 @@ describe("CodexSecurity finding validation", () => {
       client: security,
       options,
       stateDirectory,
+      captured,
     } = await validationClient(() =>
       validationEvents(
         JSON.stringify({ ...assessment, disposition: "deferred" }),
@@ -568,10 +664,77 @@ describe("CodexSecurity finding validation", () => {
     expect(
       result.outputDir.startsWith(join(stateDirectory, "validations")),
     ).toBe(true);
+    expect(captured.thread?.workingDirectory).toBe(result.outputDir);
     const evidence = join(result.outputDir, "evidence.txt");
     await writeFile(evidence, "synthetic evidence");
     await client.close();
     expect(await readFile(evidence, "utf8")).toBe("synthetic evidence");
+  });
+
+  test("resumes workflow validation from persisted assessments across clients", async () => {
+    const python = await resolvePluginPython();
+    let modelCalls = 0;
+    let targetChanged = false;
+    async function* events() {
+      modelCalls += 1;
+      if (modelCalls === 2) throw new Error("Second assessment failed.");
+      yield* validationEvents();
+    }
+    function useWorkbench(
+      fixture: Awaited<ReturnType<typeof validationClient>>,
+    ) {
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        if (args[0] === "get-scan") {
+          if (targetChanged)
+            throw new Error("The recorded scan target changed.");
+          return { scan: { targetPath: fixture.options.repositoryPath } };
+        }
+        return await runWorkbench(options, args, input);
+      });
+    }
+    const original = await validationClient(events, PLUGIN_ROOT, python);
+    useWorkbench(original);
+    await using originalClient = original.client;
+    await new FindingWorkflow(
+      "validation-retry",
+      {
+        CODEX_SECURITY_STATE_DIR: original.stateDirectory,
+      },
+      runWorkbench,
+      python,
+    ).bind({ repositoryPath: original.options.repositoryPath });
+    const request = {
+      ...original.options,
+      outputDir: undefined,
+      scanId: "recorded-scan",
+      workflowId: "validation-retry",
+    };
+    const first = await originalClient.validate(request);
+    await expect(
+      originalClient.validate({ ...request, finding: "Second candidate" }),
+    ).rejects.toThrow("Second assessment failed.");
+    await originalClient.close();
+
+    const resumed = await validationClient(
+      events,
+      PLUGIN_ROOT,
+      python,
+      original.root,
+    );
+    useWorkbench(resumed);
+    await using client = resumed.client;
+    expect(await client.validate(request)).toEqual(first);
+    expect(modelCalls).toBe(2);
+    await client.validate({ ...request, finding: "Second candidate" });
+    expect(modelCalls).toBe(3);
+    client.config.codexOverrides!["model"] = "changed-validation-model";
+    await client.validate(request);
+    expect(modelCalls).toBe(4);
+    targetChanged = true;
+    await expect(client.validate(request)).rejects.toThrow(
+      "scan target changed",
+    );
+    expect(modelCalls).toBe(4);
   });
 
   test("rejects invalid inputs, unsafe output, and cancellation before preparing credentials", async () => {

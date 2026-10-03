@@ -13,6 +13,8 @@ import type {
   ScanProgress,
   ScanWorkerStatus,
   SeverityLevel,
+  ValidationOptions,
+  ValidationResult,
 } from "../src/index.js";
 import { ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
@@ -190,6 +192,7 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
+    onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
     onCodex?: (
       ...arguments_: Parameters<MainDependencies["runCodex"]>
     ) => number | Promise<number>;
@@ -246,8 +249,15 @@ export function dependencies(
     },
     preflight: async (repository: string) =>
       options.preflight ?? fakePreflight(repository),
+    validate: async (validationOptions: ValidationOptions) =>
+      options.onValidate?.(validationOptions) ?? {
+        disposition: "deferred",
+        report: "Additional evidence is needed.",
+        outputDir: "/tmp/validation",
+        threadId: "validation-thread",
+      },
     close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
+  } as Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   return {
     createSecurity: (config) => {
       options.onConfig?.(config);
