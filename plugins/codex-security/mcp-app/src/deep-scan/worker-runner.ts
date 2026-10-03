@@ -263,15 +263,13 @@ export class DeepScanWorkerRunner {
     const promptRoot = join(reducerRoot, "prompts");
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
-    const basePrompt = renderDedupPrompt({
-      reducerLabel,
-      claimedWorkerIds: consumed.map((worker) => worker.id),
-    });
+    const workerIds = consumed.map((worker) => worker.id);
+    const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
       id: reducerId,
       scanId: run.scanId,
-      workerIds: consumed.map((worker) => worker.id),
+      workerIds,
       promptPath,
       artifactDir,
     });

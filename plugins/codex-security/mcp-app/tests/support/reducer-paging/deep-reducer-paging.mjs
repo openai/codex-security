@@ -57,10 +57,7 @@ export async function runReducerPagingEval({
   const claimedWorkerIds = fixture.context.deepReducer.claimedWorkers.map(
     (worker) => worker.id,
   );
-  const prompt = renderDedupPrompt({
-    reducerLabel: "paging-eval",
-    claimedWorkerIds,
-  });
+  const prompt = renderDedupPrompt("paging-eval", claimedWorkerIds);
   assert.deepEqual(JSON.parse(prompt.match(/```json\n([\s\S]*?)\n```/)[1]), {
     reducerLabel: "paging-eval",
     claimedWorkerIds,

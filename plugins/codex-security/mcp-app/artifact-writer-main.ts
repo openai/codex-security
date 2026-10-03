@@ -7,7 +7,7 @@ import {
 } from "./src/artifact-context.js";
 import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/deep-scan/parent-sandbox.js";
 import { registerCompactWorkerArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { MCP_APP_VERSION } from "./src/version.js";
+import { version as MCP_APP_VERSION } from "./package.json";
 import { isRecord } from "./src/record.js";
 
 /** Build the narrow worker-only MCP from coordinator-inherited state. */

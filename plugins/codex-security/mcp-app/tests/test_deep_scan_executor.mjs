@@ -1,20 +1,19 @@
 import { assertFlagPair } from "./assertions.mjs";
+import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
+import { mock } from "node:test";
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
 import {
   chmod,
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
-  rm,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { importModule, importSource } from "./import-module.mjs";
@@ -32,7 +31,11 @@ const {
   },
   stdin: {
     // Test the environment snapshot without adding a production export.
-    contents: `${await readFile(executorSource, "utf8")}\nexport { snapshotWorkerEnvironment, appendSafeItemDiagnostic };`,
+    contents: [
+      await readFile(executorSource, "utf8"),
+      "export { snapshotWorkerEnvironment, appendSafeItemDiagnostic };",
+      'export * from "./errors.js";',
+    ].join("\n"),
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource),
@@ -46,7 +49,7 @@ const {
 } = await importSource(
   fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
 );
-const temporaryRoots = [];
+const temporaryDirectories = createTemporaryDirectories();
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
   filesystemDenies: [],
@@ -181,9 +184,7 @@ try {
   }
 } finally {
   restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  await Promise.all(
-    temporaryRoots.map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await temporaryDirectories.cleanup();
 }
 
 function testOsErrorCodesRemainRetryable() {
@@ -290,10 +291,9 @@ async function testWindowsRootRelativePathsStayBoundToOriginalDrive() {
     "D:\\Tools\\codex.exe",
   );
 
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-home-"),
+  const root = await temporaryDirectories.create(
+    "codex-security-windows-home-",
   );
-  temporaryRoots.push(root);
   const target = path.join(root, "target", "nested");
   await Promise.all([
     mkdir(target, { recursive: true }),
@@ -441,10 +441,7 @@ async function testWindowsLongExecutableLaunches() {
 }
 
 async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-env-"),
-  );
-  temporaryRoots.push(root);
+  const root = await temporaryDirectories.create("codex-security-windows-env-");
   const names = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -484,10 +481,9 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
 }
 
 async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-cache-"),
+  const root = await temporaryDirectories.create(
+    "codex-security-windows-cache-",
   );
-  temporaryRoots.push(root);
   const localAppData = path.join(root, "LocalAppData");
   const olderBinary = path.join(
     localAppData,
@@ -639,10 +635,9 @@ async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
 }
 
 async function testWindowsLauncherSkipsExtensionlessNpmShim() {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-launcher-"),
+  const root = await temporaryDirectories.create(
+    "codex-security-windows-launcher-",
   );
-  temporaryRoots.push(root);
   const shimDirectory = path.join(root, "npm-shims");
   const binaryDirectory = path.join(root, "native-bin");
   await Promise.all([mkdir(shimDirectory), mkdir(binaryDirectory)]);
@@ -674,10 +669,7 @@ async function testWindowsLauncherSkipsExtensionlessNpmShim() {
 }
 
 async function testWindowsNpmPackageResolution(installation = "global") {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-npm-"),
-  );
-  temporaryRoots.push(root);
+  const root = await temporaryDirectories.create("codex-security-windows-npm-");
   const architecture = process.arch === "arm64" ? "arm64" : "x64";
   const targetTriple =
     architecture === "arm64"
@@ -926,7 +918,7 @@ async function testSdkInvocationAndThreadCapture() {
     await mkdir(workingDirectory);
     assert.equal(workingDirectory.startsWith("/repo/"), false);
     await writeFile(promptPath, "fixture worker prompt\n");
-    let callbackThreadId;
+    const onThreadId = mock.fn();
     const result = await new CodexSdkWorkerExecutor({
       model: "gpt-5.6-luna",
       reasoningEffort: "xhigh",
@@ -937,11 +929,10 @@ async function testSdkInvocationAndThreadCapture() {
       workingDirectory,
       subagents: 3,
       signal: new AbortController().signal,
-      onThreadStarted: (threadId) => {
-        callbackThreadId = threadId;
-      },
+      onThreadStarted: onThreadId,
     });
     assert.equal(result.threadId, "fixture-thread-id");
+    const callbackThreadId = onThreadId.mock.calls.at(-1)?.arguments[0];
     assert.equal(callbackThreadId, "fixture-thread-id");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.equal(invocation.stdin, "fixture worker prompt\n");
@@ -954,10 +945,11 @@ async function testSdkInvocationAndThreadCapture() {
       "--experimental-json",
     ]);
     assertFlagPair(invocation.argv, "--model", "gpt-5.6-luna");
-    assert.equal(
-      invocation.argv.includes('model_reasoning_effort="xhigh"'),
-      true,
-    );
+    assertConfigOverrides(invocation.argv, {
+      model_reasoning_effort: "xhigh",
+      "mcp_servers.codex-security.command": "node",
+      "mcp_servers.codex-security.enabled": false,
+    });
     assertReadOnlyWorkerPolicy(invocation.argv);
     assert.equal(
       workerPermissionProfileOverride(invocation.argv),
@@ -966,14 +958,6 @@ async function testSdkInvocationAndThreadCapture() {
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assertFlagPair(invocation.argv, "--cd", workingDirectory);
     assert.equal(invocation.argv.includes("--skip-git-repo-check"), true);
-    assert.equal(
-      invocation.argv.includes('mcp_servers.codex-security.command="node"'),
-      true,
-    );
-    assert.equal(
-      invocation.argv.includes("mcp_servers.codex-security.enabled=false"),
-      true,
-    );
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
@@ -1645,22 +1629,11 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
     });
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-    assert.equal(
-      invocation.argv.includes(
-        "mcp_servers.cs_artifacts.startup_timeout_sec=180",
-      ),
-      true,
-    );
-    assert.equal(
-      invocation.argv.includes("mcp_servers.cs_artifacts.required=true"),
-      true,
-    );
-    assert.equal(
-      invocation.argv.includes(
-        "mcp_servers.cs_artifacts.tool_timeout_sec=86400",
-      ),
-      true,
-    );
+    assertConfigOverrides(invocation.argv, {
+      "mcp_servers.cs_artifacts.startup_timeout_sec": 180,
+      "mcp_servers.cs_artifacts.required": true,
+      "mcp_servers.cs_artifacts.tool_timeout_sec": 86400,
+    });
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
@@ -1694,10 +1667,7 @@ async function testSdkResumesExistingThread() {
     assert.notEqual(resumeIndex, -1);
     assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
     assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
-    assert.equal(
-      invocation.argv.includes('model_reasoning_effort="ultra"'),
-      true,
-    );
+    assertConfigOverrides(invocation.argv, { model_reasoning_effort: "ultra" });
     assertReadOnlyWorkerPolicy(invocation.argv);
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assert.equal(invocation.stdin, "continue the existing worker\n");
@@ -1727,10 +1697,9 @@ async function testRetryNotificationDoesNotInterruptTurn() {
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
     assert.equal(invocation.argv.includes("--model"), false);
-    assert.equal(
-      invocation.argv.some((arg) => arg.startsWith("model_reasoning_effort=")),
-      false,
-    );
+    assertConfigOverrides(invocation.argv, {
+      model_reasoning_effort: undefined,
+    });
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
@@ -2198,7 +2167,7 @@ async function testMalformedCommandEventsRemainRetryable() {
         promptPath,
         `MALFORMED_COMMAND_EVENT\n${JSON.stringify(output)}\n`,
       );
-      let threadId;
+      const onThreadId = mock.fn();
       await assert.rejects(
         new CodexSdkWorkerExecutor({
           parentSandbox: trustedParentSandbox,
@@ -2208,9 +2177,7 @@ async function testMalformedCommandEventsRemainRetryable() {
           workingDirectory,
           subagents: 0,
           signal: new AbortController().signal,
-          onThreadStarted: (value) => {
-            threadId = value;
-          },
+          onThreadStarted: onThreadId,
         }),
         (error) =>
           error?.name === "Error" &&
@@ -2220,6 +2187,7 @@ async function testMalformedCommandEventsRemainRetryable() {
           error.message.includes(JSON.stringify(output)),
         `Malformed command output must remain retryable: ${output}`,
       );
+      const threadId = onThreadId.mock.calls.at(-1)?.arguments[0];
       assert.equal(threadId, "fixture-thread-id");
     } finally {
       restoreEnv("CODEX_CLI_PATH", previousPath);
@@ -2419,10 +2387,9 @@ async function fakeCodexFixture(
   preflightAllowed = true,
   accountResult = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
 ) {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-sdk-executor-"),
+  const root = await temporaryDirectories.create(
+    "codex-security-sdk-executor-",
   );
-  temporaryRoots.push(root);
   const markerPath = path.join(root, "invocation.json");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const scriptPath = path.join(root, "fake-codex.mjs");
@@ -2541,7 +2508,6 @@ async function fakeCodexFixture(
 function assertReadOnlyWorkerPolicy(args) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
-  assert.equal(args.includes('approval_policy="never"'), true);
   assert.deepEqual(
     args.filter((arg) => arg.startsWith("approval_policy=")),
     ['approval_policy="never"'],
@@ -2570,51 +2536,39 @@ function workerPermissionProfileOverride(args) {
 }
 
 function assertWorkerSubagentPolicy(args, subagents) {
-  assert.equal(args.includes("features.multi_agent_v2.enabled=false"), true);
+  assertConfigOverrides(args, {
+    "features.multi_agent_v2.enabled": false,
+    "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
+    "features.multi_agent": undefined,
+    "features.code_mode.excluded_tool_namespaces": undefined,
+    ...(subagents === 0
+      ? {
+          "agents.max_threads": undefined,
+          "features.enable_fanout": false,
+          "features.code_mode.enabled": undefined,
+        }
+      : {
+          "agents.max_threads": subagents,
+          "features.enable_fanout": undefined,
+        }),
+  });
   assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-  assert.equal(
-    args.includes(
-      `features.multi_agent_v2.max_concurrent_threads_per_session=${subagents + 1}`,
-    ),
-    true,
-  );
-  assert.equal(
-    args.some((arg) => arg.startsWith("features.multi_agent=")),
-    false,
-  );
-
-  if (subagents === 0) {
-    assert.equal(
-      args.some((arg) => arg.startsWith("agents.max_threads=")),
-      false,
-    );
-    assert.equal(args.includes("features.enable_fanout=false"), true);
-    assert.equal(
-      args.some((arg) =>
-        arg.startsWith("features.code_mode.excluded_tool_namespaces="),
-      ),
-      false,
-    );
-    assert.equal(
-      args.some((arg) => arg.startsWith("features.code_mode.enabled=")),
-      false,
-    );
-  } else {
-    assert.equal(args.includes(`agents.max_threads=${subagents}`), true);
-    assert.equal(
-      args.some((arg) => arg.startsWith("features.enable_fanout=")),
-      false,
-    );
-    assert.equal(
-      args.some((arg) =>
-        arg.startsWith("features.code_mode.excluded_tool_namespaces="),
-      ),
-      false,
-    );
-  }
 }
 
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function assertConfigOverrides(args, values) {
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) {
+      assert.equal(
+        args.some((arg) => arg.startsWith(`${key}=`)),
+        false,
+      );
+    } else {
+      assert.equal(args.includes(`${key}=${JSON.stringify(value)}`), true);
+    }
+  }
 }
