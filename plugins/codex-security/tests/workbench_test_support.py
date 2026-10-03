@@ -1,20 +1,35 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest import TestCase, mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+
+
+def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
+    script = SCRIPT.parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(module_name or name, script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def source_plugin_version() -> str:
@@ -446,3 +461,50 @@ def write_completed_contract(
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     (scan_dir / "report.md").write_text("# Fixture report\n")
+
+
+def windows_file_backend() -> mock.Mock:
+    backend = mock.Mock()
+
+    def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
+        return os.open(scan_dir / relative_path, os.O_RDONLY)
+
+    def atomic_write(
+        scan_dir: Path,
+        relative_path: str,
+        payload: bytes,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
+        path = scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+        (scan_dir / relative_path).unlink(missing_ok=True)
+
+    backend.open_read_fd.side_effect = open_read_fd
+    backend.atomic_write.side_effect = atomic_write
+    backend.unlink_if_exists.side_effect = unlink_if_exists
+    return backend
+
+
+class ScanFixtureTestCase(TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.scan_dir = Path(self.temp_dir.name) / "scan"
+        shutil.copytree(self.example_scan, self.scan_dir)
+        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
+        findings = json.loads((self.scan_dir / "findings.json").read_text())
+        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
+        report = self.validator.FINALIZER._generate_report_projection(manifest, findings, coverage)
+        (self.scan_dir / "report.md").write_bytes(report)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def read_json(self, name: str) -> dict[str, object]:
+        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+
+    def sha256_file(self, name: str) -> str:
+        return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

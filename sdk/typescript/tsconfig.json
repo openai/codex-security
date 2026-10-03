@@ -13,12 +13,9 @@
     "scripts/fixtures/findings-service-sqlite.ts",
     "scripts/fixtures/prepare-runner-scan.ts"
   ],
-  "exclude": ["dist", "node_modules", "tests-ts/package.test.ts"],
   "compilerOptions": {
     "allowJs": false,
     "checkJs": false,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
     "incremental": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
