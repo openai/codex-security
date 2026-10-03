@@ -369,6 +369,76 @@ setInterval(() => {}, 1000);
     expect(succeeded).toBe(false);
   });
 
+  test.skipIf(process.platform === "win32")(
+    "cancels login after the parent exits while a descendant holds stderr",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-exited-"));
+      temporaryDirectories.push(root);
+      const script = join(root, "login.mjs");
+      const ready = join(root, "ready");
+      const release = join(root, "release");
+      const node = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const descendant = `
+import { existsSync, writeFileSync } from "node:fs";
+const [parent, ready, release] = process.argv.slice(1);
+setTimeout(() => process.exit(1), 10_000);
+let announced = false;
+setInterval(() => {
+  if (existsSync(release)) process.exit(0);
+  if (announced) return;
+  try { process.kill(Number(parent), 0); return; }
+  catch (error) { if (error.code !== "ESRCH") process.exit(1); }
+  announced = true;
+  console.error("Open https://auth.example.test/device");
+  console.error("User code: ABCD-EFGH");
+}, 25);
+writeFileSync(ready, "ready");
+`;
+      await writeFile(
+        script,
+        `
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}, String(process.pid), ${JSON.stringify(ready)}, ${JSON.stringify(release)}], {
+  stdio: ["ignore", "ignore", "inherit"], windowsHide: true,
+});
+child.on("error", () => process.exit(1));
+setInterval(() => { if (existsSync(${JSON.stringify(ready)})) process.exit(0); }, 25);
+setTimeout(() => { child.kill(); process.exit(1); }, 10_000);
+`,
+      );
+      let succeeded = false;
+      const handle = new CodexLoginHandle(
+        { command: node },
+        [script],
+        process.env,
+        () => {
+          succeeded = true;
+        },
+      );
+      const deadline = new AbortController();
+      try {
+        await handle.waitForInstructions({ deviceCode: true });
+        handle.cancel();
+        await expect(
+          Promise.race([
+            handle.wait(),
+            delay(5_000, undefined, { signal: deadline.signal }).then(() => {
+              throw new Error("Canceled login waited for inherited stderr.");
+            }),
+          ]),
+        ).resolves.toMatchObject({ success: false, exitCode: 0 });
+        expect(succeeded).toBe(false);
+      } finally {
+        deadline.abort();
+        await writeFile(release, "released");
+        await handle.wait();
+      }
+    },
+  );
+
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));
     temporaryDirectories.push(root);
