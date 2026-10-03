@@ -20,3 +20,6 @@ export function parseJsonLines<T = ReturnType<typeof JSON.parse>>(
 export function jsonLines(values: readonly unknown[]): string {
   return values.map((value) => JSON.stringify(value)).join("\n");
 }
+
+export const writeJsonLines = (path: string, values: readonly unknown[]) =>
+  writeFile(path, jsonLines(values));

@@ -1,3 +1,4 @@
+import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
@@ -25,9 +26,11 @@ import {
   scanThreadId,
 } from "./support/usage-rollout.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
+  "codex-security-cost-",
+);
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
 type SessionParentField = (typeof parentFields)[number];
 
@@ -49,12 +52,7 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the cost tracker.");
 }
 
-afterEach(temporaryDirectories.cleanup);
-
-async function codexHome(): Promise<string> {
-  const directory = await temporaryDirectories.create("codex-security-cost-");
-  return directory;
-}
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -1067,7 +1065,7 @@ describe("live scan cost tracking", () => {
 
       await writeFile(
         worker,
-        [
+        jsonLines([
           {
             type: "session_meta",
             payload: {
@@ -1158,9 +1156,7 @@ describe("live scan cost tracking", () => {
               },
             },
           },
-        ]
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
+        ]) + "\n",
       );
 
       const activities: ScanActivity[] = [];
@@ -1242,10 +1238,7 @@ describe("live scan cost tracking", () => {
       scanThreadId,
     );
     const rollout = ownershipRollout(replayedTurnIds);
-    await writeFile(
-      rolloutPath,
-      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
-    );
+    await writeFile(rolloutPath, jsonLines(rollout) + "\n");
 
     const maxCostUsd = 0.001;
     const observedCosts: number[] = [];

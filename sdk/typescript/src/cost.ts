@@ -17,7 +17,7 @@ import {
   sessionStartedAt,
 } from "./scan-sessions.js";
 import {
-  scanProgressUpdatesFromEvent,
+  scanProgressUpdatesFromText,
   type ScanProgress,
 } from "./worker-progress.js";
 
@@ -344,10 +344,9 @@ export class ScanCostTracker {
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        [...this.#workerProgress.values()].reduce(
-          (total, reviewed) => total + reviewed,
-          0,
-        ),
+        this.#workerProgress
+          .values()
+          .reduce((total, reviewed) => total + reviewed, 0),
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
@@ -621,12 +620,7 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(
-        ...scanProgressUpdatesFromEvent({
-          type: "item.completed",
-          item: { type: "agent_message", text: payload["message"] },
-        }),
-      );
+      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -746,13 +740,7 @@ function sessionProgressUpdates(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     const content = payload["content"];
     if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromEvent({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: sessionContentText(content, false),
-      },
-    });
+    return scanProgressUpdatesFromText(sessionContentText(content, false));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -771,10 +759,7 @@ function sessionProgressUpdates(
   if (payload["status"] === "failed" || output === null) {
     return [];
   }
-  return scanProgressUpdatesFromEvent({
-    type: "item.completed",
-    item: { type: "command_execution", aggregated_output: output },
-  });
+  return scanProgressUpdatesFromText(output);
 }
 
 function sessionContentText(

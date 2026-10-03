@@ -305,7 +305,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 
-const DISPLAY_SEVERITIES: readonly SeverityLevel[] = SCAN_SEVERITIES;
 const MODEL_REASONING_EFFORTS = [
   "minimal",
   "low",
@@ -9213,10 +9212,8 @@ async function readDeepScanStop(
   if (state?.terminalReason !== "capped") return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = state.config;
   if (state.dispatchedCount >= maxDiscoveryRuns) {
-    const stillFindingIssues =
-      state.completionSequence > 0 && state.noNewStreak === 0;
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.completionSequence > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -9255,12 +9252,9 @@ function printScanSummary(
       (severities.get(finding.severity.level) ?? 0) + 1,
     );
   }
-  const severitySummary = DISPLAY_SEVERITIES.map((severity) => {
-    const count = severities.get(severity);
-    return count === undefined ? null : `${count} ${severity}`;
-  })
-    .filter((value): value is string => value !== null)
-    .join(", ");
+  const severitySummary = SCAN_SEVERITIES.flatMap((severity) =>
+    severities.has(severity) ? `${severities.get(severity)} ${severity}` : [],
+  ).join(", ");
 
   const started = Date.parse(result.manifest.scan.startedAt);
   const completed = Date.parse(result.manifest.scan.completedAt);
@@ -9723,9 +9717,7 @@ export class Progress {
 
   #line(message: string): string {
     const elapsedSeconds = this.elapsedSeconds;
-    const minutes = Math.floor(elapsedSeconds / 60);
-    const seconds = elapsedSeconds % 60;
-    return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${message}`;
+    return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
   }
 
   #observeStreamErrors(): void {
