@@ -15,19 +15,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
+import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
   type CoverageDocument,
   type ScanManifest,
 } from "../src/index.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import {
   SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
 } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 async function copyCompletedScan(root: string): Promise<string> {
   const scan = join(root, "scan");
@@ -86,7 +90,10 @@ describe("CLI", () => {
   test("exports the latest completed scan when no directory is provided", async () => {
     const scanDir = join(tmpdir(), "codex-security-latest-scan");
     const deps = dependencies({
-      onWorkbench: () => ({ scans: [{ scanId: "latest-scan", scanDir }] }),
+      onWorkbench: (args): JsonObject =>
+        args[0] === "list-scans"
+          ? { scans: [{ scanId: "latest-scan", scanDir }] }
+          : { scan: { scanId: "latest-scan", scanDir } },
     });
     let exportedScanDir = "";
     deps.exportFindings = async (arguments_) => {
@@ -103,6 +110,320 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(exportedScanDir).toBe(scanDir);
+  });
+
+  test("reports default-source history failures once without running the exporter", async () => {
+    for (const lookupFails of [false, true]) {
+      const deps = dependencies({
+        onWorkbench: () => {
+          if (lookupFails) throw new Error("Synthetic history failure.");
+          return { scans: [] };
+        },
+      });
+      let exports = 0;
+      deps.exportFindings = async () => {
+        exports += 1;
+        return undefined;
+      };
+      const stdout = capture();
+      const stderr = capture();
+      expect(await main(["export"], stdout.stream, stderr.stream, deps)).toBe(
+        2,
+      );
+      expect(stderr.text()).toBe(
+        lookupFails
+          ? "codex-security: Synthetic history failure.\n"
+          : "codex-security: No completed scans found for the current repository.\n",
+      );
+      expect(stdout.text()).toBe("");
+      expect(exports).toBe(0);
+    }
+  });
+
+  test("exports saved models with the selected Python and rejects changed recorded manifests", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-export-python-")),
+    );
+    try {
+      const python = await resolvePluginPython();
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      const environment = {
+        ...exportEnvironment(),
+        CODEX_HOME: join(root, "codex-home"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        PYTHON: join(root, "missing-python"),
+      };
+      const workbench = (args: readonly string[]) =>
+        runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
+      const registered = await workbench([
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ]);
+      const scanId = registered["scanId"] as string;
+      await copyCompletedScan(root);
+      const content = "# Saved model\n\nSynthetic component boundaries.\n";
+      for (const name of ["scan-manifest", "findings", "coverage"]) {
+        const path = join(scanDir, `${name}.json`);
+        const document = JSON.parse(await readFile(path, "utf8"));
+        if (name === "scan-manifest") {
+          document.scan.id = scanId;
+          document.scan.target.kind = "directory_snapshot";
+          document.scan.threatModel = { format: "markdown", content };
+          delete document.scan.sealedAt;
+          delete document.scan.artifacts;
+        } else {
+          document.scanId = scanId;
+          if (name === "findings") document.findings = [];
+        }
+        await writeFile(path, JSON.stringify(document));
+      }
+      await workbench(["complete-scan", "--scan-id", scanId]);
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const sealedManifest = await readFile(manifestPath);
+      if (process.platform !== "win32") {
+        await chmod(scanDir, 0o500);
+        await chmod(join(scanDir, "exports"), 0o500);
+      }
+
+      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
+        const result = await runCommand(
+          process.execPath,
+          [
+            join(import.meta.dir, "../src/cli.ts"),
+            "export",
+            ...selector,
+            "--artifact",
+            "threat-model",
+            "--output",
+            "-",
+            "--python",
+            python,
+          ],
+          { cwd: repository, env: environment, timeout: 30_000 },
+        );
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expect(result.stdout).toStartWith(content);
+      }
+      const sdkOptions = {
+        source: { scanId },
+        artifact: "threat-model",
+        output: join(root, "exported-model.md"),
+        pythonPath: python,
+      };
+      const exportWithSdk = () =>
+        runCommand(
+          process.execPath,
+          [
+            "-e",
+            `import { exportArtifact } from ${JSON.stringify(pathToFileURL(join(import.meta.dir, "../src/index.ts")).href)}; await exportArtifact(JSON.parse(process.argv[1]));`,
+            JSON.stringify(sdkOptions),
+          ],
+          { cwd: repository, env: environment, timeout: 30_000 },
+        );
+      const sdkExport = await exportWithSdk();
+      expect(sdkExport.status, sdkExport.stderr).toBe(0);
+      expect(sdkExport.stdout).toBe("");
+      const exportedModel = await readFile(sdkOptions.output, "utf8");
+      expect(exportedModel).toStartWith(content);
+      expect(await readFile(manifestPath)).toEqual(sealedManifest);
+      await expect(
+        lstat(join(scanDir, "exports", "threatmodel.md")),
+      ).rejects.toHaveProperty("code", "ENOENT");
+      if (process.platform !== "win32") {
+        await chmod(scanDir, 0o700);
+        await chmod(join(scanDir, "exports"), 0o700);
+      }
+
+      const changed = JSON.parse(await readFile(manifestPath, "utf8"));
+      changed.scan.threatModel.content = "# Changed after completion\n";
+      await writeFile(manifestPath, JSON.stringify(changed));
+      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
+        const rejected = await runCommand(
+          process.execPath,
+          [
+            join(import.meta.dir, "../src/cli.ts"),
+            "export",
+            ...selector,
+            "--artifact",
+            "threat-model",
+            "--output",
+            "-",
+            "--python",
+            python,
+          ],
+          { cwd: repository, env: environment, timeout: 30_000 },
+        );
+        expect(rejected.status).toBe(2);
+        expect(rejected.stdout).toBe("");
+        expect(rejected.stderr).toContain("manifest changed after completion");
+      }
+      const rejectedSdk = await exportWithSdk();
+      expect(rejectedSdk.status).not.toBe(0);
+      expect(rejectedSdk.stdout).toBe("");
+      expect(rejectedSdk.stderr).toContain("manifest changed after completion");
+      expect(await readFile(sdkOptions.output, "utf8")).toBe(exportedModel);
+    } finally {
+      if (process.platform !== "win32") {
+        await chmod(join(root, "scan"), 0o700).catch(() => {});
+        await chmod(join(root, "scan", "exports"), 0o700).catch(() => {});
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("exports a saved provisional model by scan prefix without starting Codex", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-export-model-"));
+    const stdout = capture();
+    const stderr = capture();
+    const calls: string[][] = [];
+    const deps = dependencies({
+      onWorkbench: (args) => {
+        calls.push([...args]);
+        return {
+          scan: {
+            scanId: "scan-provisional",
+            scanDir: root,
+            progress: { status: "running" },
+          },
+        };
+      },
+    });
+    deps.createSecurity = () => {
+      throw new Error("must not initialize Codex");
+    };
+    let selected: Record<string, unknown> | undefined;
+    deps.exportFindings = async (args) => {
+      selected = { ...args };
+      return Buffer.from("# Retained model\n");
+    };
+    try {
+      expect(
+        await main(
+          [
+            "export",
+            "--scan",
+            "scan-prov",
+            "--artifact",
+            "threat-model",
+            "--output",
+            "-",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(selected).toMatchObject({
+        scanDir: root,
+        artifact: "threat-model",
+        format: "md",
+        output: "-",
+      });
+      expect(calls).toEqual([
+        [
+          "export-findings",
+          "--scan-id",
+          "scan-prov",
+          "--artifact",
+          "threat-model",
+          "--format",
+          "md",
+          "--validate-only",
+        ],
+      ]);
+      expect(stdout.text()).toBe("# Retained model\n");
+      expect(stderr.text()).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("defaults model exports to threatmodel.md and findings to results.sarif", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-export-default-"),
+    );
+    const deps = dependencies();
+    deps.currentDirectory = () => root;
+    const selected: Record<string, unknown>[] = [];
+    deps.exportFindings = async (args) => {
+      selected.push({ ...args });
+      return undefined;
+    };
+    try {
+      expect(
+        await main(
+          ["export", "saved", "--artifact", "threat-model"],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(
+        await main(
+          ["export", "saved"],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(selected).toMatchObject([
+        {
+          artifact: "threat-model",
+          format: "md",
+          output: join(root, "threatmodel.md"),
+        },
+        {
+          artifact: "findings",
+          format: "sarif",
+          output: join(root, "results.sarif"),
+        },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects ambiguous sources, incompatible formats, and Markdown in JSON stdout", async () => {
+    for (const [args, expected] of [
+      [["saved", "--scan", "scan-id"], "--scan cannot be combined"],
+      [
+        ["saved", "--artifact", "threat-model", "--export-format", "json"],
+        "only support --export-format md",
+      ],
+      [
+        ["saved", "--artifact", "threat-model", "--export-format", "sarif"],
+        "only support --export-format md",
+      ],
+      [["saved", "--export-format", "md"], "Findings exports support"],
+      [
+        ["saved", "--artifact", "threat-model", "--output", "-", "--json"],
+        "Markdown stdout cannot",
+      ],
+    ] as const) {
+      const stderr = capture();
+      const deps = dependencies();
+      deps.exportFindings = async () => {
+        throw new Error("must not export invalid input");
+      };
+      expect(
+        await main(["export", ...args], capture().stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stderr.text()).toContain(expected);
+    }
   });
 
   test("waits for delayed stdout writes without closing the destination", async () => {

@@ -210,7 +210,7 @@ export function registerScanDraftTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (value, requestContext) => {
@@ -263,7 +263,7 @@ export function registerCompactArtifactTools(
     name: "save_codex_security_artifact",
     title: "Save Codex Security Artifact",
     description:
-      "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ and either exact text content or a sourcePath inside the returned temporary directory. Canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
+      "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ (or threatmodel.md for a standalone model) and either exact text content or a sourcePath inside the returned temporary directory. Scan threatmodel.md is host-generated from semantic drafts; canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
     inputSchema: saveArtifactInputSchema,
     readOnly: false,
     handler: async (value, requestContext) => {
@@ -279,7 +279,7 @@ export function registerCompactArtifactTools(
     name: "read_codex_security_artifact",
     title: "Read Codex Security Artifact",
     description:
-      "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it.",
+      "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it. A scan's host-generated model is threatmodel.md; standalone legacy threat_model.md remains readable.",
     inputSchema: readArtifactInputSchema,
     readOnly: true,
     handler: async (value, requestContext) => {
