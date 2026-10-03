@@ -255,6 +255,7 @@ const distFiles = new Set(
     "targets",
     "thread-source",
     "trusted-executable",
+    "value",
     "version",
     "windows-path",
     "worker-progress",

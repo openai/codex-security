@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { hash } from "node:crypto";
+import { sha256Text as digest } from "./contract.js";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -28,6 +28,8 @@ import type { ScanCost } from "./cost.js";
 import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import { resolvePluginPython, type ProcessEnvironment } from "./runtime.js";
 import {
+  nullIfMissingFile,
+  nullIfMissingPath,
   abortable,
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
@@ -226,10 +228,7 @@ export async function resolveSecurityPolicyTarget(
 }
 
 export async function readSecurityPolicy(path: string): Promise<string | null> {
-  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const metadata = await lstat(path).catch(nullIfMissingFile);
   if (metadata === null) return null;
   if (!metadata.isFile()) {
     throw new CodexSecurityError(
@@ -292,10 +291,7 @@ export async function readSecurityPolicySnapshot(
   );
   const previousContent = await readSecurityPolicy(target.targetPath);
   const canonicalTarget = await realpath(target.targetPath).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    },
+    nullIfMissingFile,
   );
   const inherited: [string, string][] = [];
   let directory = target.repository;
@@ -303,10 +299,7 @@ export async function readSecurityPolicySnapshot(
     signal?.throwIfAborted();
     const path = join(directory, "SECURITY.md");
     const policyPath = relative(target.repository, path).split(sep).join("/");
-    let metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    let metadata = await lstat(path).catch(nullIfMissingPath);
     if (metadata?.isSymbolicLink()) {
       const alias = await policyLinkSnapshot(
         path,
@@ -332,14 +325,8 @@ export async function readSecurityPolicySnapshot(
           `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change guidance outside the selected component. Fix the link before drafting a policy.`,
         );
       const links = { links: alias.links, destination: alias.destination };
-      inherited.push([
-        policyPath,
-        `link:${hash("sha256", JSON.stringify(links))}`,
-      ]);
-      metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      });
+      inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
+      metadata = await stat(path).catch(nullIfMissingPath);
     }
     if (metadata?.isFile()) {
       const normalized = await normalizeTarget(
@@ -355,14 +342,14 @@ export async function readSecurityPolicySnapshot(
         gitMetadataPaths,
       );
       const content = await readPolicyFile(canonical);
-      inherited.push([policyPath, hash("sha256", content)]);
+      inherited.push([policyPath, digest(content)]);
     }
     directory = join(directory, part);
   }
   signal?.throwIfAborted();
   return {
     previousContent,
-    inheritedPolicySha256: hash("sha256", JSON.stringify(inherited)),
+    inheritedPolicySha256: digest(JSON.stringify(inherited)),
   };
 }
 
@@ -399,12 +386,7 @@ async function policyLinkSnapshot(
     const relativePath = policyRelativePath(repository, canonical);
     if (!(await stat(parent)).isDirectory())
       return { links, destination: null, status: "missing" };
-    const metadata = await lstat(canonical).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
-    );
+    const metadata = await lstat(canonical).catch(nullIfMissingPath);
     if (metadata !== null || links.length > 0)
       await requirePolicyOutsideGitMetadata(
         canonical,
@@ -478,14 +460,8 @@ async function securityPolicyPaths(
     }
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
-      const metadata = await lstat(directory).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-          throw error;
-        },
-      );
       // Keep directory links distinct from their destinations.
-      if (metadata?.isDirectory()) {
+      if ((await lstat(directory).catch(nullIfMissingPath))?.isDirectory()) {
         directory = await realpath(directory);
         policyRelativePath(repository, directory);
       }
@@ -502,10 +478,7 @@ async function securityPolicyPaths(
     if (await isGitMetadataDirectory(directory, signal)) {
       gitDirectories.add(directory);
       const common = await readFile(join(directory, "commondir"), "utf8").catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
+        nullIfMissingFile,
       );
       if (common !== null)
         gitDirectories.add(
@@ -516,20 +489,12 @@ async function securityPolicyPaths(
     if (
       !knownRoots.has(directory) &&
       entries.some((entry) => entry.name.toLowerCase() === ".git") &&
-      (await lstat(join(directory, ".git")).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
-      )) !== null
+      (await lstat(join(directory, ".git")).catch(nullIfMissingFile)) !== null
     ) {
       await addRoot(directory);
     }
     const path = join(directory, "SECURITY.md");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    const metadata = await lstat(path).catch(nullIfMissingPath);
     if (
       (metadata?.isFile() || metadata?.isSymbolicLink()) &&
       !reportingPaths.has(path)
@@ -540,10 +505,7 @@ async function securityPolicyPaths(
       if (!entry.isDirectory() || entry.name === ".git") continue;
       if (entry.name.toLowerCase() === ".git") {
         const metadata = await realpath(join(directory, ".git")).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          },
+          nullIfMissingFile,
         );
         if (
           metadata !== null &&
@@ -671,10 +633,7 @@ async function requirePolicyOutsideGitMetadata(
   });
   if (root === null || relative(root, parent) !== "") return;
   const marker = await lstat(join(root, ".git"));
-  const candidate = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const candidate = await lstat(path).catch(nullIfMissingFile);
   if (
     candidate !== null &&
     candidate.dev === marker.dev &&
@@ -923,7 +882,7 @@ export async function runSecurityPolicyStages(options: {
     createdAt: new Date().toISOString(),
     revision: options.revision,
     previousPolicySha256:
-      previousContent === null ? null : hash("sha256", previousContent),
+      previousContent === null ? null : digest(previousContent),
     inheritedPolicySha256,
     model: options.model,
     reasoningEffort: options.reasoningEffort,

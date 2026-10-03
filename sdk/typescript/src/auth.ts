@@ -30,6 +30,18 @@ export function environmentEntry(
 }
 
 /** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
   return resolve(
     expandHome(

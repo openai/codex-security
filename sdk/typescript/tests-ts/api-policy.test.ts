@@ -16,10 +16,9 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import Ajv, { type AnySchema } from "ajv";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
-  CodexSecurity,
   InvalidTargetError,
   OutputDirectoryNotEmptyError,
   securityPolicyDiff,
@@ -27,27 +26,22 @@ import {
   type SecurityPolicyStage,
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
+import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
   PYTHON,
   addPolicySubmodule,
-  policyFixture,
+  createPolicyTestFixtures,
   policyGit,
   policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
+import { rejecting, throwing } from "./support/errors.js";
 
-const InternalSecurity = CodexSecurity as unknown as new (
-  config: Record<string, unknown>,
-  dependencies: Record<string, unknown>,
-  runtimeOptions?: { surface: "cli" | "sdk" },
-) => CodexSecurity;
-const fixtures: Awaited<ReturnType<typeof policyFixture>>[] = [];
-afterEach(async () => {
-  await Promise.all(fixtures.splice(0).map((f) => f.cleanup()));
-});
+const { fixture, cleanup } = createPolicyTestFixtures();
+afterEach(cleanup);
 
 async function setup(
   options: {
@@ -62,12 +56,28 @@ async function setup(
     config?: Record<string, unknown>;
   } = {},
 ) {
-  const f = await policyFixture();
-  fixtures.push(f);
+  const f = await fixture();
   const codexHome = join(f.root, "codex-home");
   await mkdir(codexHome);
   const runtime = preparedRuntime(codexHome);
-  let configuration: CodexOptions | undefined;
+  const createCodex = mock((_config: CodexOptions) => {
+    return {
+      startThread: (threadOptions: ThreadOptions) => {
+        const stage = stages[threads.length]!;
+        threads.push(threadOptions);
+        return {
+          id: null,
+          async runStreamed(prompt: string, turn: TurnOptions) {
+            prompts.push(prompt);
+            turns.push(turn);
+            return {
+              events: options.stream?.(stage, turn.signal!) ?? events(stage),
+            };
+          },
+        };
+      },
+    };
+  });
   const threads: ThreadOptions[] = [];
   const prompts: string[] = [];
   const turns: TurnOptions[] = [];
@@ -96,29 +106,8 @@ async function setup(
         await options.onRevision?.();
         return "synthetic-revision";
       },
-      runWorkbench: async () => {
-        throw new Error("Policy generation must not register a scan.");
-      },
-      createCodex: (config: CodexOptions) => {
-        configuration = config;
-        return {
-          startThread: (threadOptions: ThreadOptions) => {
-            const stage = stages[threads.length]!;
-            threads.push(threadOptions);
-            return {
-              id: null,
-              async runStreamed(prompt: string, turn: TurnOptions) {
-                prompts.push(prompt);
-                turns.push(turn);
-                return {
-                  events:
-                    options.stream?.(stage, turn.signal!) ?? events(stage),
-                };
-              },
-            };
-          },
-        };
-      },
+      runWorkbench: rejecting("Policy generation must not register a scan."),
+      createCodex,
     },
     { surface: options.surface ?? "sdk" },
   );
@@ -130,7 +119,7 @@ async function setup(
     prompts,
     turns,
     pythonSelections,
-    configuration: () => configuration,
+    configuration: () => createCodex.mock.lastCall?.[0],
   };
 }
 
@@ -162,24 +151,21 @@ async function* events(
 
 describe("CodexSecurity policy API", () => {
   test("requires private output before starting a policy turn", async () => {
-    let announced = false;
-    const secured: string[] = [];
+    const onOutputDirReady = mock();
+    const secured = mock(async (_path: string) => {
+      throw new Error("Policy output could not be made private");
+    });
     const f = await setup({
-      secureOutput: async (path) => {
-        secured.push(path);
-        throw new Error("Policy output could not be made private");
-      },
+      secureOutput: secured,
     });
     await expect(
       f.security.generatePolicy(f.repository, {
         outputDir: f.outputDir,
-        onOutputDirReady: () => {
-          announced = true;
-        },
+        onOutputDirReady,
       }),
     ).rejects.toThrow("Policy output could not be made private");
-    expect(secured).toEqual([f.outputDir]);
-    expect(announced).toBe(false);
+    expect(secured.mock.calls.map(([value]) => value)).toEqual([f.outputDir]);
+    expect(onOutputDirReady).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
@@ -217,10 +203,7 @@ describe("CodexSecurity policy API", () => {
     const f = await setup({
       config: { pythonPath: "configured-policy-python" },
       stream: async function* (stage) {
-        yield* events(stage, {
-          ...stageResult(stage),
-          ...(stage === "policy" ? { markdown: content } : {}),
-        });
+        yield* events(stage, stageResult(stage, content));
       },
     });
     const draft = await f.security.generatePolicy(f.repository, {
@@ -244,11 +227,9 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("preflights without runtime initialization or output creation", async () => {
-    let prepared = false;
+    const onPrepare = mock();
     const f = await setup({
-      onPrepare: () => {
-        prepared = true;
-      },
+      onPrepare,
     });
     await mkdir(join(f.repository, "component"));
     const preflight = await f.security.preflightPolicy(f.repository, {
@@ -260,17 +241,15 @@ describe("CodexSecurity policy API", () => {
       join(f.repository, "component", "SECURITY.md"),
     );
     expect(preflight.model).toBe("gpt-5.6-sol");
-    expect(prepared).toBe(false);
+    expect(onPrepare).not.toHaveBeenCalled();
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
   });
 
   test("gives a usable remedy for a nonempty policy output directory", async () => {
-    let prepared = false;
+    const onPrepare = mock();
     const f = await setup({
-      onPrepare: () => {
-        prepared = true;
-      },
+      onPrepare,
     });
     const previous = join(f.outputDir, "previous.md");
     await writeFile(previous, "Keep this draft.\n");
@@ -284,17 +263,15 @@ describe("CodexSecurity policy API", () => {
       expect(String(error)).toContain("Choose a new or empty directory");
       expect(String(error)).not.toContain("--archive-existing");
     }
-    expect(prepared).toBe(false);
+    expect(onPrepare).not.toHaveBeenCalled();
     expect(await readFile(previous, "utf8")).toBe("Keep this draft.\n");
     await f.security.close();
   });
 
   test("rejects redirected Git roots before inspecting policy or starting Codex", async () => {
-    let prepared = false;
+    const onPrepare = mock();
     const f = await setup({
-      onPrepare: () => {
-        prepared = true;
-      },
+      onPrepare,
     });
     execFileSync("git", ["init", "--quiet", f.repository]);
     execFileSync("git", [
@@ -311,7 +288,7 @@ describe("CodexSecurity policy API", () => {
       await expect(operation()).rejects.toThrow(
         "does not match the selected checkout",
       );
-    expect(prepared).toBe(false);
+    expect(onPrepare).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
@@ -408,11 +385,9 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("rejects Git metadata targets before starting Codex", async () => {
-    let prepared = false;
+    const onPrepare = mock();
     const f = await setup({
-      onPrepare: () => {
-        prepared = true;
-      },
+      onPrepare,
     });
     execFileSync("git", ["init", "--quiet", f.repository]);
     const options = { path: ".git/refs/heads", outputDir: f.outputDir };
@@ -422,7 +397,7 @@ describe("CodexSecurity policy API", () => {
     await expect(
       f.security.generatePolicy(f.repository, options),
     ).rejects.toThrow("inside Git metadata");
-    expect(prepared).toBe(false);
+    expect(onPrepare).not.toHaveBeenCalled();
     expect(await readdir(f.outputDir)).toEqual([]);
     expect(await readdir(join(f.repository, ".git", "refs", "heads"))).toEqual(
       [],
@@ -431,11 +406,9 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("keeps submodule artifacts outside every enclosing checkout", async () => {
-    let prepared = false;
+    const onPrepare = mock();
     const f = await setup({
-      onPrepare: () => {
-        prepared = true;
-      },
+      onPrepare,
     });
     policyGit(f.repository, "init", "--quiet");
     const nested = await addPolicySubmodule(
@@ -465,7 +438,7 @@ describe("CodexSecurity policy API", () => {
       "outside the protected scan root",
     );
     await stateInside.close();
-    expect(prepared).toBe(false);
+    expect(onPrepare).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);
     expect(await readdir(f.outputDir)).toEqual([]);
     await expect(readdir(inside)).rejects.toMatchObject({ code: "ENOENT" });
@@ -860,11 +833,9 @@ describe("CodexSecurity policy API", () => {
   ])(
     "rejects %s links into separately configured Git metadata",
     async (name) => {
-      let prepared = false;
+      const onPrepare = mock();
       const f = await setup({
-        onPrepare: () => {
-          prepared = true;
-        },
+        onPrepare,
       });
       const component = join(f.repository, "component");
       const metadata = join(component, "saved-metadata");
@@ -878,7 +849,7 @@ describe("CodexSecurity policy API", () => {
       await expect(
         f.security.preflightPolicy(f.repository, { path: "component" }),
       ).rejects.toThrow("Git metadata");
-      expect(prepared).toBe(false);
+      expect(onPrepare).not.toHaveBeenCalled();
       expect(f.threads).toHaveLength(0);
       await f.security.close();
     },
@@ -974,11 +945,9 @@ describe("CodexSecurity policy API", () => {
   test.each(["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"])(
     "checks %s links against the component's policy guidance before runtime setup",
     async (policyPath) => {
-      let prepared = false;
+      const onPrepare = mock();
       const f = await setup({
-        onPrepare: () => {
-          prepared = true;
-        },
+        onPrepare,
       });
       await mkdir(join(f.repository, "component"));
       const source = join(f.repository, "notes.md");
@@ -993,7 +962,7 @@ describe("CodexSecurity policy API", () => {
       await expect(
         f.security.generatePolicy(f.repository, options),
       ).rejects.toThrow("outside the selected component");
-      expect(prepared).toBe(false);
+      expect(onPrepare).not.toHaveBeenCalled();
       expect(f.threads).toHaveLength(0);
       expect(await readdir(f.outputDir)).toEqual([]);
       await f.security.close();
@@ -1022,11 +991,9 @@ describe("CodexSecurity policy API", () => {
 
   test("keeps literal component names intact through generation and preview", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
-      let prepared = false;
+      const onPrepare = mock();
       const f = await setup({
-        onPrepare: () => {
-          prepared = true;
-        },
+        onPrepare,
       });
       const component = join(f.repository, scope);
       await mkdir(component, { recursive: true });
@@ -1038,7 +1005,7 @@ describe("CodexSecurity policy API", () => {
       const preflight = await f.security.preflightPolicy(f.repository, options);
       expect(preflight.scope).toBe(scope);
       expect(preflight.targetPath).toBe(join(component, "SECURITY.md"));
-      expect(prepared).toBe(false);
+      expect(onPrepare).not.toHaveBeenCalled();
       const generated = await f.security.generatePolicy(f.repository, options);
       expect(generated.scope).toBe(scope);
       expect(f.prompts[0]).toContain("Inherited guidance.");
@@ -1058,11 +1025,9 @@ describe("CodexSecurity policy API", () => {
       "git_file",
       "separate_git",
     ] as const) {
-      let prepared = false;
+      const onPrepare = mock();
       const f = await setup({
-        onPrepare: () => {
-          prepared = true;
-        },
+        onPrepare,
       });
       await mkdir(join(f.repository, "component"));
       const policy = join(f.repository, "SECURITY.md");
@@ -1108,7 +1073,7 @@ describe("CodexSecurity policy API", () => {
       await expect(
         f.security.generatePolicy(f.repository, options),
       ).rejects.toThrow(message);
-      expect(prepared).toBe(false);
+      expect(onPrepare).not.toHaveBeenCalled();
       expect(f.threads).toHaveLength(0);
       expect(await readdir(f.outputDir)).toEqual([]);
       await f.security.close();
@@ -1462,12 +1427,10 @@ describe("CodexSecurity policy API", () => {
         profiles: { selected: { "features.apps": true } },
       },
     ]) {
-      let prepared = false;
+      const onPrepare = mock();
       const f = await setup({
         config: { codexOverrides },
-        onPrepare: () => {
-          prepared = true;
-        },
+        onPrepare,
       });
       await expect(f.security.preflightPolicy(f.repository)).rejects.toThrow(
         "dotted or quoted Codex override keys",
@@ -1475,7 +1438,7 @@ describe("CodexSecurity policy API", () => {
       await expect(f.security.generatePolicy(f.repository)).rejects.toThrow(
         "dotted or quoted Codex override keys",
       );
-      expect(prepared).toBe(false);
+      expect(onPrepare).not.toHaveBeenCalled();
       expect(f.threads).toHaveLength(0);
       await f.security.close();
     }
@@ -1557,9 +1520,7 @@ describe("CodexSecurity policy API", () => {
   test("optional observer failures do not stop policy generation", async () => {
     const f = await setup();
     const errors: string[] = [];
-    const fail = () => {
-      throw new Error("optional observer");
-    };
+    const fail = throwing("optional observer");
     const result = await f.security.generatePolicy(f.repository, {
       outputDir: f.outputDir,
       onStage: fail,
@@ -1729,19 +1690,18 @@ describe("CodexSecurity policy API", () => {
 
   test("close cancels an owner-question callback even if it never settles", async () => {
     const f = await setup();
-    const { promise: waiting, resolve: entered } =
-      Promise.withResolvers<void>();
+    const waiting = Promise.withResolvers<void>();
     let promptSignal: AbortSignal | undefined;
     const generation = f.security.generatePolicy(f.repository, {
       outputDir: f.outputDir,
       answerQuestions: (_questions, signal) => {
         promptSignal = signal;
-        entered();
+        waiting.resolve();
         return new Promise(() => {});
       },
     });
     const interrupted = generation.catch((error: unknown) => error);
-    await waiting;
+    await waiting.promise;
     await f.security.close();
     expect(await interrupted).toMatchObject({
       message: expect.stringContaining("interrupted"),

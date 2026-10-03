@@ -1,5 +1,6 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   chmod,
   lstat,
@@ -37,6 +38,7 @@ import {
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
+  withoutOpenAiApiKeys,
   type AccountStatus,
 } from "./auth.js";
 import {
@@ -737,12 +739,10 @@ export class CodexSecurity {
     options: ScanOptions = {},
   ): Promise<ScanPreflight> {
     this.#requireOpen();
-    const inputs = await this.#prepareLocalInputs(
-      repository,
+    return await this.#preflightInputs(
+      await this.#prepareLocalInputs(repository, options, options.signal),
       options,
-      options.signal,
     );
-    return await this.#preflightInputs(inputs, options);
   }
 
   async #preflightInputs(
@@ -927,11 +927,7 @@ export class CodexSecurity {
         const metadata = await lstat(
           join(runtime.plugin.pluginRoot, path),
         ).catch(() => null);
-        if (
-          metadata === null ||
-          !metadata.isFile() ||
-          metadata.isSymbolicLink()
-        ) {
+        if (metadata === null || !metadata.isFile()) {
           throw new CodexSecurityError(
             `Installed plugin is missing policy-generation support: ${path}`,
           );
@@ -1311,16 +1307,12 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      const deepScanConfigPath =
-        mode === "deep"
-          ? (runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml"))
-          : undefined;
-      if (
-        deepScanConfigPath !== undefined &&
-        deepScanConfiguration !== undefined
-      ) {
-        await writeDeepScanConfig(deepScanConfigPath, deepScanConfiguration);
+      if (deepScanConfiguration !== undefined) {
+        await writeDeepScanConfig(
+          runtime.deepScanConfigPath ??
+            join(runtimeHome, "codex-security", "config.toml"),
+          deepScanConfiguration,
+        );
       }
       checkOpen();
       const scanOutputRoot =
@@ -1348,15 +1340,7 @@ export class CodexSecurity {
               scanOutputRoot,
               (path) => requireOutputOutsideRepository(protectedRoot, path),
               options.archiveExisting,
-              (archiveDir) => {
-                archivedScanDir = archiveDir;
-                notifyObserver(
-                  "onOutputArchived",
-                  options.onOutputArchived,
-                  options.onObserverError,
-                  archiveDir,
-                );
-              },
+              archiveObserver(options, (path) => (archivedScanDir = path)),
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
@@ -1398,12 +1382,7 @@ export class CodexSecurity {
           runtime.plugin.installedRoot,
         );
       const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
-      const skillMetadata = await lstat(skillPath).catch(() => null);
-      if (
-        skillMetadata === null ||
-        !skillMetadata.isFile() ||
-        skillMetadata.isSymbolicLink()
-      ) {
+      if (!(await lstat(skillPath).catch(() => null))?.isFile()) {
         throw new IncompleteScanError(
           `Installed plugin is missing scan skill: ${skillName}`,
         );
@@ -1936,18 +1915,15 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
-      const postScanPrompt = options.postScanPrompt;
-      if (postScanPrompt?.trim()) {
-        runPostScan = () =>
-          thread.runStreamed(postScanPrompt, {
-            signal,
-            cyberAccessProgram: options.cyberAccessProgram,
-          });
-      }
-      const { events } = await thread.runStreamed(prompt, {
+      const turnOptions: TurnOptions = {
         signal,
         cyberAccessProgram: options.cyberAccessProgram,
-      });
+      };
+      const postScanPrompt = options.postScanPrompt;
+      if (postScanPrompt?.trim()) {
+        runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
+      }
+      const { events } = await thread.runStreamed(prompt, turnOptions);
       checkOpen();
 
       const result = await runScanEvents({
@@ -2020,9 +1996,8 @@ export class CodexSecurity {
                   thread: validationThread,
                   events: (
                     await validationThread.runStreamed(validationPrompt, {
+                      ...turnOptions,
                       outputSchema,
-                      signal,
-                      cyberAccessProgram: options.cyberAccessProgram,
                     })
                   ).events,
                   onReconnect: (message, attempts) =>
@@ -3065,20 +3040,19 @@ export class CodexSecurity {
         ...sources.gitMetadataPaths,
       ]),
     ];
-    const inputs = await this.#prepareLocalInputs(
-      target.repository,
-      {
-        auth: options.auth,
-        target:
-          target.scope === "." ? "repository" : [dirname(target.targetPath)],
-        outputDir: options.outputDir,
-        maxCostUsd: options.maxCostUsd,
-      },
-      signal,
-      protectedRoots,
-    );
     return {
-      ...inputs,
+      ...(await this.#prepareLocalInputs(
+        target.repository,
+        {
+          auth: options.auth,
+          target:
+            target.scope === "." ? "repository" : [dirname(target.targetPath)],
+          outputDir: options.outputDir,
+          maxCostUsd: options.maxCostUsd,
+        },
+        signal,
+        protectedRoots,
+      )),
       policyPaths: sources.policyPaths,
       gitMetadataPaths: [
         ...new Set([...protectedRoots.slice(1), ...sources.gitMetadataPaths]),
@@ -3154,15 +3128,7 @@ export class CodexSecurity {
         outputRoot,
         (path) => requireOutputOutsideRepository(local.protectedRoot, path),
         options.archiveExisting,
-        (path) => {
-          archivedScanDir = path;
-          notifyObserver(
-            "onOutputArchived",
-            options.onOutputArchived,
-            options.onObserverError,
-            path,
-          );
-        },
+        archiveObserver(options, (path) => (archivedScanDir = path)),
       );
       requireModelSafeOutputDir(scanDir);
       notifyObserver(
@@ -3672,8 +3638,8 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
   }
 }
 
-interface ScanEventRunOptions {
-  thread: CodexThreadLike;
+interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
+  thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
   scanDir: string;
@@ -3688,11 +3654,6 @@ interface ScanEventRunOptions {
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
-  onReconnect?: (
-    attempt: number,
-    maxAttempts: number,
-    details?: ScanReconnectDetails,
-  ) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
@@ -3853,7 +3814,7 @@ export async function runScanEvents(
 }
 
 async function readCodexTurn(options: {
-  thread: CodexThreadLike;
+  thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
   onEvent?: (event: ScanEvent) => Promise<void> | void;
   onReconnect?: (message: string, attempts: [number, number]) => void;
@@ -3995,14 +3956,12 @@ function trustedAccessWarning(
     ? ORGANIZATIONAL_TRUSTED_ACCESS_URL
     : PERSONAL_TRUSTED_ACCESS_URL;
   if (status === "not_granted") {
-    const account = apiOrganization ? "your API organization" : "your account";
-    return `Some cybersecurity requests or findings may be refused because ${account} does not have Trusted Access for Cyber. Apply at ${applicationUrl}.`;
+    return `Some cybersecurity requests or findings may be refused because ${apiOrganization ? "your API organization" : "your account"} does not have Trusted Access for Cyber. Apply at ${applicationUrl}.`;
   }
   const access = apiOrganization
     ? "Trusted Access for Cyber for your API organization"
     : "your Trusted Access for Cyber status";
-  const action = apiOrganization ? "your organization's access" : "your access";
-  return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
+  return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${apiOrganization ? "your organization's access" : "your access"} or apply at ${applicationUrl}.`;
 }
 
 function scanPrompt(
@@ -4413,16 +4372,16 @@ export function selectedScanEnvironment(
   );
 }
 
-function withoutOpenAiApiKeys(
-  environment: ProcessEnvironment,
-): ProcessEnvironment {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) =>
-        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-    ),
-  );
-}
+const archiveObserver =
+  (options: ScanOptions, save: (path: string) => void) => (path: string) => {
+    save(path);
+    notifyObserver(
+      "onOutputArchived",
+      options.onOutputArchived,
+      options.onObserverError,
+      path,
+    );
+  };
 
 function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,
@@ -4585,9 +4544,6 @@ export function scanRuntimeCodexConfig(
       delete profile["sandbox_mode"];
     }
   }
-  const configuredPermissions = isRecord(hardened["permissions"])
-    ? hardened["permissions"]
-    : {};
   return {
     ...hardened,
     approval_policy: approvalPolicy,
@@ -4595,7 +4551,7 @@ export function scanRuntimeCodexConfig(
     allow_login_shell: false,
     default_permissions: SCAN_PERMISSION_PROFILE,
     permissions: {
-      ...configuredPermissions,
+      ...(isRecord(hardened["permissions"]) ? hardened["permissions"] : {}),
       [SCAN_PERMISSION_PROFILE]: {
         filesystem: {
           ":root": "read",
@@ -4652,7 +4608,6 @@ function policyCodexConfig(config: JsonObject): JsonObject {
   // The selected provider is already written as TOML. The SDK cannot quote
   // provider names when it flattens this table into command-line overrides.
   delete resolved["model_providers"];
-  const features = isRecord(resolved["features"]) ? resolved["features"] : {};
   return {
     ...resolved,
     approval_policy: "never",
@@ -4666,7 +4621,7 @@ function policyCodexConfig(config: JsonObject): JsonObject {
       ignore_default_excludes: false,
     },
     features: {
-      ...features,
+      ...(isRecord(resolved["features"]) ? resolved["features"] : {}),
       plugins: false,
       apps: false,
       shell_snapshot: false,
@@ -4714,8 +4669,6 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     !/[\u0000-\u001f\u007f]/u.test(value);
   const safeProfileName = (value: unknown): value is string =>
     safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
-  const safeInteger = (value: unknown): value is number =>
-    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};

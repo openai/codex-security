@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { once } from "node:events";
+import { resolving } from "./support/promises.js";
+import { describe, expect, test, mock } from "bun:test";
 import {
   checkForUpdate,
   formatUpdateNotice,
@@ -6,6 +8,7 @@ import {
 } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { main } from "../src/cli.js";
+import { rejecting } from "./support/errors.js";
 
 function registryResponse(version: unknown) {
   return async () => new Response(JSON.stringify({ version }));
@@ -57,13 +60,8 @@ describe("CLI update notice", () => {
       signal: controller.signal,
       fetch: async (_url, options) => {
         requestSignal = options?.signal ?? undefined;
-        return await new Promise<Response>((_resolve, reject) => {
-          requestSignal?.addEventListener(
-            "abort",
-            () => reject(requestSignal?.reason),
-            { once: true },
-          );
-        });
+        await once(requestSignal!, "abort");
+        throw requestSignal!.reason;
       },
     });
 
@@ -178,11 +176,7 @@ describe("CLI update notice", () => {
   });
 
   test("suppresses registry checks in CI or when disabled", async () => {
-    let requests = 0;
-    const fetchLatest = async () => {
-      requests += 1;
-      return new Response(JSON.stringify({ version: "0.2.0" }));
-    };
+    const fetchLatest = mock(registryResponse("0.2.0"));
 
     for (const environment of [
       { CODEX_SECURITY_NO_UPDATE_NOTICE: "1" },
@@ -198,14 +192,12 @@ describe("CLI update notice", () => {
       ).toBeUndefined();
     }
 
-    expect(requests).toBe(0);
+    expect(fetchLatest).toHaveBeenCalledTimes(0);
   });
 
   test("ignores unavailable registries and invalid registry responses", async () => {
     for (const fetchLatest of [
-      async () => {
-        throw new Error("network unavailable");
-      },
+      rejecting("network unavailable"),
       async () => new Response("unavailable", { status: 503 }),
       async () => new Response("not JSON"),
     ]) {
@@ -246,21 +238,20 @@ describe("CLI update notice", () => {
   test("finishes the command and aborts an unfinished update check", async () => {
     const stdout = capture();
     const stderr = capture(true);
-    let updateSignal: AbortSignal | undefined;
+    const onUpdateCheck = mock(async (_signal: AbortSignal) => {
+      return await new Promise<undefined>(() => {});
+    });
     const result = await main(
       ["info", "--json"],
       stdout.stream,
       stderr.stream,
       dependencies({
-        onUpdateCheck: async (signal) => {
-          updateSignal = signal;
-          return await new Promise<undefined>(() => {});
-        },
+        onUpdateCheck,
       }),
     );
 
     expect(result).toBe(0);
-    expect(updateSignal?.aborted).toBe(true);
+    expect(onUpdateCheck.mock.lastCall?.[0]?.aborted).toBe(true);
     expect(JSON.parse(stdout.text())).toMatchObject({
       cliVersion: expect.any(String),
     });
@@ -268,11 +259,7 @@ describe("CLI update notice", () => {
   });
 
   test("skips checks for noninteractive output, help, dry runs, and disabled notices", async () => {
-    let checks = 0;
-    const onUpdateCheck = async () => {
-      checks += 1;
-      return undefined;
-    };
+    const onUpdateCheck = mock(resolving(undefined));
 
     await main(
       ["info", "--json"],
@@ -298,7 +285,7 @@ describe("CLI update notice", () => {
       }),
     );
 
-    expect(checks).toBe(0);
+    expect(onUpdateCheck).toHaveBeenCalledTimes(0);
   });
 
   test("keeps commands successful when the update check fails", async () => {
@@ -311,9 +298,7 @@ describe("CLI update notice", () => {
         stdout.stream,
         stderr.stream,
         dependencies({
-          onUpdateCheck: async () => {
-            throw new Error("registry unavailable");
-          },
+          onUpdateCheck: rejecting("registry unavailable"),
         }),
       ),
     ).toBe(0);

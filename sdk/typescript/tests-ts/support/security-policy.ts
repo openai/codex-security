@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   inspectSecurityPolicySources,
@@ -13,6 +12,7 @@ import {
   type SecurityPolicyStageResult,
 } from "../../src/security-policy.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
+import { temporaryDirectory } from "./temporary-directories.js";
 
 export const POLICY =
   "# Security Policy\n\n## Security Invariants\n\nRequests must be authorized before reading another account's records.\n";
@@ -60,14 +60,17 @@ export async function addPolicySubmodule(
 
 export function stageResult(
   stage: SecurityPolicyStage,
+  policyMarkdown = POLICY,
+  policyReviewNote = "Confirm the deployment's exposure.",
 ): SecurityPolicyStageResult {
   return {
     markdown:
-      stage === "policy" ? POLICY : `# ${stage}\n\nSource: src/service.ts:1\n`,
+      stage === "policy"
+        ? policyMarkdown
+        : `# ${stage}\n\nSource: src/service.ts:1\n`,
     questions:
       stage === "architecture" ? ["Is this service internet-facing?"] : [],
-    reviewNotes:
-      stage === "policy" ? ["Confirm the deployment's exposure."] : [],
+    reviewNotes: stage === "policy" ? [policyReviewNote] : [],
     blockedReason: null,
   };
 }
@@ -88,9 +91,7 @@ export async function policyFixture(): Promise<{
   }): Promise<SecurityPolicyDraft>;
   cleanup(): Promise<void>;
 }> {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-policy-")),
-  );
+  const root = await temporaryDirectory("codex-security-policy-", true);
   const repository = join(root, "repository");
   const outputDir = join(root, "policy");
   await mkdir(repository);
@@ -148,4 +149,18 @@ export async function policyPlugin(
   );
   await writeFile(join(plugin, "mcp", "helpers.mjs"), script);
   return plugin;
+}
+
+export function createPolicyTestFixtures() {
+  const fixtures: Awaited<ReturnType<typeof policyFixture>>[] = [];
+  return {
+    async fixture() {
+      const fixture = await policyFixture();
+      fixtures.push(fixture);
+      return fixture;
+    },
+    async cleanup(): Promise<void> {
+      await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
+    },
+  };
 }
