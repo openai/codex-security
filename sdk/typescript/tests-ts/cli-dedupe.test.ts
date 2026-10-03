@@ -252,6 +252,45 @@ test("dedupe requires both explicit inputs and reports SDK failures", async () =
   expect(stderr.text()).toContain("Finding has not been indexed");
 });
 
+test.each([
+  ["missing-url", ["--scan", "latest"], "requires --findings-url"],
+  [
+    "missing-scan",
+    ["--findings-url", "http://127.0.0.1:3000"],
+    "requires --scan or --workflow-id",
+  ],
+])(
+  "dedupe does not emit an ok: true envelope when an input is missing: %s",
+  async (_label, flags, expected) => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["dedupe", ...flags, "--json", "--full-output"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(expected);
+  },
+);
+
+test("dedupe does not emit an ok: true envelope for a failed structured dedupe run", async () => {
+  const deps = dependencies();
+  deps.deduplicateScan = async () => {
+    throw new Error("Finding has not been indexed");
+  };
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main([...args, "--full-output"], stdout.stream, stderr.stream, deps),
+  ).toBe(2);
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain("Finding has not been indexed");
+});
+
 test("dedupe forwards cancellation and removes signal handlers", async () => {
   for (const [signal, expectedCode] of [
     ["SIGINT", 130],
