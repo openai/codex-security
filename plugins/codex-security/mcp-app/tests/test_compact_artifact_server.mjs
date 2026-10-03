@@ -1,3 +1,4 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -10,7 +11,6 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -21,9 +21,7 @@ const pluginRoot = path.resolve(applicationRoot, "..");
 const bundledPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
   ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
   : path.resolve(applicationRoot, "../../../sdk/typescript/_bundled_plugin");
-const temporaryRoot = await mkdtemp(
-  path.join(tmpdir(), "codex-security-artifact-mcp-"),
-);
+const temporaryRoot = await temporaryDirectory("codex-security-artifact-mcp-");
 
 try {
   const runtimeBundle = path.join(temporaryRoot, "server.cjs");
@@ -93,12 +91,7 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     CODEX_SECURITY_STATE_DIR: stateRoot,
   });
   const ownerThread = `compact-diff-owner-${runtimeLabel}`;
-  const call = (name, arguments_) =>
-    client.callTool({
-      name,
-      arguments: arguments_,
-      _meta: { "openai/threadId": ownerThread },
-    });
+  const call = toolCaller(client, ownerThread);
 
   try {
     const selection = {
@@ -303,12 +296,7 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     CODEX_SECURITY_STATE_DIR: stateRoot,
   });
   const ownerThread = `semantic-draft-owner-${runtimeLabel}`;
-  const call = (name, arguments_) =>
-    client.callTool({
-      name,
-      arguments: arguments_,
-      _meta: { "openai/threadId": ownerThread },
-    });
+  const call = toolCaller(client, ownerThread);
 
   try {
     const opened = requireSuccessfulTool(
@@ -904,12 +892,7 @@ async function testClaimedParentArtifactOperations(bundle, runtimeLabel) {
   });
   const ownerThread = `compact-artifact-owner-${runtimeLabel}`;
   const otherThread = `compact-artifact-other-${runtimeLabel}`;
-  const call = (name, arguments_, threadId = ownerThread) =>
-    client.callTool({
-      name,
-      arguments: arguments_,
-      ...(threadId == null ? {} : { _meta: { "openai/threadId": threadId } }),
-    });
+  const call = toolCaller(client, ownerThread);
 
   try {
     const opened = requireSuccessfulTool(
@@ -1737,4 +1720,13 @@ async function startClient(bundle, environment) {
   });
   await client.connect(transport);
   return client;
+}
+
+function toolCaller(client, ownerThread) {
+  return (name, arguments_, threadId = ownerThread) =>
+    client.callTool({
+      name,
+      arguments: arguments_,
+      ...(threadId == null ? {} : { _meta: { "openai/threadId": threadId } }),
+    });
 }

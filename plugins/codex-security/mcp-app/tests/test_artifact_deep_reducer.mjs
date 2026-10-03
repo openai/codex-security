@@ -1,15 +1,8 @@
+import { sourceReferences } from "./support/source-references.mjs";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.mjs";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.mjs";
 
@@ -56,9 +49,7 @@ assert.equal(
   false,
 );
 
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-deep-reducer-")),
-);
+const root = await temporaryDirectory("codex-security-deep-reducer-", true);
 try {
   const scanRoot = path.join(root, "scan");
   const workersRoot = path.join(
@@ -536,13 +527,7 @@ function withSourceRefs(worker) {
   const { coverage: _coverage, ...result } = worker.result;
   return {
     ...result,
-    findings: worker.result.findings.map((finding, index) => ({
-      ...finding,
-      provenance: {
-        ...finding.provenance,
-        sourceFindingIds: [`${worker.id}:${index}`],
-      },
-    })),
+    findings: worker.result.findings.map(sourceReferences(worker)),
   };
 }
 
