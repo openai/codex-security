@@ -1572,8 +1572,8 @@ describe("plugin runtime preparation", () => {
       const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
       const calls: string[][] = [];
       await mkdir(home);
-      const bootstrap = () =>
-        bootstrapPlugin(home, selected, {
+      const bootstrap = (source = selected) =>
+        bootstrapPlugin(home, source, {
           codexCommand: { command: "/codex" },
           runCodex: async (_command, args) => {
             calls.push([...args]);
@@ -1606,6 +1606,17 @@ describe("plugin runtime preparation", () => {
       expect((await bootstrap()).installedRoot).toBe(installed);
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
       expect(await readFile(generated, "utf8")).toBe("generated cache");
+    });
+
+    test("reuses unchanged source after relocation", async () => {
+      const { installed, calls, bootstrap } = await fixture();
+      const relocated = await plugin(await temporaryDirectory());
+
+      const result = await bootstrap(relocated);
+
+      expect(result.installedRoot).toBe(installed);
+      expect(result.pluginRoot).toBe(relocated);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
     });
 
     test.each(["changed", "added", "removed"] as const)(
@@ -1648,6 +1659,7 @@ describe("plugin runtime preparation", () => {
     });
 
     test.each([
+      "missing installed directory",
       "missing file",
       "changed file",
       "missing record",
@@ -1660,6 +1672,9 @@ describe("plugin runtime preparation", () => {
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
       switch (damage) {
+        case "missing installed directory":
+          await rm(installed, { recursive: true });
+          break;
         case "missing file":
           await rm(helper);
           break;
