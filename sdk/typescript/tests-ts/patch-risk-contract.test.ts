@@ -8,10 +8,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 interface Assessment {
   [key: string]: unknown;
@@ -772,6 +773,58 @@ describe("patch risk assessment contract", () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "executes the documented PowerShell command with literal assessment and plugin paths",
+    async () => {
+      const outside = await mkdtemp(join(tmpdir(), "patch-risk-powershell-"));
+      try {
+        const launcher = windowsHelperFixture(outside);
+        const file = join(
+          outside,
+          "review-%USERNAME% !EXPAND! \u96ea's",
+          "assessment.json",
+        );
+        const expandedFile = file.replace("%USERNAME%", "expanded-user");
+        for (const path of [file, expandedFile])
+          await mkdir(dirname(path), { recursive: true });
+        const original = JSON.stringify(assessment()).replace(
+          "example/project",
+          "example/caf\u00e9-\u96ea",
+        );
+        await writeFile(expandedFile, original);
+        for (const powershell of launcher.powershells) {
+          for (const input of ["invalid", "valid", "stdin"]) {
+            await writeFile(file, input === "invalid" ? "{}" : original);
+            const result = launcher.run(
+              powershell,
+              "skills/assess-patch-risk/SKILL.md",
+              {
+                "<plugin-root>": launcher.plugin,
+                "<assessment.json>": input === "stdin" ? "-" : file,
+              },
+              original,
+            );
+            expect(
+              result.status,
+              `${powershell}: ${result.stderr || result.error?.message || ""}`,
+            ).toBe(input === "invalid" ? 1 : 0);
+            expect(result.stdout).toBe("");
+            if (input === "invalid")
+              expect(result.stderr).toContain(
+                "missing required schema property",
+              );
+            else expect(result.stderr).toBe("");
+            expect(await readFile(file, "utf8")).toBe(
+              input === "invalid" ? "{}" : original,
+            );
+          }
+        }
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "keeps stdin surrogate escapes distinct from replacement characters",
