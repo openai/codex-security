@@ -56,6 +56,7 @@ export async function createAuthenticatedGitHub(
   } = {},
 ): Promise<Octokit> {
   options.signal?.throwIfAborted();
+  host = host.toLowerCase();
   let token = options.token;
   if (token === undefined) {
     const trusted = await resolveTrustedExecutable(
