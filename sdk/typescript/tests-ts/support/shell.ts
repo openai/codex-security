@@ -22,16 +22,29 @@ export function runCommand(
     env?: NodeJS.ProcessEnv;
     input?: string;
     timeout: number;
+    windowsHide?: boolean;
   },
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  signal: NodeJS.Signals | null;
+  error: Error | null;
+}> {
   // Avoid Bun's premature synchronous timeouts while keeping pipe reads bounded.
   return new Promise((resolve, reject) => {
     const child = execFile(
       command,
       args,
       { ...options, encoding: "utf8" },
-      (_error, stdout, stderr) => {
-        resolve({ status: child.exitCode, stdout, stderr });
+      (error, stdout, stderr) => {
+        resolve({
+          status: child.exitCode,
+          stdout,
+          stderr,
+          signal: child.signalCode,
+          error,
+        });
       },
     );
     child.stdin?.on("error", reject);
