@@ -6,9 +6,8 @@ export async function testDeepScanPublication({
   fixtureRun,
   FakeStore,
   FakeExecutor,
-  DeepScanCoordinator,
+  createCoordinator,
   deferred,
-  immediateClock,
   eventually,
 }) {
   async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
@@ -45,12 +44,7 @@ export async function testDeepScanPublication({
       discoveryCandidates: { "discovery-0003": "late-accepted-finding" },
     });
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
@@ -120,12 +114,7 @@ export async function testDeepScanPublication({
       return outcome;
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
@@ -173,12 +162,7 @@ export async function testDeepScanPublication({
       return updateWorker(update);
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
@@ -247,14 +231,12 @@ export async function testDeepScanPublication({
       return structuredClone(store.run);
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
-      onComplete: async (draft) => completed.push(structuredClone(draft)),
-    });
+      new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
+      { onComplete: async (draft) => completed.push(structuredClone(draft)) },
+    );
     coordinator.start();
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);

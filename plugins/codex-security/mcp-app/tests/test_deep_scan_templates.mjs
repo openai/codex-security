@@ -6,7 +6,7 @@ const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
   { loader: { ".md": "text" } },
 );
 
-const rendered = renderDiscoveryPrompt({
+const discoveryInput = {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
   pluginRoot: "/fixture/plugins/codex-security",
   targetPath: "/fixture/repository",
@@ -15,7 +15,9 @@ const rendered = renderDiscoveryPrompt({
     "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
   workerLabel: "discovery-0001",
   subagents: 3,
-});
+};
+
+const rendered = renderDiscoveryPrompt({ ...discoveryInput });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
@@ -45,19 +47,7 @@ for (const field of [
 
 const feedbackPath =
   "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";
-const withFeedback = renderDiscoveryPrompt(
-  {
-    scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
-    pluginRoot: "/fixture/plugins/codex-security",
-    targetPath: "/fixture/repository",
-    scope: ".",
-    userContext:
-      "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
-    workerLabel: "discovery-0001",
-    subagents: 3,
-  },
-  feedbackPath,
-);
+const withFeedback = renderDiscoveryPrompt({ ...discoveryInput }, feedbackPath);
 assert.deepEqual(firstJsonBlock(withFeedback), discoveryContext);
 assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 

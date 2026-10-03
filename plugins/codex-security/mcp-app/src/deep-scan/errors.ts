@@ -100,3 +100,9 @@ export function abortError(reason?: unknown): Error {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+export function errorNameWithCode(error: Error): string {
+  const code =
+    "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return code ? `${error.name}:${code}` : error.name;
+}

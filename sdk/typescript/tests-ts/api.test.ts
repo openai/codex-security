@@ -4612,6 +4612,83 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(["cancel", "close", "restore failure"])(
+    "preserves completed artifacts when a follow-up ends with %s",
+    async (scenario) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([mkdir(repository), mkdir(codexHome)]);
+      const controller = new AbortController();
+      await mkdir(scanDir, { mode: 0o700 });
+      let originalFindings: string;
+      let turns = 0;
+      let closing: Promise<void> | undefined;
+      const client = new TestClient(
+        {},
+        {
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          prepareScanArtifactRestorer: async () => ({
+            restore: async (name, contents) => {
+              if (scenario === "restore failure")
+                throw new Error("write failed");
+              await writeFile(join(scanDir, name), contents);
+            },
+          }),
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed() {
+                if (++turns === 1) {
+                  await copyCompletedScan(root);
+                  originalFindings = await readFile(
+                    join(scanDir, "findings.json"),
+                    "utf8",
+                  );
+                } else {
+                  await writeFile(
+                    join(scanDir, "findings.json"),
+                    '{"unfinished":',
+                  );
+                  await writeFile(
+                    join(scanDir, "report.md"),
+                    "unfinished report",
+                  );
+                  if (scenario === "close") closing = client.close();
+                  else controller.abort();
+                }
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+      const result = client.run(repository, {
+        postScanPrompt: "Draft confirmed fixes.",
+        signal: controller.signal,
+      });
+      if (scenario === "restore failure") {
+        await expect(result).rejects.toBeInstanceOf(OutputDirectoryError);
+      } else {
+        await expect(result).rejects.toThrow(
+          scenario === "close" ? "closed" : "interrupted",
+        );
+        expect(await readFile(join(scanDir, "findings.json"), "utf8")).toBe(
+          originalFindings!,
+        );
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toBe(
+          "# Scan report\n",
+        );
+      }
+      expect(turns).toBe(2);
+      await (closing ?? client.close());
+    },
+  );
+
   test("raises a live budget twice without restarting or resetting accumulated usage", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

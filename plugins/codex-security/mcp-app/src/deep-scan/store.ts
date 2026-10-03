@@ -517,11 +517,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   /** Replay only existing, same-identity workbench mutations after transient failures. */
   private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
     const startedAt = Date.now();
-    for (
-      let attempt = 1;
-      attempt <= MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS;
-      attempt += 1
-    ) {
+    for (let attempt = 1; ; attempt += 1) {
       try {
         return await this.runWorkbench(args);
       } catch (error) {
@@ -568,7 +564,6 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         await delay(delayMs);
       }
     }
-    throw new Error("Deep Scan persistence retry loop exited unexpectedly.");
   }
 }
 

@@ -1,27 +1,13 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readSavedScanLogs, readScanLogs } from "../src/scan-logs.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const directories = createTemporaryDirectories();
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(directories.cleanup);
 
 async function writeSession(
   home: string,
@@ -61,10 +47,7 @@ async function writeSession(
 }
 
 async function temporaryHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-scan-logs-")),
-  );
-  directories.push(directory);
+  const directory = await directories.create("codex-security-scan-logs-");
   return directory;
 }
 

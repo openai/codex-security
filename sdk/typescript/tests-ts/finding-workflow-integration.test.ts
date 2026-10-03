@@ -1,5 +1,5 @@
+import { findingFingerprint, sha256 } from "./support/finding-identity.js";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -62,24 +62,17 @@ async function fixtureWithFindings(count: number) {
   const manifest = JSON.parse(
     await readFile(manifestPath, "utf8"),
   ) as ScanManifest;
-  const digest = (text: string) =>
-    createHash("sha256").update(text).digest("hex");
   document.findings = Array.from({ length: count }, (_value, index) => {
     const finding = structuredClone(document.findings[0]!);
     finding.identity.instance = `concurrent-${index}`;
-    const fingerprint = `codex-security/v1:sha256:${digest(
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance,
-      ].join("\0"),
-    )}`;
+    const fingerprint = findingFingerprint(
+      manifest.scan.target.targetId,
+      finding,
+    );
     return {
       ...finding,
-      findingId: `csf_${digest(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${digest([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
+      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
+      occurrenceId: `occ_${sha256([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
       fingerprints: { ...finding.fingerprints, primary: fingerprint },
       title: `Synthetic concurrent finding ${index}`,
     };
@@ -88,7 +81,7 @@ async function fixtureWithFindings(count: number) {
   await writeFile(join(scanDir, "findings.json"), content);
   manifest.scan.artifacts!.find(
     (artifact) => artifact.path === "findings.json",
-  )!.sha256 = digest(content);
+  )!.sha256 = sha256(content);
   await writeFile(manifestPath, JSON.stringify(manifest));
   return value;
 }
@@ -409,7 +402,7 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
   ) as ScanManifest;
   manifest.scan.artifacts!.find(
     (artifact) => artifact.path === "findings.json",
-  )!.sha256 = createHash("sha256").update(content).digest("hex");
+  )!.sha256 = sha256(content);
   await writeFile(manifestPath, JSON.stringify(manifest));
   const options = {
     workflowId: "empty-scan",

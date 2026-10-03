@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const DESTINATION_OPTIONS = [
   "--to",
@@ -15,27 +16,21 @@ const DESTINATION_OPTIONS = [
   "--linear-project",
   "project-from-flags",
 ] as const;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function publicationDirectory(): Promise<string> {
-  const directory = await mkdtemp(
-    join(tmpdir(), "codex-security-cli-publication-"),
+  const directory = await temporaryDirectories.create(
+    "codex-security-cli-publication-",
   );
-  temporaryDirectories.push(directory);
   return directory;
 }
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create(
+    "codex-security-publish-picker-",
+  );
   return Promise.all(
     Array.from({ length: count }, async (_, index) => {
       const directory = join(root, `scan-${index}`);
