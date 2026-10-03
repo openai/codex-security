@@ -349,6 +349,19 @@ describe("rank pool helpers", () => {
     expect(readFileSync(f.plan, "utf8")).toBe("preserve plan");
   });
 
+  test("creates a plan through a missing parent followed by parent traversal", () => {
+    const f = fixture();
+    const missing = join(f.root, "missing");
+    const throughMissing = {
+      ...f,
+      plan: missing + sep + ".." + sep + "assignments.json",
+    };
+    expect(make(throughMissing).status).toBe(0);
+    complete(f);
+    expect(validate(throughMissing).status).toBe(0);
+    expect(existsSync(missing)).toBe(process.platform !== "win32");
+  });
+
   test("checks shard existence and names before loading a missing or malformed plan", () => {
     const f = fixture(0);
     expect(validate(f).stderr).toContain(f.plan);

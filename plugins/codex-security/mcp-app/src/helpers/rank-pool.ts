@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import {
@@ -36,20 +37,56 @@ const same = (left: string[], right: string[]) =>
   left.length === right.length &&
   left.every((name, index) => name === right[index]);
 
+function posixDirectoryKey(
+  value: string,
+  resolving = new Set<string>(),
+): string {
+  let path = value.startsWith("/")
+    ? "/"
+    : decodePosixBytes(realpathSync.native(".", { encoding: "buffer" }));
+  // Pool plans use pathlib's non-strict resolution, including missing/.. paths.
+  for (const part of value.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      path = dirname(path);
+      continue;
+    }
+    const next = (path === "/" ? "" : path) + "/" + part;
+    let link = false;
+    try {
+      link = lstatSync(encodePosixPath(next)).isSymbolicLink();
+    } catch (error) {
+      if (typeof (error as NodeJS.ErrnoException).errno !== "number")
+        throw error;
+    }
+    if (!link) {
+      path = next;
+      continue;
+    }
+    if (resolving.has(next)) throw new Error(`Symlink loop from ${next}`);
+    resolving.add(next);
+    const target = decodePosixBytes(
+      readlinkSync(encodePosixPath(next), { encoding: "buffer" }),
+    );
+    path = posixDirectoryKey(
+      target.startsWith("/") ? target : path + "/" + target,
+      resolving,
+    );
+    resolving.delete(next);
+  }
+  return path;
+}
+
 function requirePlanDirectory(plan: string, directory: string): void {
   const expected = childPath(dirname(plan), "rank_shards");
   const key = (value: string) => {
-    const windows = process.platform === "win32";
+    if (process.platform !== "win32") return posixDirectoryKey(value);
     try {
-      const path = resolvedPath(
-        windows ? Buffer.from(value, "utf16le") : encodePosixPath(value),
-        false,
-      );
-      return windows
-        ? path.toString("utf16le").toLowerCase()
-        : decodePosixBytes(path);
+      return resolvedPath(Buffer.from(value, "utf16le"), false)
+        .toString("utf16le")
+        .toLowerCase();
     } catch (error) {
-      if (windows && (error as NodeJS.ErrnoException).code === "ELOOP")
+      if ((error as NodeJS.ErrnoException).code === "ELOOP")
         throw new Error(`Symlink loop from ${value}`);
       throw error;
     }
