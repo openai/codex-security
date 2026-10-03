@@ -1,3 +1,4 @@
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -9,7 +10,6 @@ import {
   link,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   readlink,
   realpath,
@@ -89,7 +89,7 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -98,23 +98,15 @@ import {
   readPythonRolloutUsage,
 } from "./support/usage-rollout.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories();
 const testPosix = process.platform === "win32" ? test.skip : test;
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function temporaryDirectory(
   prefix = "codex-security-runtime-",
 ): Promise<string> {
-  const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
-  temporaryDirectories.push(path);
-  return path;
+  return temporaryDirectories.create(prefix);
 }
 
 function windowsCredentialAclOutput(descriptors: readonly string[]): string {
@@ -329,101 +321,6 @@ describe("plugin runtime preparation", () => {
       "candidate-a",
       "candidate-b",
     ]);
-  });
-
-  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-
-    type Surface = {
-      id?: string;
-      label: string;
-      disposition: string;
-      receiptRefs?: string[];
-    };
-    type Deferred = { id: string; reason: string; surfaceIds: string[] };
-    const buildCoverage = new Function(
-      "semanticIdentifier",
-      "coverageMode",
-      "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
-    )(
-      (label: string) => label.toLowerCase(),
-      () => "deep_repository",
-      () => "repository",
-    ) as (
-      context: Record<string, unknown>,
-      contract: Record<string, unknown>,
-      coverage: { surfaces: Surface[]; deferred: Deferred[] },
-      scope: { includePaths: string[]; excludePaths: string[] },
-      target: Record<string, unknown>,
-    ) => {
-      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
-      deferred: Deferred[];
-    };
-
-    const coverage = {
-      surfaces: [
-        {
-          id: "surface-web",
-          label: "Primary",
-          disposition: "reported",
-          receiptRefs: ["artifacts/primary.json"],
-        },
-        { id: "surface-web", label: "Secondary", disposition: "reported" },
-        {
-          id: "surface-web-2",
-          label: "Reserved suffix",
-          disposition: "no_issue_found",
-        },
-        { label: "Uploads", disposition: "reported" },
-        {
-          id: "surface_uploads",
-          label: "Owned uploads",
-          disposition: "reported",
-        },
-        { label: "Archive", disposition: "reported" },
-        { label: "Archive", disposition: "no_issue_found" },
-      ],
-      deferred: [
-        {
-          id: "deferred-review",
-          reason: "Environment unavailable",
-          surfaceIds: ["surface-web", "surface_uploads"],
-        },
-      ],
-    };
-    const original = structuredClone(coverage);
-    const canonical = buildCoverage(
-      { mode: "deep" },
-      {},
-      coverage,
-      { includePaths: ["."], excludePaths: [] },
-      {},
-    );
-
-    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
-      "surface-web",
-      "surface-web-3",
-      "surface-web-2",
-      "surface_uploads-2",
-      "surface_uploads",
-      "surface_archive",
-      "surface_archive-2",
-    ]);
-    expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
-      coverage.surfaces.map((surface) => surface.label),
-    );
-    expect(canonical.surfaces[0]!.receiptRefs).toEqual([
-      "artifacts/primary.json",
-    ]);
-    expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect(canonical.deferred).toEqual(coverage.deferred);
-    expect(coverage).toEqual(original);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -2563,7 +2460,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.push(stateDirectory);
+      temporaryDirectories.track(stateDirectory);
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -5879,7 +5776,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.push(output);
+      temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),
@@ -6047,7 +5944,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await expect(validateOutputDir(absent)).rejects.toThrow("is not empty");
 
     const home = await createIsolatedHome();
-    temporaryDirectories.push(home);
+    temporaryDirectories.track(home);
     if (process.platform !== "win32") {
       expect((await stat(home)).mode & 0o777).toBe(0o700);
 

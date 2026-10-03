@@ -1,6 +1,5 @@
-import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPythonJsonProbe } from "./support/python-probe.js";
 
 const timestampProbe = `
 import json, sqlite3, sys, tempfile
@@ -55,24 +54,7 @@ interface TimestampProbe {
 }
 
 function runTimestampProbe(probe: TimestampProbe): boolean {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
-  const result = Bun.spawnSync(
-    [
-      python,
-      "-I",
-      "-B",
-      "-c",
-      timestampProbe,
-      join(PLUGIN_ROOT, "scripts"),
-      JSON.stringify(probe),
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-
-  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-  return JSON.parse(new TextDecoder().decode(result.stdout)) as boolean;
+  return runPythonJsonProbe(timestampProbe, probe) as boolean;
 }
 
 describe("Python 3.10 Deep Scan timestamps", () => {

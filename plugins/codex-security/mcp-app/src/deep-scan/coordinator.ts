@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -22,9 +22,10 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
+  boundedDeepScanErrorPair,
+  errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorPair,
   boundedDeepScanErrorMessage,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
@@ -327,7 +328,6 @@ export class DeepScanCoordinator {
       this.finishLocally(this.state);
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
-        await this.settleSchedulerWork();
         return;
       }
       if (
@@ -336,7 +336,6 @@ export class DeepScanCoordinator {
           isStaleCoordinatorGenerationError(error),
         )
       ) {
-        await this.settleSchedulerWork();
         return;
       }
       const message = errorMessage(error);
@@ -453,23 +452,25 @@ export class DeepScanCoordinator {
   }
 
   private finishLocally(state: DeepScanRunState): void {
-    if (this.terminal) return;
-    this.terminal = true;
-    clearTimeout(this.heartbeatTimeout);
-    this.heartbeatTimeout = undefined;
-    clearTimeout(this.discoveryTimeout);
-    this.discoveryTimeout = undefined;
-    this.resolveTerminal(cloneState(state));
+    if (this.markTerminal()) this.resolveTerminal(cloneState(state));
   }
 
   private failLocally(error: unknown): void {
-    if (this.terminal) return;
+    if (this.markTerminal()) this.rejectTerminal(error);
+  }
+
+  private markTerminal(): boolean {
+    if (this.terminal) return false;
     this.terminal = true;
-    clearTimeout(this.heartbeatTimeout);
-    this.heartbeatTimeout = undefined;
-    clearTimeout(this.discoveryTimeout);
-    this.discoveryTimeout = undefined;
-    this.rejectTerminal(error);
+    if (this.heartbeatTimeout !== undefined) {
+      clearTimeout(this.heartbeatTimeout);
+      this.heartbeatTimeout = undefined;
+    }
+    if (this.discoveryTimeout !== undefined) {
+      clearTimeout(this.discoveryTimeout);
+      this.discoveryTimeout = undefined;
+    }
+    return true;
   }
 
   private scheduleDiscoveryDeadline(): void {
@@ -614,7 +615,7 @@ export class DeepScanCoordinator {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
-    const accepted: AcceptedDiscovery[] = [...recovered];
+    let acceptedCount = recovered.length;
     const mergedIds = new Set(
       (this.state.persistedWorkers ?? [])
         .filter(
@@ -624,7 +625,7 @@ export class DeepScanCoordinator {
         .map((worker) => worker.id),
     );
     const omittedWorkerIds: string[] = [];
-    await this.checkPersistedExecutions();
+    await this.readPersistedExecutionPrompts();
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
     let buffer: AcceptedDiscovery[] = recovered.filter(
@@ -711,21 +712,14 @@ export class DeepScanCoordinator {
           wakeScheduler = resolvePromise;
         });
       }
-      const settlement = settlements.shift();
-      if (!settlement)
-        throw new Error("Deep Scan scheduler woke without a settled task.");
-      return settlement;
+      return settlements.shift()!;
     };
-    const reconcileRemainingDiscoveries = async (
-      succeededState: "buffered" | "omitted",
-    ): Promise<unknown | undefined> => {
-      const entries = [...active.entries()];
-      const results = await Promise.allSettled(
-        entries.map(([, promise]) => promise),
-      );
+    const reconcileRemainingDiscoveries = async (): Promise<
+      unknown | undefined
+    > => {
+      const results = await Promise.allSettled([...active.values()]);
       let firstFailure: unknown | undefined;
-      for (const [index, result] of results.entries()) {
-        active.delete(entries[index]![0]);
+      for (const result of results) {
         if (result.status === "rejected") {
           firstFailure ??= result.reason;
           continue;
@@ -734,16 +728,7 @@ export class DeepScanCoordinator {
         if (outcome.status === "failed") {
           if (!outcome.replaceableFailureKind) firstFailure ??= outcome.error;
         } else if (outcome.status === "succeeded") {
-          if (!accepted.some((worker) => worker.id === outcome.worker.id)) {
-            accepted.push(outcome.worker);
-          }
-          if (succeededState === "omitted") {
-            omittedWorkerIds.push(outcome.worker.id);
-          } else if (
-            !buffer.some((worker) => worker.id === outcome.worker.id)
-          ) {
-            buffer.push(outcome.worker);
-          }
+          omittedWorkerIds.push(outcome.worker.id);
         }
       }
       return firstFailure;
@@ -752,20 +737,11 @@ export class DeepScanCoordinator {
       unknown | undefined
     > => {
       if (!reducer) return undefined;
-      const pendingReducer = reducer;
-      reducer = undefined;
-      const [result] = await Promise.allSettled([pendingReducer]);
+      const [result] = await Promise.allSettled([reducer]);
       if (result.status === "rejected") return result.reason;
       const outcome = result.value;
-      if ("status" in outcome) {
-        buffer = [...outcome.consumed, ...buffer].sort(
-          compareCompletionSequence,
-        );
-        return outcome.error;
-      }
+      if ("status" in outcome) return outcome.error;
       this.state = outcome.run;
-      previousReducerResultPath = outcome.resultPath;
-      latestResult = outcome.result;
       return undefined;
     };
 
@@ -774,7 +750,7 @@ export class DeepScanCoordinator {
       phase: "discovery",
       handoffClaimToken: this.options.handoffClaimToken,
     });
-    this.logProgress(accepted.length);
+    this.logProgress(acceptedCount);
 
     while (!stopReason) {
       if (this.abortController.signal.aborted) {
@@ -847,7 +823,7 @@ export class DeepScanCoordinator {
       if (settlement.status === "rejected") {
         this.abortController.abort(errorMessage(settlement.error));
         await reconcileReducerSettlement();
-        await reconcileRemainingDiscoveries("buffered");
+        await this.settleSchedulerWork();
         throw settlement.error;
       }
       const outcome = settlement.outcome;
@@ -879,12 +855,12 @@ export class DeepScanCoordinator {
             );
             this.abortController.abort(thresholdError.message);
             await reconcileReducerSettlement();
-            await reconcileRemainingDiscoveries("buffered");
+            await this.settleSchedulerWork();
             throw thresholdError;
           }
           this.abortController.abort(outcome.error.message);
           await reconcileReducerSettlement();
-          await reconcileRemainingDiscoveries("buffered");
+          await this.settleSchedulerWork();
           throw outcome.error;
         }
         if (outcome.status === "canceled") {
@@ -898,18 +874,16 @@ export class DeepScanCoordinator {
           }
           continue;
         }
-        accepted.push(outcome.worker);
+        acceptedCount += 1;
         this.state = { ...this.state, consecutiveErrors: 0 };
         buffer.push(outcome.worker);
-        this.logProgress(accepted.length);
+        this.logProgress(acceptedCount);
         continue;
       }
 
       reducer = undefined;
       if ("status" in outcome) {
-        buffer = [...outcome.consumed, ...buffer].sort(
-          compareCompletionSequence,
-        );
+        buffer = [...outcome.consumed, ...buffer];
         reducerFailures += 1;
         this.log({
           event: "dedup_worker_replaced",
@@ -926,7 +900,7 @@ export class DeepScanCoordinator {
           outcome.error,
         );
         this.abortController.abort(thresholdError.message);
-        await reconcileRemainingDiscoveries("buffered");
+        await this.settleSchedulerWork();
         throw thresholdError;
       }
       reducerFailures = 0;
@@ -945,14 +919,14 @@ export class DeepScanCoordinator {
 
     // Convergence cancels active workers, but their promises must settle before
     // the manifest records which results completed and which were canceled.
-    const lateFailure = await reconcileRemainingDiscoveries("omitted");
+    const lateFailure = await reconcileRemainingDiscoveries();
 
     // Once Deep reaches saturation, late worker errors cannot fail the scan.
     if (lateFailure && stopReason !== "saturated") throw lateFailure;
 
     if (
       !previousReducerResultPath &&
-      !(this.discoveryDeadlineReached && accepted.length === 0)
+      !(this.discoveryDeadlineReached && acceptedCount === 0)
     ) {
       throw new Error(
         "Deep Scan ended without a successfully reduced Standard scan.",
@@ -980,7 +954,7 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
       );
-      await checkPersistedWorkerEvidence(worker);
+      await fs.readFile(worker.promptPath, "utf8");
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
@@ -993,11 +967,9 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveriesById = new Map(
-      discoveries.map((worker) => [worker.id, worker]),
-    );
+    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
     const inputs = this.state.persistedDedupInputs ?? [];
-    let previousReducerResultPath: string | undefined;
+    let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
     const completedReducers = (this.state.persistedWorkers ?? [])
       .filter(
@@ -1017,7 +989,7 @@ export class DeepScanCoordinator {
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveriesById.get(input.discoveryWorkerId));
+        .map((input) => discoveryIds.has(input.discoveryWorkerId));
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
@@ -1029,18 +1001,18 @@ export class DeepScanCoordinator {
           artifactDir: worker.artifactDir,
           resultPath: worker.resultManifestPath,
           reducerId: worker.id,
-          previousReducerResultPath,
+          previousReducerResultPath: resultPath,
         },
         this.state.scanId,
       );
       latestResult = result;
-      await checkPersistedWorkerEvidence(worker);
-      previousReducerResultPath = worker.resultManifestPath;
+      await fs.readFile(worker.promptPath, "utf8");
+      resultPath = worker.resultManifestPath;
     }
-    return { resultPath: previousReducerResultPath, result: latestResult };
+    return { resultPath, result: latestResult };
   }
 
-  private async checkPersistedExecutions(): Promise<void> {
+  private async readPersistedExecutionPrompts(): Promise<void> {
     for (const worker of this.state.persistedWorkers ?? []) {
       if (
         worker.kind === "setup" ||
@@ -1050,7 +1022,7 @@ export class DeepScanCoordinator {
       ) {
         continue;
       }
-      await checkPersistedWorkerEvidence(worker);
+      await fs.readFile(worker.promptPath, "utf8");
     }
   }
 
@@ -1217,25 +1189,6 @@ function persistedReplaceableFailure(
   return undefined;
 }
 
-async function checkPersistedWorkerEvidence(
-  worker: PersistedDeepScanWorker,
-): Promise<void> {
-  // Preserve prompt-read failures and await ordering before scheduling resumes.
-  for (let attempt = 2; attempt <= worker.attempt; attempt += 1) {
-    const promptPath = join(
-      dirname(worker.promptPath),
-      "prompts",
-      `attempt-${String(attempt).padStart(2, "0")}.md`,
-    );
-    try {
-      await fs.access(promptPath);
-    } catch {
-      // Transient execution retries reuse the original prompt.
-    }
-  }
-  await fs.readFile(worker.promptPath, "utf8");
-}
-
 function discoveryErrorLimitError(
   count: number,
   limit: number,
@@ -1263,7 +1216,5 @@ function reducerErrorLimitError(
 
 function errorKind(error: unknown): string {
   if (!(error instanceof Error)) return typeof error;
-  const code =
-    "code" in error && typeof error.code === "string" ? error.code : undefined;
-  return code ? `${error.name}:${code}` : error.name;
+  return errorNameWithCode(error);
 }

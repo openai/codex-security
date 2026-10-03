@@ -1,13 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -16,18 +7,12 @@ import {
   writeDeepScanConfig,
 } from "../src/deep-config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const directories = createTemporaryDirectories();
+afterEach(directories.cleanup);
 async function fixture(contents?: string) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "deep-config-")));
-  directories.push(root);
+  const root = await directories.create("deep-config-");
   const ambient = join(root, "ambient");
   await mkdir(join(ambient, "codex-security"), { recursive: true });
   const source = join(ambient, "codex-security", "config.toml");

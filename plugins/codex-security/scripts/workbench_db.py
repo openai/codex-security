@@ -16,9 +16,10 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 try:
@@ -95,12 +96,14 @@ from workbench_findings import (
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
-    compact_timestamp,
     insert_running_scan,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+)
+from workbench_scan_start import (
+    compact_timestamp as compact_timestamp,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -1485,13 +1488,6 @@ def complete_scan_locked(
     current_manifest = None
     if current_manifest_path is not None:
         current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
@@ -1520,30 +1516,48 @@ def complete_scan_locked(
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
                 "commands and write to the scan directory before retrying."
             )
+    merge_parent_draft = (
+        scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
+    )
     wrote = False
     try:
-        prepared = _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=expected_coverage_mode(scan),
-            completion_binding=completion_binding,
-            # Save the finished Deep result as submitted. Worker drafts and
-            # recovery repairs belong to the stopped-scan path.
-            completion_warnings=warnings if scan["mode"] != "deep" else None,
-            draft_documents=saved_results.merge_saved_results(
-                scan_dir,
-                scan["id"],
-                completion_binding,
-                connection.execute(
-                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                    (scan["id"],),
-                ).fetchall(),
-                warnings,
-                stopped=False,
-                reason="",
+        with (
+            saved_results.preserve_parent_head_on_error(scan_dir)
+            if merge_parent_draft
+            else nullcontext()
+        ):
+            draft_documents = (
+                saved_results.merge_saved_results(
+                    scan_dir,
+                    scan["id"],
+                    completion_binding,
+                    connection.execute(
+                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                        (scan["id"],),
+                    ).fetchall(),
+                    warnings,
+                    stopped=False,
+                    reason="",
+                )
+                if merge_parent_draft
+                else None
             )
-            if scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
-            else None,
-        )
+            completion_manifest = draft_documents[0] if draft_documents else current_manifest
+            if (
+                completion_manifest is not None
+                and isinstance(completion_manifest.get("scan"), dict)
+                and completion_manifest["scan"].get("complete") is False
+            ):
+                raise RecoverableContractError(
+                    "The latest saved scan draft is incomplete; continue the scan before completing it."
+                )
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=expected_coverage_mode(scan),
+                completion_binding=completion_binding,
+                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                draft_documents=draft_documents,
+            )
         add_warning()
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
@@ -1555,7 +1569,7 @@ def complete_scan_locked(
         ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
-            fail_scan_locked(connection, args)
+            saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
         raise SystemExit(str(exc)) from exc
     artifacts = {
         kind: artifact_path(scan_dir, filename, required=True)
@@ -1861,9 +1875,6 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     return recipe
 
 
-_WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
-
-
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
@@ -1878,26 +1889,12 @@ def recover_scan_results(
     return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
-def preserve_scan_results(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def write_scan_draft(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     return saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def fail_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def cancel_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
 def cancel_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -2438,13 +2435,6 @@ def set_finding_remediation(
         connection.rollback()
         raise
     return scan_context(connection, occurrence["scan_id"])
-
-
-_WORKBENCH_PUBLICATION_CONTEXT: publication.WorkbenchPublicationContext
-
-
-def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
-    return publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
 
 
 def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3359,48 +3349,10 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
-    ARTIFACTS=ARTIFACTS,
-    artifact_path=artifact_path,
-    available_artifact_path=available_artifact_path,
-    database_path=database_path,
-    expected_coverage_mode=expected_coverage_mode,
-    now=now,
-    pin_legacy_manifest_digest=pin_legacy_manifest_digest,
-    published_manifest_digest=published_manifest_digest,
-    read_json_object=read_json_object,
-    require_canonical_scan_directory=require_canonical_scan_directory,
-    require_recorded_manifest_digest=require_recorded_manifest_digest,
-    require_scan=require_scan,
-    scan_result=scan_result,
-    verify_manifest_binding=verify_manifest_binding,
-    workspace_state=workspace_state,
-)
+_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals())
 
 
-_WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
-    ARTIFACTS=ARTIFACTS,
-    artifact_path=artifact_path,
-    deep_scan=deep_scan,
-    expected_coverage_mode=expected_coverage_mode,
-    handoff=handoff,
-    index_findings=index_findings,
-    now=now,
-    optional_text=optional_text,
-    parse_scan_cost=parse_scan_cost,
-    published_manifest_digest=published_manifest_digest,
-    read_json_object=read_json_object,
-    require_canonical_scan_directory=require_canonical_scan_directory,
-    require_recorded_manifest_digest=require_recorded_manifest_digest,
-    require_scan=require_scan,
-    require_uuid=require_uuid,
-    require_workspace=require_workspace,
-    scan_completion_lock=scan_completion_lock,
-    scan_context=scan_context,
-    verify_manifest_binding=verify_manifest_binding,
-    workbench_completion_binding=workbench_completion_binding,
-    workspace_state=workspace_state,
-)
+_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
 def main() -> None:
@@ -3408,20 +3360,8 @@ def main() -> None:
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
     deep_scan.configure(
-        deep_scan.DeepScanDependencies(
-            now=now,
-            state_dir=state_dir,
-            require_scan=require_scan,
-            require_workspace=require_workspace,
-            require_target=require_target,
-            require_remediation_target=require_remediation_target,
-            require_scannable_target=require_scannable_target,
-            require_scope=require_scope,
-            ensure_security_target=ensure_security_target,
-            require_canonical_scan_directory=require_canonical_scan_directory,
-            safe_segment=safe_segment,
-            compact_timestamp=compact_timestamp,
-            scan_completion_lock=scan_completion_lock,
+        SimpleNamespace(
+            **globals(),
             preserve_stopped_results=preserve_stopped_results_after_transition,
         )
     )
@@ -3444,7 +3384,7 @@ def main() -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
-        result = inspect_linear_publication(args)
+        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(connect()) as connection:
@@ -3557,11 +3497,11 @@ def main() -> None:
         elif args.command == "complete-budget-exhausted-scan":
             result = complete_budget_exhausted_scan(connection, args)
         elif args.command == "cancel-scan":
-            result = cancel_scan(connection, args)
+            result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "fail-scan":
             result = fail_scan(connection, args)
         elif args.command == "preserve-scan-results":
-            result = preserve_scan_results(connection, args)
+            result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "recover-scan-results":
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":

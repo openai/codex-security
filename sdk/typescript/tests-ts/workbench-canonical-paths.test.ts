@@ -1,18 +1,11 @@
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories();
 const testCaseSensitive = process.platform === "linux" ? test : test.skip;
 const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
@@ -88,19 +81,12 @@ const realFilesystemProbe = [
   "print(json.dumps(checks))",
 ].join("\n");
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function temporaryDirectory(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-canonical-paths-")),
+  const directory = await temporaryDirectories.create(
+    "codex-security-canonical-paths-",
   );
-  temporaryDirectories.push(directory);
   return directory;
 }
 
@@ -110,16 +96,13 @@ function runPythonProbe(
 ): Record<string, unknown> {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
-  if (python === null) {
-    throw new Error(
-      "A Python interpreter is required for workbench path tests.",
-    );
-  }
 
-  const result = Bun.spawnSync(
-    [python, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts"), ...args],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const result = runPython(python!, [
+    "-c",
+    program,
+    join(PLUGIN_ROOT, "scripts"),
+    ...args,
+  ]);
   expect(new TextDecoder().decode(result.stderr)).toBe("");
   expect(result.exitCode).toBe(0);
   return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<

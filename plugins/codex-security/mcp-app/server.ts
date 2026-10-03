@@ -1182,7 +1182,6 @@ export function createCodexSecurityServer(): McpServer {
                 parentSandbox,
                 artifactContext: {
                   pluginRoot: PLUGIN_ROOT,
-                  scanRoot: begun.scanDir,
                   repoRoot: begun.targetPath,
                   scanId: begun.scanId,
                   scope: begun.scope,

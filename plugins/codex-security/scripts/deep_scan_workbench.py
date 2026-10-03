@@ -11,7 +11,6 @@ import sqlite3
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -137,33 +136,15 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-@dataclass(frozen=True)
-class DeepScanDependencies:
-    now: Callable[[], str]
-    state_dir: Callable[[], Path]
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    require_target: Callable[[str], Path]
-    require_remediation_target: Callable[[str], Path]
-    require_scannable_target: Callable[[Path], None]
-    require_scope: Callable[[str, str, Path], str]
-    ensure_security_target: Callable[[sqlite3.Connection, str], str]
-    require_canonical_scan_directory: Callable[[Path], Path]
-    safe_segment: Callable[[str], str]
-    compact_timestamp: Callable[[], str]
-    scan_completion_lock: Callable[[str], Any]
-    preserve_stopped_results: Callable[[sqlite3.Connection, str], None]
+_dependencies: Any = None
 
 
-_dependencies: DeepScanDependencies | None = None
-
-
-def configure(dependencies: DeepScanDependencies) -> None:
+def configure(dependencies: Any) -> None:
     global _dependencies
     _dependencies = dependencies
 
 
-def dependencies() -> DeepScanDependencies:
+def dependencies() -> Any:
     if _dependencies is None:
         raise RuntimeError("Deep Scan workbench dependencies are not configured.")
     return _dependencies
@@ -207,10 +188,6 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def state_dir() -> Path:
-    return dependencies().state_dir()
-
-
 def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     return dependencies().require_scan(connection, scan_id)
 
@@ -219,40 +196,8 @@ def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqli
     return dependencies().require_workspace(connection, workspace_id)
 
 
-def require_target(value: str) -> Path:
-    return dependencies().require_target(value)
-
-
-def require_remediation_target(value: str) -> Path:
-    return dependencies().require_remediation_target(value)
-
-
-def require_scannable_target(target: Path) -> None:
-    dependencies().require_scannable_target(target)
-
-
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    return dependencies().require_scope(scope, mode, target)
-
-
-def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
-    return dependencies().ensure_security_target(connection, target_path)
-
-
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
     return dependencies().require_canonical_scan_directory(scan_dir)
-
-
-def safe_segment(value: str) -> str:
-    return dependencies().safe_segment(value)
-
-
-def compact_timestamp() -> str:
-    return dependencies().compact_timestamp()
-
-
-def scan_completion_lock(scan_id: str) -> Any:
-    return dependencies().scan_completion_lock(scan_id)
 
 
 def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
@@ -396,17 +341,12 @@ def publication_matches_snapshot(publication: Path, snapshot: Path) -> bool:
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
     discovery_dir = Path(scan["scan_dir"]) / "artifacts" / "02_discovery"
-    artifacts = {
-        "inScopeFilesPath": discovery_dir / "in_scope_files.txt",
-        "candidateLedgerPath": discovery_dir / "candidate_ledger.jsonl",
-    }
-    labels = {
-        "inScopeFilesPath": "Canonical in-scope inventory path",
-        "candidateLedgerPath": "Canonical candidate ledger path",
-    }
     return {
-        name: deep_scan_path(scan, str(path), labels[name], kind="file")
-        for name, path in artifacts.items()
+        name: deep_scan_path(scan, str(discovery_dir / filename), label, kind="file")
+        for name, filename, label in (
+            ("inScopeFilesPath", "in_scope_files.txt", "Canonical in-scope inventory path"),
+            ("candidateLedgerPath", "candidate_ledger.jsonl", "Canonical candidate ledger path"),
+        )
     }
 
 
@@ -765,9 +705,9 @@ def begin_deep_scan_for_scan(
 def begin_deep_scan_for_target(
     connection: sqlite3.Connection, args: argparse.Namespace, thread_id: str
 ) -> dict[str, Any]:
-    target = require_target(args.target_path)
-    require_scannable_target(target)
-    scope = require_scope(args.scope, "deep", target)
+    target = dependencies().require_target(args.target_path)
+    dependencies().require_scannable_target(target)
+    scope = dependencies().require_scope(args.scope, "deep", target)
     target_path = str(target)
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
@@ -803,7 +743,7 @@ def begin_deep_scan_for_target(
                 existing["id"],
                 start_disposition="joined" if existing_run is not None else "created",
             )
-        current_target = require_remediation_target(target_path)
+        current_target = dependencies().require_remediation_target(target_path)
         current_metadata = current_target.stat()
         if (current_metadata.st_dev, current_metadata.st_ino) != (
             target_metadata.st_dev,
@@ -834,9 +774,11 @@ def begin_deep_scan_for_target(
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
         root = (
-            Path(args.scan_root).expanduser().resolve() if args.scan_root else state_dir() / "scans"
+            Path(args.scan_root).expanduser().resolve()
+            if args.scan_root
+            else dependencies().state_dir() / "scans"
         )
-        target_root = (root / safe_segment(target.name)).resolve()
+        target_root = (root / dependencies().safe_segment(target.name)).resolve()
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         create_private_directory(target_root)
@@ -846,10 +788,10 @@ def begin_deep_scan_for_target(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
+        target_id = dependencies().ensure_security_target(connection, target_path)
         scan_dir = Path(
             tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
+                prefix=f"{dependencies().safe_segment(revision)}_{dependencies().compact_timestamp()}_",
                 dir=target_root,
             )
         ).resolve()
@@ -995,7 +937,7 @@ def claim_deep_scan_coordinator(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return claim_deep_scan_coordinator_locked(connection, args, scan_id)
 
 
@@ -1577,7 +1519,7 @@ def commit_deep_scan_dedup(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return commit_deep_scan_dedup_locked(connection, args, scan_id)
 
 
@@ -1703,7 +1645,7 @@ def commit_deep_scan_dedup_locked(
 
 def finish_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return finish_deep_scan_locked(connection, args, scan_id)
 
 
@@ -1975,7 +1917,7 @@ def finish_deep_scan_locked(
 
 def fail_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return fail_deep_scan_locked(connection, args, scan_id)
 
 
@@ -2081,7 +2023,7 @@ def record_deep_scan_publication_failure(
     message = optional_text(args.message, maximum=2400)
     if message is None:
         raise SystemExit("message is required.")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         connection.execute("BEGIN IMMEDIATE")
         try:
             run = require_deep_scan_run(connection, scan_id)

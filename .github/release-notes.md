@@ -50,6 +50,7 @@
 - preserve custom provider authentication in skill commands ([#1187](https://github.com/openai/codex-security/pull/1187))
 - restore completed artifacts after follow-up cancellation ([#1057](https://github.com/openai/codex-security/pull/1057))
 - detect credentials exposed in source ([#1134](https://github.com/openai/codex-security/pull/1134))
+- close saved review tasks and simplify recovery ([#1036](https://github.com/openai/codex-security/pull/1036))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

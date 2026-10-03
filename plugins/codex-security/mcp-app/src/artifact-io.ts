@@ -57,6 +57,39 @@ export async function readArtifactText(
   components: readonly string[],
   label: string,
 ): Promise<string> {
+  const canonical = await artifactSourcePath(context, components, label);
+  try {
+    return await fs.readFile(canonical, "utf8");
+  } catch {
+    throw new Error(label + ": the requested artifact cannot be read.");
+  }
+}
+
+export async function readArtifactTextWithMetadata(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<{ contents: string; modifiedMs: number }> {
+  const canonical = await artifactSourcePath(context, components, label);
+  try {
+    const handle = await fs.open(canonical, "r");
+    try {
+      const contents = await handle.readFile("utf8");
+      const metadata = await handle.stat();
+      return { contents, modifiedMs: Number(metadata.mtimeMs) };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    throw new Error(label + ": the requested artifact cannot be read.");
+  }
+}
+
+async function artifactSourcePath(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<string> {
   validateArtifactComponents(components, label);
   const root = await requireArtifactRoot(context.root, label);
   let current = root;
@@ -84,11 +117,7 @@ export async function readArtifactText(
       label + ": the requested artifact escaped its bound context.",
     );
   }
-  try {
-    return await fs.readFile(canonical, "utf8");
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
-  }
+  return canonical;
 }
 
 export async function readArtifactJsonObject(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -747,14 +748,19 @@ def test_completion_keeps_invalid_prewrite_drafts_resumable(
     assert completed["findingCount"] == 1
 
 
+@pytest.mark.parametrize("invalid_inventory", [None, "", "invalid_strategy", 42])
 def test_completion_keeps_recoverable_prewrite_failures_resumable(
     tmp_path: Path,
+    invalid_inventory: str | int | None,
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
     inventory_strategy = coverage["inventoryStrategy"]
-    coverage["inventoryStrategy"] = ""
+    if invalid_inventory is None:
+        coverage.pop("inventoryStrategy")
+    else:
+        coverage["inventoryStrategy"] = invalid_inventory
     coverage_path.write_text(json.dumps(coverage))
 
     failed = run_workbench(
@@ -767,6 +773,7 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
 
     assert failed["returncode"] != 0
     assert "inventoryStrategy" in str(failed["stderr"])
+    assert not (scan_dir / "checkpoint-head.json").exists()
     pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert pending["progress"]["status"] == "running"
     coverage["inventoryStrategy"] = inventory_strategy
@@ -774,6 +781,118 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
+
+
+def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage_path.write_text("{}")
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage["inventoryStrategy"] == "repository"
+    assert coverage["completeness"] == "partial"
+
+
+@pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
+@pytest.mark.parametrize("defect", ["target", "unicode"])
+@pytest.mark.parametrize("existing_head", [False, True])
+def test_rejected_completion_restores_parent_head_before_corrected_retry(
+    tmp_path: Path, workbench_api, command: str, defect: str, existing_head: bool
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    saved_results = workbench_api["saved_results"]
+    manifest_path = scan_dir / "scan-manifest.json"
+    findings_path = scan_dir / "findings.json"
+    coverage_path = scan_dir / "coverage.json"
+    manifest = json.loads(manifest_path.read_text())
+    findings = json.loads(findings_path.read_text())
+    coverage = json.loads(coverage_path.read_text())
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
+    independent = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "deferred": [{"id": "other-review", "reason": "Independent earlier review."}],
+            },
+        },
+    )
+    os.utime(independent, ns=(50, 50))
+    head_path = scan_dir / "checkpoint-head.json"
+    if existing_head:
+        checkpoint = write_checkpoint(
+            scan_dir / "checkpoints",
+            saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
+        )
+        os.utime(checkpoint, ns=(100, 100))
+        head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
+        os.utime(head_path, ns=(100, 100))
+        saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+
+    def head_state():
+        head = (
+            (head_path.read_bytes(), head_path.stat().st_mtime_ns) if head_path.exists() else None
+        )
+        snapshots = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (scan_dir / "checkpoint-heads").glob("*.json")
+        }
+        return head, snapshots
+
+    previous_head = head_state()
+    previous_checkpoints = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (scan_dir / "checkpoints").glob("*.json")
+    }
+    target_kind = manifest["scan"]["target"]["kind"]
+    if defect == "target":
+        manifest["scan"]["target"]["kind"] = "unsupported_target"
+    else:
+        coverage["deferred"][0]["reason"] = "Invalid review: \ud800"
+    manifest_path.write_text(json.dumps(manifest))
+    coverage_path.write_text(json.dumps(coverage))
+    for path in (manifest_path, findings_path, coverage_path):
+        os.utime(path, ns=(200, 200))
+    original_documents = {
+        path: path.read_bytes() for path in (manifest_path, findings_path, coverage_path)
+    }
+
+    failed = run_workbench(state_dir, command, "--scan-id", scan_id, check=False)
+
+    assert failed["returncode"] != 0
+    assert ("target.kind" if defect == "target" else "coverage") in failed["stderr"]
+    assert head_state() == previous_head
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (scan_dir / "checkpoints").glob("*.json")
+    } == previous_checkpoints
+    assert all(path.read_bytes() == contents for path, contents in original_documents.items())
+    # Correct the rejected documents without rewriting unchanged findings.
+    if defect == "target":
+        manifest["scan"]["target"]["kind"] = target_kind
+        manifest_path.write_text(json.dumps(manifest))
+        os.utime(manifest_path, ns=(300, 300))
+    coverage["deferred"] = []
+    coverage["resolvedDeferred"] = [{"id": "review", "reason": "Review completed."}]
+    coverage["completeness"] = "complete"
+    coverage_path.write_text(json.dumps(coverage))
+    os.utime(coverage_path, ns=(300, 300))
+    assert findings_path.stat().st_mtime_ns == 200
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    final_coverage = json.loads(coverage_path.read_text())
+    assert final_coverage["deferred"] == []
+    assert final_coverage["resolvedDeferred"] == coverage["resolvedDeferred"]
 
 
 def test_deep_completion_derives_inventory_without_downgrading_coverage(

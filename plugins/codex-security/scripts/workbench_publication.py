@@ -7,9 +7,7 @@ import csv
 import io
 import os
 import sqlite3
-from collections.abc import Callable
 from contextlib import closing
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -19,32 +17,14 @@ from finalize_scan_contract import (
     csv_cell,
     finalize_scan,
     finding_candidate_id,
+    finding_csv_columns,
     write_sarif_projection,
     write_scan_local_bytes,
 )
 
 
-@dataclass(frozen=True)
-class WorkbenchPublicationContext:
-    ARTIFACTS: dict[str, str]
-    artifact_path: Callable[..., Path | None]
-    available_artifact_path: Callable[[Path, Path], Path | None]
-    database_path: Callable[[], Path]
-    expected_coverage_mode: Callable[[sqlite3.Row], str]
-    now: Callable[[], str]
-    pin_legacy_manifest_digest: Callable[[sqlite3.Connection, str, str], None]
-    published_manifest_digest: Callable[[Path, dict[str, Any]], str]
-    read_json_object: Callable[[Path], dict[str, Any]]
-    require_canonical_scan_directory: Callable[[Path], Path]
-    require_recorded_manifest_digest: Callable[[sqlite3.Row, Path], str]
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    scan_result: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, Any]]
-    verify_manifest_binding: Callable[[sqlite3.Row, dict[str, Any]], None]
-    workspace_state: Callable[[sqlite3.Connection, str], dict[str, Any]]
-
-
 def linear_publication_input(
-    db: WorkbenchPublicationContext,
+    db: Any,
     args: argparse.Namespace,
     *,
     recording: bool,
@@ -107,7 +87,7 @@ def linear_publication_input(
 
 
 def verify_linear_publication_scan(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     payload: dict[str, Any],
     findings: list[dict[str, str]],
@@ -154,7 +134,7 @@ def verify_linear_publication_scan(
 
 
 def inspect_linear_publication(
-    db: WorkbenchPublicationContext,
+    db: Any,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     payload, destination, findings = linear_publication_input(db, args, recording=False)
@@ -203,7 +183,7 @@ def inspect_linear_publication(
 
 
 def prepare_linear_publication(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -224,7 +204,7 @@ def prepare_linear_publication(
 
 
 def record_linear_publications(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -357,7 +337,7 @@ def record_linear_publications(
 
 
 def export_findings(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -401,7 +381,7 @@ def export_findings(
 
 
 def write_csv_export(
-    db: WorkbenchPublicationContext,
+    db: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
 ) -> Path:
@@ -422,23 +402,7 @@ def write_csv_export(
             candidate_id = finding_candidate_id(finding)
             if isinstance(occurrence_id, str) and isinstance(candidate_id, str):
                 candidate_ids_by_occurrence[occurrence_id] = candidate_id
-    columns = (
-        "occurrence_id",
-        "finding_id",
-        *(("candidate_id",) if deep_scan else ()),
-        "title",
-        "summary",
-        "severity",
-        "confidence",
-        "status",
-        "close_reason",
-        "note",
-        "remediation",
-        "path",
-        "start_line",
-        "end_line",
-    )
-    writer.writerow(columns)
+    writer.writerow(finding_csv_columns(deep_scan))
     for row in finding_export_rows(connection, scan["id"]):
         writer.writerow(
             (

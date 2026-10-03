@@ -10,6 +10,7 @@ import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -17,18 +18,11 @@ const receipt = {
   findingCount: 1,
 };
 
-const temporaryDirectories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+afterEach(temporaryDirectories.cleanup);
 
 async function savedScansFixture() {
-  const root = await mkdtemp(join(tmpdir(), "cloud-saved-scans-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectories.create("cloud-saved-scans-");
   const scans = await Promise.all(
     [1, 2, 3].map(async (index) => {
       const scanDir = join(root, `scan ${index}`);
@@ -784,8 +778,7 @@ describe("publish scan to Cloud", () => {
   });
 
   test("publishes a scan once through canonical and directory-linked paths", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cloud-publish-links-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectories.create("cloud-publish-links-");
     const scans = join(root, "scans");
     const scanDir = join(scans, "completed-scan");
     const linkedScans = join(root, "linked-scans");

@@ -312,6 +312,13 @@ export interface CoverageDocument {
     surfaceIds?: string[];
     [k: string]: unknown;
   }[];
+  /**
+   * Completed generic review tasks, with their saved IDs and completion reasons.
+   */
+  resolvedDeferred?: {
+    id: string;
+    reason: string;
+  }[];
   openQuestions?: {
     question: string;
     followUpPrompt?: string;

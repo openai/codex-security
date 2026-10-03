@@ -45,7 +45,6 @@ export interface CodexSdkWorkerModelSettings {
 /** The coordinator supplies scan identity; worker tools never choose paths. */
 export interface CodexSdkWorkerArtifactContext {
   pluginRoot: string;
-  scanRoot: string;
   repoRoot: string;
   scanId: string;
   scope?: string;

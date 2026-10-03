@@ -32,6 +32,65 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
+def saved_draft(
+    scan_id: str,
+    *,
+    deferred=(),
+    surfaces=(),
+    closures=(),
+    complete=False,
+    findings=(),
+    completeness=None,
+):
+    return {
+        "scanId": scan_id,
+        "complete": complete,
+        "findings": list(findings),
+        "coverage": {
+            "completeness": completeness or ("partial" if deferred else "complete"),
+            "surfaces": list(surfaces),
+            "explicitExclusions": [],
+            "deferred": list(deferred),
+            **({"resolvedDeferred": list(closures)} if closures else {}),
+        },
+    }
+
+
+def saved_binding(coverage_mode="repository", *, repository="test", status="interrupted"):
+    return {
+        "status": status,
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": repository, "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": coverage_mode,
+    }
+
+
+def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int = 1) -> dict:
+    return {
+        "id": worker_id,
+        "kind": "discovery",
+        "artifact_dir": str(output),
+        "result_manifest_path": None,
+        "attempt": attempt,
+    }
+
+
+def replay_saved_results(
+    module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
+):
+    return module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        list(workers),
+        [],
+        stopped=stopped,
+        reason="interrupted",
+        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+    )
+
+
 def stable_target_id(target: Path) -> str:
     digest = hashlib.sha256(f"local-workspace\0{target.resolve()}".encode()).hexdigest()
     return f"target_sha256_{digest}"
@@ -104,6 +163,19 @@ def run_workbench(
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    return run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        message,
+        *(["--deep-status", deep_status] if deep_status is not None else []),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
 
 
 def start_delivered_scan(

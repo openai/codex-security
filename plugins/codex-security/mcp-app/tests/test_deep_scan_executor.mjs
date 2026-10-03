@@ -1203,7 +1203,6 @@ async function testWorkerRuntimeSettings() {
             parentSandbox: trustedParentSandboxWithDenials,
             artifactContext: {
               pluginRoot: fixture.root,
-              scanRoot: fixture.root,
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model}`,
               pythonCommand: helperPython,
@@ -1633,7 +1632,6 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
       parentSandbox: trustedParentSandbox,
       artifactContext: {
         pluginRoot: fixture.root,
-        scanRoot: path.join(fixture.root, "scans"),
         repoRoot: fixture.root,
         scanId: "fixture-scan-id",
       },
