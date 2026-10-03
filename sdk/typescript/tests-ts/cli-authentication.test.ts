@@ -1791,13 +1791,67 @@ describe("skill authentication", () => {
       const providerOverride = result.launch.args.findLast((arg: string) =>
         arg.startsWith("model_providers="),
       );
-      expect(parseToml(providerOverride)["model_providers"]).toEqual({
-        gateway: { ...providerConfig, requires_openai_auth: true },
-      });
+      if (source === "override") {
+        expect(parseToml(providerOverride)["model_providers"]).toEqual({
+          gateway: { ...providerConfig, requires_openai_auth: true },
+        });
+      } else {
+        expect(providerOverride).toBeUndefined();
+      }
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );
       expect(environment.GATEWAY_API_KEY).toBe("SYNTHETIC_GATEWAY_KEY");
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s keeps ambient provider credentials out of process arguments",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        auth: "chatgpt",
+        overrides: [
+          'model_provider="gateway"',
+          'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+          "model_providers.gateway.requires_openai_auth=false",
+          'model_providers.gateway.http_headers.X-Explicit="SYNTHETIC_CLI_HEADER"',
+        ],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "[model_providers.gateway.http_headers]",
+          'Authorization="Bearer SYNTHETIC_SELECTED_CREDENTIAL"',
+          "[model_providers.other]",
+          'name="Other gateway"',
+          'base_url="https://other.example.test/v1"',
+          'wire_api="responses"',
+          'experimental_bearer_token="SYNTHETIC_UNSELECTED_CREDENTIAL"',
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+        storedCredentials: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const argumentsText = JSON.stringify(result.launch.args);
+      expect(argumentsText).not.toContain("SYNTHETIC_SELECTED_CREDENTIAL");
+      expect(argumentsText).not.toContain("SYNTHETIC_UNSELECTED_CREDENTIAL");
+      expect(argumentsText).toContain("SYNTHETIC_CLI_HEADER");
+      expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+        gateway: {
+          name: "Synthetic gateway",
+          base_url: "https://gateway.example.test/v1",
+          wire_api: "responses",
+          requires_openai_auth: true,
+          http_headers: {
+            Authorization: "Bearer SYNTHETIC_SELECTED_CREDENTIAL",
+            "X-Explicit": "SYNTHETIC_CLI_HEADER",
+          },
+        },
+      });
     },
   );
 

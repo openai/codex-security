@@ -1408,7 +1408,8 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const config = deepMerge(ambientConfig, output.codexOverrides ?? {});
+      const overrides = structuredClone(output.codexOverrides ?? {});
+      const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
@@ -1489,12 +1490,25 @@ export async function runCodexSkillCommand(
         );
         // Native provider keys take precedence over stored authentication.
         // Apply explicit ChatGPT selection to the home and CLI configuration.
-        delete providerConfiguration["env_key"];
-        delete providerConfiguration["experimental_bearer_token"];
-        providerConfiguration["requires_openai_auth"] = true;
+        const providerOverrides =
+          typeof provider === "string"
+            ? (
+                overrides["model_providers"] as
+                  Record<string, JsonObject> | undefined
+              )?.[provider]
+            : undefined;
+        for (const selectedConfig of [
+          providerConfiguration,
+          providerOverrides,
+        ]) {
+          if (selectedConfig === undefined) continue;
+          delete selectedConfig["env_key"];
+          delete selectedConfig["experimental_bearer_token"];
+          selectedConfig["requires_openai_auth"] = true;
+        }
         args = [
           ...args,
-          ...modelProviderConfigOverride(config).flatMap((value) => [
+          ...modelProviderConfigOverride(overrides).flatMap((value) => [
             "--config",
             value,
           ]),
