@@ -71,6 +71,7 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  warnings?: string[];
   policyFailed?: boolean;
 }
 
@@ -261,6 +262,16 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (receipt.status !== "failed") {
+        for (const warning of receipt.warnings ?? []) {
+          notifyProgress(options, {
+            repository: task.id,
+            status: receipt.status,
+            attempt: receipt.attempt,
+            warning,
+          });
+        }
+      }
       if (receipt.status === "completed") {
         policyFailed ||= receipt.policyFailed === true;
         completed += 1;
@@ -330,6 +341,7 @@ async function runCampaign(
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
+        const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
@@ -439,13 +451,15 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
-              onWarning: (warning) =>
+              onWarning: (warning) => {
+                runWarnings.push(warning);
                 notifyProgress(options, {
                   repository: task.id,
                   attempt,
                   status: "started",
                   warning,
-                }),
+                });
+              },
               ...(options.signal === undefined
                 ? {}
                 : { signal: options.signal }),
@@ -507,6 +521,7 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
             ...(attemptPolicyFailed === undefined
               ? {}
               : { policyFailed: attemptPolicyFailed }),
