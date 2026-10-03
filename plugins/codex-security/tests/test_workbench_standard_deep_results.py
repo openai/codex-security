@@ -1619,6 +1619,11 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
     head = write_checkpoint(checkpoints, checkpoint)
     (result_path.parent / "checkpoint-head.json").write_text(json.dumps({"checkpoint": head.name}))
 
+    # This accepted checkpoint predates the successful result; a newer head reopens work.
+    for path in (head, result_path.parent / "checkpoint-head.json"):
+        os.utime(path, ns=(100, 100))
+    os.utime(result_path, ns=(200, 200))
+
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped after the worker completed.")
 
     coverage = json.loads((scan_dir / "coverage.json").read_text())
