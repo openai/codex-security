@@ -90,6 +90,7 @@ export function windowsHelperFixture(
             document,
             workingDirectory,
             paths,
+            environment,
             command,
             status: result.status,
             signal: result.signal,

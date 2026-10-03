@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
 import {
   hasWindowsLoopbackShare,
@@ -61,9 +62,8 @@ function run(f: Fixture, args?: string[], env = process.env) {
     { cwd: f.root, env, encoding: "utf8" },
   );
 }
-afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(removeTemporaryDirectory));
 });
 
 test("binds exact requested scopes and retains unrelated contract fields", () => {
@@ -310,26 +310,37 @@ for (const location of ["absolute", "relative", "unc"] as const)
           undefined,
           workingDirectory,
         );
-        expect(
-          result.status,
-          `${powershell}: ${result.stderr || result.error?.message || ""}`,
-        ).toBe(0);
-        expect(result.stdout).toContain(
+        expect(result.stdout, result.diagnostics).not.toContain(
+          "expanded-plugin-used",
+        );
+        expect(result.status, result.diagnostics).toBe(0);
+        expect(result.stdout, result.diagnostics).toContain(
           `Bound 3 requested scopes into the scan contract${newline}`,
         );
-        if (location !== "unc") expect(result.stderr).toBe("");
+        if (location !== "unc")
+          expect(result.stderr, result.diagnostics).toBe("");
         expect(
           JSON.parse(readFileSync(join(scanDir, "scan-manifest.json"), "utf8"))
             .scan.scope.includePaths,
+          result.diagnostics,
         ).toEqual(requested);
         expect(
           JSON.parse(readFileSync(join(scanDir, "coverage.json"), "utf8"))
             .includePaths,
+          result.diagnostics,
         ).toEqual(requested);
-        expect(JSON.parse(readFileSync(scopes, "utf8"))).toEqual(requested);
-        expect(readFileSync(expandedScopes, "utf8")).toBe('["wrong"]');
+        expect(
+          JSON.parse(readFileSync(scopes, "utf8")),
+          result.diagnostics,
+        ).toEqual(requested);
+        expect(readFileSync(expandedScopes, "utf8"), result.diagnostics).toBe(
+          '["wrong"]',
+        );
         for (const [name, bytes] of Object.entries(initial))
-          expect(readFileSync(join(expandedScanDir, name))).toEqual(bytes);
+          expect(
+            readFileSync(join(expandedScanDir, name)),
+            result.diagnostics,
+          ).toEqual(bytes);
       }
     },
   );
