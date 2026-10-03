@@ -20,6 +20,7 @@ import {
   requirePrivateOutputDirectory,
   requireSecureOutputAncestry,
 } from "./runtime.js";
+import { MODEL_UNSAFE_STRING } from "./string-safety.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
@@ -407,7 +408,11 @@ function validateCanonicalContract(
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
       remote,
     )?.[1];
-    if (remote.includes("\\") || authority === undefined) {
+    if (
+      MODEL_UNSAFE_STRING.test(remote) ||
+      remote.includes("\\") ||
+      authority === undefined
+    ) {
       throw new ContractValidationError(
         "scan.target.remote: expected a sanitized canonical absolute URL.",
       );
