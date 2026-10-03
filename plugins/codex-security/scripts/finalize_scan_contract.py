@@ -73,6 +73,13 @@ EXPORT_PATHS = {
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
+THREAT_MODEL_EXPORT_PATH = "exports/threatmodel.md"
+_LEGACY_THREAT_MODEL_PATHS = (
+    "threatmodel.md",
+    "THREAT_MODEL.md",
+    "artifacts/01_context/threat_model.md",
+    "threat_model.md",
+)
 WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
     r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
     re.IGNORECASE,
@@ -136,6 +143,213 @@ def _generate_report_projection(
         except ValueError as exc:
             raise ContractError(f"report projection failed: {exc}") from exc
     raise AssertionError("Report projection retry loop exhausted unexpectedly.")
+
+
+def _threat_model_renderer() -> Any:
+    script = Path(__file__).resolve().with_name("threat_model_projection.py")
+    spec = importlib.util.spec_from_file_location("codex_security_threat_model_projection", script)
+    if spec is None or spec.loader is None:
+        raise ContractError(f"could not load threat model projection helper: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
+    if manifest.get("documentType") == "codex-security.policy-draft":
+        scope = manifest.get("scope")
+        return {
+            "source": "policy",
+            "target": manifest.get("repository"),
+            "revision": manifest.get("revision"),
+            "scanScope": {"includePaths": [scope], "excludePaths": []} if scope else None,
+            "status": manifest.get("status", "completed"),
+            "provisional": manifest.get("status", "completed") != "completed",
+        }
+    scan = _require_dict(manifest, "scan", "manifest")
+    target = _require_dict(scan, "target", "manifest.scan") if "target" in scan else {}
+    status = scan.get("status")
+    if status == "completed" and not scan.get("sealedAt"):
+        status = "draft"
+    return {
+        "source": "scan",
+        "scanId": scan.get("id"),
+        "target": target.get("displayName"),
+        "revision": target.get("revision") or target.get("headRevision"),
+        "snapshotDigest": target.get("snapshotDigest"),
+        "scanScope": scan.get("scope"),
+        "status": status,
+        "provisional": scan.get("status") != "completed" or not scan.get("sealedAt"),
+    }
+
+
+def _render_threat_model(model: dict[str, Any], provenance: dict[str, Any]) -> bytes:
+    try:
+        return _threat_model_renderer().render_threat_model(model, provenance)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"threat model projection failed: {exc}") from exc
+
+
+def _read_saved_threat_model(
+    scan_dir: Path, *, validate_seal: bool = True, schema_dir: Path | None = None
+) -> tuple[dict[str, Any], bytes] | None:
+    """Read canonical content first; old documents are a read-only compatibility path."""
+    scan_dir = _require_scan_directory(scan_dir)
+    saved_provenance: dict[str, Any] | None = None
+    sealed_artifact_paths: set[str] | None = None
+    scan_manifest_path = scan_dir / "scan-manifest.json"
+    filename = (
+        "scan-manifest.json"
+        if scan_manifest_path.exists() or scan_manifest_path.is_symlink()
+        else "policy-draft.json"
+    )
+    manifest_path = scan_dir / filename
+    if manifest_path.exists() or manifest_path.is_symlink():
+        manifest = _read_scan_local_json(scan_dir, filename, filename)
+        scan = (
+            _require_dict(manifest, "scan", "manifest")
+            if filename == "scan-manifest.json"
+            else manifest
+        )
+        if (
+            validate_seal
+            and filename == "scan-manifest.json"
+            and (scan.get("sealedAt") is not None or scan.get("artifacts"))
+        ):
+            if "threatModel" not in scan:
+                _validate_manifest(manifest)
+                recorded_paths = {
+                    _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                    for artifact in scan["artifacts"]
+                }
+                if recorded_paths.isdisjoint(_LEGACY_THREAT_MODEL_PATHS):
+                    validate_against_schema(
+                        manifest,
+                        (schema_dir or Path(__file__).resolve().parent.parent / "schemas")
+                        / "scan-manifest.schema.json",
+                    )
+                    return None
+            manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
+            scan = manifest["scan"]
+            sealed_artifact_paths = {
+                _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                for artifact in scan["artifacts"]
+            }
+        provenance = threat_model_provenance(manifest)
+        saved_provenance = provenance
+        if "threatModel" in scan:
+            model = _require_dict(
+                scan,
+                "threatModel",
+                "manifest.scan" if filename == "scan-manifest.json" else "policy draft",
+            )
+            contents = _render_threat_model(model, provenance)
+            path = scan_dir / "threatmodel.md"
+            current_path = None
+            try:
+                descriptor = open_scan_local_file_descriptor(
+                    scan_dir, "threatmodel.md", "Saved threat model"
+                )
+                with os.fdopen(descriptor, "rb") as handle:
+                    if handle.read() == contents:
+                        current_path = str(path)
+            except (ContractError, OSError):
+                # An unavailable projection does not invalidate the canonical model.
+                pass
+            return {
+                "threatModel": model,
+                "provenance": provenance,
+                "path": current_path,
+            }, contents
+    for filename in _LEGACY_THREAT_MODEL_PATHS:
+        if sealed_artifact_paths is not None and filename not in sealed_artifact_paths:
+            continue
+        path = scan_dir / filename
+        if not path.exists() and not path.is_symlink():
+            continue
+        descriptor = open_scan_local_file_descriptor(scan_dir, filename, "Saved threat model")
+        with os.fdopen(descriptor, "rb") as handle:
+            contents = handle.read()
+        try:
+            body = contents.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContractError(f"{filename}: expected UTF-8 Markdown") from exc
+        if body.strip():
+            return {
+                "threatModel": {"format": "markdown", "content": body},
+                "provenance": saved_provenance
+                or {"source": filename, "status": "unknown", "provisional": True},
+                "path": str(path),
+            }, contents
+    return None
+
+
+def describe_threat_model(scan_dir: Path, schema_dir: Path | None = None) -> dict[str, Any]:
+    saved = _read_saved_threat_model(scan_dir, schema_dir=schema_dir)
+    if saved is None:
+        raise ContractError("No saved threat model is available for this result.")
+    return saved[0]
+
+
+def build_threat_model_export(scan_dir: Path, schema_dir: Path | None = None) -> bytes:
+    saved = _read_saved_threat_model(scan_dir, schema_dir=schema_dir)
+    if saved is None:
+        raise ContractError("No saved threat model is available for this result.")
+    return saved[1]
+
+
+def write_threat_model_projection_if_possible(
+    scan_dir: Path, manifest: dict[str, Any] | None = None
+) -> str | None:
+    """A convenience document failure must not discard saved canonical content."""
+    try:
+        saved_manifest = manifest
+        if saved_manifest is None and (scan_dir / "scan-manifest.json").exists():
+            saved_manifest = _read_scan_local_json(
+                scan_dir, "scan-manifest.json", "scan-manifest.json"
+            )
+        if (
+            saved_manifest is not None
+            and saved_manifest.get("documentType") != "codex-security.policy-draft"
+        ):
+            scan = _require_dict(saved_manifest, "scan", "manifest")
+            artifacts = (
+                _require_list(scan, "artifacts", "manifest.scan") if "artifacts" in scan else []
+            )
+            for index, artifact in enumerate(artifacts):
+                if not isinstance(artifact, dict):
+                    continue
+                context = f"manifest.scan.artifacts[{index}]"
+                path = _require_portable_relative_path(
+                    _require_str(artifact, "path", context), f"{context}.path"
+                )
+                if path.lower() == "threatmodel.md":
+                    return None
+        if manifest is None:
+            saved = _read_saved_threat_model(scan_dir, validate_seal=False)
+            if saved is None:
+                return None
+            contents = saved[1]
+        else:
+            scan = (
+                manifest
+                if manifest.get("documentType") == "codex-security.policy-draft"
+                else _require_dict(manifest, "scan", "manifest")
+            )
+            model = scan.get("threatModel")
+            if not isinstance(model, dict):
+                return None
+            contents = _render_threat_model(model, threat_model_provenance(manifest))
+        write_scan_local_bytes(scan_dir, "threatmodel.md", contents, owner_read_write=True)
+        return None
+    except (ContractError, OSError) as exc:
+        warning = (
+            f"Automatic threat model save failed: {exc}. "
+            "Saved canonical content can be exported with `codex-security export "
+            "<result-dir> --artifact threat-model`."
+        )
+        print(f"codex-security: warning: {warning}", file=sys.stderr)
+        return warning
 
 
 def _validate_report_output_paths(scan_dir: Path) -> None:
@@ -533,6 +747,7 @@ def write_scan_local_bytes(
     *,
     external_name: bool = False,
     expected_root_identity: tuple[int, int] | None = None,
+    owner_read_write: bool = False,
 ) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     if external_name:
@@ -611,6 +826,9 @@ def write_scan_local_bytes(
         temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:
+            if owner_read_write:
+                # Generated Markdown must remain editable under a restrictive umask.
+                os.fchmod(handle.fileno(), 0o600)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1630,6 +1848,17 @@ def _validate_schema_node(
     root_schema: dict[str, Any] | None = None,
 ) -> None:
     root_schema = schema if root_schema is None else root_schema
+    alternatives = schema.get("anyOf")
+    if isinstance(alternatives, list):
+        errors = []
+        for alternative in alternatives:
+            try:
+                _validate_schema_node(value, alternative, context, root_schema)
+                break
+            except ContractError as exc:
+                errors.append(str(exc))
+        else:
+            raise ContractError(f"{context}: no schema alternative matched: {'; '.join(errors)}")
     reference = schema.get("$ref")
     if reference is not None:
         if not isinstance(reference, str):
@@ -2597,7 +2826,8 @@ def build_findings_export(
 
 
 def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
-    if export_format not in EXPORT_PATHS:
+    output_paths = {**EXPORT_PATHS, "md": THREAT_MODEL_EXPORT_PATH}
+    if export_format not in output_paths:
         raise ContractError(f"unsupported export format: {export_format}")
     scan_dir = _require_scan_directory(scan_dir)
     output = Path(os.path.abspath(output))
@@ -2621,13 +2851,22 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
                 relative_output = output.relative_to(ancestor).as_posix()
                 break
         else:
-            write_scan_local_bytes(output.parent, output.name, contents, external_name=True)
+            write_scan_local_bytes(
+                output.parent,
+                output.name,
+                contents,
+                external_name=True,
+                owner_read_write=export_format == "md",
+            )
             return
-    if relative_output != EXPORT_PATHS[export_format]:
+    if relative_output != output_paths[export_format]:
         raise ContractError(f"{export_format.upper()} output path cannot overwrite a scan artifact")
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
-    scan = _require_dict(manifest, "scan", "manifest")
-    artifacts = _require_list(scan, "artifacts", "manifest.scan")
+    if (scan_dir / "scan-manifest.json").exists():
+        manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+        scan = _require_dict(manifest, "scan", "manifest")
+        artifacts = scan.get("artifacts", [])
+    else:
+        artifacts = []
     artifact_paths = [
         _require_portable_relative_path(
             _require_str(artifact, "path", f"manifest.scan.artifacts[{index}]"),
@@ -2660,7 +2899,9 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
             raise ContractError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
-    write_scan_local_bytes(scan_dir, relative_output, contents)
+    write_scan_local_bytes(
+        scan_dir, relative_output, contents, owner_read_write=export_format == "md"
+    )
 
 
 def _write_sarif_projection_if_possible(
@@ -2814,6 +3055,8 @@ def _prepare_scan_finalization(
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
+    *,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
@@ -2836,6 +3079,13 @@ def _write_prepared_scan_finalization(
         _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
         _validate_existing_seal(scan_dir, scan)
     _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
+    warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+    if (
+        warning is not None
+        and projection_warnings is not None
+        and warning not in projection_warnings
+    ):
+        projection_warnings.append(warning)
     return manifest, findings, coverage
 
 
@@ -2846,6 +3096,7 @@ def finalize_scan(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -2853,7 +3104,9 @@ def finalize_scan(
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
     )
-    return _write_prepared_scan_finalization(prepared, source_root)
+    return _write_prepared_scan_finalization(
+        prepared, source_root, projection_warnings=projection_warnings
+    )
 
 
 def main() -> int:
@@ -2863,10 +3116,30 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--sarif-only", action="store_true")
     parser.add_argument("--sarif-output", type=Path)
-    parser.add_argument("--export-format", choices=sorted(EXPORT_PATHS))
+    parser.add_argument(
+        "--export-artifact", choices=("findings", "threat-model"), default="findings"
+    )
+    parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
     parser.add_argument("--export-output", type=Path)
+    parser.add_argument("--export-metadata", action="store_true")
+    parser.add_argument("--describe-threat-model", action="store_true")
+    parser.add_argument("--write-threat-model", action="store_true")
     args = parser.parse_args()
     try:
+        if args.describe_threat_model:
+            sys.stdout.buffer.write(
+                _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
+            )
+            return 0
+        if args.write_threat_model:
+            write_threat_model_projection_if_possible(args.scan_dir)
+            return 0
+        if args.export_artifact == "threat-model" and args.export_format is None:
+            args.export_format = "md"
+        if args.export_metadata and (
+            args.export_artifact != "threat-model" or args.export_output is None
+        ):
+            parser.error("--export-metadata requires a threat-model export with --export-output")
         if args.sarif_only and args.export_format is not None:
             parser.error("--sarif-only cannot be combined with --export-format")
         if args.export_output is not None and args.export_format is None:
@@ -2876,13 +3149,27 @@ def main() -> int:
         if args.sarif_only:
             args.export_format, args.export_output = "sarif", args.sarif_output
         if args.export_format is not None:
-            contents = build_findings_export(
-                args.scan_dir, args.export_format, args.source_root, args.schema_dir
-            )
+            if args.export_artifact == "threat-model":
+                if args.export_format != "md":
+                    parser.error("threat-model exports require --export-format md")
+                if args.source_root is not None:
+                    parser.error("source-root is only supported for SARIF exports")
+                saved = _read_saved_threat_model(args.scan_dir, schema_dir=args.schema_dir)
+                if saved is None:
+                    raise ContractError("No saved threat model is available for this result.")
+                description, contents = saved
+            else:
+                contents = build_findings_export(
+                    args.scan_dir, args.export_format, args.source_root, args.schema_dir
+                )
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)
             else:
                 write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
+                if args.export_metadata:
+                    sys.stdout.buffer.write(
+                        _json_bytes({**description, "path": str(args.export_output.absolute())})
+                    )
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
     except ContractError as exc:
