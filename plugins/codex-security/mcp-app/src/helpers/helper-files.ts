@@ -39,11 +39,26 @@ export function pythonPath(path: string): string {
   );
 }
 
-export function readFile(path: string | number): Buffer {
+export function readFile(path: string | number, label?: string): Buffer {
   if (typeof path === "number") return readFileSync(path);
-  return process.platform === "win32"
-    ? windowsFileSystem(windowsBinding()).readFile(widePath(path))
-    : readFileSync(encodePosixPath(path));
+  try {
+    return process.platform === "win32"
+      ? windowsFileSystem(windowsBinding()).readFile(widePath(path))
+      : readFileSync(encodePosixPath(path));
+  } catch (error) {
+    const { code, winerror } = error as NodeJS.ErrnoException & {
+      winerror?: number;
+    };
+    // Preserve pathlib.exists() diagnostics only for callers with missing-file labels.
+    if (
+      label !== undefined &&
+      (["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "") ||
+        winerror === 21 ||
+        winerror === 123)
+    )
+      throw new Error(`${label} missing: ${path}`);
+    throw error;
+  }
 }
 
 export function mkdir(path: string): void {
