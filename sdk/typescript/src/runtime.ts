@@ -2837,9 +2837,11 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
 ): Promise<CodexCommandResult> {
   const child = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
+    cwd,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     signal,
