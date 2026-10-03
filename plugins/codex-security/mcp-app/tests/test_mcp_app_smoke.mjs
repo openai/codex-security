@@ -1,3 +1,4 @@
+import { gitText } from "../scripts/git.mjs";
 import { assertNoError } from "./assertions.mjs";
 import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
@@ -161,9 +162,7 @@ execFileSync("git", [
   "-qm",
   "fixture",
 ]);
-const gitBase = execFileSync("git", ["-C", gitTarget, "rev-parse", "HEAD"], {
-  encoding: "utf8",
-}).trim();
+const gitBase = gitText(["-C", gitTarget, "rev-parse", "HEAD"]).trim();
 await writeFile(path.join(gitTarget, "fixture.txt"), "fixture\nupdated\n");
 execFileSync("git", ["-C", gitTarget, "add", "fixture.txt"]);
 execFileSync("git", [
@@ -177,9 +176,7 @@ execFileSync("git", [
   "-qm",
   "update fixture",
 ]);
-const gitHead = execFileSync("git", ["-C", gitTarget, "rev-parse", "HEAD"], {
-  encoding: "utf8",
-}).trim();
+const gitHead = gitText(["-C", gitTarget, "rev-parse", "HEAD"]).trim();
 
 function startTestServer({
   args = [serverPath, "--stdio"],

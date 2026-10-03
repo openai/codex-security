@@ -55,6 +55,10 @@
 - bump Codex CLI and SDK to 0.162.0-alpha.9 ([#1198](https://github.com/openai/codex-security/pull/1198))
 - include server-rendered templates in scan inventories ([#1197](https://github.com/openai/codex-security/pull/1197))
 - save models with results and support offline export ([#1133](https://github.com/openai/codex-security/pull/1133))
+- share triage assertion output parsing ([#1201](https://github.com/openai/codex-security/pull/1201))
+- simplify contradiction grouping state ([#1202](https://github.com/openai/codex-security/pull/1202))
+- share repository Git adapters ([#1203](https://github.com/openai/codex-security/pull/1203))
+- consolidate build and tool setup ([#1204](https://github.com/openai/codex-security/pull/1204))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
