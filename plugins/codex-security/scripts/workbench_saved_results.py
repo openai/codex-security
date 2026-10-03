@@ -662,6 +662,21 @@ def _saved_coverage_id(item: dict[str, Any]) -> str:
     return item.get("candidateId") or f"saved-{_digest(item)[:16]}"
 
 
+def _deferred_candidate_id(
+    row: dict[str, Any],
+    owner: str | None,
+    ambiguous_deferred: set[tuple[str | None, str]],
+) -> str | None:
+    identity = row.get("candidateId") or row.get("id")
+    if not isinstance(identity, str):
+        return None
+    if (owner, identity) in ambiguous_deferred and not any(
+        key in row for key in ("candidateId", "candidate", "finding")
+    ):
+        return None
+    return identity
+
+
 def _generic_surface_updates(
     sources: list[tuple[str, dict[str, Any], str | None]],
     source_order: dict[str, tuple[int, int]],
@@ -671,6 +686,7 @@ def _generic_surface_updates(
     reopened_generic: set[tuple[str | None, str]],
     surface_schema: dict[str, Any],
     deferred_rows: dict[str, list[Any]],
+    ambiguous_deferred: set[tuple[str | None, str]],
 ) -> tuple[set[int], list[dict[str, Any]]]:
     if not closed_deferred and not reopened_generic:
         return set(), []
@@ -733,7 +749,14 @@ def _generic_surface_updates(
 
             if not reopening and any(
                 saved_owner == owner
-                and not isinstance(row.get("id") or row.get("candidateId"), str)
+                and (
+                    not isinstance(row.get("id") or row.get("candidateId"), str)
+                    or (
+                        isinstance(row.get("id"), str)
+                        and (owner, row["id"]) in ambiguous_deferred
+                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                    )
+                )
                 and linked(row, identity)
                 for saved_path, _, saved_owner in sources
                 for row in deferred_rows[saved_path]
@@ -744,7 +767,7 @@ def _generic_surface_updates(
                 saved_owner == owner
                 and (owner, deferred_id) not in closed_deferred
                 and (
-                    not isinstance(candidate_id := row.get("candidateId") or deferred_id, str)
+                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
                     or (owner, candidate_id) not in resolved_candidates
                 )
                 and linked(row, identity)
@@ -1176,6 +1199,12 @@ def merge_saved_results(
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
+    # Completion follows the selected parent, including legacy terminal drafts
+    # that omit the optional marker, rather than an older canonical manifest.
+    if parent is not None:
+        manifest["scan"].pop("complete", None)
+        if "complete" in parent:
+            manifest["scan"]["complete"] = parent["complete"]
     coverage = (
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
@@ -1242,12 +1271,20 @@ def merge_saved_results(
     ambiguous_deferred: set[tuple[str | None, str]] = set()
     for relative, _, owner in all_sources:
         by_id: dict[str, dict[str, Any]] = {}
+        candidate_aliases = {
+            identity
+            for row in deferred_rows[relative]
+            if isinstance(row, dict)
+            and any(key in row for key in ("candidateId", "candidate", "finding"))
+            for identity in (row.get("id"), row.get("candidateId"))
+            if isinstance(identity, str)
+        }
         for row in deferred_rows[relative]:
             if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
                 continue
             if any(key in row for key in ("candidateId", "candidate", "finding")):
                 continue
-            if identity in by_id and row != by_id[identity]:
+            if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
                 ambiguous_deferred.add((owner, identity))
             by_id[identity] = row
     current_drafts = ([("parent", parent, None)] if parent else []) + [
@@ -1326,6 +1363,7 @@ def merge_saved_results(
                 isinstance(row, dict)
                 and isinstance(identity := row.get("id"), str)
                 and (owner, identity) in ambiguous_deferred
+                and not any(key in row for key in ("candidateId", "candidate", "finding"))
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
@@ -1348,7 +1386,7 @@ def merge_saved_results(
     ordered_candidates = {
         (owner, identity)
         for owner, row in reopened_rows
-        if isinstance(identity := row.get("candidateId") or row.get("id"), str)
+        if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
         and (owner, identity) in candidate_ids
     }
     ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
@@ -1386,7 +1424,7 @@ def merge_saved_results(
         order = source_order[relative]
         if any(
             saved_owner == owner
-            and (row.get("candidateId") or row.get("id")) == candidate_id
+            and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
             and modified >= order
             for (saved_owner, _), (modified, row, _) in active_deferred.items()
         ):
@@ -1443,6 +1481,7 @@ def merge_saved_results(
         reopened_generic,
         coverage_schema["surfaces"]["items"],
         deferred_rows,
+        ambiguous_deferred,
     )
     replaced_rows = {
         "surfaces": replaced_surfaces,
@@ -1475,14 +1514,40 @@ def merge_saved_results(
     # Reopened work survives a superseded checkpoint, but current candidate
     # outcomes still apply. Parent closures cannot remove another worker's row.
     for owner, item in reopened_rows:
-        if (
-            isinstance(identity := item.get("candidateId") or item.get("id"), str)
-            and (owner, identity) in resolved
-        ):
+        if (identity := _deferred_candidate_id(item, owner, ambiguous_deferred)) is not None and (
+            owner,
+            identity,
+        ) in resolved:
             continue
         pending = coverage.setdefault("deferred", [])
         if isinstance(pending, list) and item not in pending:
             pending.append(copy.deepcopy(item))
+    ambiguous_surface_ids = {
+        (owner, identity)
+        for owner, row in reopened_rows
+        if isinstance(row.get("id"), str)
+        and (owner, row["id"]) in ambiguous_deferred
+        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+        for identity in [
+            row["id"],
+            *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
+        ]
+        if isinstance(identity, str)
+    }
+    for _, draft, owner in all_sources:
+        surfaces = draft["coverage"].get("surfaces", [])
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if (
+                isinstance(surface, dict)
+                and isinstance(surface.get("id"), str)
+                and (owner, surface["id"]) in ambiguous_surface_ids
+                and surface.get("disposition") == "needs_follow_up"
+                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
+                and isinstance(coverage.get("surfaces"), list)
+            ):
+                retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
+                if retained_surface not in coverage["surfaces"]:
+                    coverage["surfaces"].append(copy.deepcopy(retained_surface))
     terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
         if relative in current_results and draft.get("complete") is not False:
@@ -1749,8 +1814,9 @@ def merge_saved_results(
                 if (
                     isinstance(item, dict)
                     and isinstance(
-                        identity := item.get("candidateId")
-                        or (item.get("id") if field == "deferred" else None),
+                        identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+                        if field == "deferred"
+                        else item.get("candidateId"),
                         str,
                     )
                     and (worker_id, identity) in resolved

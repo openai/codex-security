@@ -1514,3 +1514,207 @@ for (const malformed of [false, true]) {
     assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
   });
 }
+
+for (const layout of ["standard", "diff", "worker"]) {
+  for (const reopened of [false, true]) {
+    test(`${layout}: accepted progress remains incomplete after a terminal draft, reopened=${reopened}`, async (t) => {
+      const f = await fixture(t, layout);
+      const task = { id: "review", ...generic };
+      await f.write(f.draft({ deferred: [task] }, true));
+      if (reopened)
+        await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
+      for (const input of [f.draft({ deferred: [task] }), f.draft()]) {
+        await f.write(input);
+        const published = JSON.parse(
+          await readFile(
+            path.join(
+              f.root,
+              layout === "worker" ? "result.json" : "scan-manifest.json",
+            ),
+            "utf8",
+          ),
+        );
+        assert.equal(
+          layout === "worker" ? published.complete : published.scan.complete,
+          false,
+        );
+        if (layout === "worker") {
+          const head = JSON.parse(
+            await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
+          );
+          const checkpoint = JSON.parse(
+            await readFile(
+              path.join(f.root, "checkpoints", head.checkpoint),
+              "utf8",
+            ),
+          );
+          assert.equal(checkpoint.complete, false);
+          assert.deepEqual(checkpoint.coverage.deferred, [task]);
+        }
+      }
+      await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
+      const finished = JSON.parse(
+        await readFile(
+          path.join(
+            f.root,
+            layout === "worker" ? "result.json" : "scan-manifest.json",
+          ),
+          "utf8",
+        ),
+      );
+      assert.notEqual(
+        layout === "worker" ? finished.complete : finished.scan.complete,
+        false,
+      );
+    });
+  }
+
+  test(`${layout}: ignored late progress keeps an accepted terminal marker`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write(f.draft({}, true));
+    await f.write(f.draft({ deferred: [{ id: "late", ...generic }] }));
+    const published = JSON.parse(
+      await readFile(
+        path.join(
+          f.root,
+          layout === "worker" ? "result.json" : "scan-manifest.json",
+        ),
+        "utf8",
+      ),
+    );
+    assert.notEqual(
+      layout === "worker" ? published.complete : published.scan.complete,
+      false,
+    );
+    assert.deepEqual((await f.read()).deferred, []);
+  });
+
+  for (const reverse of [false, true]) {
+    test(`${layout}: reject cross-row candidate identity ownership, reverse=${reverse}`, async (t) => {
+      const f = await fixture(t, layout);
+      const deferred = [
+        { id: "candidate-a", ...generic },
+        { id: "candidate-task", candidateId: "candidate-a", ...generic },
+      ];
+      if (reverse) deferred.reverse();
+      await assert.rejects(
+        f.write(f.draft({ deferred })),
+        /coverage\.deferred repeats candidate-a/,
+      );
+      assert.deepEqual(await readdir(f.root), []);
+      await f.write(
+        f.draft({
+          deferred: [
+            { id: "candidate-a", candidateId: "candidate-a", ...generic },
+          ],
+        }),
+      );
+      await f.write(
+        f.draft(
+          {
+            surfaces: [
+              {
+                id: "outcome",
+                candidateId: "candidate-a",
+                label: "Candidate",
+                disposition: "rejected",
+              },
+            ],
+          },
+          true,
+        ),
+      );
+      assert.deepEqual((await f.read()).deferred, []);
+    });
+  }
+
+  for (const alias of ["id", "candidateId"]) {
+    for (const outcome of ["rejected", "reported"]) {
+      test(`${layout}: legacy candidate identity collisions retain independent generic work, alias=${alias}, outcome=${outcome}`, async (t) => {
+        const f = await fixture(t, layout);
+        const surfaceId =
+          alias === "candidateId" ? "candidate-a" : "generic-surface";
+        const task = {
+          id: alias === "candidateId" ? "candidate-a" : "candidate-task",
+          ...generic,
+          surfaceIds: [surfaceId],
+        };
+        const other = {
+          id: "other-review",
+          ...generic,
+          surfaceIds: [surfaceId],
+        };
+        const followUp = {
+          id: surfaceId,
+          label: "Independent review",
+          disposition: "needs_follow_up",
+          receiptRefs: [],
+        };
+        await saveScanDraftCheckpoint(
+          f.context,
+          f.draft({
+            deferred: [
+              task,
+              { id: "candidate-task", candidateId: "candidate-a", ...generic },
+              other,
+            ],
+            surfaces: [followUp],
+          }),
+          false,
+        );
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const restored = await f.write(f.draft());
+          assert.equal(restored.coverage.deferred.length, 3);
+          assert.ok(
+            restored.coverage.deferred.some(
+              (row) => row.candidateId === "candidate-a",
+            ),
+          );
+          assert.ok(
+            restored.coverage.deferred.some((row) =>
+              isDeepStrictEqual(row, task),
+            ),
+          );
+        }
+        const terminal = {
+          ...f.draft(
+            {
+              resolvedDeferred: [close(other.id)],
+              surfaces: [
+                { ...followUp, disposition: "no_issue_found" },
+                {
+                  id: "outcome",
+                  candidateId: "candidate-a",
+                  label: "Candidate",
+                  disposition: outcome,
+                },
+              ],
+            },
+            true,
+          ),
+          findings: outcome === "reported" ? [findingFor("candidate-a")] : [],
+        };
+        for (const input of [terminal, f.draft({}, true), f.draft()]) {
+          const result = await f.write(input);
+          assert.deepEqual(result.coverage.deferred, [task]);
+          assert.equal(result.coverage.completeness, "partial");
+          assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
+          assert.deepEqual(
+            result.coverage.surfaces.filter(({ id }) => id === followUp.id),
+            [followUp],
+          );
+          if (outcome === "rejected")
+            assert.equal(
+              result.coverage.surfaces.find(({ id }) => id === "outcome")
+                .disposition,
+              outcome,
+            );
+        }
+        await assert.rejects(
+          f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
+          /ambiguous saved deferred work/,
+        );
+      });
+    }
+  }
+}

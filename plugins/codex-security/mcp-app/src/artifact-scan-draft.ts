@@ -429,6 +429,9 @@ async function preserveScanDraft(
       }),
     );
   }
+  const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
+  const keepsGenericWork = (row: JsonObject) =>
+    ambiguousGenericEntry(row, ambiguousDeferredIds);
   const retainedFinal =
     input.complete === false
       ? savedSources.find(({ input }) => input.complete !== false)
@@ -484,11 +487,13 @@ async function preserveScanDraft(
       );
       if (reopenedIds.size > 0) acceptProgress = true;
       if (!acceptProgress) continue;
+      result.complete = false;
       const resolved = reconcileDeferredSurfaces(
         progress.coverage,
         sources,
         reopenedIds,
         new Set(),
+        ambiguousDeferredIds,
         [],
       );
       for (const surface of resolved) reopenedSurfaces.add(surface);
@@ -497,16 +502,19 @@ async function preserveScanDraft(
           ...result.coverage,
           deferred: (progress.coverage.deferred as JsonObject[]).filter(
             (row) =>
+              keepsGenericWork(row) ||
               !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
           ),
           surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
             (surface) =>
-              !terminalOutcomeIds.has(surface.id as string) &&
-              !terminalOutcomeIds.has(surface.candidateId as string),
+              keepsGenericWork(surface) ||
+              (!terminalOutcomeIds.has(surface.id as string) &&
+                !terminalOutcomeIds.has(surface.candidateId as string)),
           ),
         },
         [result.coverage],
         false,
+        ambiguousDeferredIds,
       );
       sources.unshift(progress);
     }
@@ -519,6 +527,7 @@ async function preserveScanDraft(
     sources,
     savedSources,
     resolvedCandidateIds,
+    ambiguousDeferredIds,
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
@@ -532,6 +541,7 @@ async function preserveScanDraft(
       pending.some((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
+          keepsGenericWork(item) ||
           typeof candidateId !== "string" ||
           !currentCandidateIds.has(candidateId)
         );
@@ -571,7 +581,9 @@ async function preserveScanDraft(
           preserveFindingDetails(finding, pending.finding);
       } else {
         const candidateRow = candidateRows.find(
-          (item) => item.candidateId === candidateId || item.id === candidateId,
+          (item) =>
+            !keepsGenericWork(item) &&
+            (item.candidateId === candidateId || item.id === candidateId),
         );
         if (candidateRow) {
           for (const field of ["candidate", "finding"] as const) {
@@ -611,7 +623,9 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...candidateRows
+          .filter((item) => !keepsGenericWork(item))
+          .map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
@@ -619,7 +633,9 @@ async function preserveScanDraft(
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (keepsGenericWork(item) ||
+            typeof candidateId !== "string" ||
+            !resolvedIds.has(candidateId)) &&
           !closedDeferredIds.has(item.id as string)
         );
       }),
@@ -627,10 +643,13 @@ async function preserveScanDraft(
         if (resolvedSurfaces.has(surface)) return false;
         const candidateId = surface.candidateId ?? surface.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (keepsGenericWork(surface) ||
+            typeof candidateId !== "string" ||
+            !resolvedIds.has(candidateId)) &&
           !coverageEntryPresent(
             result.coverage.surfaces as unknown[],
             surface,
+            ambiguousDeferredIds,
           ) &&
           !(
             surface.disposition === "needs_follow_up" &&
@@ -660,6 +679,7 @@ async function preserveScanDraft(
       result.coverage,
       [previousCoverage],
       false,
+      ambiguousDeferredIds,
     );
   }
   result.coverage.deferred = normalizeDeferred(
@@ -707,42 +727,71 @@ function resolvedDeferred(coverage: JsonObject): JsonObject[] {
   return (coverage.resolvedDeferred as JsonObject[] | undefined) ?? [];
 }
 
+function genericDeferred(row: JsonObject): boolean {
+  return (
+    typeof row.candidateId !== "string" &&
+    !("candidate" in row) &&
+    !("finding" in row)
+  );
+}
+
+function ambiguousGenericEntry(
+  row: JsonObject,
+  identities: Set<string>,
+): boolean {
+  return (
+    typeof row.id === "string" && identities.has(row.id) && genericDeferred(row)
+  );
+}
+
+function ambiguousGenericDeferredIds(sources: ScanDraftInput[]): Set<string> {
+  const ambiguous = new Set<string>();
+  for (const source of sources) {
+    const rows = source.coverage.deferred as JsonObject[];
+    const candidateIds = new Set(
+      rows
+        .filter((row) => !genericDeferred(row))
+        .flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string",
+          ),
+        ),
+    );
+    const byId = new Map<string, JsonObject>();
+    for (const row of rows) {
+      if (typeof row.id !== "string" || !genericDeferred(row)) continue;
+      const previous = byId.get(row.id);
+      if (
+        candidateIds.has(row.id) ||
+        (previous !== undefined && !isDeepStrictEqual(previous, row))
+      )
+        ambiguous.add(row.id);
+      byId.set(row.id, row);
+    }
+  }
+  return ambiguous;
+}
+
 function reconcileResolvedDeferred(
   result: ScanDraftInput,
   requestedClosures: JsonObject[],
   sources: ScanDraftInput[],
   savedSources: SavedScanDraft[],
   resolvedCandidateIds: Set<string>,
+  ambiguousIds: Set<string>,
   retainedFinal?: ScanDraftInput,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
   const activeDeferred = result.coverage.deferred as JsonObject[];
-  const ambiguousIds = new Set<string>();
-  const genericRows: JsonObject[] = [];
+  // Legacy aliases cannot identify which independent task was completed.
+  // Keep generic work separate from candidate outcomes and ambiguous closures.
   for (const source of sources) {
-    const rowsById = new Map<string, JsonObject>();
     for (const row of source.coverage.deferred as JsonObject[]) {
       if (
-        typeof row.id !== "string" ||
-        typeof row.candidateId === "string" ||
-        "candidate" in row ||
-        "finding" in row
+        ambiguousGenericEntry(row, ambiguousIds) &&
+        !activeDeferred.some((current) => isDeepStrictEqual(current, row))
       )
-        continue;
-      genericRows.push(row);
-      const previous = rowsById.get(row.id);
-      if (previous !== undefined && !isDeepStrictEqual(previous, row))
-        ambiguousIds.add(row.id);
-      rowsById.set(row.id, row);
+        activeDeferred.push(structuredClone(row));
     }
-  }
-  // A legacy duplicate ID cannot identify which independent task was completed.
-  // Retain that evidence across rewrites instead of treating it as an ID update.
-  for (const row of genericRows) {
-    if (
-      ambiguousIds.has(row.id as string) &&
-      !activeDeferred.some((current) => isDeepStrictEqual(current, row))
-    )
-      activeDeferred.push(structuredClone(row));
   }
   const observedIds = new Set(
     activeDeferred.flatMap((row) =>
@@ -878,6 +927,7 @@ function reconcileResolvedDeferred(
     sources,
     closedDeferredIds,
     resolvedCandidateIds,
+    ambiguousIds,
     inherited,
     savedSources,
     retainedFinal,
@@ -891,6 +941,7 @@ function reconcileDeferredSurfaces(
   sources: ScanDraftInput[],
   closedDeferredIds: Set<string>,
   resolvedCandidateIds: Set<string>,
+  ambiguousDeferredIds: Set<string>,
   inherited: ScanDraftInput[],
   savedSources: SavedScanDraft[] = [],
   retainedFinal?: ScanDraftInput,
@@ -914,13 +965,15 @@ function reconcileDeferredSurfaces(
   const latestDeferred = [...(coverage.deferred as JsonObject[])];
   for (const source of sources) {
     for (const row of source.coverage.deferred as JsonObject[]) {
-      if (!deferredEntryPresent(latestDeferred, row)) latestDeferred.push(row);
+      if (!deferredEntryPresent(latestDeferred, row, ambiguousDeferredIds))
+        latestDeferred.push(row);
     }
   }
   const pending = latestDeferred.filter(
     (row) =>
       !closedDeferredIds.has(row.id as string) &&
-      !resolvedCandidateIds.has((row.candidateId ?? row.id) as string),
+      (ambiguousGenericEntry(row, ambiguousDeferredIds) ||
+        !resolvedCandidateIds.has((row.candidateId ?? row.id) as string)),
   );
   for (const { surface: original, source: inheritedSource } of [
     ...current.map((surface) => ({
@@ -1489,12 +1542,18 @@ function containsSavedValue(current: unknown, previous: unknown): boolean {
   return current === previous;
 }
 
-function deferredEntryPresent(entries: unknown[], previous: unknown): boolean {
+function deferredEntryPresent(
+  entries: unknown[],
+  previous: unknown,
+  ambiguousIds = new Set<string>(),
+): boolean {
   return entries.some(
     (current) =>
       isDeepStrictEqual(current, previous) ||
       (isObject(current) &&
         isObject(previous) &&
+        !ambiguousGenericEntry(current, ambiguousIds) &&
+        !ambiguousGenericEntry(previous, ambiguousIds) &&
         [previous.id, previous.candidateId].some(
           (id) =>
             typeof id === "string" &&
@@ -1503,7 +1562,11 @@ function deferredEntryPresent(entries: unknown[], previous: unknown): boolean {
   );
 }
 
-function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
+function coverageEntryPresent(
+  entries: unknown[],
+  previous: unknown,
+  ambiguousIds = new Set<string>(),
+): boolean {
   return entries.some((entry) => {
     const current =
       typeof entry === "string" ? { question: entry.trim() } : entry;
@@ -1512,6 +1575,11 @@ function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
         ? { question: previous.trim() }
         : structuredClone(previous);
     if (isObject(current) && isObject(original)) {
+      if (
+        ambiguousGenericEntry(current, ambiguousIds) ||
+        ambiguousGenericEntry(original, ambiguousIds)
+      )
+        return isDeepStrictEqual(current, original);
       const currentIdentities = coverageEntryIdentities(current);
       if (
         coverageEntryIdentities(original).some((identity) =>
@@ -1546,6 +1614,7 @@ export function preserveScanCoverage(
   coverage: JsonObject,
   sources: JsonObject[],
   preserveCompleteness = true,
+  ambiguousDeferredIds = new Set<string>(),
 ): JsonObject {
   const result = structuredClone(coverage);
   for (const field of [
@@ -1560,7 +1629,16 @@ export function preserveScanCoverage(
       for (const value of (source[field] as unknown[] | undefined) ?? []) {
         const present =
           field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
-        if (!present(values, value)) values.push(structuredClone(value));
+        if (
+          !present(
+            values,
+            value,
+            field === "deferred" || field === "surfaces"
+              ? ambiguousDeferredIds
+              : undefined,
+          )
+        )
+          values.push(structuredClone(value));
       }
     }
     if (
@@ -1696,9 +1774,10 @@ export async function getCodexSecurityCompletedScan(
 export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
   const parsed = parseScanDraftDocument(input);
   const deferredIds = new Set<string>();
+  const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred as JsonObject[]) {
     if (typeof row.id !== "string") continue;
-    if (deferredIds.has(row.id))
+    if (deferredIds.has(row.id) || ambiguousIds.has(row.id))
       throw new Error(`scan draft: coverage.deferred repeats ${row.id}.`);
     deferredIds.add(row.id);
   }
