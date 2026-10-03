@@ -11,6 +11,7 @@ import {
   expandHome,
   resolveCodexCommand,
 } from "../runtime.js";
+import { sourceMcpInstructions, type SourceMcp } from "./source-mcp.js";
 import type { CodexReview, CodexReviewRunner } from "./codex-review.js";
 import {
   reviewSubmissionInstructions,
@@ -22,6 +23,7 @@ const REVIEW_CONTRACT_VERSION = 3;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
+  sourceMcp?: { mcp: SourceMcp; repository: string; signal?: AbortSignal },
 ): Promise<string> {
   const homes = new Set([
     expandHome(
@@ -42,6 +44,18 @@ export async function reviewSettingsDigest(
   );
   return workflowDigest({
     configs,
+    ...(sourceMcp === undefined
+      ? {}
+      : {
+          sourceMcp: {
+            ...sourceMcp.mcp,
+            instructions: await sourceMcpInstructions(
+              sourceMcp.mcp,
+              sourceMcp.repository,
+              sourceMcp.signal,
+            ),
+          },
+        }),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
   });

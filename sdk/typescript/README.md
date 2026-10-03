@@ -2393,6 +2393,50 @@ contain groups of observation IDs and unresolved observations.
 See the [records protocol and Python fake-host example](docs/dedupe-records.md)
 for the complete input, review contract, cancellation, and persistence rules.
 
+### Source access during dedupe
+
+Add `--source-mcp NAME` to use a configured native Codex MCP server for source
+reads during dedupe. For example, configure Sourcegraph in your user
+`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`):
+
+```toml
+[mcp_servers.sourcegraph]
+url = "https://sourcegraph.example.com/.api/mcp"
+env_http_headers = { Authorization = "SOURCEGRAPH_AUTHORIZATION" }
+```
+
+Set `SOURCEGRAPH_AUTHORIZATION` to the complete `token <access-token>` value
+through your usual secret manager, then run:
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url http://localhost:3000 --source-mcp sourcegraph
+```
+
+The SDK option is `deduplicateScan(scanId, { findingsUrl, sourceMcp: "sourcegraph" })`.
+The selected server must be configured, authenticated, enabled, and available.
+Dedupe uses finding-cited revisions when supplied, with the local Git checkout's
+origin and revision as repository context. Sourcegraph's CLI is not bundled.
+
+This uses native Codex MCP transport and approval review. HTTP environment credentials are excluded from model shell access. Static HTTP
+headers and stdio server environment values are passed through native MCP
+configuration over JSON-RPC, preserving native header and environment precedence.
+Stdio `env_vars` inherits only defined values, and `env` overrides remain local
+to the MCP child. An explicit relative stdio `cwd` is resolved from the caller's
+directory for local servers; executor-owned paths retain native handling. If a
+stored-login home defines the same server name, its effective definition must
+match the caller's configuration; use matching definitions or distinct server
+names. Local HTTP servers do not require a local executor. Executor-backed
+servers require the selected native executor to be available with a matching
+definition in the review's credential home. The selected executor's connection
+(including native Noise settings), configured environment, and referenced
+inherited values are included in resume checkpoints. A stdio executor without `cwd`
+inherits the caller's directory, including its trusted Codex startup configuration;
+the review target, permissions, and tool approvals remain explicit. That caller
+directory also participates in resume checkpoints. OAuth credentials
+from another Codex home are not imported.
+Native resource reads retain Codex's existing behavior and the MCP server's
+repository permissions. Omitting the flag preserves existing dedupe source access.
+
 ### Stored duplicate groups
 
 `POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:
