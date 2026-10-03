@@ -1,3 +1,4 @@
+import { filesystemErrorMessage } from "./helper-files";
 import {
   ArgumentError,
   argumentsFor,
@@ -68,7 +69,7 @@ export function deepReviewInputCommand(
     print(message);
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = filesystemErrorMessage(error);
     print(
       error instanceof ArgumentError
         ? `${usage}\n${command}: error: ${message}`

@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { mkdir, readFile, writeFile } from "./helper-files";
+import {
+  filesystemErrorMessage,
+  mkdir,
+  readFile,
+  writeFile,
+} from "./helper-files";
 import {
   JsonSyntaxError,
   object,
@@ -177,7 +182,18 @@ function validatePlan(plan: string, directory: string) {
   const inputs = discoverInputShards(directory);
   const inputNames = inputs.map((path) => basename(path));
   const outputNames = inputNames.map(outputName);
-  const bytes = readFile(plan);
+  let bytes: Buffer;
+  try {
+    bytes = readFile(plan);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    )
+      throw new Error(`Rank pool plan missing: ${plan}`);
+    throw error;
+  }
   let payload: unknown;
   try {
     payload = parseJsonBytes(bytes);
@@ -382,7 +398,7 @@ export function rankPoolCommand(
     }
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = filesystemErrorMessage(error);
     print(
       error instanceof ArgumentError
         ? `${usage}\n${command}: error: ${message}`

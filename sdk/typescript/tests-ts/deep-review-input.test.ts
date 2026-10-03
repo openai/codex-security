@@ -363,9 +363,13 @@ describe("deep-review worklists", () => {
     const f = fixture();
     writeFileSync(f.output, "previous output\n");
     for (const selection of [false, true]) {
-      const result = run(f, selection);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(f.input);
+      for (const input of [f.input, join(f.output, "child.jsonl")]) {
+        const result = run({ ...f, input }, selection);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toBe(
+          `Rank ${selection ? "output" : "input"} missing: ${input}${newline}`,
+        );
+      }
       expect(readFileSync(f.output, "utf8")).toBe("previous output\n");
     }
     write(f.input, [ranked("a.py")]);
@@ -382,6 +386,39 @@ describe("deep-review worklists", () => {
       expect(run(f, true, args).status).toBe(2);
     expect(run(f, true, ["--help"]).stdout).toContain("Defaults to 100");
   });
+  test.skipIf(process.platform === "win32")(
+    "escapes controls in filesystem errors but preserves other command text",
+    () => {
+      const f = fixture();
+      f.input = join(f.root, "input-\x1b[2J.jsonl");
+      f.output = join(f.root, "output-\x1b[2J.jsonl");
+      for (const selection of [false, true]) {
+        const missing = run(f, selection);
+        expect(missing.status).toBe(1);
+        expect(missing.stderr).toBe(
+          `Rank ${selection ? "output" : "input"} missing: ${f.input}\n`,
+        );
+        writeFileSync(f.input, "{}\n");
+        const invalid = run(f, selection);
+        expect(invalid.status).toBe(1);
+        expect(invalid.stderr).toStartWith(`${f.input}:1: missing fields`);
+        write(f.input, [selection ? ranked("a.py") : candidate("a.py")]);
+        mkdirSync(f.output);
+        const collision = run(f, selection);
+        expect(collision.status).toBe(1);
+        expect(collision.stderr).toContain("\\x1b[2J");
+        expect(collision.stderr).not.toContain("\x1b");
+        rmSync(f.output, { recursive: true });
+        const success = run(f, selection);
+        expect(success.status).toBe(0);
+        expect(success.stdout).toBe(
+          `${selection ? "Selected 1 of 1" : "Copied 1"} rows into ${f.output}\n`,
+        );
+        rmSync(f.input);
+        rmSync(f.output);
+      }
+    },
+  );
   test.skipIf(process.platform === "win32")(
     "follows existing input/output symlinks and preserves existing output permissions",
     () => {

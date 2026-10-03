@@ -364,7 +364,9 @@ describe("rank pool helpers", () => {
 
   test("checks shard existence and names before loading a missing or malformed plan", () => {
     const f = fixture(0);
-    expect(validate(f).stderr).toContain(f.plan);
+    expect(validate(f).stderr).toBe(
+      `Rank pool plan missing: ${f.plan}${newline}`,
+    );
     writeFileSync(f.plan, "bad");
     writeFileSync(join(f.directory, "rank-shard-001.input.jsonl"), "");
     expect(validate(f).stderr).toContain("contiguous canonical names");
@@ -373,6 +375,32 @@ describe("rank pool helpers", () => {
     rmSync(f.directory, { recursive: true });
     expect(make(f).stderr).toContain("Rank shard directory missing");
   });
+
+  test.skipIf(process.platform === "win32")(
+    "escapes filesystem errors without changing custom plan diagnostics or output",
+    () => {
+      const f = fixture(0);
+      f.plan = join(f.root, "plan-\u001b[2J.json");
+      for (const slot of [undefined, "1"]) {
+        const missing = validate(f, slot);
+        expect(missing.status).toBe(1);
+        expect(missing.stderr).toBe(`Rank pool plan missing: ${f.plan}\n`);
+      }
+      mkdirSync(f.plan);
+      const collision = make(f);
+      expect(collision.status).toBe(1);
+      expect(collision.stderr).toContain("\\x1b[2J");
+      expect(collision.stderr).not.toContain("\u001b");
+      rmSync(f.plan, { recursive: true });
+      writeFileSync(f.plan, "bad");
+      expect(validate(f).stderr).toStartWith(`${f.plan}: invalid JSON:`);
+      const success = make(f);
+      expect(success.status).toBe(0);
+      expect(success.stdout).toBe(
+        `Assigned 0 rank shards to 0 ranking workers in ${f.plan}\n`,
+      );
+    },
+  );
 
   test.each([
     [
