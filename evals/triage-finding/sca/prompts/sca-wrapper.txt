@@ -1,0 +1,11 @@
+Read plugins/codex-security/skills/triage-finding/SKILL.md and use its existing static triage workflow.
+
+Repository to inspect: {{target_repo}}
+Assess the typed dependency match in {{target_repo}}/input.json. Its input_id is {{input_id}}.
+The captured scanner output is {{target_repo}}/osv.json. Inspect APPLICATION.md and the source files needed to understand this exact application snapshot.
+
+Keep the resolved package/advisory match separate from application applicability. Preserve every supplied match ID even when information is incomplete. A version match alone does not establish application impact. A devDependency declaration or absence of observed calls alone does not establish not_actionable. Assess the documented affected API and its configuration using local evidence. If required deployment values are missing and can change the answer, use needs_review and identify the missing evidence. Do not treat not_actionable as erasure of the original match or as a verified update.
+
+These are fictional static fixtures. Do not install dependencies, execute code, modify files, reproduce vulnerabilities, or inspect other case directories. No external advisory lookup is needed.
+
+Return one triage-finding/v0 JSON document, with exactly one finding, source_type advisory and the supplied input_id. Preserve package identity, resolved version, source lockfile, and advisory references in normalized_input. Cite source evidence as repository-relative path:line and quote the decisive source fragment in backticks inside evidence or counterevidence. Keep missing information in proof_gaps. Do not ask follow-up questions.

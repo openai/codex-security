@@ -778,10 +778,11 @@ export async function gitMarkerRoot(
   }
 }
 
-function isolatedGitEnvironment(
+export function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
+  source: Readonly<Record<string, string | undefined>> = process.env,
 ): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+  const environment = { ...source };
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (

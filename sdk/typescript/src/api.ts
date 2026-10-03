@@ -1,5 +1,16 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
+import { runOsvScan, type OsvScanResult } from "./sca-osv.js";
+import {
+  dependencyScanResult,
+  dependencyRepositoryDirty,
+  saveDependencyScan,
+} from "./sca.js";
+import {
+  dependencyTriageContract,
+  dependencyTriagePrompt,
+} from "./sca-triage.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
 import {
   chmod,
   lstat,
@@ -34,6 +45,7 @@ import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
+  codexSecurityPrivatePaths,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -154,6 +166,7 @@ import {
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
+  disabledMcpServers,
   matchCompletedScan,
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
@@ -312,6 +325,14 @@ export interface ScanOptions extends ScanSettings {
   signal?: AbortSignal;
 }
 
+export interface DependencyScanOptions extends Pick<
+  ScanOptions,
+  "auth" | "outputDir" | "signal" | "maxCostUsd"
+> {
+  repositoryPath: string;
+}
+export type DependencyScanResult = ScaResult;
+
 export interface ValidationOptions extends Pick<
   ScanOptions,
   "auth" | "outputDir" | "signal"
@@ -453,6 +474,8 @@ interface ClientDependencies {
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
+  runOsvScan?: typeof runOsvScan;
+  sourceSnapshot?: FindingWorkflow["sourceSnapshot"];
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -462,6 +485,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
+const SCA_PERMISSION_PROFILE = "codex_security_dependencies";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
@@ -614,6 +638,334 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       await workflow.fail("scan", error);
+      throw error;
+    }
+  }
+
+  /** Inventory locked dependencies, match OSV advisories, and assess them statically. */
+  public async scanDependencies(
+    options: DependencyScanOptions,
+  ): Promise<DependencyScanResult> {
+    return await this.#trackOperation(() => this.#scanDependencies(options));
+  }
+
+  async #scanDependencies(
+    options: DependencyScanOptions,
+  ): Promise<DependencyScanResult> {
+    const budgetController = new AbortController();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      budgetController.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    let outputDir = "";
+    let result: ScaResult | undefined;
+    try {
+      throwIfAborted(signal);
+      const inputs = await this.#prepareLocalInputs(
+        options.repositoryPath,
+        options,
+        signal,
+      );
+      const temporaryRoot = await realpath(tmpdir());
+      requireOutputOutsideRepository(
+        inputs.protectedRoot,
+        temporaryRoot,
+        "temporary",
+      );
+      const outputRoot =
+        inputs.outputDir === null
+          ? await preparePersistentOutputRoot(
+              inputs.stateDirectory,
+              "dependencies",
+              basename(inputs.repository),
+            )
+          : temporaryRoot;
+      outputDir = await prepareOutputDir(
+        inputs.outputDir ?? undefined,
+        basename(inputs.repository),
+        outputRoot,
+        (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+      );
+      let sourceWorkflow: FindingWorkflow | undefined;
+      const snapshotSource = async (): Promise<JsonObject> => {
+        if (this.#dependencies.sourceSnapshot !== undefined)
+          return await this.#dependencies.sourceSnapshot(inputs.repository);
+        if (sourceWorkflow === undefined) {
+          const python = await (
+            this.#dependencies.resolvePluginPython ?? resolvePluginPython
+          )({
+            configuredPath: this.config.pythonPath,
+            environment: this.#dependencies.environment,
+            protectedRoot: inputs.protectedRoot,
+            signal,
+          });
+          sourceWorkflow = new FindingWorkflow(
+            "dependency-triage",
+            this.#dependencies.environment,
+            (options, args, input) =>
+              (this.#dependencies.runWorkbench ?? runWorkbench)(
+                { ...options, signal },
+                args,
+                input,
+              ),
+            python,
+          );
+        }
+        return await sourceWorkflow.sourceSnapshot(inputs.repository);
+      };
+      const sourceDigest = async () => {
+        const { repository, revision, content } = await snapshotSource();
+        return workflowDigest({ repository, revision, content });
+      };
+      // Bind triage to the source before inventory, including dirty and ignored files.
+      // A snapshot failure must not discard deterministic scanner evidence.
+      const source = await sourceDigest().then(
+        (digest) => ({ digest }),
+        (error: unknown) => ({ error }),
+      );
+      const repository = {
+        path: inputs.repository,
+        revision: await (
+          this.#dependencies.repositoryRevision ?? repositoryRevision
+        )(inputs.repository, signal),
+        dirty: await dependencyRepositoryDirty(
+          inputs.repository,
+          this.#dependencies.environment,
+          signal,
+        ),
+      };
+      try {
+        const scan = await (this.#dependencies.runOsvScan ?? runOsvScan)({
+          repositoryPath: inputs.repository,
+          outputDir,
+          environment: this.#dependencies.environment,
+          signal,
+        });
+        result = dependencyScanResult(scan, repository, outputDir);
+      } catch (error) {
+        if (error instanceof Error && "osvResult" in error) {
+          result = dependencyScanResult(
+            error.osvResult as OsvScanResult,
+            repository,
+            outputDir,
+          );
+          await saveDependencyScan(result);
+        }
+        throw error;
+      }
+      await saveDependencyScan(result);
+      throwIfAborted(signal, outputDir);
+      if (result.matches.length === 0) return result;
+      // Authentication is deliberately deferred until deterministic evidence is durable.
+      try {
+        if ("error" in source) throw source.error;
+        const session = await this.#prepareSession(
+          inputs,
+          options,
+          signal,
+          temporaryRoot,
+        );
+        const { runtime } = session;
+        const { model } = scanModelConfiguration(session.effectiveConfig);
+        result.model.model = model;
+        validateScanCostLimit(options.maxCostUsd, model);
+        const contract = await dependencyTriageContract(
+          runtime.plugin.pluginRoot,
+        );
+        result.model.skillDigest = contract.skillDigest;
+        const command = this.#codexCommand();
+        const mcpServers = await disabledMcpServers(
+          command,
+          session.sessionConfig,
+          definedEnvironment({
+            ...withoutCodexHome(runtime.environment),
+            CODEX_HOME: runtime.codexHome,
+          }),
+          { workingDirectory: outputDir, signal },
+        );
+        const { codex } = this.#createSessionCodex(
+          session,
+          {
+            CODEX_SECURITY_REPOSITORY: inputs.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+            CODEX_SECURITY_SURFACE: this.#surface,
+          },
+          options.auth,
+          undefined,
+          {
+            ...policyCodexConfig(session.sessionConfig),
+            default_permissions: SCA_PERMISSION_PROFILE,
+          },
+          [
+            `mcp_servers=${inlineToml(mcpServers)}`,
+            `permissions.${SCA_PERMISSION_PROFILE}=${inlineToml(dependencyPermissions(this.#dependencies.environment, runtime.codexHome))}`,
+            ...(hasCommandAuth(session.sessionConfig)
+              ? []
+              : modelProviderConfigOverride(session.sessionConfig)),
+          ],
+        );
+        const threadOptions: ThreadOptions = {
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
+          workingDirectory: outputDir,
+          additionalDirectories: [inputs.repository, runtime.plugin.pluginRoot],
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+          webSearchMode: "disabled",
+        };
+        const reportCost = (cost: Readonly<ScanCost>): void => {
+          result!.model.costUsd = cost.estimatedUsd;
+          if (
+            options.maxCostUsd !== undefined &&
+            cost.estimatedUsd > options.maxCostUsd
+          )
+            budgetController.abort(
+              new ScanCostLimitExceededError(
+                options.maxCostUsd,
+                cost,
+                outputDir,
+              ),
+            );
+        };
+        const reportTrackingError = (error: unknown): void => {
+          if (options.maxCostUsd !== undefined) budgetController.abort(error);
+          else
+            result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
+        };
+        const verifyCost = (cost: Readonly<ScanCost> | null): void => {
+          if (cost !== null) reportCost(cost);
+          else {
+            result!.model.costUsd = null;
+            if (options.maxCostUsd !== undefined)
+              budgetController.abort(
+                new CodexSecurityError(
+                  "Could not verify the dependency assessment cost limit.",
+                ),
+              );
+          }
+        };
+        const tracker = new ScanCostTracker({
+          codexHome: runtime.codexHome,
+          model,
+          repository: inputs.repository,
+          scanDirectory: outputDir,
+          maxCostUsd: options.maxCostUsd,
+          onCost: reportCost,
+          onError: reportTrackingError,
+        });
+        try {
+          for (const [index, match] of result.matches.entries()) {
+            throwIfAborted(signal, outputDir);
+            const thread = codex.startThread(threadOptions);
+            let assessment: ScaAssessment;
+            try {
+              const { events } = await thread.runStreamed(
+                dependencyTriagePrompt(result, contract.skillPath, match),
+                { signal, outputSchema: contract.schema },
+              );
+              const turn = await readCodexTurn({
+                thread,
+                events,
+                onEvent: (event) => {
+                  if (
+                    event.type === "thread.started" &&
+                    typeof event["thread_id"] === "string"
+                  ) {
+                    result!.model.threadId = event["thread_id"];
+                    tracker.recordUsage(null, event["thread_id"]);
+                    tracker.start(event["thread_id"]);
+                  }
+                  throwIfAborted(signal, outputDir);
+                },
+              });
+              tracker.recordUsage(turn.usage, turn.threadId);
+              result.model.threadId = turn.threadId;
+              throwIfAborted(signal, outputDir);
+              if (turn.status !== "completed")
+                throw new CodexSecurityError(
+                  "Dependency triage did not complete.",
+                );
+              assessment = contract.parse(turn.finalResponse, {
+                ...result,
+                matches: [match],
+              })[0]!;
+            } catch (error) {
+              throwIfAborted(signal, outputDir);
+              const message = errorMessage(error);
+              const failure = classifyConnectionFailure(message);
+              if (failure === "unauthorized" || failure === "forbidden")
+                throw error;
+              result.diagnostics.push(
+                `Static assessment ${match.id}: ${message}`,
+              );
+              assessment = {
+                matchId: match.id,
+                status: "failed",
+                verdict: null,
+                triage: null,
+                error: message,
+              };
+            }
+            if ((await sourceDigest()) !== source.digest)
+              throw new CodexSecurityError(
+                "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
+              );
+            throwIfAborted(signal, outputDir);
+            result.assessments[index] = assessment;
+            await saveDependencyScan(result);
+            const snapshot = await tracker.refresh().catch((error: unknown) => {
+              reportTrackingError(error);
+              if (options.maxCostUsd !== undefined) throw error;
+              return { cost: null };
+            });
+            verifyCost(snapshot.cost);
+            throwIfAborted(signal, outputDir);
+          }
+          if (
+            result.coverage.status === "complete" &&
+            result.assessments.every((item) => item.status === "completed")
+          )
+            result.status = "completed";
+        } finally {
+          const snapshot = await tracker.stop().catch((error: unknown) => {
+            reportTrackingError(error);
+            if (options.maxCostUsd !== undefined) throw error;
+            return { cost: null };
+          });
+          verifyCost(snapshot.cost);
+        }
+        throwIfAborted(signal, outputDir);
+      } catch (error) {
+        const message = errorMessage(error);
+        result.diagnostics.push(`Static assessment: ${message}`);
+        throwIfAborted(signal, outputDir);
+        result.status = "partial";
+        for (const assessment of result.assessments) {
+          if (assessment.status === "completed") continue;
+          assessment.status = "failed";
+          assessment.error = message;
+        }
+        await saveDependencyScan(result);
+        throwIfAborted(signal, outputDir);
+        return result;
+      }
+      await saveDependencyScan(result);
+      return result;
+    } catch (error) {
+      if (result !== undefined && signal.aborted) {
+        result.status = "partial";
+        for (const assessment of result.assessments) {
+          if (assessment.status === "completed") continue;
+          assessment.status = "cancelled";
+          assessment.error = errorMessage(signal.reason);
+        }
+        result.diagnostics.push(
+          "Dependency scan interrupted; completed scanner facts are retained.",
+        );
+        await saveDependencyScan(result);
+      }
+      throwIfAborted(signal, outputDir);
       throw error;
     }
   }
@@ -4610,6 +4962,28 @@ export function scanRuntimeCodexConfig(
         network: { enabled: false },
       },
     },
+  };
+}
+
+function dependencyPermissions(
+  environment: ProcessEnvironment,
+  runtimeHome: string,
+): JsonObject {
+  const ambientHome = configuredCodexHome(environment);
+  const privatePaths = [
+    ...codexSecurityPrivatePaths(environment),
+    runtimeHome,
+    // The ambient home also contains the default dependency evidence directory.
+    join(ambientHome, "auth.json"),
+    join(ambientHome, ".credentials.json"),
+    join(ambientHome, "config.toml"),
+  ];
+  return {
+    extends: ":read-only",
+    filesystem: Object.fromEntries(
+      privatePaths.map((path) => [path, { ".": "deny" }]),
+    ),
+    network: { enabled: false },
   };
 }
 

@@ -14,8 +14,6 @@ import {
   environmentEntry,
 } from "../scan-comparison.js";
 import {
-  codexSecurityCredentialHome,
-  codexSecurityStateDirectory,
   executablePathForSpawn,
   expandHome,
   resolveCodexCommand,
@@ -27,7 +25,11 @@ import {
   type DeduplicationReviewFailureCategory,
   errorMessage,
 } from "../errors.js";
-import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
+import {
+  codexSecurityPrivatePaths,
+  configuredCodexHome,
+  readCodexHomeConfig,
+} from "../auth.js";
 import {
   hasCommandAuth,
   modelProviderConfigOverride,
@@ -212,21 +214,11 @@ export class CodexReviewRunner {
           ).flatMap((value) => ["--config", value]),
         );
       }
-      const stateDatabase = join(
-        codexSecurityStateDirectory(environment),
-        "workbench.sqlite3",
-      );
       const privatePaths = new Set(
         [
           environmentEntry(environment, "CODEX_HOME") ||
             join(homedir(), ".codex"),
-          codexSecurityCredentialHome(environment),
-          join(homedir(), ".ssh"),
-          environmentEntry(environment, "GH_CONFIG_DIR") ||
-            join(homedir(), ".config", "gh"),
-          stateDatabase,
-          `${stateDatabase}-wal`,
-          `${stateDatabase}-shm`,
+          ...codexSecurityPrivatePaths(environment),
           directory,
         ].map((path) => resolve(expandHome(path, environment))),
       );

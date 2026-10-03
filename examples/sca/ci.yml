@@ -1,0 +1,12 @@
+# Example steps for an existing CI job with Node, the built SDK, and OSV-Scanner
+# v2.6.0 on PATH. Supply the job's normal Codex authentication separately.
+# Place artifacts outside the repository to preserve SDK output-path protections.
+steps:
+  - name: Assess dependencies
+    run: node examples/sca/run.mjs "$GITHUB_WORKSPACE" "$RUNNER_TEMP/sca-result"
+  - name: Save dependency assessment
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: dependency-assessment
+      path: ${{ runner.temp }}/sca-result

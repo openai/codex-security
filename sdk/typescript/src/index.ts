@@ -202,3 +202,22 @@ export {
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
+
+export type { DependencyScanOptions, DependencyScanResult } from "./api.js";
+export type {
+  ScaResult,
+  ScaScanner,
+  ScaCoverage,
+  ScaInput,
+  ScaFile,
+  ScaComponent,
+  ScaMatch,
+  ScaAssessment,
+  TriageFinding,
+} from "./sca-types.js";
+export {
+  renderScaReport,
+  compareScaResults,
+  createScaUpdateHandoff,
+} from "./sca-report.js";
+export type { ScaComparison, ScaUpdateHandoff } from "./sca-report.js";

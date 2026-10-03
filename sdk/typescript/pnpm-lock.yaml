@@ -53,6 +53,9 @@ importers:
       react:
         specifier: 19.3.0
         version: 19.3.0
+      saxes:
+        specifier: 6.0.0
+        version: 6.0.0
       semver:
         specifier: 7.8.5
         version: 7.8.5
@@ -123,9 +126,6 @@ importers:
       react-dom:
         specifier: 19.3.0
         version: 19.3.0(react@19.3.0)
-      saxes:
-        specifier: 6.0.0
-        version: 6.0.0
       tailwindcss:
         specifier: 4.3.3
         version: 4.3.3

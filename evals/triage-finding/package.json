@@ -14,7 +14,7 @@
     "test:calibration-generate": "node scripts/test-generate-calibration-tests.js",
     "test:calibration-hydrate": "node scripts/test-hydrate-calibration-repos.js",
     "test:dataset": "node scripts/test-calibration-dataset.js",
-    "test:deterministic": "node scripts/test-app-surface-instructions.js && node scripts/test-triage-io.js && node scripts/test-calibration-dataset.js && node scripts/test-generate-calibration-tests.js && node scripts/test-calibration-evidence.js && node scripts/test-hydrate-calibration-repos.js && node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js",
+    "test:deterministic": "node scripts/test-app-surface-instructions.js && node scripts/test-triage-io.js && node scripts/test-calibration-dataset.js && node scripts/test-generate-calibration-tests.js && node scripts/test-calibration-evidence.js && node scripts/test-hydrate-calibration-repos.js && node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js && node --test sca/scripts/test-sca.js",
     "test:instructions": "node scripts/test-app-surface-instructions.js",
     "test:sastbench": "node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js",
     "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.yaml",
@@ -27,7 +27,11 @@
     "eval:calibration:smoke": "node scripts/generate-calibration-tests.js --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable --output artifacts/calibration-smoke.yaml && node scripts/hydrate-calibration-repos.js --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.calibration-smoke.yaml -o ./artifacts/triage-finding-calibration-smoke.json --no-cache --no-share",
     "eval:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js eval -c ./sastbench/promptfooconfig.sastbench.yaml --no-cache --no-share",
     "eval:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js eval -c ./sastbench/promptfooconfig.sastbench-sample.yaml --no-cache --no-share --max-concurrency 32",
-    "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view"
+    "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view",
+    "test:sca": "node --test sca/scripts/test-sca.js",
+    "validate:sca": "node sca/scripts/run-promptfoo.js validate config -c ./sca/promptfooconfig.yaml",
+    "eval:sca": "node sca/scripts/run-promptfoo.js eval -c ./sca/promptfooconfig.yaml -o ./artifacts/sca-eval.json --no-cache --no-share",
+    "eval:sca:smoke": "node sca/scripts/run-promptfoo.js eval -c ./sca/promptfooconfig.yaml -o ./artifacts/sca-smoke.json --no-cache --no-share --filter-range 0:3"
   },
   "dependencies": {
     "@openai/codex-sdk": "0.162.0-alpha.9",

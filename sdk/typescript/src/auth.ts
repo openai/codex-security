@@ -7,6 +7,8 @@ import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
+  codexSecurityCredentialHome,
+  codexSecurityStateDirectory,
   executablePathForSpawn,
   expandHome,
   runCodexCommand,
@@ -38,6 +40,25 @@ export function configuredCodexHome(environment: ProcessEnvironment): string {
       environment,
     ),
   );
+}
+
+/** Private stores excluded from read-only model tools. @internal */
+export function codexSecurityPrivatePaths(
+  environment: ProcessEnvironment,
+): string[] {
+  const stateDatabase = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  return [
+    codexSecurityCredentialHome(environment),
+    join(homedir(), ".ssh"),
+    environmentEntry(environment, "GH_CONFIG_DIR") ||
+      join(homedir(), ".config", "gh"),
+    stateDatabase,
+    `${stateDatabase}-wal`,
+    `${stateDatabase}-shm`,
+  ].map((path) => resolve(expandHome(path, environment)));
 }
 
 /** @internal */

@@ -42,7 +42,7 @@ pnpm --dir evals/triage-finding run eval --filter-metadata case_id=sarif-redirec
 
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
 
-- `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
+- `contains-json` validates the fenced `triage-finding/v0` JSON block against `../../plugins/codex-security/schemas/triage-result.schema.json`.
 - `assertions/triage-io.js` checks input order, `input_id`, `source_type`,
   verdicts, array fields, and `$fix-finding` handoff behavior.
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.

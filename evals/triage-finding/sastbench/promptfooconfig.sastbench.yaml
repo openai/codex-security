@@ -48,7 +48,7 @@ extensions:
 defaultTest:
   assert:
     - type: contains-json
-      value: file://../schemas/triage-result-v0.schema.json
+      value: file://../../../plugins/codex-security/schemas/triage-result.schema.json
       metric: schema_valid
     - type: javascript
       value: file://./assertions/sastbench-verdict.js

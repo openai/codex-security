@@ -1,0 +1,374 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "startedAt",
+    "completedAt",
+    "repository",
+    "scanner",
+    "coverage",
+    "components",
+    "matches",
+    "assessments",
+    "diagnostics",
+    "model",
+    "outputDir"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "sca/v0"
+    },
+    "status": {
+      "enum": ["completed", "partial", "failed"]
+    },
+    "startedAt": {
+      "type": "string"
+    },
+    "completedAt": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "revision", "dirty"],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "revision": {
+          "type": ["string", "null"]
+        },
+        "dirty": {
+          "type": ["boolean", "null"]
+        }
+      }
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "argv",
+        "startedAt",
+        "completedAt",
+        "exitCode",
+        "rawOutputPath",
+        "stderrPath",
+        "advisoryMode",
+        "advisorySnapshotId"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": ["string", "null"]
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": ["integer", "null"]
+        },
+        "rawOutputPath": {
+          "type": "string"
+        },
+        "stderrPath": {
+          "type": "string"
+        },
+        "advisoryMode": {
+          "enum": ["online", "offline", "unknown"]
+        },
+        "advisorySnapshotId": {
+          "type": ["string", "null"]
+        },
+        "invocations": {
+          "type": "array",
+          "description": "Actual sequential OSV calls. argv retains the first call for compatibility; rawOutputPath aggregates source records when there is more than one invocation.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["argv", "exitCode", "rawOutputPath", "stderrPath"],
+            "properties": {
+              "argv": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exitCode": {
+                "type": ["integer", "null"]
+              },
+              "rawOutputPath": {
+                "type": "string"
+              },
+              "stderrPath": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "title": "ScaScanner"
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "inputs",
+        "configFiles",
+        "limitations",
+        "unresolvedPackages"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["complete", "partial", "failed"]
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256", "format", "status", "reason"],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "format": {
+                "enum": [
+                  "npm",
+                  "pnpm",
+                  "uv",
+                  "poetry",
+                  "pipenv",
+                  "requirements",
+                  "go",
+                  "cargo",
+                  "gradle",
+                  "maven",
+                  "bundler",
+                  "composer",
+                  "nuget"
+                ]
+              },
+              "status": {
+                "enum": ["scanned", "excluded", "unsupported", "failed"]
+              },
+              "reason": {
+                "type": ["string", "null"]
+              }
+            },
+            "title": "ScaInput"
+          }
+        },
+        "configFiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            },
+            "title": "ScaFile"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unresolvedPackages": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "title": "ScaCoverage"
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "version",
+          "ecosystem",
+          "sourcePath",
+          "dependencyGroups"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": ["string", "null"]
+          },
+          "ecosystem": {
+            "type": ["string", "null"]
+          },
+          "sourcePath": {
+            "type": "string"
+          },
+          "dependencyGroups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "title": "ScaComponent"
+      }
+    },
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "componentId",
+          "advisoryIds",
+          "aliases",
+          "sourceAdvisories",
+          "severity",
+          "fixedVersions",
+          "advisoryModifiedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "componentId": {
+            "type": "string"
+          },
+          "advisoryIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sourceAdvisories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "severity": {
+            "type": ["string", "null"]
+          },
+          "fixedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "advisoryModifiedAt": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "title": "ScaMatch"
+      }
+    },
+    "assessments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["matchId", "status", "verdict", "triage", "error"],
+        "properties": {
+          "matchId": {
+            "type": "string"
+          },
+          "status": {
+            "enum": ["not_started", "completed", "failed", "cancelled"]
+          },
+          "verdict": {
+            "enum": ["confirmed", "not_actionable", "needs_review", null]
+          },
+          "triage": {
+            "anyOf": [
+              {
+                "$ref": "triage-result.schema.json#/properties/findings/items"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "type": ["string", "null"]
+          }
+        },
+        "title": "ScaAssessment"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "skillDigest", "threadId", "costUsd"],
+      "properties": {
+        "model": {
+          "type": ["string", "null"]
+        },
+        "skillDigest": {
+          "type": ["string", "null"]
+        },
+        "threadId": {
+          "type": ["string", "null"]
+        },
+        "costUsd": {
+          "type": ["number", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "outputDir": {
+      "type": "string"
+    }
+  },
+  "title": "ScaResult",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

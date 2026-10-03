@@ -1098,6 +1098,8 @@ async function testWorkerRuntimeSettings() {
       "none",
     ],
   ];
+  if (process.platform !== "win32")
+    cases.push(['model_reasoning_summary = "auto"\n', "auto", true]);
   const saved = Object.fromEntries(
     [
       "PYTHON",
@@ -1118,7 +1120,7 @@ async function testWorkerRuntimeSettings() {
   try {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
-    for (const [configuration, expected] of cases) {
+    for (const [configuration, expected, scriptLauncher = false] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
         true,
@@ -1156,7 +1158,10 @@ async function testWorkerRuntimeSettings() {
       );
       await writeFile(configPath, configuration);
       await writeFile(promptPath, "synthetic worker configuration fixture");
-      process.env.CODEX_CLI_PATH = process.execPath;
+      const selectedExecutable = scriptLauncher
+        ? fixture.executablePath
+        : process.execPath;
+      process.env.CODEX_CLI_PATH = selectedExecutable;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = path.join(
@@ -1175,6 +1180,12 @@ async function testWorkerRuntimeSettings() {
           FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
         };
         launches.push({ command, args, environment, markerPath });
+        if (scriptLauncher && command === selectedExecutable)
+          return originalSpawn(
+            process.execPath,
+            [fixture.executablePath, ...args],
+            { ...options, env: environment },
+          );
         return originalSpawn(
           command,
           command === process.execPath ||
@@ -1259,11 +1270,11 @@ async function testWorkerRuntimeSettings() {
               workerLaunch.command,
               process.platform === "win32"
                 ? path.toNamespacedPath(process.execPath)
-                : process.execPath,
+                : selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment.CODEX_CLI_PATH,
-              process.execPath,
+              selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment.CODEX_HOME,
