@@ -15,13 +15,21 @@ if ! versions="$(gh api --paginate "$endpoint/versions?per_page=100")"; then
     exit 1
 fi
 
-if ! already_published="$(
+if ! version_status="$(
     printf '%s\n' "$versions" |
-        jq --slurp --arg version "$version" '
+        jq --raw-output --slurp --arg version "$version" '
+            def stable_version:
+                select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) |
+                split(".") | map(tonumber);
             if length == 0 or any(.[]; type != "array") then
                 error("Container package versions must contain at least one JSON array.")
+            elif any(.[]; any(.[]; any(.metadata.container.tags[]?; . == $version))) then
+                "published"
+            elif any(.[]; any(.[]; any(.metadata.container.tags[]?;
+                stable_version > ($version | stable_version)))) then
+                "backfill"
             else
-                any(.[]; any(.[]; any(.metadata.container.tags[]?; . == $version)))
+                "latest"
             end
         '
 )"; then
@@ -29,11 +37,18 @@ if ! already_published="$(
     exit 1
 fi
 
-case "$already_published" in
-    false)
+case "$version_status" in
+    latest|backfill)
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            publish_latest=false
+            if [ "$version_status" = latest ]; then
+                publish_latest=true
+            fi
+            printf 'publish_latest=%s\n' "$publish_latest" >> "$GITHUB_OUTPUT"
+        fi
         exit 0
         ;;
-    true)
+    published)
         printf '%s\n' "::error::Container version $version already exists; stable version tags cannot be overwritten." >&2
         exit 1
         ;;
