@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, watch } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  watch,
+  writeFile,
+} from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -8,6 +16,7 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { build } from "esbuild";
+import { draftFixture } from "./scan-draft-recovery-fixture.mjs";
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const bundled = await build({
@@ -22,6 +31,8 @@ const bundled = await build({
   write: false,
 });
 const {
+  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   saveThreatModelDocument,
   scanDraftInputSchema,
@@ -43,6 +54,154 @@ const threatModel = {
   origin: "provided",
   scope: { includePaths: ["services/api"] },
 };
+
+for (const complete of [true, undefined]) {
+  for (const publication of ["direct", "workbench"]) {
+    test(`terminal Deep ${publication} drafts retain an omitted model (${complete})`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-final-"));
+      try {
+        const { context, draft } = draftFixture(root, "deep");
+        context.pluginRoot = pluginRoot;
+        await recordCodexSecurityScanDraft(context, {
+          ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
+          threatModel,
+        });
+        // A final Deep result replaces old review documents without parsing them.
+        await writeFile(join(root, "findings.json"), "unfinished findings");
+        await writeFile(join(root, "coverage.json"), "unfinished coverage");
+        const replacement = {
+          format: "markdown",
+          content: "# Replacement model\n",
+        };
+        for (const model of [undefined, replacement]) {
+          const terminal = draft({}, true);
+          if (complete === undefined) delete terminal.complete;
+          if (model !== undefined) terminal.threatModel = model;
+          const expectedModel = model ?? threatModel;
+          if (publication === "direct") {
+            await recordCodexSecurityScanDraft(context, terminal);
+            const manifest = JSON.parse(
+              await readFile(join(root, "scan-manifest.json"), "utf8"),
+            );
+            assert.deepEqual(manifest.scan.threatModel, expectedModel);
+            const checkpoints = await Promise.all(
+              (await readdir(join(root, "checkpoints"))).map(async (name) =>
+                JSON.parse(
+                  await readFile(join(root, "checkpoints", name), "utf8"),
+                ),
+              ),
+            );
+            assert.ok(
+              checkpoints.some(
+                (checkpoint) =>
+                  checkpoint.complete !== false &&
+                  checkpoint.threatModel?.content === expectedModel.content &&
+                  checkpoint.coverage.deferred.length === 0,
+              ),
+            );
+            const savedCoverage = JSON.parse(
+              await readFile(join(root, "coverage.json"), "utf8"),
+            );
+            assert.deepEqual(savedCoverage.deferred, []);
+            assert.ok(
+              (await readFile(join(root, "threatmodel.md"), "utf8")).startsWith(
+                expectedModel.content,
+              ),
+            );
+          } else {
+            await recordCodexSecurityScanDraftViaWorkbench(
+              context,
+              terminal,
+              async (args) => {
+                const staged = JSON.parse(
+                  await readFile(
+                    args[args.indexOf("--draft-path") + 1],
+                    "utf8",
+                  ),
+                );
+                const checkpoint = JSON.parse(
+                  await readFile(
+                    args[args.indexOf("--checkpoint-path") + 1],
+                    "utf8",
+                  ),
+                );
+                assert.deepEqual(
+                  staged.manifest.scan.threatModel,
+                  expectedModel,
+                );
+                assert.deepEqual(checkpoint.threatModel, expectedModel);
+                assert.deepEqual(staged.coverage.deferred, []);
+                assert.deepEqual(staged.findings.findings, []);
+              },
+            );
+          }
+          assert.equal(terminal.threatModel, model);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test("terminal Deep model inheritance retries a changed canonical draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-retry-"));
+  try {
+    const { context, draft } = draftFixture(root, "deep");
+    context.pluginRoot = pluginRoot;
+    await recordCodexSecurityScanDraft(context, { ...draft(), threatModel });
+    const replacement = { format: "markdown", content: "# Concurrent model\n" };
+    const digests = [];
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft({}, true),
+      async (args) => {
+        const staged = JSON.parse(
+          await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
+        );
+        assert.ok(args.includes("--expected-draft-digest"));
+        digests.push(args[args.indexOf("--expected-draft-digest") + 1]);
+        if (digests.length === 1) {
+          assert.deepEqual(staged.manifest.scan.threatModel, threatModel);
+          const manifestPath = join(root, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          manifest.scan.threatModel = replacement;
+          await writeFile(manifestPath, JSON.stringify(manifest));
+          throw new Error(
+            "scan_draft_conflict: canonical scan results changed",
+          );
+        }
+        assert.deepEqual(staged.manifest.scan.threatModel, replacement);
+      },
+    );
+    assert.equal(digests.length, 2);
+    assert.notEqual(digests[0], digests[1]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal Deep input remains checkpointed when reading the previous model fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-read-failure-"));
+  try {
+    const { context, draft } = draftFixture(root, "deep");
+    await writeFile(join(root, "scan-manifest.json"), "unfinished manifest");
+    await assert.rejects(
+      recordCodexSecurityScanDraft(context, draft({}, true)),
+      /previous scan draft manifest/,
+    );
+    const checkpoints = await readdir(join(root, "checkpoints"));
+    assert.equal(checkpoints.length, 1);
+    const saved = JSON.parse(
+      await readFile(join(root, "checkpoints", checkpoints[0]), "utf8"),
+    );
+    assert.equal(saved.complete, true);
+    assert.deepEqual(saved.findings, []);
+    assert.deepEqual(saved.coverage.deferred, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("model-only worker checkpoints save Markdown before findings and retain it on retry", async () => {
   const root = await mkdtemp(join(tmpdir(), "threatmodel-worker-"));

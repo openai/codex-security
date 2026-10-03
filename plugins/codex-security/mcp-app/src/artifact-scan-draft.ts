@@ -105,12 +105,14 @@ export async function recordCodexSecurityScanDraft(
 
   for (;;) {
     signal?.throwIfAborted();
-    // Deep results are ready to save. Do not merge older drafts or
-    // checkpoints into them.
+    // Deep results replace findings and coverage while retaining an omitted model.
+    // Do not merge older review work into them.
     const preserved = finalDeepDraft
-      ? { input: parsed, previousDigest: undefined }
+      ? await preserveDeepThreatModel(context, parsed)
       : await preserveScanDraft(context, parsed, !publishDraft);
     const reconciled = preserved.input;
+    if (finalDeepDraft && !publishDraft && reconciled !== parsed)
+      await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -155,7 +157,7 @@ export async function recordCodexSecurityScanDraft(
         documentWarnings = await publishDraft(
           draft,
           preserved.previousDigest,
-          parsed,
+          finalDeepDraft ? reconciled : parsed,
         );
       } else {
         const destinations = await Promise.all([
@@ -1238,18 +1240,7 @@ async function readPreviousScanDraft(
       modifiedMs: saved?.modifiedMs ?? 0,
     };
   }
-  const names = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-  ] as const;
-  const saved = await Promise.all(
-    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
-  );
-  const contents = saved.map((record) => record?.contents);
-  const digest = draftDigest(
-    names.map((name, index) => [name, contents[index]]),
-  );
+  const { saved, contents, digest } = await readPreviousScanDocuments(context);
   if (contents.every((value) => value === undefined))
     return { digest, modifiedMs: 0 };
   if (contents.some((value) => value === undefined)) {
@@ -1283,6 +1274,48 @@ async function readPreviousScanDraft(
       findings: findings.findings,
       coverage,
     }),
+  };
+}
+
+async function readPreviousScanDocuments(context: ArtifactContext) {
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+  ] as const;
+  const saved = await Promise.all(
+    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
+  );
+  const contents = saved.map((record) => record?.contents);
+  return {
+    saved,
+    contents,
+    digest: draftDigest(names.map((name, index) => [name, contents[index]])),
+  };
+}
+
+async function preserveDeepThreatModel(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+  if (input.threatModel !== undefined) return { input };
+  const { contents, digest } = await readPreviousScanDocuments(context);
+  const previous =
+    contents[0] === undefined
+      ? undefined
+      : requireObject(
+          parseJsonObject(contents[0], "previous scan draft manifest").scan,
+          "previous scan draft.scan",
+        );
+  return {
+    input:
+      previous?.threatModel === undefined
+        ? input
+        : scanDraftInputSchema.parse({
+            ...input,
+            threatModel: previous.threatModel,
+          }),
+    previousDigest: digest,
   };
 }
 

@@ -2509,9 +2509,10 @@ def _scan_draft_digest(scan_dir: Path) -> str:
         except FileNotFoundError:
             digest.update(b"missing\0")
             continue
-        _, contents = _read_scan_local_json_bytes(scan_dir, filename, filename)
         digest.update(b"present\0")
-        digest.update(contents)
+        descriptor = open_scan_local_file_descriptor(scan_dir, filename, filename)
+        with os.fdopen(descriptor, "rb") as handle:
+            digest.update(handle.read())
         digest.update(b"\0")
     return digest.hexdigest()
 
