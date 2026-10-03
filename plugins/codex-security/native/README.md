@@ -4,6 +4,8 @@ These internal bindings supply OS operations that Node does not expose. The `res
 
 The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
 
+`directoryEntries` returns raw names in filesystem order. With `withTypes: true`, it uses cached directory and symlink types where available and returns any individual type-query errno beside that entry. Symlinks are not followed. With `withTypes: false`, it never queries entry metadata; the unused type flags are false and entry errnos are zero. A directory-open or iteration failure returns its errno and an empty array. Enumeration uses the Rust standard library's OS behavior, and Rust closes the directory on success or failure.
+
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
 ```sh
@@ -15,7 +17,7 @@ cargo +1.97.1 fmt --check --manifest-path plugins/codex-security/native/Cargo.to
 cargo +1.97.1 clippy --locked --manifest-path plugins/codex-security/native/Cargo.toml -- -D warnings
 ```
 
-The proof runs without Python. It checks current and named account lookup, missing accounts, and embedded-NUL rejection. CI invokes it with an empty `PATH`.
+The proof runs without Python. It checks current and named account lookup, missing accounts, embedded-NUL rejection, directory names and types, names-only enumeration, nonsearchable directories, enumeration errors, and descriptor cleanup. Linux exercises undecodable filename bytes; macOS uses valid UTF-8 filenames required by APFS. CI invokes it with an empty `PATH`.
 
 Build outputs stay under ignored `target` and `dist` directories. Linux output directories include the C runtime: `linux-x64-gnu`, `linux-arm64-gnu`, `linux-x64-musl`, and `linux-arm64-musl`. The dependency-free `platform.mts` helper distinguishes glibc from musl using the Node diagnostic report header, without a subprocess. macOS and Windows retain their platform and architecture directories. Source, Cargo registry, and compiler paths are remapped before compilation; actual payload bytes are checked for private paths. Before an artifact is uploaded, run:
 
