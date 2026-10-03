@@ -270,7 +270,8 @@ def write_inventory(output: Path, rows: list[bytes]) -> int:
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=output.parent,
-            prefix=f".{output.name}.",
+            # Including the output name can exceed the filesystem's 255-byte name limit.
+            prefix=".",
             suffix=".tmp",
             delete=False,
         ) as handle:
