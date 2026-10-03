@@ -1,15 +1,11 @@
+import { gitText } from "./support/shell.js";
+import { emptyPage } from "./support/linear-pagination.js";
+import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { hash } from "node:crypto";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -18,6 +14,8 @@ import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -42,11 +40,12 @@ function resultWithFindings(severities: readonly SeverityLevel[]) {
 function savedScan(
   result: ReturnType<typeof resultWithFindings>,
   scanId = "scan-1",
+  targetPath = SAVED_REPOSITORY,
 ): JsonObject {
   return {
     scan: {
       scanId,
-      targetPath: SAVED_REPOSITORY,
+      targetPath,
       findings: result.findings.findings as unknown as JsonObject[],
     },
   };
@@ -153,7 +152,8 @@ describe("scan and patch workflow", () => {
       let snapshotHadProgress = false;
       let resultSnapshotHadProgress = false;
       let modelStarted = false;
-      let timers = 0;
+      const setInterval = mock(() => ({}) as NodeJS.Timeout);
+      const clearInterval = mock();
       const current = dependencies({
         result,
         onWorkbench: () => savedScan(result),
@@ -165,7 +165,8 @@ describe("scan and patch workflow", () => {
             if (failSnapshot) throw new Error("Baseline snapshot failed.");
           }
           if (args.includes("add") && modelStarted)
-            resultSnapshotHadProgress = timers > 0;
+            resultSnapshotHadProgress =
+              setInterval.mock.calls.length > clearInterval.mock.calls.length;
           return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
         },
         onCodex: (args, output) => {
@@ -174,13 +175,8 @@ describe("scan and patch workflow", () => {
           return 0;
         },
       });
-      current.setInterval = () => {
-        timers += 1;
-        return {} as NodeJS.Timeout;
-      };
-      current.clearInterval = () => {
-        timers -= 1;
-      };
+      current.setInterval = setInterval;
+      current.clearInterval = clearInterval;
 
       const status = await main(
         ["scan", "--patch", "--patch-severity", "high"],
@@ -193,7 +189,9 @@ describe("scan and patch workflow", () => {
       expect(resultSnapshotHadProgress).toBe(!failSnapshot);
       expect(modelStarted).toBe(!failSnapshot);
       expect(status).toBe(failSnapshot ? 2 : 0);
-      expect(timers).toBe(0);
+      expect(setInterval.mock.calls.length).toBe(
+        clearInterval.mock.calls.length,
+      );
       if (failSnapshot)
         expect(stderr.text()).toContain("Baseline snapshot failed.");
     },
@@ -253,22 +251,19 @@ describe("scan and patch workflow", () => {
       const stderr = capture(true);
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
-      let tick: (() => void) | undefined;
       const current = dependencies({
         result,
         onWorkbench: () => savedScan(result),
         onCodex: (args, output) => {
           now = 84_000;
-          tick?.();
+          setIntervalMock.mock.lastCall?.[0]?.();
           expect(completePatches(args, output)[0]!.title).toBe(title);
           return 0;
         },
       });
+      const setIntervalMock = mock(current.setInterval);
       current.now = () => now;
-      current.setInterval = (callback) => {
-        tick = callback;
-        return {} as NodeJS.Timeout;
-      };
+      current.setInterval = setIntervalMock;
       current.clearInterval = () => {};
 
       expect(
@@ -397,7 +392,8 @@ describe("scan and patch workflow", () => {
   test("stops patch progress on interruption or an agent error", async () => {
     for (const status of [130, "error"] as const) {
       const result = resultWithFindings(["high", "high"]);
-      let timers = 0;
+      const setInterval = mock(() => ({}) as NodeJS.Timeout);
+      const clearInterval = mock();
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--json"],
         {
@@ -411,18 +407,15 @@ describe("scan and patch workflow", () => {
         {
           interactive: true,
           configure: (current) => {
-            current.setInterval = () => {
-              timers += 1;
-              return {} as NodeJS.Timeout;
-            };
-            current.clearInterval = () => {
-              timers -= 1;
-            };
+            current.setInterval = setInterval;
+            current.clearInterval = clearInterval;
           },
         },
       );
       expect(outcome.exitCode).not.toBe(0);
-      expect(timers).toBe(0);
+      expect(setInterval.mock.calls.length).toBe(
+        clearInterval.mock.calls.length,
+      );
       expect(outcome.stderr).toContain("\u001B[?25h");
       expect(outcome.stderr).not.toContain("Patching 2/2");
       expect(outcome.stderr).toContain(
@@ -444,7 +437,7 @@ describe("scan and patch workflow", () => {
   test.each(["literal", "file", "linear"])(
     "passes custom validation instructions to the %s patch task",
     async (source) => {
-      const repository = await mkdtemp(join(tmpdir(), "patch-validation-"));
+      const repository = await temporaryDirectory("patch-validation-");
       const validation =
         "Start the local app. Exercise the fix and a legitimate request. Stop the app.\n";
       try {
@@ -478,10 +471,7 @@ describe("scan and patch workflow", () => {
                   title: "Synthetic security issue",
                   description: "Synthetic issue details",
                   url: "https://linear.app/example/issue/SEC-123",
-                  comments: async () => ({
-                    nodes: [],
-                    pageInfo: { hasNextPage: false },
-                  }),
+                  comments: emptyPage,
                 }),
               }) as unknown as ReturnType<LinearClientFactory>,
             onCodex: (_args, output) => {
@@ -515,7 +505,7 @@ describe("scan and patch workflow", () => {
   );
 
   test("reads validation from the invocation directory once for all saved findings", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "saved-patch-validation-"));
+    const directory = await temporaryDirectory("saved-patch-validation-");
     const repository = join(directory, "repository");
     const validation = "Build the app and run the regression tests.\n";
     const result = resultWithFindings(["high", "medium"]);
@@ -534,13 +524,7 @@ describe("scan and patch workflow", () => {
         ],
         {
           currentDirectory: directory,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan-1",
-              targetPath: repository,
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          }),
+          onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             calls++;
             expect(output?.appServer?.directory).toBe(repository);
@@ -575,7 +559,7 @@ describe("scan and patch workflow", () => {
   ])(
     "checks the invocation checkout boundary for %s prompts from a %s",
     async (kind, invocation) => {
-      const root = await mkdtemp(join(tmpdir(), "patch-prompt-boundary-"));
+      const root = await temporaryDirectory("patch-prompt-boundary-");
       const checkout = join(root, "invocation");
       const directory =
         invocation === "root" ? checkout : join(checkout, "nested", "cwd");
@@ -617,13 +601,7 @@ describe("scan and patch workflow", () => {
           ],
           {
             currentDirectory: directory,
-            onWorkbench: () => ({
-              scan: {
-                scanId: "scan-1",
-                targetPath: repository,
-                findings: result.findings.findings as unknown as JsonObject[],
-              },
-            }),
+            onWorkbench: () => savedScan(result, "scan-1", repository),
             onCodex: (args, output) => {
               started = true;
               completePatches(args, output);
@@ -644,14 +622,12 @@ describe("scan and patch workflow", () => {
   test.each(["missing", "empty", "directory"])(
     "rejects a %s validation prompt before starting a patch",
     async (kind) => {
-      const directory = await mkdtemp(
-        join(tmpdir(), "invalid-patch-validation-"),
-      );
+      const directory = await temporaryDirectory("invalid-patch-validation-");
       try {
         const path = join(directory, "validation.md");
         if (kind === "empty") await writeFile(path, " \n");
         if (kind === "directory") await mkdir(path);
-        let started = false;
+        const onCodex = mock<() => number>().mockReturnValue(0);
         const outcome = await runWorkflow(
           [
             "patch",
@@ -662,14 +638,11 @@ describe("scan and patch workflow", () => {
           ],
           {
             currentDirectory: directory,
-            onCodex: () => {
-              started = true;
-              return 0;
-            },
+            onCodex,
           },
         );
         expect(outcome.exitCode).toBe(2);
-        expect(started).toBe(false);
+        expect(onCodex).not.toHaveBeenCalled();
         expect(JSON.parse(outcome.stdout)).toMatchObject({
           ok: false,
           applied: false,
@@ -802,9 +775,7 @@ describe("scan and patch workflow", () => {
   });
 
   test("assesses only changes made during a literal patch run", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "codex-security-patch-risk-"),
-    );
+    const directory = await temporaryDirectory("codex-security-patch-risk-");
     const repository = join(directory, "repository");
     await mkdir(repository, { recursive: true });
     const git = repositoryGit(repository);
@@ -879,16 +850,7 @@ describe("scan and patch workflow", () => {
             output?.stdout.write("Patch complete.");
             return 0;
           },
-          onRepositoryCommand: (command, args, workingDirectory, options) => {
-            expect(command).toBe("git");
-            const result = execFileSync("git", args, {
-              cwd: workingDirectory,
-              encoding: "utf8",
-              env: { ...process.env, ...options?.environment },
-              stdio: ["ignore", "pipe", "pipe"],
-            });
-            return options?.trim === false ? result : result.trim();
-          },
+          onRepositoryCommand: runGitRepositoryCommand,
         },
       );
 
@@ -900,8 +862,8 @@ describe("scan and patch workflow", () => {
   });
 
   test("creates a draft pull request with the Linear patch-risk summary", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "codex-security-linear-patch-pr-"),
+    const directory = await temporaryDirectory(
+      "codex-security-linear-patch-pr-",
     );
     const repository = join(directory, "repository");
     const remote = join(directory, "remote.git");
@@ -988,13 +950,12 @@ describe("scan and patch workflow", () => {
           ) => {
             expect(workingDirectory).toBe(repository);
             if (command === "git") {
-              const result = execFileSync("git", args, {
-                cwd: repository,
-                encoding: "utf8",
-                env: { ...process.env, ...commandOptions?.environment },
-                stdio: ["ignore", "pipe", "pipe"],
-              });
-              return commandOptions?.trim === false ? result : result.trim();
+              return runGitRepositoryCommand(
+                command,
+                args,
+                workingDirectory,
+                commandOptions,
+              );
             }
             if (args[1] === "list") return "";
             pullRequestArguments = args;
@@ -1039,9 +1000,7 @@ describe("scan and patch workflow", () => {
   });
 
   test("assesses a patch larger than the repository command buffer", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "codex-security-large-patch-"),
-    );
+    const directory = await temporaryDirectory("codex-security-large-patch-");
     const repository = join(directory, "repository");
     await mkdir(repository, { recursive: true });
     const git = repositoryGit(repository);
@@ -1071,9 +1030,7 @@ describe("scan and patch workflow", () => {
               ) as { path: string; sha256: string };
               const patch = await readFile(artifact.path);
               expect(patch.byteLength).toBeGreaterThan(1024 * 1024);
-              expect(createHash("sha256").update(patch).digest("hex")).toBe(
-                artifact.sha256,
-              );
+              expect(hash("sha256", patch)).toBe(artifact.sha256);
               output.stdout.write(patchRiskAssessment().report);
               return 0;
             }
@@ -1084,16 +1041,7 @@ describe("scan and patch workflow", () => {
             output?.stdout.write("Patch complete.");
             return 0;
           },
-          onRepositoryCommand: (command, args, workingDirectory, options) => {
-            expect(command).toBe("git");
-            const result = execFileSync("git", args, {
-              cwd: workingDirectory,
-              encoding: "utf8",
-              env: { ...process.env, ...options?.environment },
-              stdio: ["ignore", "pipe", "pipe"],
-            });
-            return options?.trim === false ? result : result.trim();
-          },
+          onRepositoryCommand: runGitRepositoryCommand,
         },
       );
 
@@ -1364,7 +1312,7 @@ describe("scan and patch workflow", () => {
   });
 
   test("publishes only verified patch files and preserves unrelated staged changes", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-pr-"));
+    const directory = await temporaryDirectory("codex-security-patch-pr-");
     const repository = join(directory, "repository");
     const remote = join(directory, "remote.git");
     const url = "https://github.example.test/example/repository/pull/15";
@@ -1411,13 +1359,7 @@ describe("scan and patch workflow", () => {
         {
           currentDirectory: repository,
           result,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan",
-              targetPath: repository,
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          }),
+          onWorkbench: () => savedScan(result, "scan", repository),
           onCodex: async (args, output) => {
             if (
               output?.appServer?.prompt.includes(
@@ -1446,9 +1388,7 @@ describe("scan and patch workflow", () => {
               expect(artifact.sourceType).toBe("patch_file");
               expect(artifact.changedFiles).toEqual(["src/finding-1.ts"]);
               expect(patch.toString()).toEndWith("+fixed  \n");
-              expect(createHash("sha256").update(patch).digest("hex")).toBe(
-                artifact.sha256,
-              );
+              expect(hash("sha256", patch)).toBe(artifact.sha256);
               output.stdout.write(patchRiskAssessment().report);
               return 0;
             }
@@ -1467,13 +1407,12 @@ describe("scan and patch workflow", () => {
           ) => {
             expect(workingDirectory).toBe(repository);
             if (command === "git") {
-              const result = execFileSync("git", args, {
-                cwd: repository,
-                encoding: "utf8",
-                env: { ...process.env, ...commandOptions?.environment },
-                stdio: ["ignore", "pipe", "pipe"],
-              });
-              return commandOptions?.trim === false ? result : result.trim();
+              return runGitRepositoryCommand(
+                command,
+                args,
+                workingDirectory,
+                commandOptions,
+              );
             }
             githubCommands.push([...args]);
             if (args[1] === "list") return "";
@@ -1537,9 +1476,7 @@ describe("scan and patch workflow", () => {
   ])(
     "resumes %s publication after %s fails without patching again",
     async (provider, failure) => {
-      const directory = await mkdtemp(
-        join(tmpdir(), "codex-security-pr-retry-"),
-      );
+      const directory = await temporaryDirectory("codex-security-pr-retry-");
       const repository = join(directory, "repository");
       const remote = join(directory, "remote.git");
       const branch = "codex-security/patch-scan-1";
@@ -1572,13 +1509,7 @@ describe("scan and patch workflow", () => {
 
         const fixtures: Parameters<typeof dependencies>[0] = {
           currentDirectory: repository,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan-1",
-              targetPath: repository,
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          }),
+          onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             modelCalls += 1;
             await writeFile(join(repository, "src", "finding-1.ts"), "fixed\n");
@@ -1667,14 +1598,11 @@ describe("scan and patch workflow", () => {
 
   test("refuses to resume a missing or changed patch commit", async () => {
     for (const saved of ["", "saved-commit"]) {
-      let modelCalls = 0;
+      const onCodex = mock<() => number>().mockReturnValue(0);
       const outcome = await runWorkflow(
         ["patch", "--resume-pr", "codex-security/patch-scan-1"],
         {
-          onCodex: () => {
-            modelCalls += 1;
-            return 0;
-          },
+          onCodex,
           onRepositoryCommand: (command, args) => {
             expect(command).toBe("git");
             return args[0] === "config" ? saved : "changed-commit";
@@ -1685,7 +1613,7 @@ describe("scan and patch workflow", () => {
       expect(outcome.stderr).toContain(
         saved ? "changed since verification" : "No verified patch commit",
       );
-      expect(modelCalls).toBe(0);
+      expect(onCodex).toHaveBeenCalledTimes(0);
     }
   });
 
@@ -1700,23 +1628,19 @@ describe("scan and patch workflow", () => {
       ["--external-sandbox"],
       ["occ_1"],
     ]) {
-      let commandStarted = false;
+      const onCodex = mock<() => number>().mockReturnValue(0);
+      const onRepositoryCommand = mock<() => string>().mockReturnValue("");
       const outcome = await runWorkflow(
         ["patch", "--resume-pr", "codex-security/patch-scan-1", ...input],
         {
-          onCodex: () => {
-            commandStarted = true;
-            return 0;
-          },
-          onRepositoryCommand: () => {
-            commandStarted = true;
-            return "";
-          },
+          onCodex,
+          onRepositoryCommand,
         },
       );
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain("--resume-pr cannot be combined");
-      expect(commandStarted).toBe(false);
+      expect(onCodex).not.toHaveBeenCalled();
+      expect(onRepositoryCommand).not.toHaveBeenCalled();
     }
   });
 
@@ -1846,18 +1770,15 @@ describe("scan and patch workflow", () => {
   );
 
   test("does not patch incomplete scans or allow patching during a dry run", async () => {
-    let invoked = false;
+    const onCodex = mock<() => number>().mockReturnValue(0);
     const incomplete = resultWithFindings(["high"]);
     incomplete.coverage.completeness = "partial";
     const partial = await runWorkflow(["scan", "--patch", "--json"], {
       result: incomplete,
-      onCodex: () => {
-        invoked = true;
-        return 0;
-      },
+      onCodex,
     });
     expect(partial.exitCode).toBe(2);
-    expect(invoked).toBe(false);
+    expect(onCodex).not.toHaveBeenCalled();
 
     const dryRun = await runWorkflow(["scan", "--patch", "--dry-run"]);
     expect(dryRun.exitCode).toBe(2);
@@ -1963,8 +1884,8 @@ describe("scan and patch workflow", () => {
 
   test("does not offer patch review when there are no actionable findings", async () => {
     for (const severities of [[], ["informational"]] as const) {
-      let offered = false;
-      let opened = false;
+      const confirmPatchReview = mock(resolving(true));
+      const patchEditor = mock(resolving(null));
       const outcome = await runWorkflow(
         ["scan"],
         {
@@ -1974,14 +1895,8 @@ describe("scan and patch workflow", () => {
         {
           interactive: true,
           configure: (value) => {
-            value.confirmPatchReview = async () => {
-              offered = true;
-              return true;
-            };
-            value.patchEditor = async () => {
-              opened = true;
-              return null;
-            };
+            value.confirmPatchReview = confirmPatchReview;
+            value.patchEditor = patchEditor;
           },
         },
       );
@@ -1989,8 +1904,8 @@ describe("scan and patch workflow", () => {
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr).toContain(`FINDINGS  ${severities.length}`);
       expect(outcome.stderr).not.toContain("Review and patch these findings?");
-      expect(offered).toBe(false);
-      expect(opened).toBe(false);
+      expect(confirmPatchReview).not.toHaveBeenCalled();
+      expect(patchEditor).not.toHaveBeenCalled();
     }
   });
 
@@ -2263,11 +2178,9 @@ describe("scan and patch workflow", () => {
         {
           result,
           onWorkbench: () => savedScan(result),
-          onRepositoryCommand: () => {
-            throw new Error(
-              "GitHub rejected github_pat_SYNTHETIC_SECRET_123\u001b[2J\ncontinued",
-            );
-          },
+          onRepositoryCommand: throwing(
+            "GitHub rejected github_pat_SYNTHETIC_SECRET_123\u001b[2J\ncontinued",
+          ),
         },
       );
 
@@ -2394,7 +2307,7 @@ describe("scan and patch workflow", () => {
     expect(scan.exitCode).toBe(2);
     expect(scan.stderr).toContain("--create-pr requires --patch");
 
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-dirty-pr-"));
+    const directory = await temporaryDirectory("codex-security-dirty-pr-");
     const git = repositoryGit(directory);
     try {
       git("init", "--initial-branch=main");
@@ -2404,32 +2317,20 @@ describe("scan and patch workflow", () => {
       git("add", "--", "app.ts");
       git("commit", "-m", "Initial synthetic checkout");
       await writeFile(join(directory, "app.ts"), "user change\n");
-      let started = false;
+      const onCodex = mock<() => number>().mockReturnValue(0);
       const literal = await runWorkflow(
         ["patch", "Synthetic security issue", "--create-pr"],
         {
           currentDirectory: directory,
-          onCodex: () => {
-            started = true;
-            return 0;
-          },
-          onRepositoryCommand: (command, args, workingDirectory, options) => {
-            expect(command).toBe("git");
-            const result = execFileSync("git", args, {
-              cwd: workingDirectory,
-              encoding: "utf8",
-              env: { ...process.env, ...options?.environment },
-              stdio: ["ignore", "pipe", "pipe"],
-            });
-            return options?.trim === false ? result : result.trim();
-          },
+          onCodex,
+          onRepositoryCommand: runGitRepositoryCommand,
         },
       );
       expect(literal.exitCode).toBe(2);
       expect(literal.stderr).toContain(
         "Pull request creation for supplied issues requires a clean working tree.",
       );
-      expect(started).toBe(false);
+      expect(onCodex).not.toHaveBeenCalled();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -2444,3 +2345,15 @@ function repositoryGit(repository: string) {
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
 }
+
+const runGitRepositoryCommand: NonNullable<
+  NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
+> = (command, args, workingDirectory, options) => {
+  expect(command).toBe("git");
+  const result = gitText(args, {
+    cwd: workingDirectory,
+    env: { ...process.env, ...options?.environment },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return options?.trim === false ? result : result.trim();
+};
