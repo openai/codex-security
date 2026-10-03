@@ -1165,7 +1165,7 @@ def _populate_unsealed_manifest_envelope(
     target = scan.setdefault("target", {})
     if isinstance(target, dict):
         allowed_kinds = completion_binding["allowedTargetKinds"]
-        if len(allowed_kinds) == 1:
+        if allowed_kinds:
             target.setdefault("kind", allowed_kinds[0])
         _populate_unsealed_target_binding(target, completion_binding["target"])
 

@@ -77,6 +77,7 @@ class WorkbenchDbContext:
     scan_completion_lock: Callable[..., Any]
     scan_context: Callable[..., dict[str, Any]]
     verify_manifest_binding: Callable[..., None]
+    manifest_target_kind: Callable[..., str | None]
     workbench_completion_binding: Callable[..., dict[str, Any]]
     workspace_state: Callable[..., dict[str, Any]]
 
@@ -1437,7 +1438,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
-        binding = db.workbench_completion_binding(scan, db.now())
+        target_kind = db.manifest_target_kind(manifest)
+        binding = db.workbench_completion_binding(scan, db.now(), target_kind=target_kind)
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
