@@ -8,6 +8,7 @@ import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
@@ -179,9 +180,7 @@ export async function readScanLogs(options: ScanLogOptions) {
           event["type"] !== "event_msg" ||
           !isRecord(payload) ||
           payload["type"] !== "task_started" ||
-          typeof payload["started_at"] !== "number" ||
-          session.startedAt === null ||
-          payload["started_at"] < Math.floor(session.startedAt / 1_000)
+          !sessionOwnsTurn(session, payload)
         ) {
           continue;
         }
