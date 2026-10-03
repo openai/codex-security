@@ -427,15 +427,15 @@ def lookup_multi_agent_v2_enabled(
     merged_v2_config: Any = None
     enabled_source: str | None = None
     for index, (source, feature_config) in enumerate(v2_configs):
+        if isinstance(feature_config, bool):
+            feature_config = {"enabled": feature_config}
         tables_merge = isinstance(merged_v2_config, dict) and isinstance(feature_config, dict)
         if index and not tables_merge:
             enabled_source = None
         merged_v2_config = (
             merge_toml_value(merged_v2_config, feature_config) if index else feature_config
         )
-        if isinstance(feature_config, bool) or (
-            isinstance(feature_config, dict) and "enabled" in feature_config
-        ):
+        if isinstance(feature_config, dict) and "enabled" in feature_config:
             enabled_source = source
 
     enabled = parse_multi_agent_v2_enabled(merged_v2_config)

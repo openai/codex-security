@@ -1147,11 +1147,11 @@ def test_higher_partial_v2_table_inherits_lower_enabled(tmp_path: Path) -> None:
     assert worker_slots["source"] == str(project_config)
 
 
-def test_higher_partial_v2_table_replaces_lower_boolean(tmp_path: Path) -> None:
+def test_higher_partial_v2_table_inherits_lower_boolean(tmp_path: Path) -> None:
     user_config = tmp_path / "user.toml"
     project_config = tmp_path / "project.toml"
     user_config.write_text("[features]\ngoals = true\nmulti_agent_v2 = true\n")
-    project_config.write_text("[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 9\n")
+    project_config.write_text("[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 3\n")
 
     result = run_preflight(
         "--profile",
@@ -1167,9 +1167,17 @@ def test_higher_partial_v2_table_replaces_lower_boolean(tmp_path: Path) -> None:
     )
 
     payload = json.loads(result.stdout)
+    worker_slots = next(
+        item for item in payload["results"] if item["capability"] == "usable_worker_slots_6"
+    )
     assert result.returncode == 0
-    assert payload["multi_agent_mode"] == "v1"
-    assert payload["multi_agent_context"]["version_source"] == "documented-default"
+    assert payload["multi_agent_mode"] == "v2"
+    assert payload["multi_agent_context"]["version_source"] == str(user_config)
+    assert worker_slots["configured_value"] == 3
+    assert worker_slots["actual"] == 2
+    assert worker_slots["source"] == str(project_config)
+    assert worker_slots["status"] == "fail"
+    assert worker_slots["severity"] == "warn"
 
 
 def test_deep_scan_preflight_accepts_native_v2_without_parent_slots(tmp_path: Path) -> None:
@@ -1341,6 +1349,38 @@ def test_higher_precedence_boolean_feature_overrides_lower_table(tmp_path: Path)
     assert result.returncode == 0
     assert payload["multi_agent_mode"] == "v1"
     assert payload["multi_agent_context"]["owner"] == "native"
+
+
+def test_higher_boolean_v2_feature_preserves_lower_table_capacity(tmp_path: Path) -> None:
+    lower_config = tmp_path / "lower.toml"
+    higher_config = tmp_path / "higher.toml"
+    lower_config.write_text(
+        "[features.multi_agent_v2]\nenabled = false\nmax_concurrent_threads_per_session = 9\n"
+    )
+    higher_config.write_text("[features]\nmulti_agent_v2 = true\n")
+
+    result = run_preflight(
+        "--profile",
+        "security_scan",
+        "--config",
+        str(lower_config),
+        "--config",
+        str(higher_config),
+        "--runtime-check",
+        "delegation_available=true",
+    )
+
+    payload = json.loads(result.stdout)
+    worker_slots = next(
+        item for item in payload["results"] if item["capability"] == "usable_worker_slots_6"
+    )
+    assert result.returncode == 0
+    assert payload["multi_agent_mode"] == "v2"
+    assert payload["multi_agent_context"]["version_source"] == str(higher_config)
+    assert worker_slots["configured_value"] == 9
+    assert worker_slots["actual"] == 8
+    assert worker_slots["source"] == str(lower_config)
+    assert worker_slots["status"] == "pass"
 
 
 def test_security_scan_warns_for_insufficient_bridge_worker_slots(tmp_path: Path) -> None:
