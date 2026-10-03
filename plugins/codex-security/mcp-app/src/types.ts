@@ -15,6 +15,7 @@ export interface ScanArtifacts {
   manifest?: string;
   markdownReport?: string;
   sarifReport?: string;
+  threatModel?: string;
 }
 
 export interface ScanResults {
@@ -40,6 +41,9 @@ export interface ScanResults {
   targetPath: string;
   targetRevision?: string;
   targetSummary?: string | null;
+  threatModelAvailable: boolean;
+  threatModelPath?: string;
+  threatModelProvenance?: JsonObject;
   updatedAt?: string;
   userContext?: string;
 }
