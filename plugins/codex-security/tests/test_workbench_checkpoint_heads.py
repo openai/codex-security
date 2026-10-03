@@ -223,6 +223,148 @@ def test_file_authored_deferred_update_preserves_valid_checkpoint_evidence(
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
+@pytest.mark.parametrize("anonymous", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+def test_recovery_preserves_accepted_generic_surface_closeout(
+    tmp_path: Path, checkpoint_scan, layout: str, anonymous: bool, linked: bool
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    output = tmp_path if layout == "parent" else tmp_path / "worker" / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    directory = output if layout != "archived" else output.parent / "attempts" / "attempt-01"
+    directory.mkdir(parents=True, exist_ok=True)
+    surface = {"id": "api", "label": "API", "disposition": "needs_follow_up"}
+    task = {"id": "review", "reason": "Review remains."}
+    if linked:
+        task["surfaceIds"] = ["api"]
+    pending = saved_draft(scan_id, surfaces=[surface], deferred=[task])
+    legacy = copy.deepcopy(pending)
+    if anonymous:
+        legacy["coverage"]["surfaces"][0].pop("id")
+    checkpoint = write_checkpoint(directory / "checkpoints", legacy)
+    os.utime(checkpoint, ns=(100, 100))
+    # A prior writer returned the assigned surface ID, but its checkpoint was anonymous.
+    published = copy.deepcopy(pending)
+    published["coverage"]["surfaces"][0]["receiptRefs"] = []
+    if layout == "parent":
+        write_saved_parent(directory, published, 150)
+    else:
+        result = directory / "result.json"
+        result.write_text(json.dumps(published))
+        os.utime(result, ns=(150, 150))
+    closed_surface = {**surface, "disposition": "no_issue_found", "receiptRefs": []}
+    closed = saved_draft(
+        scan_id,
+        surfaces=[closed_surface],
+        closures=[{"id": "review", "reason": "Review completed."}],
+        complete=True,
+    )
+    completed = write_checkpoint(directory / "checkpoints", closed)
+    os.utime(completed, ns=(200, 200))
+    select(directory, completed, 300)
+    workers = (
+        []
+        if layout == "parent"
+        else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
+    )
+    original = {path: path.read_bytes() for path in directory.rglob("*.json")}
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    for result in (
+        first,
+        replay_saved_results(saved, first, tmp_path, scan_id, binding, workers),
+    ):
+        assert result[2]["surfaces"] == [closed_surface]
+        assert result[2]["deferred"] == [{"id": "scan-stopped", "reason": "interrupted"}]
+    assert all(path.read_bytes() == contents for path, contents in original.items())
+
+
+@pytest.mark.parametrize("identity", [["review"], {"name": "review"}])
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("closure", [False, True])
+def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
+    tmp_path: Path, checkpoint_scan, identity, complete: bool, closure: bool
+) -> None:
+    scan_id, pending, _, binding = checkpoint_scan
+    pending["complete"] = False
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    current = copy.deepcopy(pending)
+    current["complete"] = complete
+    current["coverage"]["deferred"][0]["id"] = identity
+    if closure:
+        current["coverage"]["resolvedDeferred"] = [
+            {"id": "finished", "reason": "Independent review completed."}
+        ]
+    write_saved_parent(tmp_path, current, 200)
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
+    for result in (first, replay):
+        coverage = result[2]
+        assert current["coverage"]["deferred"][0] in coverage["deferred"]
+        warnings: list[str] = []
+        finalize_scan_contract._recover_unsealed_coverage(
+            coverage,
+            Path(saved.__file__).resolve().parent.parent / "schemas",
+            tmp_path,
+            warnings,
+            [],
+        )
+        assert warnings
+        assert all(isinstance(row["id"], str) for row in coverage["deferred"])
+        assert coverage["completeness"] == "partial"
+
+
+@pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_recovery_preserves_distinct_legacy_tasks_with_one_id(
+    tmp_path: Path, checkpoint_scan, layout: str, rewrite: bool
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    output = tmp_path if layout == "parent" else tmp_path / "worker" / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    directory = output if layout != "archived" else output.parent / "attempts" / "attempt-01"
+    directory.mkdir(parents=True, exist_ok=True)
+    tasks = [
+        {"id": "review", "reason": "Review API.", "paths": ["api.py"]},
+        {"id": "review", "reason": "Review worker.", "paths": ["worker.py"]},
+    ]
+    legacy = saved_draft(scan_id, deferred=tasks)
+    checkpoint = write_checkpoint(directory / "checkpoints", legacy)
+    os.utime(checkpoint, ns=(100, 100))
+    if rewrite:
+        rewritten = saved_draft(scan_id, deferred=tasks[:1])
+        checkpoint = write_checkpoint(directory / "checkpoints", rewritten)
+        os.utime(checkpoint, ns=(150, 150))
+    closed = saved_draft(
+        scan_id, closures=[{"id": "review", "reason": "API reviewed."}], complete=True
+    )
+    completed = write_checkpoint(directory / "checkpoints", closed)
+    os.utime(completed, ns=(200, 200))
+    select(directory, completed, 300)
+    workers = (
+        []
+        if layout == "parent"
+        else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
+    )
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
+    repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
+    assert first[2] == replay[2] == repeated[2]
+    for result in (first, replay, repeated):
+        retained = [row for row in result[2]["deferred"] if row["id"] != "scan-stopped"]
+        assert [{key: value for key, value in row.items() if key != "id"} for row in retained] == [
+            {key: value for key, value in row.items() if key != "id"} for row in tasks
+        ]
+        assert not result[2].get("resolvedDeferred")
+
+
+@pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
 def test_frozen_observations_survive_live_head_changes(
     tmp_path: Path, checkpoint_scan, layout: str
 ) -> None:

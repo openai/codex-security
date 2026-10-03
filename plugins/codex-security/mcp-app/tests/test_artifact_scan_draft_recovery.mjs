@@ -618,6 +618,63 @@ for (const layout of ["standard", "diff", "worker"]) {
     assert.deepEqual((await f.read()).deferred, [second]);
   });
 
+  for (const savedIn of ["canonical result", "checkpoint"]) {
+    test(`${layout}: a closure cannot erase distinct legacy tasks from a ${savedIn}`, async (t) => {
+      const f = await fixture(t, layout);
+      const tasks = [
+        { id: "review", ...generic },
+        { id: "review", reason: "Review storage.", paths: ["src/storage.py"] },
+      ];
+      if (savedIn === "checkpoint") {
+        await saveScanDraftCheckpoint(
+          f.context,
+          f.draft({ deferred: tasks }),
+          false,
+        );
+      } else {
+        await f.write(f.draft({ deferred: [tasks[0]] }));
+        await rm(path.join(f.root, "checkpoint-head.json"), { force: true });
+        await rm(path.join(f.root, "checkpoints"), { recursive: true });
+        const filename = path.join(
+          f.root,
+          layout === "worker" ? "result.json" : "coverage.json",
+        );
+        const saved = JSON.parse(await readFile(filename, "utf8"));
+        (layout === "worker" ? saved.coverage : saved).deferred = tasks;
+        await writeFile(filename, JSON.stringify(saved));
+      }
+      const snapshot = async (directory = f.root) => {
+        const files = [];
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+          const filename = path.join(directory, entry.name);
+          if (entry.isDirectory()) files.push(...(await snapshot(filename)));
+          else files.push([filename, await readFile(filename, "utf8")]);
+        }
+        return files.sort(([left], [right]) => left.localeCompare(right));
+      };
+      const original = await snapshot();
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await assert.rejects(
+          f.write(f.draft({ resolvedDeferred: [close("review")] }, true)),
+          /cannot close ambiguous saved deferred work: review/,
+        );
+        assert.deepEqual(await snapshot(), original);
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const recovered = await f.write(f.draft({}, true));
+        assert.equal(recovered.coverage.completeness, "partial");
+        assert.deepEqual(recovered.coverage.deferred, tasks);
+        assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
+        const beforeClosure = await snapshot();
+        await assert.rejects(
+          f.write(f.draft({ resolvedDeferred: [close("review")] }, true)),
+          /cannot close ambiguous saved deferred work: review/,
+        );
+        assert.deepEqual(await snapshot(), beforeClosure);
+      }
+    });
+  }
+
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
     const initial = await f.write(f.draft({ deferred: [generic] }));
@@ -996,6 +1053,32 @@ for (const layout of ["standard", "diff", "worker"]) {
     });
   }
 }
+
+test("worker: inherited closures cannot erase ambiguous legacy tasks", async (t) => {
+  const f = await fixture(t, "worker");
+  const tasks = [
+    { id: "review", ...generic },
+    { id: "review", reason: "Review storage.", paths: ["src/storage.py"] },
+  ];
+  await saveScanDraftCheckpoint(f.context, f.draft({ deferred: tasks }), false);
+  await saveScanDraftCheckpoint(
+    f.context,
+    f.draft({ resolvedDeferred: [close("review")] }, true),
+  );
+  const checkpoints = path.join(f.root, "checkpoints");
+  for (const name of await readdir(checkpoints)) {
+    const filename = path.join(checkpoints, name);
+    const saved = JSON.parse(await readFile(filename, "utf8"));
+    const timestamp = saved.coverage.deferred.length ? 100 : 200;
+    await utimes(filename, timestamp, timestamp);
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const recovered = await f.write(f.draft({}, true));
+    assert.equal(recovered.coverage.completeness, "partial");
+    assert.deepEqual(recovered.coverage.deferred, tasks);
+    assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
+  }
+});
 
 for (const layout of ["standard", "diff"]) {
   for (const taskCount of [1, 2]) {

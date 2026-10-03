@@ -716,6 +716,34 @@ function reconcileResolvedDeferred(
   retainedFinal?: ScanDraftInput,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
   const activeDeferred = result.coverage.deferred as JsonObject[];
+  const ambiguousIds = new Set<string>();
+  const genericRows: JsonObject[] = [];
+  for (const source of sources) {
+    const rowsById = new Map<string, JsonObject>();
+    for (const row of source.coverage.deferred as JsonObject[]) {
+      if (
+        typeof row.id !== "string" ||
+        typeof row.candidateId === "string" ||
+        "candidate" in row ||
+        "finding" in row
+      )
+        continue;
+      genericRows.push(row);
+      const previous = rowsById.get(row.id);
+      if (previous !== undefined && !isDeepStrictEqual(previous, row))
+        ambiguousIds.add(row.id);
+      rowsById.set(row.id, row);
+    }
+  }
+  // A legacy duplicate ID cannot identify which independent task was completed.
+  // Retain that evidence across rewrites instead of treating it as an ID update.
+  for (const row of genericRows) {
+    if (
+      ambiguousIds.has(row.id as string) &&
+      !activeDeferred.some((current) => isDeepStrictEqual(current, row))
+    )
+      activeDeferred.push(structuredClone(row));
+  }
   const observedIds = new Set(
     activeDeferred.flatMap((row) =>
       [row.id, row.candidateId].filter(
@@ -785,6 +813,10 @@ function reconcileResolvedDeferred(
     closures.set(id, closure);
   }
   for (const id of closures.keys()) {
+    if (ambiguousIds.has(id))
+      throw new Error(
+        `scan draft: coverage.resolvedDeferred cannot close ambiguous saved deferred work: ${id}.`,
+      );
     if (candidateIds.has(id)) {
       if (
         candidateRows

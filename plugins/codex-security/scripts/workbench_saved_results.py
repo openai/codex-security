@@ -743,17 +743,16 @@ def _generic_surface_updates(
             if not reopening and any(
                 saved_owner == owner
                 and (owner, deferred_id) not in closed_deferred
-                and (owner, row.get("candidateId") or deferred_id) not in resolved_candidates
+                and (
+                    not isinstance(candidate_id := row.get("candidateId") or deferred_id, str)
+                    or (owner, candidate_id) not in resolved_candidates
+                )
                 and linked(row, identity)
                 for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
             ):
                 continue
-            if not any(
-                isinstance(row, dict) and row.get("id") in work_ids and linked(row, identity)
-                for saved_path, _ in matches
-                for row in deferred_rows[saved_path]
-            ):
-                continue
+            # An accepted checkpoint can update a saved surface by ID without
+            # optional surfaceIds links on its generic task.
             latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
             update = copy.deepcopy(latest_surface)
             refs = update.setdefault("receiptRefs", [])
@@ -1094,36 +1093,49 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
-    # Older checkpoints can omit task IDs already assigned in their published output.
-    named_deferred: dict[str | None, list[dict[str, Any]]] = {}
-    for _, draft, owner in all_sources:
-        named_deferred.setdefault(owner, []).extend(
-            row
-            for row in _deferred_rows(draft["coverage"])
-            if isinstance(row, dict) and isinstance(row.get("id"), str)
-        )
-    for _, draft, owner in all_sources:
-        rows = _deferred_rows(draft["coverage"])
-        reserved = {
-            row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
-        }
-        for row in rows:
-            if not isinstance(row, dict) or any(
-                key in row for key in ("id", "candidateId", "candidate", "finding")
-            ):
-                continue
-            identity = next(
-                (
-                    named["id"]
-                    for named in named_deferred[owner]
-                    if named["id"] not in reserved
-                    and {key: value for key, value in named.items() if key != "id"} == row
-                ),
-                None,
+    # Older checkpoints can omit IDs already assigned in their published output.
+    for field in ("deferred", "surfaces"):
+        named_rows: dict[str | None, list[dict[str, Any]]] = {}
+        for _, draft, owner in all_sources:
+            rows = draft["coverage"].get(field, [])
+            named_rows.setdefault(owner, []).extend(
+                row
+                for row in (rows if isinstance(rows, list) else [])
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
             )
-            if identity is not None:
-                row["id"] = identity
-                reserved.add(identity)
+        for _, draft, owner in all_sources:
+            rows = draft["coverage"].get(field, [])
+            if not isinstance(rows, list):
+                continue
+            reserved = {
+                row["id"]
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
+            }
+            for row in rows:
+                if not isinstance(row, dict) or "id" in row:
+                    continue
+                if field == "deferred" and any(
+                    key in row for key in ("candidateId", "candidate", "finding")
+                ):
+                    continue
+                content = {"receiptRefs": [], **row} if field == "surfaces" else row
+                identity = next(
+                    (
+                        named["id"]
+                        for named in named_rows[owner]
+                        if named["id"] not in reserved
+                        and {
+                            **({"receiptRefs": []} if field == "surfaces" else {}),
+                            **{key: value for key, value in named.items() if key != "id"},
+                        }
+                        == content
+                    ),
+                    None,
+                )
+                if identity is not None:
+                    row["id"] = identity
+                    reserved.add(identity)
 
     if parent is None and not sources:
         return None
@@ -1225,6 +1237,19 @@ def merge_saved_results(
     deferred_rows = {
         relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
     }
+    # A legacy source can contain independent tasks with the same explicit ID.
+    # Later rewrites cannot make an ID-only closure identify one of those tasks.
+    ambiguous_deferred: set[tuple[str | None, str]] = set()
+    for relative, _, owner in all_sources:
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in deferred_rows[relative]:
+            if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
+                continue
+            if any(key in row for key in ("candidateId", "candidate", "finding")):
+                continue
+            if identity in by_id and row != by_id[identity]:
+                ambiguous_deferred.add((owner, identity))
+            by_id[identity] = row
     current_drafts = ([("parent", parent, None)] if parent else []) + [
         source for source in sources if source[0] in current_results | selected_observations.keys()
     ]
@@ -1287,12 +1312,23 @@ def merge_saved_results(
             and (identity == key[1] or active[1].get("candidateId") == key[1])
             and active[0] >= order
         ]
-        if key in candidate_ids or reopened:
+        if key in candidate_ids or key in ambiguous_deferred or reopened:
             del closed_deferred[key]
         for _, item, _ in reopened:
             reopened_rows.append((key[0], item))
             if key not in candidate_ids:
                 reopened_generic.add(key)
+    # Retain every distinct ambiguous task even when a terminal result supersedes
+    # its source. Existing output ID normalization keeps each row distinct.
+    for relative, _, owner in all_sources:
+        for row in deferred_rows[relative]:
+            if (
+                isinstance(row, dict)
+                and isinstance(identity := row.get("id"), str)
+                and (owner, identity) in ambiguous_deferred
+                and (owner, row) not in reopened_rows
+            ):
+                reopened_rows.append((owner, row))
     parent_closures = [
         closure for (owner, _), (_, closure, _) in closed_deferred.items() if owner is None
     ]
@@ -1303,14 +1339,17 @@ def merge_saved_results(
             coverage["deferred"] = [
                 row
                 for row in deferred_rows["parent"]
-                if not isinstance(row, dict) or (None, row.get("id")) not in closed_deferred
+                if not isinstance(row, dict)
+                or not isinstance(row.get("id"), str)
+                or (None, row["id"]) not in closed_deferred
             ]
     resolved: dict[tuple[str | None, str], str] = {}
 
     ordered_candidates = {
-        (owner, row.get("candidateId") or row.get("id"))
+        (owner, identity)
         for owner, row in reopened_rows
-        if (owner, row.get("candidateId") or row.get("id")) in candidate_ids
+        if isinstance(identity := row.get("candidateId") or row.get("id"), str)
+        and (owner, identity) in candidate_ids
     }
     ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
 
@@ -1412,7 +1451,9 @@ def merge_saved_results(
             for relative, _, owner in all_sources
             for row in deferred_rows[relative]
             if isinstance(row, dict)
-            and (key := (owner, row.get("id"))) not in candidate_ids
+            and isinstance(identity := row.get("id"), str)
+            and (key := (owner, identity)) not in candidate_ids
+            and key not in ambiguous_deferred
             and (updated := accepted_deferred_orders.get(key)) is not None
             and updated > source_order[relative]
         },
@@ -1434,7 +1475,10 @@ def merge_saved_results(
     # Reopened work survives a superseded checkpoint, but current candidate
     # outcomes still apply. Parent closures cannot remove another worker's row.
     for owner, item in reopened_rows:
-        if (owner, item.get("candidateId") or item.get("id")) in resolved:
+        if (
+            isinstance(identity := item.get("candidateId") or item.get("id"), str)
+            and (owner, identity) in resolved
+        ):
             continue
         pending = coverage.setdefault("deferred", [])
         if isinstance(pending, list) and item not in pending:
@@ -1704,12 +1748,12 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (
-                        worker_id,
-                        item.get("candidateId")
+                    and isinstance(
+                        identity := item.get("candidateId")
                         or (item.get("id") if field == "deferred" else None),
+                        str,
                     )
-                    in resolved
+                    and (worker_id, identity) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
@@ -1751,6 +1795,9 @@ def merge_saved_results(
                     used.add(item["id"])
                 continue
             item.setdefault("id", _saved_coverage_id(item))
+            if not isinstance(item["id"], str):
+                # Preserve malformed rows for per-record recovery, including frozen replay.
+                continue
             if item["id"] in used:
                 item["id"] = f"{item['id']}-{_digest(item)[:16]}"
             used.add(item["id"])
