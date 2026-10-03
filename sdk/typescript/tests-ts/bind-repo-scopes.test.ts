@@ -269,7 +269,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
       (location === "unc" && !hasWindowsLoopbackShare),
   )(
     `documented PowerShell scope binding preserves ${location} literal input and artifact paths`,
-    () => {
+    async () => {
       const requested = ["caf\u00e9/\u96ea.py", "src", "src"];
       const f = fixture(requested);
       const scopes = join(
@@ -300,7 +300,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
           writeFileSync(join(scanDir, name), bytes);
           writeFileSync(join(expandedScanDir, name), bytes);
         }
-        const result = launcher.run(
+        const result = await launcher.run(
           powershell,
           "skills/security-scan/SKILL.md",
           {
