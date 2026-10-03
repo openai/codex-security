@@ -3077,7 +3077,14 @@ def test_workbench_rejects_working_tree_target_after_contents_change(tmp_path: P
 def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
-    revision = initialize_git_repository(target)
+    initialize_git_repository(target)
+    (target / "README.md").write_text("committed source\n" * 50)
+    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (target / "README.md").write_text("scanned working-tree source\n" * 50)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
     run_workbench(
@@ -3124,6 +3131,7 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
         scan_dir,
         scan_id,
         target,
+        relative_path="README.md",
         target_kind="git_diff",
         diff_base_revision=revision,
         diff_head_revision=revision,
@@ -3134,6 +3142,9 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [WORKTREE_CHANGED_WARNING]
+    finding = completed["scan"]["findings"][0]
+    assert finding["locations"][0]["path"] == "README.md"
+    assert "sourceExcerpt" not in finding
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
@@ -4077,19 +4088,26 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     ]
 
 
+@pytest.mark.parametrize("nested", [False, True])
 def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     tmp_path: Path,
+    nested: bool,
 ) -> None:
     state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    initialize_git_repository(target)
+    repository = tmp_path / "target"
+    initialize_git_repository(repository)
+    target = repository
+    if nested:
+        (repository / "README.md").write_text("different root source\n" * 50)
+        target = repository / "nested"
+        target.mkdir()
     (target / "README.md").write_text(
         "\n".join(f"source line {line_number}" for line_number in range(1, 51))
         + "\n"
         + "x" * (1024 * 1024)
     )
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=repository, check=True)
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,
