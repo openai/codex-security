@@ -28,7 +28,6 @@ function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
     if (!entry.isFile()) {
       throw new Error("Refusing to stage non-file runtime entry: " + sourcePath);
     }
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.copyFileSync(sourcePath, targetPath);
   }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const childProcess = require("node:child_process");
+const { runGit, gitOutput } = require("./hydrate-sastbench-repos");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -32,18 +32,6 @@ function parseArgs(argv) {
     }
   }
   return { ...args, target: path.resolve(args.target) };
-}
-
-function runGit(args, cwd) {
-  return childProcess.execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-}
-
-function gitOutput(args, cwd) {
-  return runGit(args, cwd).trim();
 }
 
 function inspectInstallation(target) {

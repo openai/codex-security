@@ -4,6 +4,10 @@
 const assert = require("assert");
 const triageIo = require("../assertions/triage-io.js");
 
+assert.throws(() => triageIo("no json", {}), {
+  message: "Could not find a parseable triage-finding/v0 JSON block.",
+});
+
 function outputFor({ inputId, sourceType, verdict }) {
   const stackRank = {
     rank_queue: verdict === "not_actionable" ? null : verdict,
