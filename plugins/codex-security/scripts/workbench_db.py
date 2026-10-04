@@ -2882,14 +2882,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     except (ContractError, OSError, SystemExit, ValueError):
         return
 
-    findings = findings_document.get("findings")
-    if not isinstance(findings, list):
-        return
-    by_occurrence = {
-        finding.get("occurrenceId"): finding
-        for finding in findings
-        if isinstance(finding, dict) and isinstance(finding.get("occurrenceId"), str)
-    }
+    by_occurrence = {finding["occurrenceId"]: finding for finding in findings_document["findings"]}
     updates = []
     for row in legacy_rows:
         finding = by_occurrence.get(row["id"])
@@ -2933,17 +2926,13 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
 def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
     if not isinstance(finding, dict):
         return False
-    severity = finding.get("severity")
-    confidence = finding.get("confidence")
     return (
         finding.get("findingId") == row["finding_id"]
         and finding.get("title") == row["title"]
         and finding.get("summary") == row["summary"]
         and finding.get("remediation") == row["remediation"]
-        and isinstance(severity, dict)
-        and severity.get("level") == row["severity"]
-        and isinstance(confidence, dict)
-        and confidence.get("level") == row["confidence"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
     )
 
 
@@ -3019,7 +3008,6 @@ def finding_result(
         result["knownScanIds"] = known_scan_ids
     if related:
         result["related"] = related
-    result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
