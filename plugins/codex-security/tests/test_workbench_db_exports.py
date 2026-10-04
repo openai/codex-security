@@ -18,10 +18,13 @@ import pytest
 from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
+    empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     start_delivered_scan,
+    start_saved_scan,
+    start_workspace_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -29,19 +32,7 @@ from workbench_test_support import (
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
 def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, termination: str) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id = str(started["scanId"])
-    scan_dir = Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     extra = (
         ("--message", "Stopped after recording a finding.") if termination == "fail-scan" else ()
@@ -91,18 +82,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
 def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     documents = {
         key: json.loads((scan_dir / filename).read_text())
@@ -243,18 +223,7 @@ def test_stopped_clean_git_checkpoint_uses_revision_target(tmp_path: Path) -> No
 def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
     tmp_path: Path, diff_kind: str, coverage_mode: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     base_revision, head_revision = "base-revision", "head-revision"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -297,18 +266,7 @@ def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
 
 
 def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     original = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"][0]
@@ -382,18 +340,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
 
 
 def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
@@ -459,18 +406,7 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
 
 
 def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     foreign = {
@@ -496,18 +432,7 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
 def test_final_candidate_disposition_supersedes_pending_checkpoint(
     tmp_path: Path, disposition: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     pending = {
         "scanId": scan_id,
@@ -551,15 +476,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
 def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> None:
     state_dir, target = tmp_path / "state", tmp_path / "target"
     target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     manifest["scan"]["complete"] = False
@@ -682,14 +599,7 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
 def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
     tmp_path: Path, changed_file: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     manifest_path = scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -785,14 +695,7 @@ def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
 def test_export_validation_checks_binding_without_writing_or_pinning_legacy_artifacts(
     tmp_path: Path, artifact: str, format: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir, "--workspace-id", str(saved["id"]), "--scan-root", str(tmp_path / "scans")
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
@@ -848,16 +751,7 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     source = target / "src/extract.py"
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["artifacts"]["sarifReport"] == str(scan_dir / "exports" / "results.sarif")
@@ -1005,15 +899,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "--mode",
         "deep",
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     run_workbench(
         state_dir,
         "begin-deep-scan",
@@ -1075,19 +961,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
 
 
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
     findings_document = json.loads(findings_path.read_text())
@@ -1115,19 +989,7 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
 
 
 def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
     document = json.loads(findings_path.read_text())
@@ -1250,19 +1112,7 @@ def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -
 def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
     document = json.loads(findings_path.read_text())
@@ -1376,16 +1226,7 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     for index in range(9):
         (target / f"support-{index}.py").write_text("support\n")
     (target / "root.py").write_text("vulnerable\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
     document = json.loads(findings_path.read_text())
@@ -1421,16 +1262,7 @@ def test_csv_export_rejects_symlinked_exports_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     target.mkdir()
     outside.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     (scan_dir / "exports" / "results.sarif").unlink()
@@ -1455,16 +1287,7 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     target.mkdir()
     outside.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     moved_scan_dir = scan_dir.with_name(f"{scan_dir.name}.moved")
@@ -1484,19 +1307,7 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
 
 
 def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     stored_parent = scan_dir.parent
@@ -1520,19 +1331,7 @@ def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
 
 
 def test_completion_rejects_replaced_scan_directory(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     moved_scan_dir = scan_dir.with_name(f"{scan_dir.name}.moved")
     scan_dir.rename(moved_scan_dir)
@@ -1543,19 +1342,7 @@ def test_completion_rejects_replaced_scan_directory(tmp_path: Path) -> None:
 
 
 def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     stored_parent = scan_dir.parent
     moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
@@ -1570,19 +1357,7 @@ def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> 
 
 
 def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
@@ -1654,15 +1429,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
     target = tmp_path / "target"
     target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["results"]
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     documents = {
         key: json.loads((scan_dir / filename).read_text())

@@ -17,10 +17,13 @@ from workbench_test_support import (
     SCRIPT,
     create_saved_git_workspace,
     create_saved_workspace,
+    empty_target_scan,
     initialize_git_repository,
     run_workbench,
     stable_target_id,
     start_delivered_scan,
+    start_saved_scan,
+    start_workspace_scan,
     write_completed_contract,
 )
 
@@ -637,15 +640,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         "--mode",
         "deep",
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     run_workbench(
         state_dir,
         "begin-deep-scan",
@@ -721,16 +716,7 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("version = 1\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
     target.rename(tmp_path / "moved-target")
 
@@ -765,19 +751,7 @@ def test_scan_start_rejects_artifact_root_inside_target(tmp_path: Path) -> None:
 
 
 def test_workbench_serializes_concurrent_scan_completion(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1048,19 +1022,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
 
 
 def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
 
     findings_path = scan_dir / "findings.json"
@@ -1117,16 +1079,7 @@ def test_completed_finding_triage_and_remediation_persist(
     target.mkdir()
     source = target / "source.txt"
     source.write_bytes(f"vulnerable{line_ending}".encode())
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
@@ -1695,15 +1648,7 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -1740,16 +1685,7 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     target = tmp_path / "target"
     target.mkdir()
     (target / "source.txt").write_text("vulnerable\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
@@ -1805,19 +1741,7 @@ def test_completed_scan_disables_remediation_after_checkout_symlink_is_replaced(
 
 
 def test_finding_management_rejects_invalid_state_transitions(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
@@ -2202,19 +2126,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
 
 
 def test_finding_remediation_rejects_delayed_update_after_superseding_patch(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
@@ -2292,16 +2204,7 @@ def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Pat
     target.mkdir()
     source = target / "source.txt"
     source.write_text("original\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
@@ -2967,11 +2870,23 @@ def test_workbench_resolves_structured_diff_target(tmp_path: Path) -> None:
     assert "must match the selected commit's parent" in rejected["stderr"]
 
 
-def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    revision = initialize_git_repository(target)
-    workspace_id = str(uuid.uuid4())
+def create_saved_working_tree_workspace(
+    state_dir: Path,
+    target: Path,
+    workspace_id: str,
+    revision: str,
+    *,
+    head_revision: str | None = None,
+) -> dict[str, object]:
+    diff_arguments = (
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "working_tree",
+        "--diff-base-revision",
+        revision,
+        *(["--diff-head-revision", head_revision] if head_revision is not None else []),
+    )
     run_workbench(
         state_dir,
         "create-workspace",
@@ -2979,16 +2894,9 @@ def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) 
         workspace_id,
         "--target-path",
         str(target),
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-        "--diff-head-revision",
-        revision,
+        *diff_arguments,
     )
-    saved = run_workbench(
+    return run_workbench(
         state_dir,
         "save-workspace",
         "--workspace-id",
@@ -2997,14 +2905,17 @@ def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) 
         str(target),
         "--scope",
         ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-        "--diff-head-revision",
-        revision,
+        *diff_arguments,
+    )
+
+
+def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    workspace_id = str(uuid.uuid4())
+    saved = create_saved_working_tree_workspace(
+        state_dir, target, workspace_id, revision, head_revision=revision
     )
     assert saved["targetSummary"] == "Uncommitted changes"
 
@@ -3028,36 +2939,7 @@ def test_workbench_rejects_working_tree_target_after_contents_change(tmp_path: P
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
-    saved = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
+    saved = create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
     assert str(saved["diffTarget"]["contentDigest"]).startswith(
         "codex-security-snapshot/v1:sha256:"
     )
@@ -3080,36 +2962,7 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     revision = initialize_git_repository(target)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
+    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
@@ -3146,36 +2999,7 @@ def test_workbench_warns_after_working_tree_head_changes(
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
+    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
@@ -3216,36 +3040,7 @@ def test_workbench_can_validate_legacy_nested_working_tree_scan(tmp_path: Path) 
     nested_target = target / "nested"
     nested_target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "working_tree",
-        "--diff-base-revision",
-        revision,
-    )
+    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
@@ -3313,15 +3108,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         "--diff-content-digest",
         str(diff_target["contentDigest"]),
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -3409,15 +3196,7 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         revision,
     )
     diff_target = saved["diffTarget"]
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     write_completed_contract(
         scan_dir,
         scan_id,

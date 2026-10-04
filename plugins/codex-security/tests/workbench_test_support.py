@@ -209,6 +209,30 @@ def start_delivered_scan(
     return started
 
 
+def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        workspace_id,
+        "--scan-root",
+        str(scan_root),
+    )["results"]
+    return str(started["scanId"]), Path(str(started["scanDir"]))
+
+
+def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[str, Path]:
+    saved = create_saved_workspace(state_dir, target)
+    return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
+    return state_dir, target, scan_id, scan_dir
+
+
 def initialize_git_repository(target: Path) -> str:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
@@ -275,7 +299,9 @@ def create_saved_workspace(
     )
 
 
-def create_saved_git_workspace(state_dir: Path, target: Path) -> dict[str, object]:
+def create_saved_git_workspace(
+    state_dir: Path, target: Path, *, mode: str = "standard"
+) -> dict[str, object]:
     workspace_id = str(uuid.uuid4())
     run_workbench(
         state_dir,
@@ -295,8 +321,17 @@ def create_saved_git_workspace(state_dir: Path, target: Path) -> dict[str, objec
         "--scope",
         ".",
         "--mode",
-        "standard",
+        mode,
     )
+
+
+def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
+    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
+    artifact_dir.mkdir(parents=True)
+    prompt_path = artifact_dir / "prompt.md"
+    prompt_path.write_text(f"Prompt for {name}\n")
+    result_path = artifact_dir / "result.json"
+    return prompt_path, artifact_dir, result_path
 
 
 def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
