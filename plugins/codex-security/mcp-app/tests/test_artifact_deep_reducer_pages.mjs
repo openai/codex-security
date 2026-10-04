@@ -1,13 +1,6 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importModule } from "./import-module.mjs";
 
@@ -45,9 +38,7 @@ assert.equal(
 );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "reducer-pages-")),
-);
+const root = await temporaryDirectory("reducer-pages-", true);
 try {
   const scanRoot = path.join(root, "scan");
   const workerRoot = path.join(

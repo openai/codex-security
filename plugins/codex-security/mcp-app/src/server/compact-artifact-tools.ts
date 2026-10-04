@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
+import type { JsonObject as JsonRecord } from "../types.js";
 import {
   createScanArtifactContext,
   type ArtifactContext,
@@ -51,8 +52,6 @@ import {
   standaloneArtifactContext,
   type ArtifactLocation,
 } from "../artifact-storage.js";
-
-type JsonRecord = Record<string, unknown>;
 
 export interface CompactArtifactToolOptions {
   runWorkbench: RunArtifactWorkbench;
