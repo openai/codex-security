@@ -12,6 +12,11 @@ export const binaryPath = join(
 
 /** Usernames and home directories are uninterpreted POSIX bytes. */
 export interface UnixBinding {
+  fileLock(
+    descriptor: number,
+    unlock: boolean,
+    nonblocking: boolean,
+  ): { value: number; errno: number };
   userHome(username: Buffer): { errno: number; value: Buffer | null };
 }
 

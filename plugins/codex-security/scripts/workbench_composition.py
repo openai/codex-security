@@ -116,7 +116,7 @@ def load_composition(
     connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
 ) -> CompositionView:
     if scan["mode"] != "deep":
-        return CompositionView(None, (), (), None)
+        return CompositionView(None, (), composition_execution_threads(connection, scan), None)
     return CompositionView(
         read_composition_checkpoint(scan) if checkpoint else None,
         tuple(composition_children(connection, scan)),

@@ -209,6 +209,7 @@ const allowedFiles = new Set([
     "result",
     "record",
     "runtime",
+    "scan-accounting",
     "scan-activity",
     "scan-comparison",
     "scan-dashboard",
