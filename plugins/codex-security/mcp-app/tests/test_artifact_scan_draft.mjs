@@ -80,8 +80,23 @@ async function fixture(t, mode = "standard") {
     reconciledCheckpointIds = [],
   ) => {
     const before = await readFile(snapshotPath, "utf8").catch(() => undefined);
-    if (before !== undefined && expected !== undefined)
-      assert.equal(expected, createHash("sha256").update(before).digest("hex"));
+    if (expected !== undefined) {
+      const digest = createHash("sha256");
+      for (const name of [
+        ...(before === undefined ? [] : ["artifacts/scan-draft.json"]),
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+      ]) {
+        const contents = await readFile(join(root, name)).catch(
+          () => undefined,
+        );
+        digest.update(name).update("\0");
+        if (contents === undefined) digest.update("missing\0");
+        else digest.update("present\0").update(contents).update("\0");
+      }
+      assert.equal(expected, digest.digest("hex"));
+    }
     last = documents;
     documents.reconciledCheckpointIds = [...reconciledCheckpointIds];
     documents.manifest.scan.id = scanId;

@@ -2369,18 +2369,17 @@ def advance_scan_phase(db: Any, connection: Any, scan_id: str, phase: str) -> No
 
 
 def _scan_draft_digest(scan_dir: Path) -> str:
-    committed = scan_dir / "artifacts/scan-draft.json"
+    filenames = ["scan-manifest.json", "findings.json", "coverage.json"]
     try:
-        committed.lstat()
+        (scan_dir / "artifacts/scan-draft.json").lstat()
     except FileNotFoundError:
         pass
     else:
-        _, contents = _read_scan_local_json_bytes(
-            scan_dir, "artifacts/scan-draft.json", "Committed scan draft"
-        )
-        return hashlib.sha256(contents).hexdigest()
+        filenames.insert(0, "artifacts/scan-draft.json")
+    # Match the MCP reader: protect both the committed snapshot and independently
+    # authored canonical files from changes after reconciliation reads them.
     digest = hashlib.sha256()
-    for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+    for filename in filenames:
         digest.update(filename.encode())
         digest.update(b"\0")
         try:

@@ -576,10 +576,14 @@ async function readPreviousScanDraft(context: ArtifactContext): Promise<{
     acknowledged: Array.isArray(draft?.reconciledCheckpointIds)
       ? draft.reconciledCheckpointIds
       : [],
-    digest:
-      snapshot === undefined
-        ? draftDigest(names.map((name, index) => [name, contents[index]]))
-        : createHash("sha256").update(snapshot.contents).digest("hex"),
+    // Canonical files can be authored independently after the last snapshot.
+    // The writer must reject a token if either source changes during reconciliation.
+    digest: draftDigest([
+      ...(snapshot === undefined
+        ? []
+        : [["artifacts/scan-draft.json", snapshot.contents] as const]),
+      ...names.map((name, index) => [name, contents[index]] as const),
+    ]),
   };
   if (contents.every((value) => value === undefined)) return state;
   if (contents.some((value) => value === undefined)) {

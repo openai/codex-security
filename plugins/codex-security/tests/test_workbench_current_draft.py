@@ -89,7 +89,7 @@ def test_committed_draft_survives_partial_export_and_blocks_stale_writer(
         with pytest.raises(OSError, match="export interruption"):
             module.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], connection, args)
         committed = (directory / "artifacts/scan-draft.json").read_bytes()
-        assert module._scan_draft_digest(directory) == hashlib.sha256(committed).hexdigest()
+        observed_digest = module._scan_draft_digest(directory)
         _, recovered = module._read_saved_parent_result(directory, registered["scanId"])
         assert recovered["findings"][0]["title"] == "Accepted current draft"
         monkeypatch.setattr(module, "write_scan_local_bytes", write)
@@ -99,7 +99,7 @@ def test_committed_draft_survives_partial_export_and_blocks_stale_writer(
             module.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], connection, args)
         assert (directory / "artifacts/scan-draft.json").read_bytes() == committed
         monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps({"documents": documents})))
-        args.expected_draft_digest = hashlib.sha256(committed).hexdigest()
+        args.expected_draft_digest = observed_digest
         module.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], connection, args)
     blocked = run_workbench(
         state,

@@ -318,7 +318,17 @@ async function publicationFixture(t) {
     candidateId: "candidate",
     rationale: "Synthetic candidate rejected.",
   };
-  return { root, scanDir, scanId, save, read, finding, rejection, workbench };
+  return {
+    root,
+    scanDir,
+    scanId,
+    context,
+    save,
+    read,
+    finding,
+    rejection,
+    workbench,
+  };
 }
 
 for (const timestamp of ["unchanged", "changed", "omitted"]) {
@@ -521,3 +531,83 @@ test("MCP surface resolution keeps earlier receipts in the final seal", async (t
   const artifacts = (await f.read("scan-manifest.json")).scan.artifacts;
   for (const ref of refs) assert.ok(artifacts.some((row) => row.path === ref));
 });
+
+for (const complete of [false, true]) {
+  for (const changed of [
+    "findings.json",
+    "coverage.json",
+    "scan-manifest.json",
+  ]) {
+    test(`MCP retries concurrent canonical ${changed} edits (complete: ${complete})`, async (t) => {
+      const f = await publicationFixture(t);
+      await f.save({ complete: false, findings: [f.finding("initial")] });
+      const committed = await readFile(
+        join(f.scanDir, "artifacts/scan-draft.json"),
+      );
+      let attempts = 0,
+        conflicts = 0,
+        concurrent;
+      await recordCodexSecurityScanDraftViaWorkbench(
+        f.context,
+        {
+          scanId: f.scanId,
+          complete,
+          findings: [],
+          coverage: semanticCoverage(),
+        },
+        async (args, input) => {
+          attempts++;
+          if (attempts === 1) {
+            const document = await f.read(changed);
+            if (changed === "findings.json")
+              document.findings.push(f.finding("concurrent"));
+            else if (changed === "coverage.json") {
+              document.completeness = "partial";
+              document.deferred.push({
+                id: "concurrent-work",
+                reason: "Retain concurrent evidence.",
+              });
+            } else
+              document.scan.threatModel = {
+                format: "markdown",
+                content: "# Concurrent model\n",
+              };
+            concurrent = JSON.stringify(document);
+            await writeFile(join(f.scanDir, changed), concurrent);
+          }
+          try {
+            return await f.workbench(args, input);
+          } catch (error) {
+            assert.match(String(error), /scan_draft_conflict/);
+            conflicts++;
+            assert.equal(
+              await readFile(join(f.scanDir, changed), "utf8"),
+              concurrent,
+            );
+            assert.deepEqual(
+              await readFile(join(f.scanDir, "artifacts/scan-draft.json")),
+              committed,
+            );
+            throw error;
+          }
+        },
+      );
+      assert.equal(conflicts, 1);
+      assert.equal(attempts, 2);
+      if (changed === "findings.json")
+        assert.deepEqual(
+          (await f.read(changed)).findings
+            .map((row) => row.identity.anchor)
+            .sort(),
+          ["concurrent", "initial"],
+        );
+      else if (changed === "coverage.json")
+        assert.equal((await f.read(changed)).deferred[0].id, "concurrent-work");
+      else
+        assert.equal(
+          (await f.read(changed)).scan.threatModel.content,
+          "# Concurrent model\n",
+        );
+    });
+  }
+}
