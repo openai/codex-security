@@ -10,8 +10,8 @@ export function createDeepScanWorkerFailureCases({
   DeepScanCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
-  deferred,
   immediateClock,
+  recordingClock,
   workerIdFromPrompt,
   promptContext,
 }) {
@@ -260,10 +260,7 @@ export function createDeepScanWorkerFailureCases({
         },
       },
       {
-        clock: {
-          now: immediateClock.now,
-          sleep: async (delayMs) => sleeps.push(delayMs),
-        },
+        clock: recordingClock(sleeps),
       },
     );
     coordinator.start();
