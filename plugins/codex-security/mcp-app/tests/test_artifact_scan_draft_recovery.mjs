@@ -1,2765 +1,715 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { promises as fsPromises } from "node:fs";
 import {
   mkdir,
   readFile,
   readdir,
-  rename,
   rm,
-  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
-import path from "node:path";
-import test from "node:test";
+import { join } from "node:path";
+import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { isDeepStrictEqual, promisify } from "node:util";
-import {
-  draftApi,
-  fixture,
-  interruptDraftWrite,
-} from "./scan-draft-recovery-fixture.mjs";
+import { promisify } from "node:util";
+import { loadSourceModule, privateDirectory } from "./helpers/source.mjs";
 
-const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
-  draftApi;
-const execFileAsync = promisify(execFile);
-async function checkpointNames(directory) {
-  return (await readdir(directory)).filter((name) => name.endsWith(".json"));
-}
+const { recordCodexSecurityScanDraftViaWorkbench } = await loadSourceModule(
+  new URL("../src/artifact-scan-draft.ts", import.meta.url),
+);
+const { createScanArtifactContext } = await loadSourceModule(
+  new URL("../src/artifact-context.ts", import.meta.url),
+);
+const { semanticFinding, semanticCoverage } = await loadSourceModule(
+  new URL(
+    "../../../../sdk/typescript/tests-ts/helpers/semantic-scan.ts",
+    import.meta.url,
+  ),
+);
+const exec = promisify(execFile);
+const script = fileURLToPath(
+  new URL("../../scripts/workbench_db.py", import.meta.url),
+);
 
-const generic = { reason: "Review remains.", paths: ["src/example.py"] };
-const close = (id, reason = "Review completed.") => ({ id, reason });
-const findingFor = (candidateId) => ({
-  ruleId: "fixture.review",
-  title: "Synthetic review finding",
-  summary: "The candidate outcome must survive publication.",
-  severity: { level: "low" },
-  confidence: { level: "high", rationale: "Synthetic persistence fixture." },
-  taxonomy: { category: "other", cwe: [] },
-  locations: [{ path: "src/example.py", startLine: 1 }],
-  remediation: "Complete the review.",
-  provenance: { source: "local_plugin", candidateId },
-});
-
-test("Standard pending checkpoint indexes retain the accepted head", async (t) => {
-  const f = await fixture(t, "standard");
-  const task = { id: "review", ...generic };
-  await f.write(f.draft({ deferred: [task] }));
-  const checkpoints = path.join(f.root, "checkpoints");
-  const [pendingName] = await checkpointNames(checkpoints);
-  await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
-  assert.deepEqual((await f.read()).deferred, []);
-  await mkdir(path.join(checkpoints, "pending"), { recursive: true });
-  // The accepted immutable checkpoint remains authoritative after its marker is gone.
-  const headPath = path.join(f.root, "checkpoint-head.json");
-  await writeFile(headPath, JSON.stringify({ checkpoint: pendingName }));
-  const observed = Date.now() / 1000 + 10;
-  await utimes(headPath, observed, observed);
-  await f.write(f.draft({}, true));
-  assert.deepEqual((await f.read()).deferred, [task]);
-});
-
-for (const observation of ["checkpoint head", "worker result"]) {
-  test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
-    const f = await fixture(t, "worker");
-    const task = { id: "review", ...generic };
-    const headPath = path.join(f.root, "checkpoint-head.json");
-    const resultPath = path.join(f.root, "result.json");
-    await f.write(f.draft({ deferred: [task] }));
-    const reopenedHead = JSON.parse(await readFile(headPath, "utf8"));
-    await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
-    assert.deepEqual((await f.read()).deferred, []);
-    const checkpoints = path.join(f.root, "checkpoints");
-    for (const name of await checkpointNames(checkpoints)) {
-      const checkpointPath = path.join(checkpoints, name);
-      const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
-      const time = checkpoint.coverage.deferred.length ? 50 : 100;
-      await utimes(checkpointPath, time, time);
-    }
-
-    const replacementPath = path.join(f.root, "replacement.json");
-    if (observation === "checkpoint head") {
-      await utimes(headPath, 100, 100);
-      await utimes(resultPath, 200, 200);
-      await writeFile(replacementPath, JSON.stringify(reopenedHead));
-    } else {
-      await writeFile(headPath, JSON.stringify(reopenedHead));
-      await utimes(headPath, 200, 200);
-      await utimes(resultPath, 100, 100);
-      await writeFile(
-        replacementPath,
-        JSON.stringify(f.draft({ deferred: [task] }, true)),
-      );
-    }
-    await utimes(replacementPath, 300, 300);
-
-    let replaced = false;
-    const replaceOnce = async (destination) => {
-      if (replaced) return;
-      replaced = true;
-      await rename(replacementPath, destination);
-    };
-    const originalLstat = fsPromises.lstat;
-    const originalReadFile = fsPromises.readFile;
-    const originalOpen = fsPromises.open;
-    if (observation === "checkpoint head") {
-      fsPromises.lstat = async (filename, ...args) => {
-        const metadata = await originalLstat(filename, ...args);
-        if (filename === headPath) await replaceOnce(headPath);
-        return metadata;
-      };
-    } else {
-      // Replace after returning the old file's bytes, for both pathname and
-      // descriptor readers. Its observation time must still belong to those bytes.
-      fsPromises.readFile = async (filename, ...args) => {
-        const contents = await originalReadFile(filename, ...args);
-        if (filename === resultPath) await replaceOnce(resultPath);
-        return contents;
-      };
-      fsPromises.open = async (filename, ...args) => {
-        const handle = await originalOpen(filename, ...args);
-        if (filename === resultPath) {
-          const read = handle.readFile.bind(handle);
-          handle.readFile = async (...readArgs) => {
-            const contents = await read(...readArgs);
-            await replaceOnce(resultPath);
-            return contents;
-          };
-        }
-        return handle;
-      };
-    }
-    try {
-      const result = await f.write(f.draft({}, true));
-      assert.equal(replaced, true);
-      for (const coverage of [result.coverage, await f.read()]) {
-        assert.deepEqual(coverage.deferred, [task]);
-        assert.deepEqual(coverage.resolvedDeferred ?? [], []);
-        assert.equal(coverage.completeness, "partial");
-      }
-    } finally {
-      fsPromises.lstat = originalLstat;
-      fsPromises.readFile = originalReadFile;
-      fsPromises.open = originalOpen;
-    }
-  });
-}
-
-for (const headTime of [1, 2, 3]) {
-  test(`worker: stopped recovery retains accepted coverage with head time ${headTime}`, async (t) => {
-    const f = await fixture(t, "worker");
-    const surface = (id) => ({
-      id,
-      label: id,
-      disposition: "no_issue_found",
-      receiptRefs: [],
-    });
-    await f.write(f.draft({ surfaces: [surface("existing")] }, true));
-    const added = {
-      surfaces: [surface("newly-reviewed")],
-      explicitExclusions: [
-        { pattern: "vendor/**", reason: "External dependency." },
-      ],
-      openQuestions: [
-        { question: "Should a later review include dependencies?" },
-      ],
-    };
-    const resultPath = path.join(f.root, "result.json");
-    await interruptDraftWrite(resultPath, () =>
-      f.write(
-        f.draft(
-          { ...added, surfaces: [surface("existing"), ...added.surfaces] },
-          true,
-        ),
-      ),
-    );
-    const headPath = path.join(f.root, "checkpoint-head.json");
-    const head = JSON.parse(await readFile(headPath, "utf8"));
-    const selectedPath = path.join(f.root, "checkpoints", head.checkpoint);
-    const selected = JSON.parse(await readFile(selectedPath, "utf8"));
-    assert.deepEqual(selected.coverage.surfaces, [
-      surface("existing"),
-      ...added.surfaces,
-    ]);
-    await utimes(resultPath, 2, 2);
-    await utimes(headPath, headTime, headTime);
-    await utimes(selectedPath, headTime, headTime);
-    const originals = new Map();
-    for (const filename of [
-      resultPath,
-      headPath,
-      ...(await checkpointNames(path.join(f.root, "checkpoints"))).map((name) =>
-        path.join(f.root, "checkpoints", name),
-      ),
-    ]) {
-      originals.set(
-        filename,
-        createHash("sha256")
-          .update(await readFile(filename))
-          .digest("hex"),
-      );
-    }
-    const { stdout } = await execFileAsync(
-      process.env.PYTHON?.trim() || "python3",
-      [
-        "-c",
-        `import json,sys
-from pathlib import Path
-sys.path.insert(0,sys.argv[1])
-from workbench_saved_results import merge_saved_results
-root,output=Path(sys.argv[2]),Path(sys.argv[3])
-worker={"id":"worker","kind":"discovery","artifact_dir":str(output),"result_manifest_path":None,"attempt":1}
-binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{"kind":"git_revision","repository":"synthetic","revision":"head"},"scope":{"includePaths":["."],"excludePaths":[]},"coverageMode":"repository"}
-first=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted")
-replay=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted",frozen_source_digests=first[0]["scan"]["preservedSources"])
-print(json.dumps([first[2],replay[2]]))`,
-        fileURLToPath(new URL("../../scripts", import.meta.url)),
-        path.dirname(f.root),
-        f.root,
-        f.context.scanId,
-      ],
-    );
-    const [coverage, replay] = JSON.parse(stdout);
-    assert.deepEqual(replay, coverage);
-    for (const [field, rows] of Object.entries(added)) {
-      assert.equal(
-        (coverage[field] ?? []).some((row) =>
-          Object.entries(rows[0]).every(([key, value]) =>
-            isDeepStrictEqual(row[key], value),
-          ),
-        ),
-        headTime >= 2,
-      );
-    }
-    assert.ok(coverage.surfaces.some((row) => row.id === "existing"));
-    for (const [filename, digest] of originals) {
-      assert.equal(
-        createHash("sha256")
-          .update(await readFile(filename))
-          .digest("hex"),
-        digest,
-      );
-    }
-  });
-}
-
-for (const updateSavedSurface of [false, true]) {
-  test(`worker: repeated progress preserves independent evidence, saved surface update=${updateSavedSurface}`, async (t) => {
-    const f = await fixture(t, "worker");
-    const reopened = { id: "reopened-review", ...generic, surfaceIds: ["api"] };
-    const stillClosed = { id: "closed-review", ...generic };
-    const independentSurface = {
-      id: "configuration",
-      label: "Configuration",
-      disposition: "no_issue_found",
-      notes: "Initial review.",
-    };
-    await f.write(
-      f.draft({
-        deferred: [reopened, stillClosed],
-        surfaces: updateSavedSurface ? [independentSurface] : [],
-      }),
-    );
-    await f.write(
-      f.draft(
-        { resolvedDeferred: [close(reopened.id), close(stillClosed.id)] },
-        true,
-      ),
-    );
-    const independent = { id: "independent-review", ...generic };
-    const finding = {
-      ruleId: "fixture.review",
-      title: "Synthetic review finding",
-      summary: "A separate review result must survive progress publication.",
-      severity: { level: "low" },
-      confidence: {
-        level: "high",
-        rationale: "Synthetic persistence fixture.",
-      },
-      taxonomy: { category: "other", cwe: [] },
-      locations: [{ path: "src/example.py", startLine: 1 }],
-      remediation: "Complete the independent review.",
-      provenance: { source: "local_plugin", candidateId: "new-finding" },
-    };
-    const surfaces = [
-      {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: [],
-      },
-      {
-        id: "new-finding",
-        candidateId: "new-finding",
-        label: "Independent review",
-        disposition: "reported",
-      },
-    ];
-    if (updateSavedSurface)
-      surfaces.push({ ...independentSurface, notes: "Updated review." });
-    const progress = {
-      ...f.draft({ deferred: [reopened, independent], surfaces }),
-      findings: [finding],
-    };
-    for (const input of [progress, f.draft()]) {
-      const result = await f.write(input);
-      assert.equal(result.findingCount, 1);
-      assert.equal(result.coverage.completeness, "partial");
-      assert.deepEqual(result.coverage.deferred, [reopened, independent]);
-      assert.deepEqual(result.coverage.resolvedDeferred, [
-        close(stillClosed.id),
-      ]);
-      assert.deepEqual(
-        result.coverage.surfaces,
-        surfaces.map((surface) => ({
-          ...surface,
-          receiptRefs: surface.receiptRefs ?? [],
-        })),
-      );
-      const published = JSON.parse(
-        await readFile(path.join(f.root, "result.json"), "utf8"),
-      );
-      assert.deepEqual(published.findings, [finding]);
-      const head = JSON.parse(
-        await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
-      );
-      assert.deepEqual(
-        JSON.parse(
-          await readFile(
-            path.join(f.root, "checkpoints", head.checkpoint),
-            "utf8",
-          ),
-        ),
-        published,
-      );
-    }
-    const nextTask = { id: "next-review", ...generic };
-    const nextFinding = {
-      ...finding,
-      ruleId: "fixture.second-review",
-      provenance: { ...finding.provenance, candidateId: "next-finding" },
-    };
-    const nextSurface = {
-      id: "next-finding",
-      candidateId: "next-finding",
-      label: "Next review",
-      disposition: "reported",
-    };
-    const updated = {
-      ...reopened,
-      reason: "Review another caller.",
-      paths: ["src/example.py", "src/other.py"],
-      notes: "The latest checkpoint adds a second caller.",
-    };
-    const nextProgress = {
-      ...f.draft({ deferred: [updated, nextTask], surfaces: [nextSurface] }),
-      findings: [nextFinding],
-    };
-    for (const input of [nextProgress, f.draft()]) {
-      const result = await f.write(input);
-      assert.equal(result.findingCount, 2);
-      assert.equal(result.coverage.completeness, "partial");
-      assert.deepEqual(
-        new Set(result.coverage.deferred.map(({ id }) => id)),
-        new Set([reopened.id, independent.id, nextTask.id]),
-      );
-      assert.deepEqual(
-        result.coverage.deferred.find(({ id }) => id === updated.id),
-        updated,
-      );
-      assert.deepEqual((await f.read()).deferred, result.coverage.deferred);
-      assert.deepEqual(result.coverage.resolvedDeferred, [
-        close(stillClosed.id),
-      ]);
-      assert.deepEqual(
-        new Set(result.coverage.surfaces.map(({ id }) => id)),
-        new Set([...surfaces, nextSurface].map(({ id }) => id)),
-      );
-    }
-  });
-}
-
-for (const outcome of ["rejected", "reported"]) {
-  for (const surfaceLink of ["candidate", "surface", "none"]) {
-    if (surfaceLink === "none" && outcome === "rejected") continue;
-    test(`worker: accepted candidate outcomes survive progress ${outcome}/${surfaceLink}`, async (t) => {
-      const f = await fixture(t, "worker");
-      const candidateId = "accepted-candidate";
-      const surface = {
-        id: "accepted-surface",
-        candidateId,
-        label: "Accepted review",
-        disposition: outcome,
-      };
-      const finding = {
-        ruleId: "fixture.accepted-review",
-        title: "Accepted review finding",
-        summary: "A completed candidate outcome remains authoritative.",
-        severity: { level: "low" },
-        confidence: {
-          level: "high",
-          rationale: "Synthetic persistence fixture.",
-        },
-        taxonomy: { category: "other", cwe: [] },
-        locations: [{ path: "src/example.py", startLine: 1 }],
-        remediation: "Complete the independent review.",
-        provenance: { source: "local_plugin", candidateId },
-      };
-      const genericTask = { id: "generic-review", ...generic };
-      await f.write({
-        ...f.draft(
+for (const scenario of [
+  "interrupted then new draft",
+  "interrupted then empty draft",
+  "retry",
+]) {
+  test(
+    `concurrent draft identities survive ${scenario} and completion`,
+    { timeout: 30000 },
+    async (t) => {
+      const root = await privateDirectory("codex-security-draft-recovery-");
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      for (const path of ["earlier.js", "later.js", "new.js", "shared.js"])
+        await writeFile(join(repository, path), "export const value = 1;\n");
+      const workbench = async (args, input) => {
+        const execution = exec(
+          process.env.PYTHON || "python3",
+          [script, ...args],
           {
-            surfaces: surfaceLink === "none" ? [] : [surface],
-            deferred: [genericTask],
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            },
           },
-          true,
-        ),
-        findings: outcome === "reported" ? [finding] : [],
-      });
-      const candidate = { title: "Additional candidate evidence" };
-      const update = {
-        id: surface.id,
-        ...(surfaceLink === "surface" ? {} : { candidateId }),
-        label: surface.label,
-        disposition: outcome === "reported" ? "rejected" : "needs_follow_up",
+        );
+        execution.child.stdin.on("error", () => {});
+        execution.child.stdin.end(input);
+        return JSON.parse((await execution).stdout);
       };
-      const progress = f.draft({
-        surfaces: [update],
-        deferred: [
-          { id: "candidate-review", candidateId, candidate, ...generic },
+      const { scanId } = await workbench(
+        [
+          "register-cli-scan",
+          "--repository",
+          repository,
+          "--scan-dir",
+          scanDir,
+          "--registration-json-stdin",
         ],
-      });
-      for (const input of [progress, f.draft()]) {
-        const result = await f.write(input);
-        assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
-        assert.deepEqual(result.coverage.deferred, [genericTask]);
-        assert.deepEqual(
-          result.coverage.surfaces.map(({ id, disposition }) => ({
-            id,
-            disposition,
-          })),
-          surfaceLink === "none"
-            ? []
-            : [{ id: surface.id, disposition: outcome }],
-        );
-        if (outcome === "rejected") {
-          assert.deepEqual(result.coverage.surfaces[0].candidate, candidate);
-        } else {
-          const saved = JSON.parse(
-            await readFile(path.join(f.root, "result.json"), "utf8"),
-          );
-          assert.deepEqual(saved.findings[0].provenance.originalCandidates, [
-            candidate,
-          ]);
-        }
-      }
-    });
-  }
-}
-
-for (const layout of ["standard", "diff", "worker"]) {
-  test(`${layout}: moving a saved task stops blocking its former surface`, async (t) => {
-    const f = await fixture(t, layout);
-    const first = {
-      id: "first",
-      label: "First",
-      disposition: "needs_follow_up",
-    };
-    const second = {
-      id: "second",
-      label: "Second",
-      disposition: "needs_follow_up",
-    };
-    const a = { id: "a", ...generic, surfaceIds: [first.id] };
-    const b = { id: "b", ...generic, surfaceIds: [first.id] };
-    await f.write(f.draft({ surfaces: [first, second], deferred: [a, b] }));
-    const moved = { ...a, surfaceIds: [second.id] };
-    await f.write(f.draft({ deferred: [moved] }));
-    for (const input of [
-      f.draft(
-        {
-          surfaces: [{ ...first, disposition: "no_issue_found" }],
-          resolvedDeferred: [close(b.id)],
-        },
-        true,
-      ),
-      f.draft({}, true),
-    ]) {
-      const result = await f.write(input);
-      assert.deepEqual(result.coverage.deferred, [moved]);
-      assert.equal(
-        result.coverage.surfaces.find(({ id }) => id === first.id).disposition,
-        "no_issue_found",
-      );
-      assert.equal(
-        result.coverage.surfaces.find(({ id }) => id === second.id).disposition,
-        "needs_follow_up",
-      );
-    }
-  });
-
-  test(`${layout}: a legacy ID-less checkpoint retains one closable task`, async (t) => {
-    const f = await fixture(t, layout);
-    await saveScanDraftCheckpoint(
-      f.context,
-      f.draft({ deferred: [generic] }),
-      false,
-    );
-    let id;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const result = await f.write(f.draft({}, true));
-      assert.equal(result.coverage.deferred.length, 1);
-      id ??= result.coverage.deferred[0].id;
-      assert.equal(result.coverage.deferred[0].id, id);
-    }
-    await f.write(f.draft({ resolvedDeferred: [close(id)] }, true));
-    const retried = await f.write(f.draft({}, true));
-    assert.deepEqual(retried.coverage.deferred, []);
-    assert.deepEqual(retried.coverage.resolvedDeferred, [close(id)]);
-  });
-
-  for (const hasPublishedId of [false, true]) {
-    test(`${layout}: a legacy ID-less surface stays closed, published ID=${hasPublishedId}`, async (t) => {
-      const f = await fixture(t, layout);
-      const surface = { label: "Uploads", disposition: "needs_follow_up" };
-      if (hasPublishedId) {
-        await f.write(
-          f.draft({ surfaces: [{ ...surface, id: "surface_uploads" }] }),
-        );
-      }
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({ surfaces: [surface], deferred: [generic] }),
-        false,
-      );
-      const restored = await f.write(f.draft({}, true));
-      assert.equal(restored.coverage.surfaces.length, 1);
-      const restoredSurface = restored.coverage.surfaces[0];
-      if (hasPublishedId) assert.equal(restoredSurface.id, "surface_uploads");
-      const resolved = f.draft(
-        {
-          surfaces: [{ ...restoredSurface, disposition: "no_issue_found" }],
-          resolvedDeferred: [close(restored.coverage.deferred[0].id)],
-        },
-        true,
-      );
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const result = await f.write(resolved);
-        assert.equal(result.coverage.completeness, "complete");
-        assert.deepEqual(result.coverage.surfaces, resolved.coverage.surfaces);
-        assert.deepEqual(result.coverage.deferred, []);
-      }
-    });
-  }
-
-  test(`${layout}: inheriting a candidate outcome keeps newer follow-up work`, async (t) => {
-    const f = await fixture(t, layout);
-    const surface = { id: "api", label: "API", disposition: "needs_follow_up" };
-    await f.write(
-      f.draft({
-        deferred: [
-          {
-            id: "candidate-review",
-            candidateId: "candidate-review",
-            ...generic,
+        JSON.stringify({
+          recipe: {
+            repository,
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
           },
-        ],
-        surfaces: [surface],
-      }),
-    );
-    await f.write({
-      ...f.draft({ surfaces: [surface] }),
-      findings: [findingFor("candidate-review")],
-    });
-    const result = await f.write(f.draft({}, true));
-    assert.equal(result.findingCount, 1);
-    assert.equal(result.coverage.completeness, "partial");
-    assert.deepEqual(
-      result.coverage.surfaces.map(({ id, disposition }) => ({
-        id,
-        disposition,
-      })),
-      [{ id: surface.id, disposition: surface.disposition }],
-    );
-  });
-
-  for (const outcome of ["reported", "rejected", "not_applicable"]) {
-    test(`${layout}: redundant candidate closure requires its ordinary ${outcome} outcome`, async (t) => {
-      const f = await fixture(t, layout);
-      const pending = {
-        id: "candidate-task",
-        candidateId: "candidate-review",
-        ...generic,
-      };
-      const independent = { id: "independent-review", ...generic };
-      await f.write(f.draft({ deferred: [pending, independent] }));
-      const terminal = f.draft(
-        { resolvedDeferred: [close(pending.id), close(pending.candidateId)] },
-        true,
-      );
-      await assert.rejects(f.write(terminal), /cannot close candidate/);
-      assert.deepEqual((await f.read()).deferred, [pending, independent]);
-      terminal.findings = [findingFor("unrelated-candidate")];
-      await assert.rejects(f.write(terminal), /cannot close candidate/);
-      assert.deepEqual((await f.read()).deferred, [pending, independent]);
-      terminal.findings = [];
-      if (outcome === "reported")
-        terminal.findings = [findingFor(pending.candidateId)];
-      else
-        terminal.coverage.surfaces = [
-          {
-            id: "candidate-surface",
-            candidateId: pending.candidateId,
-            label: "Candidate",
-            disposition: outcome,
-          },
-        ];
-      for (const input of [terminal, f.draft({}, true)]) {
-        const result = await f.write(input);
-        assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
-        assert.deepEqual(result.coverage.deferred, [independent]);
-        assert.deepEqual(result.coverage.resolvedDeferred ?? [], []);
-      }
-    });
-  }
-
-  test(`${layout}: duplicate task IDs cannot close independent deferred work`, async (t) => {
-    const f = await fixture(t, layout);
-    const first = { id: "review", ...generic };
-    const second = { ...first, paths: ["src/other.py"] };
-    await assert.rejects(
-      f.write(f.draft({ deferred: [first, second] })),
-      /coverage.deferred repeats review/,
-    );
-    assert.deepEqual(await readdir(f.root), []);
-    second.id = "other-review";
-    await f.write(f.draft({ deferred: [first, second] }));
-    await f.write(f.draft({ resolvedDeferred: [close(first.id)] }, true));
-    assert.deepEqual((await f.read()).deferred, [second]);
-  });
-
-  for (const savedIn of ["canonical result", "checkpoint"]) {
-    test(`${layout}: a closure cannot erase distinct legacy tasks from a ${savedIn}`, async (t) => {
-      const f = await fixture(t, layout);
-      const tasks = [
-        { id: "review", ...generic },
-        { id: "review", reason: "Review storage.", paths: ["src/storage.py"] },
-      ];
-      if (savedIn === "checkpoint") {
-        await saveScanDraftCheckpoint(
-          f.context,
-          f.draft({ deferred: tasks }),
-          false,
-        );
-      } else {
-        await f.write(f.draft({ deferred: [tasks[0]] }));
-        await rm(path.join(f.root, "checkpoint-head.json"), { force: true });
-        await rm(path.join(f.root, "checkpoints"), { recursive: true });
-        const filename = path.join(
-          f.root,
-          layout === "worker" ? "result.json" : "coverage.json",
-        );
-        const saved = JSON.parse(await readFile(filename, "utf8"));
-        (layout === "worker" ? saved.coverage : saved).deferred = tasks;
-        await writeFile(filename, JSON.stringify(saved));
-      }
-      const snapshot = async (directory = f.root) => {
-        const files = [];
-        for (const entry of await readdir(directory, { withFileTypes: true })) {
-          const filename = path.join(directory, entry.name);
-          if (entry.isDirectory()) files.push(...(await snapshot(filename)));
-          else files.push([filename, await readFile(filename, "utf8")]);
-        }
-        return files.sort(([left], [right]) => left.localeCompare(right));
-      };
-      const original = await snapshot();
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        await assert.rejects(
-          f.write(f.draft({ resolvedDeferred: [close("review")] }, true)),
-          /cannot close ambiguous saved deferred work: review/,
-        );
-        assert.deepEqual(await snapshot(), original);
-      }
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const recovered = await f.write(f.draft({}, true));
-        assert.equal(recovered.coverage.completeness, "partial");
-        assert.deepEqual(recovered.coverage.deferred, tasks);
-        assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
-        const beforeClosure = await snapshot();
-        await assert.rejects(
-          f.write(f.draft({ resolvedDeferred: [close("review")] }, true)),
-          /cannot close ambiguous saved deferred work: review/,
-        );
-        assert.deepEqual(await snapshot(), beforeClosure);
-      }
-    });
-  }
-
-  test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
-    const f = await fixture(t, layout);
-    const initial = await f.write(f.draft({ deferred: [generic] }));
-    const original = initial.coverage.deferred[0];
-    assert.equal(typeof original.id, "string");
-    assert.deepEqual(initial.coverage, await f.read());
-    const enriched = { ...original, notes: "Both callers were inspected." };
-    const updatedDraft = await f.write(f.draft({ deferred: [enriched] }));
-    assert.deepEqual(updatedDraft.coverage.deferred, [enriched]);
-    const checkpointRoot = path.join(f.root, "checkpoints");
-    const originals = await Promise.all(
-      (await checkpointNames(checkpointRoot)).map(async (name) => [
-        name,
-        await readFile(path.join(checkpointRoot, name), "utf8"),
-      ]),
-    );
-    const closure = close(original.id);
-    await f.write(f.draft({ resolvedDeferred: [closure] }, true));
-    const updated = close(
-      original.id,
-      "A second review confirmed the decision.",
-    );
-    await f.write(f.draft({ resolvedDeferred: [updated] }, true));
-    await f.write(f.draft({}, true));
-    const saved = await f.read();
-    assert.equal(saved.completeness, "complete");
-    assert.deepEqual(saved.deferred, []);
-    assert.deepEqual(saved.resolvedDeferred, [updated]);
-    for (const [name, contents] of originals)
-      assert.equal(
-        await readFile(path.join(checkpointRoot, name), "utf8"),
-        contents,
-      );
-    const reopened = { ...original, reason: "A new caller needs review." };
-    await f.write(f.draft({ deferred: [reopened] }, true));
-    for (const complete of [false, true]) {
-      await f.write(f.draft({}, complete));
-      const pending = await f.read();
-      assert.equal(pending.completeness, "partial");
-      assert.deepEqual(pending.deferred, [reopened]);
-      assert.deepEqual(pending.resolvedDeferred ?? [], []);
-    }
-  });
-
-  for (const payload of ["candidate", "finding"]) {
-    test(`${layout}: generic closure preserves ${payload} evidence until its explicit outcome`, async (t) => {
-      const f = await fixture(t, layout);
-      const pending = {
-        id: "caller-review",
-        candidateId: "candidate-review",
-        ...generic,
-        [payload]: {
-          title: "Caller validation.",
-          evidence: "Check both callers.",
-        },
-      };
-      const independent = { id: "source-review", ...generic };
-      await f.write(f.draft({ deferred: [pending, independent] }));
-      const closure = close(independent.id);
-      await f.write(f.draft({ resolvedDeferred: [closure] }, true));
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, [pending]);
-      await f.write(
-        f.draft(
-          {
-            surfaces: [
-              {
-                id: "candidate-outcome",
-                candidateId: pending.candidateId,
-                label: "Caller",
-                disposition: "rejected",
-              },
-            ],
-          },
-          true,
-        ),
-      );
-      await f.write(f.draft({}, true));
-      const saved = await f.read();
-      assert.deepEqual(saved.deferred, []);
-      assert.deepEqual(saved.resolvedDeferred, [closure]);
-      assert.deepEqual(
-        saved.surfaces.find((row) => row.candidateId === pending.candidateId)[
-          payload
-        ],
-        pending[payload],
-      );
-    });
-  }
-
-  for (const payload of ["generic", "candidate", "finding"]) {
-    test(`${layout}: ID-less ${payload} checkpoints cannot borrow a saved identity`, async (t) => {
-      const f = await fixture(t, layout);
-      const evidence =
-        payload === "generic"
-          ? {}
-          : { [payload]: { title: "Caller validation." } };
-      const named = {
-        id: "caller-review",
-        ...generic,
-        ...evidence,
-        paths: [...generic.paths, "src/alternate.py"],
-        notes: "Both callers remain pending.",
-        ...(payload === "generic" ? {} : { candidateId: "candidate-review" }),
-      };
-      const raw = { ...generic, ...evidence };
-      await f.write(f.draft({ deferred: [named] }));
-      await interruptDraftWrite(
-        path.join(
-          f.root,
-          layout === "worker" ? "result.json" : "coverage.json",
-        ),
-        () => f.write(f.draft({ deferred: [raw] })),
-      );
-      await f.write(f.draft({}, true));
-      const saved = await f.read();
-      assert.equal(saved.completeness, "partial");
-      assert.deepEqual(
-        saved.deferred.find((row) => row.id === named.id),
-        named,
-      );
-      const independent = saved.deferred.find((row) => row.id !== named.id);
-      assert.ok(independent);
-      assert.deepEqual(independent, { ...raw, id: independent.id });
-      const outcome =
-        payload === "generic"
-          ? { resolvedDeferred: [close(named.id)] }
-          : {
-              surfaces: [
-                {
-                  candidateId: named.candidateId,
-                  label: "Caller",
-                  disposition: "rejected",
-                },
-              ],
-            };
-      await f.write(f.draft(outcome, true));
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, [independent]);
-    });
-  }
-
-  for (const submittedId of [undefined, "api", "other-api"]) {
-    test(`${layout}: surface closeout requires matching ID ${submittedId ?? "omitted"}`, async (t) => {
-      const f = await fixture(t, layout);
-      const surface = {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: ["artifacts/api-review.md"],
-      };
-      const other = {
-        ...surface,
-        id: "another-api",
-        notes: "Independent entry point.",
-      };
-      await f.write(
-        f.draft({
-          surfaces: [surface, other],
-          deferred: [
-            { id: "api-review", ...generic, surfaceIds: [surface.id] },
-          ],
         }),
       );
-      await f.write(
-        f.draft(
-          {
-            resolvedDeferred: [close("api-review")],
-            surfaces: [
-              {
-                ...(submittedId ? { id: submittedId } : {}),
-                label: surface.label,
-                disposition: "no_issue_found",
-              },
-            ],
-          },
-          true,
-        ),
-      );
-      await f.write(f.draft({}, true));
-      const saved = await f.read();
-      assert.deepEqual(saved.deferred, []);
-      assert.deepEqual(
-        saved.surfaces.find((row) => row.id === other.id),
-        other,
-      );
-      assert.equal(saved.completeness, "partial");
-      assert.deepEqual(
-        saved.surfaces.find((row) => row.id === surface.id),
-        submittedId === surface.id
-          ? { ...surface, disposition: "no_issue_found" }
-          : surface,
-      );
-    });
-  }
-
-  for (const payload of ["generic", "candidate"]) {
-    test(`${layout}: closing one task retains ${payload} work on a shared surface`, async (t) => {
-      const f = await fixture(t, layout);
-      const first = { id: "review-a", ...generic, surfaceIds: ["shared"] };
-      const remaining = {
-        id: "review-b",
-        ...generic,
-        surfaceIds: ["shared"],
-        ...(payload === "candidate"
-          ? {
-              candidateId: "candidate-b",
-              candidate: { title: "Pending caller." },
-            }
-          : {}),
-      };
-      const surface = {
-        id: "shared",
-        label: "Shared entry point",
-        disposition: "needs_follow_up",
-        notes: "The second caller still needs review.",
-        receiptRefs: ["artifacts/pending.md"],
-      };
-      await f.write(
-        f.draft({ surfaces: [surface], deferred: [first, remaining] }),
-      );
-      const closure = close(first.id);
-      for (const resolvedDeferred of [[closure], [closure], undefined]) {
-        await f.write(
-          f.draft(
-            resolvedDeferred
-              ? {
-                  resolvedDeferred,
-                  surfaces: [
-                    {
-                      ...surface,
-                      disposition: "no_issue_found",
-                      notes: "The first caller is reviewed.",
-                      receiptRefs: ["artifacts/reviewed.md"],
-                    },
-                  ],
-                }
-              : {},
-            true,
-          ),
-        );
-        const saved = await f.read();
-        assert.equal(saved.completeness, "partial");
-        assert.deepEqual(saved.deferred, [remaining]);
-        assert.deepEqual(saved.resolvedDeferred, [closure]);
-        assert.deepEqual(saved.surfaces, [
-          {
-            ...surface,
-            receiptRefs: ["artifacts/reviewed.md", "artifacts/pending.md"],
-          },
-        ]);
-      }
-    });
-  }
-
-  for (const observation of ["terminal", "progress", "surface-only", "tied"]) {
-    test(`${layout}: explicit surface follow-up survives ${observation} checkpoint recovery`, async (t) => {
-      const f = await fixture(t, layout);
-      const pending = { id: "api-review", ...generic, surfaceIds: ["api"] };
-      const surface = {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: ["artifacts/original.md"],
-      };
-      await f.write(f.draft({ deferred: [pending], surfaces: [surface] }));
-      const closed = f.draft(
-        {
-          resolvedDeferred: [close(pending.id)],
-          surfaces: [{ ...surface, disposition: "no_issue_found" }],
-        },
-        true,
-      );
-      await f.write(closed);
-      const checkpoints = path.join(f.root, "checkpoints");
-      for (const name of await checkpointNames(checkpoints)) {
-        const file = path.join(checkpoints, name);
-        const row = JSON.parse(await readFile(file, "utf8"));
-        const time = row.coverage.resolvedDeferred?.length ? 2 : 1;
-        await utimes(file, time, time);
-      }
-      for (const name of layout === "worker"
-        ? ["result.json", "checkpoint-head.json"]
-        : ["coverage.json", "scan-manifest.json", "findings.json"])
-        await utimes(path.join(f.root, name), 2, 2);
-      const before = new Set(await checkpointNames(checkpoints));
-      const followUp = {
-        ...surface,
-        notes: "A new caller needs review.",
-        receiptRefs: ["artifacts/new-caller.md"],
-      };
-      const deferred =
-        observation === "surface-only"
-          ? []
-          : [{ ...pending, reason: followUp.notes }];
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft(
-          { deferred, surfaces: [followUp] },
-          observation === "terminal" || observation === "tied",
-        ),
-        false,
-      );
-      for (const name of await checkpointNames(checkpoints)) {
-        if (!before.has(name)) {
-          const time = observation === "tied" ? 2 : 3;
-          await utimes(path.join(checkpoints, name), time, time);
-        }
-      }
-      for (const complete of [true, false, true]) {
-        await f.write(f.draft({}, complete));
-        const saved = await f.read();
-        assert.equal(saved.completeness, "partial");
-        assert.deepEqual(saved.deferred, deferred);
-        assert.equal(saved.surfaces.length, 1);
-        assert.equal(saved.surfaces[0].id, surface.id);
-        assert.equal(saved.surfaces[0].disposition, "needs_follow_up");
-        assert.equal(saved.surfaces[0].notes, followUp.notes);
-        assert.ok(
-          saved.surfaces[0].receiptRefs.includes("artifacts/new-caller.md"),
-        );
-      }
-      await f.write(closed);
-      const saved = await f.read();
-      assert.equal(saved.completeness, "complete");
-      assert.deepEqual(saved.deferred, []);
-      assert.equal(saved.surfaces[0].disposition, "no_issue_found");
-    });
-  }
-
-  for (const destination of layout === "worker"
-    ? ["result.json", "checkpoint-head.json"]
-    : ["coverage.json", "scan-manifest.json"]) {
-    test(`${layout}: recover explicit work after ${destination} publication fails`, async (t) => {
-      const f = await fixture(t, layout);
-      const pending = { id: "review", ...generic };
-      const closing = f.draft({ resolvedDeferred: [close(pending.id)] }, true);
-      const fail = (input) =>
-        interruptDraftWrite(path.join(f.root, destination), () =>
-          f.write(input),
-        );
-      await f.write(f.draft({ deferred: [pending] }));
-      await fail(closing);
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, []);
-      assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
-      const checkpointRoot = path.join(f.root, "checkpoints");
-      const originalClosures = [];
-      for (const name of await checkpointNames(checkpointRoot)) {
-        const file = path.join(checkpointRoot, name);
-        const saved = JSON.parse(await readFile(file, "utf8"));
-        if (saved.coverage.resolvedDeferred?.length)
-          originalClosures.push([file, (await stat(file)).mtimeMs]);
-      }
-      const reopened = {
-        ...pending,
-        reason: "A newly inspected caller needs review.",
-      };
-      await fail(f.draft({ deferred: [reopened] }, true));
-      await f.write(f.draft({}, true));
-      const saved = await f.read();
-      assert.equal(saved.completeness, "partial");
-      assert.deepEqual(saved.deferred, [reopened]);
-      assert.deepEqual(saved.resolvedDeferred ?? [], []);
-      await fail(closing);
-      for (const [file, modified] of originalClosures)
-        assert.equal((await stat(file)).mtimeMs, modified);
-      await f.write(f.draft({}, true));
-      const accepted =
-        destination === "result.json" || destination === "scan-manifest.json";
-      assert.deepEqual((await f.read()).deferred, accepted ? [] : [reopened]);
-      await f.write(closing);
-      await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, []);
-      assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
-    });
-  }
-}
-
-test("worker: inherited closures cannot erase ambiguous legacy tasks", async (t) => {
-  const f = await fixture(t, "worker");
-  const tasks = [
-    { id: "review", ...generic },
-    { id: "review", reason: "Review storage.", paths: ["src/storage.py"] },
-  ];
-  await saveScanDraftCheckpoint(f.context, f.draft({ deferred: tasks }), false);
-  await saveScanDraftCheckpoint(
-    f.context,
-    f.draft({ resolvedDeferred: [close("review")] }, true),
-  );
-  const checkpoints = path.join(f.root, "checkpoints");
-  for (const name of await checkpointNames(checkpoints)) {
-    const filename = path.join(checkpoints, name);
-    const saved = JSON.parse(await readFile(filename, "utf8"));
-    const timestamp = saved.coverage.deferred.length ? 100 : 200;
-    await utimes(filename, timestamp, timestamp);
-  }
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const recovered = await f.write(f.draft({}, true));
-    assert.equal(recovered.coverage.completeness, "partial");
-    assert.deepEqual(recovered.coverage.deferred, tasks);
-    assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
-  }
-});
-
-for (const layout of ["standard", "diff"]) {
-  for (const taskCount of [1, 2]) {
-    test(`${layout}: an upgraded checkpoint retains ${taskCount} older canonical task IDs`, async (t) => {
-      const f = await fixture(t, layout);
-      await f.write(f.draft({ deferred: [generic] }));
-      const legacyId = `deferred-${createHash("sha256")
-        .update(JSON.stringify([generic.reason, generic.paths, []]))
-        .digest("hex")
-        .slice(0, 16)}`;
-      const coverage = await f.read();
-      const named = Array.from({ length: taskCount }, (_, index) => ({
-        id: index === 0 ? legacyId : `${legacyId}-${index + 1}`,
-        paths: generic.paths,
-        reason: generic.reason,
-      }));
-      coverage.deferred = named;
-      await writeFile(
-        path.join(f.root, "coverage.json"),
-        JSON.stringify(coverage),
-      );
-      await rm(path.join(f.root, "checkpoint-head.json"), { force: true });
-      await rm(path.join(f.root, "checkpoints"), {
-        recursive: true,
-        force: true,
+      const context = await createScanArtifactContext(scanId, workbench);
+      const input = (path) => ({
+        scanId,
+        complete: false,
+        findings: path
+          ? [
+              semanticFinding({
+                locations: [{ path, startLine: 1 }],
+                provenance: { source: "local_plugin", candidateId: path },
+              }),
+            ]
+          : [],
+        coverage: semanticCoverage({
+          completeness: "partial",
+          surfaces: path
+            ? [
+                {
+                  label: "Output review",
+                  disposition: "needs_follow_up",
+                  paths: [path],
+                },
+              ]
+            : [],
+          deferred: path
+            ? [
+                {
+                  reason: "Review shared output",
+                  paths: ["shared.js"],
+                  candidate: { summary: path },
+                },
+              ]
+            : [],
+        }),
       });
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({ deferred: Array.from({ length: taskCount }, () => generic) }),
-        false,
-      );
-      const resumed = await f.write(f.draft({}, true));
-      assert.deepEqual(resumed.coverage.deferred, named);
-      const partlyClosed = await f.write(
-        f.draft({ resolvedDeferred: [close(legacyId)] }, true),
-      );
-      assert.deepEqual(partlyClosed.coverage.deferred, named.slice(1));
-      if (taskCount > 1)
-        await f.write(
-          f.draft(
-            { resolvedDeferred: named.slice(1).map(({ id }) => close(id)) },
-            true,
-          ),
+      const save = (draft, publish = workbench, signal) =>
+        recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          draft,
+          publish,
+          signal,
         );
-      const retried = await f.write(f.draft({}, true));
-      assert.deepEqual(retried.coverage.deferred, []);
-      assert.deepEqual(
-        new Set(retried.coverage.resolvedDeferred.map(({ id }) => id)),
-        new Set(named.map(({ id }) => id)),
-      );
-    });
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  test(`${layout}: a staged explicit surface closeout survives omitted and repeated retries`, async (t) => {
-    const f = await fixture(t, layout);
-    const surface = {
-      id: "api",
-      label: "API",
-      disposition: "needs_follow_up",
-      receiptRefs: ["artifacts/api-review.md"],
-    };
-    await f.write(
-      f.draft({
-        surfaces: [surface],
-        deferred: [{ id: "review", ...generic, surfaceIds: [surface.id] }],
-      }),
-    );
-    const resolvedDeferred = [close("review")];
-    const closed = f.draft(
-      {
-        resolvedDeferred,
-        surfaces: [
-          {
-            id: surface.id,
-            label: surface.label,
-            disposition: "no_issue_found",
-          },
-        ],
-      },
-      true,
-    );
-    await assert.rejects(
-      recordCodexSecurityScanDraftViaWorkbench(
-        f.context,
-        closed,
-        async (args) => {
+      await save(input());
+      let prepared, release;
+      const ready = new Promise((resolve) => {
+        prepared = resolve;
+      });
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const abort = new AbortController();
+      const submitted = [];
+      const laterInput = input("later.js");
+      const later = save(
+        laterInput,
+        async (args, encoded) => {
           const checkpoint = JSON.parse(
             await readFile(args[args.indexOf("--checkpoint-path") + 1], "utf8"),
           );
-          await saveScanDraftCheckpoint(f.context, checkpoint);
-          throw new Error("interrupted draft write");
+          submitted.push({
+            finding: checkpoint.findings.find(
+              (row) => row.locations[0].path === "later.js",
+            ).identity,
+            surface: checkpoint.coverage.surfaces.find(
+              (row) => row.paths[0] === "later.js",
+            ).id,
+            deferred: checkpoint.coverage.deferred.find(
+              (row) => row.candidate.summary === "later.js",
+            ).id,
+          });
+          if (submitted.length === 1) {
+            prepared();
+            await gate;
+          }
+          try {
+            return await workbench(args, encoded);
+          } catch (error) {
+            assert.match(String(error), /scan_draft_conflict/);
+            if (scenario !== "retry")
+              abort.abort(new Error("Synthetic interruption"));
+            throw error;
+          }
         },
-      ),
-      /interrupted draft write/,
-    );
-    for (const coverage of [{}, { resolvedDeferred }, {}]) {
-      await f.write(f.draft(coverage, true));
-      const saved = await f.read();
-      assert.equal(saved.completeness, "complete");
-      assert.deepEqual(saved.deferred, []);
-      assert.deepEqual(saved.resolvedDeferred, resolvedDeferred);
-      assert.deepEqual(saved.surfaces, [
-        { ...surface, disposition: "no_issue_found" },
-      ]);
-    }
-  });
-}
-
-for (const layout of ["standard", "diff", "worker"]) {
-  for (const interrupted of [false, true]) {
-    test(`${layout}: returned surface IDs support closeout after first-write interruption=${interrupted}`, async (t) => {
-      const f = await fixture(t, layout);
-      const input = f.draft({
-        surfaces: [{ label: "API", disposition: "needs_follow_up" }],
-        deferred: [generic],
-      });
-      const original = structuredClone(input);
-      if (interrupted) {
-        await interruptDraftWrite(
-          path.join(
-            f.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          ),
-          () => f.write(input),
-        );
-      }
-      const initial = await f.write(input);
-      const [surface] = initial.coverage.surfaces;
-      const [task] = initial.coverage.deferred;
-      assert.equal(typeof surface.id, "string");
-      assert.equal(typeof task.id, "string");
-      assert.deepEqual(initial.coverage, await f.read());
-      assert.deepEqual(input, original);
-      for (const name of await checkpointNames(
-        path.join(f.root, "checkpoints"),
-      )) {
-        const checkpoint = JSON.parse(
-          await readFile(path.join(f.root, "checkpoints", name), "utf8"),
-        );
-        assert.equal(checkpoint.coverage.surfaces[0].id, surface.id);
-        assert.deepEqual(checkpoint.coverage.surfaces[0].receiptRefs, []);
-        assert.equal(checkpoint.coverage.deferred[0].id, task.id);
-      }
-      const linked = await f.write(
-        f.draft({
-          surfaces: [surface],
-          deferred: [
-            {
-              ...task,
-              surfaceIds: [surface.id],
-              notes: "Both callers inspected.",
-            },
-          ],
-        }),
+        abort.signal,
+      ).then(
+        () => assert.equal(scenario, "retry"),
+        (error) => {
+          assert.notEqual(scenario, "retry");
+          assert.equal(error.message, "Synthetic interruption");
+        },
       );
-      assert.equal(linked.coverage.deferred.length, 1);
-      assert.equal(linked.coverage.deferred[0].id, task.id);
-      const terminal = await f.write(
-        f.draft(
-          {
-            surfaces: [{ ...surface, disposition: "no_issue_found" }],
-            resolvedDeferred: [close(task.id)],
-          },
-          true,
+      await ready;
+      await save(input("earlier.js"));
+      release();
+      await later;
+      assert.equal(laterInput.findings[0].identity, undefined);
+      assert.equal(submitted.length, scenario === "retry" ? 2 : 1);
+      if (scenario === "retry") assert.deepEqual(submitted[1], submitted[0]);
+      await save({
+        ...input(
+          scenario === "interrupted then new draft" ? "new.js" : undefined,
         ),
+        complete: true,
+      });
+      const snapshotPath = join(scanDir, "artifacts/scan-draft.json");
+      const saved = JSON.parse(await readFile(snapshotPath, "utf8"));
+      const expected =
+        scenario === "interrupted then new draft"
+          ? ["earlier.js", "later.js", "new.js"]
+          : ["earlier.js", "later.js"];
+      assert.deepEqual(
+        saved.findings.findings.map((row) => row.locations[0].path).sort(),
+        expected,
       );
-      assert.equal(terminal.coverage.completeness, "complete");
-      assert.deepEqual(terminal.coverage.deferred, []);
-      assert.deepEqual(terminal.coverage.surfaces, [
-        { ...surface, disposition: "no_issue_found", receiptRefs: [] },
-      ]);
-      await f.write(f.draft({}, true));
-      assert.deepEqual(await f.read(), terminal.coverage);
-    });
-  }
+      assert.deepEqual(
+        saved.coverage.surfaces.map((row) => row.paths[0]).sort(),
+        expected,
+      );
+      assert.deepEqual(
+        saved.coverage.deferred.map((row) => row.candidate.summary).sort(),
+        expected,
+      );
+      assert.deepEqual(
+        saved.findings.findings.map((row) => row.provenance.candidateId).sort(),
+        expected,
+      );
+      const revision = saved.findings.findings[0];
+      const identity = structuredClone(revision.identity);
+      revision.remediation = "Revised repair.";
+      await save({
+        scanId,
+        findings: [revision],
+        coverage: semanticCoverage({
+          completeness: saved.coverage.completeness,
+          surfaces: saved.coverage.surfaces,
+          explicitExclusions: saved.coverage.explicitExclusions,
+          deferred: saved.coverage.deferred,
+        }),
+      });
+      const revised = JSON.parse(await readFile(snapshotPath, "utf8"));
+      assert.equal(revised.findings.findings.length, expected.length);
+      assert.deepEqual(revised.findings.findings[0].identity, identity);
+      assert.equal(revised.findings.findings[0].remediation, "Revised repair.");
+      assert.deepEqual(revised.coverage, saved.coverage);
+      await workbench(["prepare-scan-completion", "--scan-id", scanId]);
+      const findings = JSON.parse(
+        await readFile(join(scanDir, "findings.json"), "utf8"),
+      ).findings;
+      assert.deepEqual(
+        findings.map((row) => row.locations[0].path).sort(),
+        expected,
+      );
+      assert.ok(
+        JSON.parse(await readFile(join(scanDir, "scan-manifest.json"), "utf8"))
+          .scan.sealedAt,
+      );
+    },
+  );
 }
 
-test("worker: duplicate authored surface IDs preserve each observation", async (t) => {
-  const f = await fixture(t, "worker");
-  const rows = [
-    { id: "api", label: "First API", disposition: "needs_follow_up" },
-    { id: "api", label: "Second API", disposition: "needs_follow_up" },
-    { id: "api-2", label: "Existing API", disposition: "needs_follow_up" },
-  ];
-  const initial = await f.write(f.draft({ surfaces: rows }));
-  assert.deepEqual(
-    initial.coverage.surfaces.map(({ id }) => id),
-    ["api", "api-3", "api-2"],
+async function publicationFixture(t, mode = "standard") {
+  const root = await privateDirectory("codex-security-publication-recovery-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  await mkdir(join(repository, "src"), { recursive: true });
+  await writeFile(
+    join(repository, "src/render.js"),
+    "export const value = 1;\n",
   );
-  assert.deepEqual(
-    (await f.write(f.draft({ surfaces: rows }))).coverage.surfaces,
-    initial.coverage.surfaces,
-  );
-  const updated = initial.coverage.surfaces.map((row) =>
-    row.id === "api-3" ? { ...row, disposition: "no_issue_found" } : row,
-  );
-  const saved = await f.write(f.draft({ surfaces: updated }));
-  assert.equal(saved.coverage.surfaces.length, 3);
-  assert.equal(
-    saved.coverage.surfaces.find(({ id }) => id === "api").disposition,
-    "needs_follow_up",
-  );
-  assert.equal(
-    saved.coverage.surfaces.find(({ id }) => id === "api-3").disposition,
-    "no_issue_found",
-  );
-});
-
-test("worker: surface IDs remain valid independently of candidate names", async (t) => {
-  const f = await fixture(t, "worker");
-  const candidate = {
-    candidateId: "Candidate A",
-    label: "API",
-    disposition: "needs_follow_up",
+  await mkdir(scanDir, { mode: 0o700 });
+  const workbench = async (args, input, interruptedAt) => {
+    const injected = [
+      "import runpy, sys",
+      "from pathlib import Path",
+      "script, interrupted = sys.argv[1:3]",
+      "sys.path.insert(0, str(Path(script).parent))",
+      "import workbench_saved_results as saved",
+      "original = saved.write_scan_local_bytes",
+      "def write(root, relative, contents, **kwargs):",
+      "    if relative == interrupted: raise OSError('Synthetic publication interruption')",
+      "    return original(root, relative, contents, **kwargs)",
+      "saved.write_scan_local_bytes = write",
+      "sys.argv = [script, *sys.argv[3:]]",
+      "runpy.run_path(script, run_name='__main__')",
+    ].join("\n");
+    const execution = exec(
+      process.env.PYTHON || "python3",
+      interruptedAt
+        ? ["-c", injected, script, interruptedAt, ...args]
+        : [script, ...args],
+      {
+        env: { ...process.env, CODEX_SECURITY_STATE_DIR: join(root, "state") },
+      },
+    );
+    execution.child.stdin.on("error", () => {});
+    execution.child.stdin.end(input);
+    return JSON.parse((await execution).stdout);
   };
-  const initial = await f.write(f.draft({ surfaces: [candidate] }));
-  const [surface] = initial.coverage.surfaces;
-  assert.match(surface.id, /^[a-z0-9][a-z0-9._/-]*$/u);
-  assert.equal(surface.candidateId, candidate.candidateId);
-  await f.write(
-    f.draft({ surfaces: [{ ...surface, disposition: "rejected" }] }, true),
+  const { scanId } = await workbench(
+    [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--registration-json-stdin",
+    ],
+    JSON.stringify({
+      recipe: {
+        repository,
+        target: { kind: "repository", paths: [] },
+        mode,
+        config: {},
+      },
+    }),
   );
-  const retried = await f.write(f.draft({}, true));
-  assert.deepEqual(retried.coverage.surfaces, [
-    { ...surface, disposition: "rejected" },
-  ]);
-});
-
-test("worker: generated surface IDs preserve distinct observations and reserved identities", async (t) => {
-  const f = await fixture(t, "worker");
-  const first = {
-    label: "API",
-    disposition: "needs_follow_up",
-    notes: "First caller.",
+  const context = await createScanArtifactContext(scanId, workbench);
+  const save = (input, interruptedAt) =>
+    recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      { scanId, findings: [], coverage: semanticCoverage(), ...input },
+      (args, stdin) => workbench(args, stdin, interruptedAt),
+    );
+  const read = async (name) =>
+    JSON.parse(await readFile(join(scanDir, name), "utf8"));
+  const finding = (id) =>
+    semanticFinding({
+      identity: { anchor: id },
+      provenance: { source: "local_plugin", candidateId: id },
+    });
+  const rejection = {
+    id: "reviewed-surface",
+    label: "Reviewed candidate",
+    disposition: "rejected",
+    candidateId: "candidate",
+    rationale: "Synthetic candidate rejected.",
   };
-  const second = { ...first, notes: "Second caller." };
-  const input = f.draft({ surfaces: [first, second] });
-  const initial = await f.write(input);
-  const ids = initial.coverage.surfaces.map(({ id }) => id);
-  assert.ok(ids.every((id) => typeof id === "string"));
-  assert.equal(new Set(ids).size, 2);
-  assert.deepEqual(
-    (await f.write(input)).coverage.surfaces,
-    initial.coverage.surfaces,
-  );
-  const changed = { ...first, notes: "A newly found caller." };
-  const updated = await f.write(f.draft({ surfaces: [changed] }));
-  assert.equal(updated.coverage.surfaces.length, 3);
-  assert.ok(
-    updated.coverage.surfaces.some(
-      (row) => row.id === ids[0] && row.notes === first.notes,
-    ),
-  );
-  const other = await fixture(t, "worker");
-  const reserved = [
-    first,
-    second,
-    { ...changed, id: ids[0] },
-    { label: "Candidate", disposition: "needs_follow_up", candidateId: ids[1] },
-  ];
-  const saved = (await other.write(other.draft({ surfaces: reserved })))
-    .coverage.surfaces;
-  assert.equal(new Set(saved.map(({ id }) => id)).size, 4);
-  assert.equal(saved[2].id, ids[0]);
-  assert.equal(saved[3].candidateId, ids[1]);
-  assert.notEqual(saved[0].id, ids[0]);
-  assert.notEqual(saved[3].id, ids[1]);
-  for (const input of [other.draft({ surfaces: [saved[3]] }), other.draft()]) {
-    const retained = (await other.write(input)).coverage.surfaces;
-    assert.equal(retained.length, saved.length);
+  return {
+    root,
+    scanDir,
+    scanId,
+    context,
+    save,
+    read,
+    finding,
+    rejection,
+    workbench,
+  };
+}
+
+for (const timestamp of ["unchanged", "changed", "omitted"]) {
+  test(`MCP drafts preserve later canonical findings and coverage with ${timestamp} timestamp`, async (t) => {
+    const f = await publicationFixture(t);
+    await f.save({ complete: false, findings: [f.finding("initial")] });
+    const manifest = await f.read("scan-manifest.json");
+    const findings = await f.read("findings.json");
+    const coverage = await f.read("coverage.json");
+    findings.findings.push(f.finding("later-canonical"));
+    coverage.completeness = "partial";
+    coverage.deferred.push({
+      id: "later-work",
+      reason: "Retain later observed work.",
+    });
+    if (timestamp === "changed")
+      manifest.scan.completedAt = "2030-01-01T00:00:00Z";
+    if (timestamp === "omitted") delete manifest.scan.completedAt;
+    for (const [name, document] of [
+      ["scan-manifest.json", manifest],
+      ["findings.json", findings],
+      ["coverage.json", coverage],
+    ])
+      await writeFile(join(f.scanDir, name), JSON.stringify(document));
+    await f.save({ complete: false });
     assert.deepEqual(
-      retained.find((row) => row.notes === second.notes),
-      saved[1],
+      (await f.read("findings.json")).findings
+        .map((row) => row.identity.anchor)
+        .sort(),
+      ["initial", "later-canonical"],
     );
-  }
-  assert.notEqual(saved[1].id, ids[1]);
-});
-
-test("worker: archived closures cannot discard a later explicitly reopened task", async (t) => {
-  const f = await fixture(t, "worker");
-  const pending = { id: "review", ...generic };
-  await f.write(f.draft({ deferred: [pending] }));
-  await f.write(f.draft({ resolvedDeferred: [close(pending.id)] }, true));
-  const attempts = path.join(path.dirname(f.root), "attempts");
-  await mkdir(attempts);
-  await rename(f.root, path.join(attempts, "attempt-01"));
-  await mkdir(f.root);
-  await f.write(f.draft({ deferred: [pending] }, true));
-  await rename(f.root, path.join(attempts, "attempt-02"));
-  await mkdir(f.root);
-  await f.write(f.draft({}, true));
-  assert.deepEqual((await f.read()).deferred, [pending]);
-  assert.deepEqual((await f.read()).resolvedDeferred ?? [], []);
-});
-
-for (const layout of ["standard", "diff"]) {
-  for (const selectedTime of [150, 200, 300]) {
-    test(`${layout}: parent checkpoint selection at ${selectedTime} orders a closure`, async (t) => {
-      const f = await fixture(t, layout);
-      const pending = { id: "review", ...generic };
-      await f.write(f.draft({ deferred: [pending] }));
-      const closed = f.draft(
-        { resolvedDeferred: [{ id: pending.id, reason: "Callers reviewed." }] },
-        true,
-      );
-      await f.write(closed);
-      await f.write(f.draft({ deferred: [pending] }));
-      let selected;
-      for (const name of await checkpointNames(
-        path.join(f.root, "checkpoints"),
-      )) {
-        const file = path.join(f.root, "checkpoints", name);
-        const value = JSON.parse(await readFile(file, "utf8"));
-        const time = value.coverage.resolvedDeferred?.length ? 100 : 200;
-        await utimes(file, time, time);
-        if (value.complete && value.coverage.resolvedDeferred?.length)
-          selected = name;
-      }
-      assert.ok(selected);
-      for (const name of [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ])
-        await utimes(path.join(f.root, name), 200, 200);
-      const head = path.join(f.root, "checkpoint-head.json");
-      await writeFile(head, JSON.stringify({ checkpoint: selected }));
-      await utimes(head, selectedTime, selectedTime);
-      await f.write(f.draft({}, true));
-      const saved = await f.read();
-      if (selectedTime > 200) {
-        assert.deepEqual(saved.deferred, []);
-        assert.deepEqual(
-          saved.resolvedDeferred,
-          closed.coverage.resolvedDeferred,
-        );
-        assert.equal(saved.completeness, "complete");
-      } else {
-        assert.deepEqual(saved.deferred, [pending]);
-        assert.equal(saved.resolvedDeferred, undefined);
-        assert.equal(saved.completeness, "partial");
-      }
-    });
-  }
-}
-
-for (const payload of ["generic", "candidate"]) {
-  test(`worker: legacy unnamed ${payload} evidence remains pending after a named closeout`, async (t) => {
-    const f = await fixture(t, "worker");
-    const raw = {
-      ...generic,
-      ...(payload === "candidate"
-        ? { candidate: { title: "Caller review." } }
-        : {}),
-    };
-    const named = {
-      ...raw,
-      id: "named-review",
-      notes: "Saved caller context.",
-      ...(payload === "candidate" ? { candidateId: "named-candidate" } : {}),
-    };
-    await f.write(f.draft({ deferred: [named] }));
-    await saveScanDraftCheckpoint(
-      f.context,
-      f.draft({ deferred: [raw] }),
-      false,
+    assert.deepEqual(
+      (await f.read("coverage.json")).deferred,
+      coverage.deferred,
     );
-    const outcome =
-      payload === "generic"
-        ? { resolvedDeferred: [close(named.id)] }
-        : {
-            surfaces: [
-              {
-                candidateId: named.candidateId,
-                label: "Caller",
-                disposition: "rejected",
-              },
-            ],
-          };
-    await f.write(f.draft(outcome, true));
-    await f.write(f.draft({}, true));
-    const saved = await f.read();
-    assert.equal(saved.completeness, "partial");
-    assert.ok(saved.deferred.length > 0);
-    for (const { id, ...row } of saved.deferred) {
-      assert.notEqual(id, named.id);
-      assert.deepEqual(row, raw);
-    }
+    await f.save({ complete: false });
+    assert.equal((await f.read("findings.json")).findings.length, 2);
   });
 }
+
+for (const interruptedAt of [
+  "findings.json",
+  "coverage.json",
+  "scan-manifest.json",
+]) {
+  test(`MCP drafts retain committed rejection after export interrupts at ${interruptedAt}`, async (t) => {
+    const f = await publicationFixture(t);
+    const original = f.finding("candidate");
+    await f.save({
+      findings: [original],
+      complete: false,
+      coverage: semanticCoverage({
+        completeness: "partial",
+        deferred: [{ id: "generic-work", reason: "Review a boundary." }],
+      }),
+    });
+    await assert.rejects(
+      f.save(
+        {
+          coverage: semanticCoverage({
+            surfaces: [f.rejection],
+            resolvedDeferred: [
+              { id: "generic-work", reason: "Boundary reviewed." },
+            ],
+          }),
+        },
+        interruptedAt,
+      ),
+      /Synthetic publication interruption/,
+    );
+    await f.save({ complete: false });
+    assert.deepEqual((await f.read("findings.json")).findings, []);
+    const coverage = await f.read("coverage.json");
+    assert.equal(coverage.surfaces[0].disposition, "rejected");
+    assert.deepEqual(coverage.surfaces[0].finding, original);
+    assert.deepEqual(coverage.deferred, []);
+    assert.deepEqual(coverage.resolvedDeferred, [
+      { id: "generic-work", reason: "Boundary reviewed." },
+    ]);
+  });
+}
+
+for (const pendingNewer of [true, false]) {
+  test(`MCP reconciliation keeps the ${pendingNewer ? "pending" : "committed"} terminal decision by recency`, async (t) => {
+    const f = await publicationFixture(t);
+    const original = f.finding("candidate");
+    const committedModel = {
+      format: "markdown",
+      content: "# Committed model\n",
+    };
+    const pendingModel = { format: "markdown", content: "# Pending model\n" };
+    await f.save({ findings: [original], threatModel: committedModel });
+    await assert.rejects(
+      f.save(
+        {
+          coverage: semanticCoverage({ surfaces: [f.rejection] }),
+          threatModel: pendingModel,
+        },
+        "artifacts/scan-draft.json",
+      ),
+      /Synthetic publication interruption/,
+    );
+    const pendingDir = join(f.scanDir, "checkpoints/pending");
+    const pending = await readdir(pendingDir);
+    assert.equal(pending.length, 1);
+    await utimes(
+      join(f.scanDir, "artifacts/scan-draft.json"),
+      1700000010,
+      1700000010,
+    );
+    for (const name of pending) {
+      const timestamp = pendingNewer ? 1700000020 : 1700000000;
+      for (const relative of [
+        join("checkpoints", name),
+        join("checkpoints/pending", name),
+      ])
+        await utimes(join(f.scanDir, relative), timestamp, timestamp);
+    }
+    await f.save({
+      complete: false,
+      threatModel: {
+        format: "markdown",
+        content: "# Incomplete retry model\n",
+      },
+    });
+    assert.deepEqual(
+      (await f.read("scan-manifest.json")).scan.threatModel,
+      pendingNewer ? pendingModel : committedModel,
+    );
+    const findings = (await f.read("findings.json")).findings;
+    assert.equal(findings.length, pendingNewer ? 0 : 1);
+    if (pendingNewer) {
+      const surface = (await f.read("coverage.json")).surfaces.find(
+        (row) => row.candidateId === "candidate",
+      );
+      assert.equal(surface.disposition, "rejected");
+      assert.deepEqual(surface.finding, original);
+    }
+    const acknowledged = (await f.read("artifacts/scan-draft.json"))
+      .reconciledCheckpointIds;
+    assert.ok(pending.every((name) => acknowledged.includes(name)));
+    assert.deepEqual(await readdir(pendingDir), []);
+    const evidence = await f.read(join("checkpoints", pending[0]));
+    assert.equal(evidence.coverage.surfaces[0].disposition, "rejected");
+  });
+}
+
+for (const mode of ["standard", "deep"]) {
+  for (const source of ["canonical", "pending"]) {
+    for (const newer of [true, false]) {
+      test(`MCP ${mode} draft preserves the newest threat model (${source} ${newer ? "newer" : "older"})`, async (t) => {
+        const f = await publicationFixture(t, mode);
+        const committedModel = {
+          format: "markdown",
+          content: "# Committed model\n",
+        };
+        const authoredModel = {
+          format: "markdown",
+          content: "# Authored model\n",
+        };
+        await f.save({ complete: false, threatModel: committedModel });
+        const authoredPaths = [];
+        if (source === "canonical") {
+          const manifest = await f.read("scan-manifest.json");
+          manifest.scan.threatModel = authoredModel;
+          await writeFile(
+            join(f.scanDir, "scan-manifest.json"),
+            JSON.stringify(manifest),
+          );
+          authoredPaths.push(
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+          );
+        } else {
+          await assert.rejects(
+            f.save(
+              { complete: false, threatModel: authoredModel },
+              "artifacts/scan-draft.json",
+            ),
+            /Synthetic publication interruption/,
+          );
+          const pending = await readdir(join(f.scanDir, "checkpoints/pending"));
+          assert.equal(pending.length, 1);
+          authoredPaths.push(
+            join("checkpoints", pending[0]),
+            join("checkpoints/pending", pending[0]),
+          );
+        }
+        await utimes(
+          join(f.scanDir, "artifacts/scan-draft.json"),
+          1700000010,
+          1700000010,
+        );
+        for (const path of authoredPaths) {
+          const timestamp = newer ? 1700000020 : 1700000000;
+          await utimes(join(f.scanDir, path), timestamp, timestamp);
+        }
+
+        await f.save({ complete: false });
+        for (const manifest of [
+          await f.read("scan-manifest.json"),
+          (await f.read("artifacts/scan-draft.json")).manifest,
+        ])
+          assert.deepEqual(
+            manifest.scan.threatModel,
+            newer ? authoredModel : committedModel,
+          );
+
+        const explicitModel = {
+          format: "markdown",
+          content: "# Explicit new model\n",
+        };
+        await f.save({ complete: false, threatModel: explicitModel });
+        assert.deepEqual(
+          (await f.read("scan-manifest.json")).scan.threatModel,
+          explicitModel,
+        );
+        assert.deepEqual(
+          (await f.read("artifacts/scan-draft.json")).manifest.scan.threatModel,
+          explicitModel,
+        );
+      });
+    }
+  }
+}
+
+test("MCP rejection and re-report preserve every finding for one candidate", async (t) => {
+  const f = await publicationFixture(t);
+  const original = ["first", "second"].map((id) => ({
+    ...f.finding("candidate"),
+    identity: { anchor: id },
+    title: `Synthetic ${id} finding`,
+    remediation: `Preserve ${id} repair.`,
+  }));
+  await f.save({ findings: original });
+  await f.save({ coverage: semanticCoverage({ surfaces: [f.rejection] }) });
+  assert.deepEqual((await f.read("findings.json")).findings, []);
+  await f.save({
+    findings: [
+      { ...f.finding("candidate"), identity: { anchor: "reported-again" } },
+    ],
+  });
+  const retained = (await f.read("findings.json")).findings[0].provenance
+    .previousFindings;
+  assert.deepEqual(
+    new Set(retained.map((row) => row.identity.anchor)),
+    new Set(["first", "second"]),
+  );
+  for (const finding of original)
+    assert.deepEqual(
+      retained.find((row) => row.identity.anchor === finding.identity.anchor),
+      finding,
+    );
+});
+
+test("MCP surface resolution keeps earlier receipts in the final seal", async (t) => {
+  const f = await publicationFixture(t);
+  const refs = [
+    "artifacts/receipts/earlier.txt",
+    "artifacts/receipts/final.txt",
+  ];
+  await mkdir(join(f.scanDir, "artifacts/receipts"), { recursive: true });
+  for (const ref of refs)
+    await writeFile(join(f.scanDir, ref), `Synthetic evidence: ${ref}\n`);
+  const surface = {
+    id: "surface",
+    label: "Reviewed handler",
+    disposition: "needs_follow_up",
+    receiptRefs: [refs[0]],
+  };
+  await f.save({
+    complete: false,
+    coverage: semanticCoverage({
+      completeness: "partial",
+      surfaces: [surface],
+      deferred: [
+        {
+          id: "task",
+          reason: "Review retained evidence.",
+          surfaceIds: [surface.id],
+        },
+      ],
+    }),
+  });
+  await f.save({
+    coverage: semanticCoverage({
+      surfaces: [
+        { ...surface, disposition: "no_issue_found", receiptRefs: [refs[1]] },
+      ],
+      resolvedDeferred: [{ id: "task", reason: "Review complete." }],
+    }),
+  });
+  const coverage = await f.read("coverage.json");
+  assert.deepEqual(new Set(coverage.surfaces[0].receiptRefs), new Set(refs));
+  assert.deepEqual(coverage.deferred, []);
+  await f.workbench(["prepare-scan-completion", "--scan-id", f.scanId]);
+  const artifacts = (await f.read("scan-manifest.json")).scan.artifacts;
+  for (const ref of refs) assert.ok(artifacts.some((row) => row.path === ref));
+});
 
 for (const complete of [false, true]) {
-  test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading a malformed result`, async (t) => {
-    const f = await fixture(t, "worker");
-    const destination = path.join(f.root, "result.json");
-    await writeFile(destination, "{broken");
-    const submitted = f.draft(
-      { deferred: [{ id: "pending", ...generic }] },
-      complete,
-    );
-    await assert.rejects(f.write(submitted), /stored JSON is malformed/);
-    const files = await checkpointNames(path.join(f.root, "checkpoints"));
-    assert.equal(files.length, 1);
-    assert.deepEqual(
-      JSON.parse(
-        await readFile(path.join(f.root, "checkpoints", files[0]), "utf8"),
-      ),
-      submitted,
-    );
-    await rm(destination);
-    await f.write(f.draft({}, true));
-    assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
-  });
-}
-
-for (const malformed of [false, true]) {
-  test(`worker: reject an unknown closure without a checkpoint, malformed result=${malformed}`, async (t) => {
-    const f = await fixture(t, "worker");
-    if (malformed) await writeFile(path.join(f.root, "result.json"), "{broken");
-    await assert.rejects(
-      f.write(
-        f.draft(
-          {
-            resolvedDeferred: [
-              { id: "unknown", reason: "Unsupported closure." },
-            ],
-          },
-          true,
-        ),
-      ),
-      malformed
-        ? /stored JSON is malformed/
-        : /names no saved generic deferral/,
-    );
-    assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
-  });
-}
-
-for (const layout of ["standard", "diff", "worker"]) {
-  for (const reopened of [false, true]) {
-    test(`${layout}: accepted progress remains incomplete after a terminal draft, reopened=${reopened}`, async (t) => {
-      const f = await fixture(t, layout);
-      const task = { id: "review", ...generic };
-      await f.write(f.draft({ deferred: [task] }, true));
-      if (reopened)
-        await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
-      for (const input of [f.draft({ deferred: [task] }), f.draft()]) {
-        await f.write(input);
-        const published = JSON.parse(
-          await readFile(
-            path.join(
-              f.root,
-              layout === "worker" ? "result.json" : "scan-manifest.json",
-            ),
-            "utf8",
-          ),
-        );
-        assert.equal(
-          layout === "worker" ? published.complete : published.scan.complete,
-          false,
-        );
-        if (layout === "worker") {
-          const head = JSON.parse(
-            await readFile(path.join(f.root, "checkpoint-head.json"), "utf8"),
-          );
-          const checkpoint = JSON.parse(
-            await readFile(
-              path.join(f.root, "checkpoints", head.checkpoint),
-              "utf8",
-            ),
-          );
-          assert.equal(checkpoint.complete, false);
-          assert.deepEqual(checkpoint.coverage.deferred, [task]);
-        }
-      }
-      await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
-      const finished = JSON.parse(
-        await readFile(
-          path.join(
-            f.root,
-            layout === "worker" ? "result.json" : "scan-manifest.json",
-          ),
-          "utf8",
-        ),
-      );
-      assert.notEqual(
-        layout === "worker" ? finished.complete : finished.scan.complete,
-        false,
-      );
-    });
-  }
-
-  test(`${layout}: ignored late progress keeps an accepted terminal marker`, async (t) => {
-    const f = await fixture(t, layout);
-    await f.write(f.draft({}, true));
-    await f.write(f.draft({ deferred: [{ id: "late", ...generic }] }));
-    const published = JSON.parse(
-      await readFile(
-        path.join(
-          f.root,
-          layout === "worker" ? "result.json" : "scan-manifest.json",
-        ),
-        "utf8",
-      ),
-    );
-    assert.notEqual(
-      layout === "worker" ? published.complete : published.scan.complete,
-      false,
-    );
-    assert.deepEqual((await f.read()).deferred, []);
-  });
-
-  for (const reverse of [false, true]) {
-    test(`${layout}: reject cross-row candidate identity ownership, reverse=${reverse}`, async (t) => {
-      const f = await fixture(t, layout);
-      const deferred = [
-        { id: "candidate-a", ...generic },
-        { id: "candidate-task", candidateId: "candidate-a", ...generic },
-      ];
-      if (reverse) deferred.reverse();
-      await assert.rejects(
-        f.write(f.draft({ deferred })),
-        /coverage\.deferred repeats candidate-a/,
-      );
-      assert.deepEqual(await readdir(f.root), []);
-      await f.write(
-        f.draft({
-          deferred: [
-            { id: "candidate-a", candidateId: "candidate-a", ...generic },
-          ],
-        }),
-      );
-      await f.write(
-        f.draft(
-          {
-            surfaces: [
-              {
-                id: "outcome",
-                candidateId: "candidate-a",
-                label: "Candidate",
-                disposition: "rejected",
-              },
-            ],
-          },
-          true,
-        ),
-      );
-      assert.deepEqual((await f.read()).deferred, []);
-    });
-  }
-
-  for (const alias of ["id", "candidateId"]) {
-    for (const outcome of ["rejected", "reported"]) {
-      test(`${layout}: legacy candidate identity collisions retain independent generic work, alias=${alias}, outcome=${outcome}`, async (t) => {
-        const f = await fixture(t, layout);
-        const surfaceId =
-          alias === "candidateId" ? "candidate-a" : "generic-surface";
-        const task = {
-          id: alias === "candidateId" ? "candidate-a" : "candidate-task",
-          ...generic,
-          surfaceIds: [surfaceId],
-        };
-        const other = {
-          id: "other-review",
-          ...generic,
-          surfaceIds: [surfaceId],
-        };
-        const followUp = {
-          id: surfaceId,
-          label: "Independent review",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        };
-        await saveScanDraftCheckpoint(
-          f.context,
-          f.draft({
-            deferred: [
-              task,
-              { id: "candidate-task", candidateId: "candidate-a", ...generic },
-              other,
-            ],
-            surfaces: [followUp],
-          }),
-          false,
-        );
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const restored = await f.write(f.draft());
-          assert.equal(restored.coverage.deferred.length, 3);
-          assert.ok(
-            restored.coverage.deferred.some(
-              (row) => row.candidateId === "candidate-a",
-            ),
-          );
-          assert.ok(
-            restored.coverage.deferred.some((row) =>
-              isDeepStrictEqual(row, task),
-            ),
-          );
-        }
-        const terminal = {
-          ...f.draft(
-            {
-              resolvedDeferred: [close(other.id)],
-              surfaces: [
-                { ...followUp, disposition: "no_issue_found" },
-                {
-                  id: "outcome",
-                  candidateId: "candidate-a",
-                  label: "Candidate",
-                  disposition: outcome,
-                },
-              ],
-            },
-            true,
-          ),
-          findings: outcome === "reported" ? [findingFor("candidate-a")] : [],
-        };
-        for (const input of [terminal, f.draft({}, true), f.draft()]) {
-          const result = await f.write(input);
-          assert.deepEqual(result.coverage.deferred, [task]);
-          assert.equal(result.coverage.completeness, "partial");
-          assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
-          assert.deepEqual(
-            result.coverage.surfaces.filter(({ id }) => id === followUp.id),
-            [followUp],
-          );
-          if (outcome === "rejected")
-            assert.equal(
-              result.coverage.surfaces.find(({ id }) => id === "outcome")
-                .disposition,
-              outcome,
-            );
-        }
-        await assert.rejects(
-          f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
-          /ambiguous saved deferred work/,
-        );
+  for (const changed of [
+    "findings.json",
+    "coverage.json",
+    "scan-manifest.json",
+  ]) {
+    test(`MCP retries concurrent canonical ${changed} edits (complete: ${complete})`, async (t) => {
+      const f = await publicationFixture(t);
+      await f.save({
+        complete: false,
+        findings: [f.finding("initial")],
+        threatModel: { format: "markdown", content: "# Initial model\n" },
       });
-    }
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const operation of ["open", "realpath"]) {
-    for (const removed of ["marker", "stage"]) {
-      test(`${layout}: reopens checkpoint history when acknowledgement removes its ${removed} during ${operation}`, async (t) => {
-        const f = await fixture(t, layout);
-        await f.write(f.draft());
-        const task = { id: "concurrent-review", ...generic };
-        const contents = JSON.stringify(f.draft({ deferred: [task] }));
-        const name =
-          createHash("sha256").update(contents).digest("hex") + ".json";
-        const stageRelative =
-          "drafts/00000000-0000-4000-8000-000000000001.checkpoint.json";
-        const stage = path.join(f.root, stageRelative);
-        const marker = path.join(f.root, "checkpoints", "pending", name);
-        const history = path.join(f.root, "checkpoints", name);
-        await mkdir(path.dirname(stage), { recursive: true });
-        await mkdir(path.dirname(marker), { recursive: true });
-        await writeFile(stage, contents);
-        await writeFile(marker, stageRelative);
-        const original = fsPromises[operation];
-        let acknowledged = false;
-        fsPromises[operation] = async (filename, ...args) => {
-          if (
-            !acknowledged &&
-            filename === (removed === "marker" ? marker : stage)
-          ) {
-            acknowledged = true;
-            await writeFile(history, contents);
-            await rm(marker);
-            await rm(stage);
+      const committed = await readFile(
+        join(f.scanDir, "artifacts/scan-draft.json"),
+      );
+      let attempts = 0,
+        conflicts = 0,
+        concurrent;
+      await recordCodexSecurityScanDraftViaWorkbench(
+        f.context,
+        {
+          scanId: f.scanId,
+          complete,
+          findings: [],
+          coverage: semanticCoverage(),
+        },
+        async (args, input) => {
+          attempts++;
+          if (attempts === 1) {
+            const document = await f.read(changed);
+            if (changed === "findings.json")
+              document.findings.push(f.finding("concurrent"));
+            else if (changed === "coverage.json") {
+              document.completeness = "partial";
+              document.deferred.push({
+                id: "concurrent-work",
+                reason: "Retain concurrent evidence.",
+              });
+            } else
+              document.scan.threatModel = {
+                format: "markdown",
+                content: "# Concurrent model\n",
+              };
+            concurrent = JSON.stringify(document);
+            await writeFile(join(f.scanDir, changed), concurrent);
           }
-          return original(filename, ...args);
-        };
-        try {
-          await f.write(f.draft({}, true));
-        } finally {
-          fsPromises[operation] = original;
-        }
-        assert.ok(acknowledged);
-        assert.deepEqual((await f.read()).deferred, [task]);
-      });
-    }
-  }
-}
-for (const layout of ["standard", "diff"]) {
-  for (const disposition of ["rejected", "not_applicable"]) {
-    test(`${layout}: stopped ${disposition} retains every acknowledged finding variant`, async (t) => {
-      const f = await fixture(t, layout);
-      const variants = [1, 2].map((line) => ({
-        ...findingFor("candidate-review"),
-        identity: { anchor: "review", instance: `variant-${line}` },
-        summary: `Synthetic finding variant ${line}.`,
-        locations: [{ path: "src/example.py", startLine: line }],
-      }));
-      await f.write({ ...f.draft(), findings: variants });
-      const checkpoints = path.join(f.root, "checkpoints");
-      const originals = new Map(
-        await Promise.all(
-          (await checkpointNames(checkpoints)).map(async (name) => [
-            name,
-            await readFile(path.join(checkpoints, name), "utf8"),
-          ]),
-        ),
-      );
-      const acknowledge = async () => {
-        const pending = path.join(checkpoints, "pending");
-        await mkdir(pending, { recursive: true });
-        for (const name of await checkpointNames(pending))
-          await rm(path.join(pending, name));
-      };
-      const surface = {
-        id: "candidate-surface",
-        candidateId: "candidate-review",
-        label: "Candidate",
-        disposition,
-      };
-      await acknowledge();
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        await f.write(f.draft({ surfaces: [surface] }, true));
-        await acknowledge();
-      }
-      const { stdout } = await execFileAsync(
-        process.env.PYTHON?.trim() || "python3",
-        [
-          "-c",
-          `import json,sys
-from pathlib import Path
-sys.path.insert(0,sys.argv[1])
-from workbench_saved_results import merge_saved_results
-root=Path(sys.argv[2])
-binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{"kind":"git_revision","repository":"synthetic","revision":"head"},"scope":{"includePaths":["."],"excludePaths":[]},"coverageMode":"repository"}
-result=merge_saved_results(root,sys.argv[3],binding,[],stopped=True,reason="interrupted")
-print(json.dumps(result))`,
-          fileURLToPath(new URL("../../scripts", import.meta.url)),
-          f.root,
-          f.context.scanId,
-        ],
-      );
-      const [, findings, coverage] = JSON.parse(stdout);
-      assert.deepEqual(findings.findings, []);
-      assert.deepEqual(coverage.deferred, [
-        { id: "scan-stopped", reason: "interrupted" },
-      ]);
-      const rejected = coverage.surfaces.find(
-        (row) => row.candidateId === surface.candidateId,
-      );
-      assert.equal(rejected.disposition, disposition);
-      const evidence = [
-        rejected.finding,
-        ...(rejected.finding?.provenance?.previousFindings ?? []),
-        ...(rejected.previousFindings ?? []),
-      ].filter(Boolean);
-      for (const variant of variants) {
-        assert.ok(
-          evidence.some(
-            (finding) =>
-              finding.summary === variant.summary &&
-              isDeepStrictEqual(finding.locations, variant.locations),
-          ),
-          variant.summary,
-        );
-      }
-      await f.write({
-        ...f.draft({}, true),
-        findings: [{ ...variants[0], summary: "Updated review outcome." }],
-      });
-      const reported = JSON.parse(
-        await readFile(path.join(f.root, "findings.json"), "utf8"),
-      ).findings;
-      assert.equal(reported.length, 1);
-      for (const variant of variants)
-        assert.ok(
-          reported[0].provenance.previousFindings.some(
-            (finding) =>
-              finding.summary === variant.summary &&
-              isDeepStrictEqual(finding.locations, variant.locations),
-          ),
-        );
-      for (const [name, contents] of originals)
-        assert.equal(
-          await readFile(path.join(checkpoints, name), "utf8"),
-          contents,
-        );
-    });
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const disposition of ["rejected", "not_applicable"]) {
-    test(`${layout}: repeated ${disposition} retains acknowledged finding evidence`, async (t) => {
-      const f = await fixture(t, layout);
-      const finding = findingFor("candidate-review");
-      await f.write({ ...f.draft(), findings: [finding] });
-      const surface = {
-        id: "candidate-surface",
-        candidateId: "candidate-review",
-        label: "Candidate",
-        disposition,
-      };
-      const pending = path.join(f.root, "checkpoints", "pending");
-      const acknowledge = async () => {
-        // Successful workbench publication retires markers, retaining immutable history.
-        await mkdir(pending, { recursive: true });
-        for (const name of await checkpointNames(pending))
-          await rm(path.join(pending, name));
-      };
-      await acknowledge();
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const result = await f.write(f.draft({ surfaces: [surface] }, true));
-        const saved = result.coverage.surfaces.find(
-          ({ candidateId }) => candidateId === surface.candidateId,
-        );
-        assert.equal(saved.disposition, disposition);
-        assert.equal(saved.finding.summary, finding.summary);
-        assert.deepEqual(saved.finding.locations, finding.locations);
-        assert.equal(result.findingCount, 0);
-        await acknowledge();
-      }
-      const restored = { ...finding, summary: "Updated review outcome." };
-      await f.write({ ...f.draft({}, true), findings: [restored] });
-      const published = JSON.parse(
-        await readFile(path.join(f.root, "findings.json"), "utf8"),
-      ).findings[0];
-      assert.equal(published.summary, restored.summary);
-      assert.ok(
-        published.provenance.previousFindings.some(
-          (previous) => previous.summary === finding.summary,
-        ),
-      );
-    });
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const complete of [false, true]) {
-    for (const pendingOnly of [false, true]) {
-      test(`${layout}: acknowledged generic review restores its surface on reopening, complete=${complete}, pending=${pendingOnly}`, async (t) => {
-        const f = await fixture(t, layout);
-        const task = { id: "api-review", ...generic, surfaceIds: ["api"] };
-        const other = { id: "other-review", ...generic };
-        const surface = {
-          id: "api",
-          label: "API",
-          disposition: "needs_follow_up",
-          notes: "The caller needs review.",
-        };
-        const acknowledge = async () => {
-          const pending = path.join(f.root, "checkpoints", "pending");
-          await mkdir(pending, { recursive: true });
-          for (const name of await checkpointNames(pending))
-            await rm(path.join(pending, name));
-        };
-        await f.write(
-          f.draft({ deferred: [task, other], surfaces: [surface] }),
-        );
-        await acknowledge();
-        await f.write(
-          f.draft(
-            {
-              resolvedDeferred: [close(task.id), close(other.id)],
-              surfaces: [{ ...surface, disposition: "no_issue_found" }],
-            },
-            true,
-          ),
-        );
-        await acknowledge();
-        const reopening = f.draft({ deferred: [task] }, complete);
-        if (pendingOnly) {
-          const originalRename = fsPromises.rename;
-          let checkpointWrites = 0;
-          fsPromises.rename = async (source, destination) => {
-            if (
-              path.dirname(destination) === path.join(f.root, "checkpoints") &&
-              destination.endsWith(".json") &&
-              ++checkpointWrites === 2
-            )
-              throw new Error("interrupted reconciled checkpoint");
-            return originalRename(source, destination);
-          };
           try {
-            await assert.rejects(
-              f.write(reopening),
-              /interrupted reconciled checkpoint/,
-            );
-            assert.equal(checkpointWrites, 2);
-          } finally {
-            fsPromises.rename = originalRename;
-          }
-          assert.equal(
-            (await f.read()).surfaces.find(({ id }) => id === "api")
-              .disposition,
-            "no_issue_found",
-          );
-        }
-        const checkpoints = path.join(f.root, "checkpoints");
-        const evidence = await Promise.all(
-          (await checkpointNames(checkpoints)).map(async (name) => [
-            name,
-            await readFile(path.join(checkpoints, name)),
-          ]),
-        );
-        await f.write(pendingOnly ? f.draft({}, complete) : reopening);
-        for (const [name, contents] of evidence) {
-          assert.deepEqual(
-            await readFile(path.join(checkpoints, name)),
-            contents,
-          );
-        }
-        const coverage = await f.read();
-        assert.deepEqual(coverage.deferred, [task]);
-        assert.equal(
-          coverage.surfaces.find(({ id }) => id === "api").disposition,
-          "needs_follow_up",
-        );
-        assert.deepEqual(coverage.resolvedDeferred, [close(other.id)]);
-        await acknowledge();
-        await f.write(f.draft());
-        assert.equal(
-          (await f.read()).surfaces.find(({ id }) => id === "api").disposition,
-          "needs_follow_up",
-        );
-      });
-    }
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const complete of [false, true]) {
-    test(`${layout}: accepted closures survive two acknowledged progress updates before reopening, complete=${complete}`, async (t) => {
-      const f = await fixture(t, layout);
-      const task = { id: "api-review", ...generic, surfaceIds: ["api"] };
-      const other = { id: "other-review", ...generic };
-      const surface = {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        notes: "The caller needs review.",
-        receiptRefs: ["artifacts/review.md"],
-      };
-      const acknowledge = async () => {
-        const pending = path.join(f.root, "checkpoints", "pending");
-        await mkdir(pending, { recursive: true });
-        for (const name of await checkpointNames(pending))
-          await rm(path.join(pending, name));
-      };
-      await f.write(f.draft({ deferred: [task, other], surfaces: [surface] }));
-      await acknowledge();
-      await f.write(
-        f.draft(
-          {
-            resolvedDeferred: [close(task.id)],
-            surfaces: [{ ...surface, disposition: "no_issue_found" }],
-          },
-          true,
-        ),
-      );
-      await acknowledge();
-      const checkpoints = path.join(f.root, "checkpoints");
-      const evidence = await Promise.all(
-        (await checkpointNames(checkpoints)).map(async (name) => [
-          name,
-          await readFile(path.join(checkpoints, name)),
-        ]),
-      );
-      for (let update = 0; update < 2; update++) {
-        const result = await f.write(
-          f.draft({ openQuestions: [{ question: `Progress ${update}` }] }),
-        );
-        assert.deepEqual(result.coverage.deferred, [other]);
-        assert.deepEqual(result.coverage.resolvedDeferred, [close(task.id)]);
-        assert.equal(
-          result.coverage.surfaces.find(({ id }) => id === "api").disposition,
-          "no_issue_found",
-        );
-        await acknowledge();
-      }
-      await f.write(f.draft({ deferred: [task] }, complete));
-      const saved = await f.read();
-      assert.deepEqual(
-        new Set(saved.deferred.map(({ id }) => id)),
-        new Set([task.id, other.id]),
-      );
-      assert.deepEqual(saved.resolvedDeferred ?? [], []);
-      assert.deepEqual(
-        saved.surfaces.find(({ id }) => id === "api"),
-        surface,
-      );
-      for (const [name, contents] of evidence)
-        assert.deepEqual(
-          await readFile(path.join(checkpoints, name)),
-          contents,
-        );
-      await acknowledge();
-      await f.write(f.draft());
-      assert.deepEqual(
-        (await f.read()).surfaces.find(({ id }) => id === "api"),
-        surface,
-      );
-    });
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const disposition of ["rejected", "not_applicable"]) {
-    test(`${layout}: terminal ${disposition} survives acknowledged progress findings`, async (t) => {
-      const f = await fixture(t, layout);
-      const finding = findingFor("candidate-review");
-      const task = { id: "other-review", ...generic };
-      const surface = {
-        id: "candidate-surface",
-        candidateId: "candidate-review",
-        label: "Candidate",
-        disposition,
-      };
-      const acknowledge = async () => {
-        const pending = path.join(f.root, "checkpoints", "pending");
-        await mkdir(pending, { recursive: true });
-        for (const name of await checkpointNames(pending))
-          await rm(path.join(pending, name));
-      };
-      await f.write({ ...f.draft({ deferred: [task] }), findings: [finding] });
-      await acknowledge();
-      await f.write(f.draft({ surfaces: [surface], deferred: [task] }, true));
-      await acknowledge();
-      const checkpoints = path.join(f.root, "checkpoints");
-      const evidence = await Promise.all(
-        (await checkpointNames(checkpoints)).map(async (name) => [
-          name,
-          await readFile(path.join(checkpoints, name)),
-        ]),
-      );
-      await f.write(
-        f.draft({ openQuestions: [{ question: "Other review continues." }] }),
-      );
-      await acknowledge();
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const result = await f.write({ ...f.draft(), findings: [finding] });
-        assert.equal(result.findingCount, 0);
-        assert.deepEqual(result.coverage.deferred, [task]);
-        assert.equal(
-          result.coverage.surfaces.find(
-            (row) => row.candidateId === "candidate-review",
-          ).disposition,
-          disposition,
-        );
-        await acknowledge();
-      }
-      await interruptDraftWrite(path.join(f.root, "findings.json"), () =>
-        f.write({ ...f.draft({}, true), findings: [finding] }),
-      );
-      const restored = await f.write(f.draft());
-      assert.equal(restored.findingCount, 1);
-      for (const [name, contents] of evidence)
-        assert.deepEqual(
-          await readFile(path.join(checkpoints, name)),
-          contents,
-        );
-    });
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  for (const staleOutcome of ["downgraded", "rejected", "pending"]) {
-    for (const reportedSurface of [false, true]) {
-      test(`${layout}: reported finding survives acknowledged ${staleOutcome} progress, surface=${reportedSurface}`, async (t) => {
-        const f = await fixture(t, layout);
-        const candidateId = "accepted-candidate";
-        const accepted = {
-          ...findingFor(candidateId),
-          severity: { level: "high" },
-          remediation: "Keep the accepted repair.",
-        };
-        const unrelated = {
-          ...findingFor("new-candidate"),
-          ruleId: "fixture.unrelated",
-          title: "Unrelated follow-up finding",
-        };
-        const task = { id: "other-review", ...generic };
-        const surface = {
-          id: "accepted-surface",
-          candidateId,
-          label: "Accepted candidate",
-          disposition: "reported",
-        };
-        const acknowledge = async () => {
-          const pending = path.join(f.root, "checkpoints", "pending");
-          await mkdir(pending, { recursive: true });
-          for (const name of await checkpointNames(pending))
-            await rm(path.join(pending, name));
-        };
-        const readFindings = async () =>
-          JSON.parse(await readFile(path.join(f.root, "findings.json"), "utf8"))
-            .findings;
-        await f.write({
-          ...f.draft(
-            { deferred: [task], surfaces: reportedSurface ? [surface] : [] },
-            true,
-          ),
-          findings: [accepted],
-        });
-        await acknowledge();
-        await f.write(
-          f.draft({
-            openQuestions: [{ question: "Unrelated review continues." }],
-          }),
-        );
-        await acknowledge();
-        const evidence = await Promise.all(
-          (await checkpointNames(path.join(f.root, "checkpoints"))).map(
-            async (name) => [
-              name,
-              await readFile(path.join(f.root, "checkpoints", name)),
-            ],
-          ),
-        );
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const stale = f.draft({
-            openQuestions: [{ question: `More review ${attempt}` }],
-            ...(staleOutcome === "rejected"
-              ? { surfaces: [{ ...surface, disposition: "rejected" }] }
-              : {}),
-            ...(staleOutcome === "pending"
-              ? {
-                  deferred: [
-                    { candidateId, reason: "Stale unfinished review." },
-                  ],
-                }
-              : {}),
-          });
-          stale.findings = [
-            unrelated,
-            ...(staleOutcome === "downgraded"
-              ? [
-                  {
-                    ...accepted,
-                    severity: { level: "low" },
-                    remediation: "Stale proposed repair.",
-                  },
-                ]
-              : []),
-          ];
-          const result = await f.write(stale);
-          const findings = await readFindings();
-          assert.equal(findings.length, 2);
-          const finding = findings.find(
-            (row) => row.provenance.candidateId === candidateId,
-          );
-          assert.equal(finding.severity.level, "high");
-          assert.equal(finding.remediation, accepted.remediation);
-          if (staleOutcome === "downgraded")
-            assert.ok(
-              finding.provenance.previousFindings.some(
-                (row) =>
-                  row.severity.level === "low" &&
-                  row.remediation === "Stale proposed repair.",
-              ),
-            );
-          assert.deepEqual(result.coverage.deferred, [task]);
-          assert.ok(
-            result.coverage.openQuestions.some(
-              (row) => row.question === `More review ${attempt}`,
-            ),
-          );
-          if (reportedSurface)
+            return await f.workbench(args, input);
+          } catch (error) {
+            assert.match(String(error), /scan_draft_conflict/);
+            conflicts++;
             assert.equal(
-              result.coverage.surfaces.find(
-                (row) => row.candidateId === candidateId,
-              ).disposition,
-              "reported",
+              await readFile(join(f.scanDir, changed), "utf8"),
+              concurrent,
             );
-          assert.equal(
-            JSON.parse(
-              await readFile(path.join(f.root, "scan-manifest.json"), "utf8"),
-            ).scan.complete,
-            false,
-          );
-          await acknowledge();
-        }
-        for (const [name, bytes] of evidence)
-          assert.deepEqual(
-            await readFile(path.join(f.root, "checkpoints", name)),
-            bytes,
-          );
-        const revised = await f.write(
-          f.draft(
-            { surfaces: [{ ...surface, disposition: "rejected" }] },
-            true,
-          ),
-        );
-        assert.equal(revised.findingCount, 1);
-        assert.equal(
-          (await readFindings())[0].provenance.candidateId,
-          "new-candidate",
-        );
-        assert.equal(
-          revised.coverage.surfaces.find(
-            (row) => row.candidateId === candidateId,
-          ).disposition,
-          "rejected",
-        );
-      });
-    }
-  }
-}
-
-for (const layout of ["standard", "diff"]) {
-  test(`${layout}: reported finding identity survives acknowledged progress`, async (t) => {
-    const f = await fixture(t, layout);
-    const accepted = {
-      ...findingFor(undefined),
-      identity: { anchor: "accepted-issue" },
-      severity: { level: "high" },
-      remediation: "Keep the accepted repair.",
-    };
-    const task = { id: "other-review", ...generic };
-    const acknowledge = async () => {
-      const pending = path.join(f.root, "checkpoints", "pending");
-      await mkdir(pending, { recursive: true });
-      for (const name of await checkpointNames(pending))
-        await rm(path.join(pending, name));
-    };
-    const readFindings = async () =>
-      JSON.parse(await readFile(path.join(f.root, "findings.json"), "utf8"))
-        .findings;
-    await f.write({
-      ...f.draft({ deferred: [task] }, true),
-      findings: [accepted],
-    });
-    await acknowledge();
-    await f.write(f.draft());
-    await acknowledge();
-    const stale = {
-      ...accepted,
-      severity: { level: "low" },
-      remediation: "Stale proposed repair.",
-    };
-    const result = await f.write({ ...f.draft(), findings: [stale] });
-    const [finding] = await readFindings();
-    assert.equal(result.findingCount, 1);
-    assert.equal(finding.severity.level, "high");
-    assert.equal(finding.remediation, accepted.remediation);
-    assert.deepEqual(finding.identity, accepted.identity);
-    assert.ok(
-      finding.provenance.previousFindings.some(
-        (row) => row.severity.level === "low",
-      ),
-    );
-    assert.deepEqual(result.coverage.deferred, [task]);
-    await acknowledge();
-    await f.write({ ...f.draft({}, true), findings: [stale] });
-    assert.equal((await readFindings())[0].severity.level, "low");
-  });
-}
-
-for (const layout of ["standard", "diff", "worker"]) {
-  for (const identity of ["candidate", "authored"]) {
-    for (const acknowledged of layout === "worker" ? [false] : [false, true]) {
-      for (const hasTerminal of [false, true]) {
-        test(`${layout}: explicit ${identity} progress updates stay current (acknowledged=${acknowledged}, terminal=${hasTerminal})`, async (t) => {
-          const f = await fixture(t, layout);
-          const finding = {
-            ...findingFor(
-              identity === "candidate" ? "changing-candidate" : undefined,
-            ),
-            identity: { anchor: "changing-issue" },
-          };
-          const retained = {
-            ...findingFor("unrelated-candidate"),
-            ruleId: "fixture.unrelated",
-            title: "Unrelated finding",
-            identity: { anchor: "unrelated-issue" },
-            severity: { level: "high" },
-          };
-          const task = { id: "other-review", ...generic };
-          const acknowledge = async () => {
-            if (!acknowledged) return;
-            const pending = path.join(f.root, "checkpoints", "pending");
-            await mkdir(pending, { recursive: true });
-            for (const name of await checkpointNames(pending))
-              await rm(path.join(pending, name));
-          };
-          const readFindings = async () =>
-            JSON.parse(
-              await readFile(
-                path.join(
-                  f.root,
-                  layout === "worker" ? "result.json" : "findings.json",
-                ),
-                "utf8",
-              ),
-            ).findings;
-          if (hasTerminal) {
-            await f.write({
-              ...f.draft({ deferred: [task] }, true),
-              findings: [retained],
-            });
-            await acknowledge();
+            assert.deepEqual(
+              await readFile(join(f.scanDir, "artifacts/scan-draft.json")),
+              committed,
+            );
+            throw error;
           }
-          await f.write({
-            ...f.draft({ deferred: [task] }),
-            findings: [finding, retained],
-          });
-          await acknowledge();
-          for (const level of ["high", "medium"]) {
-            const update = {
-              ...finding,
-              severity: { level },
-              remediation: `${level} revised repair.`,
-            };
-            const result = await f.write({ ...f.draft(), findings: [update] });
-            const findings = await readFindings();
-            assert.equal(findings.length, 2);
-            const current = findings.find(
-              (row) => row.ruleId === finding.ruleId,
-            );
-            assert.equal(current.severity.level, level);
-            assert.equal(current.remediation, update.remediation);
-            assert.ok(
-              current.provenance.previousFindings.some(
-                (row) => row.severity.level === "low",
-              ),
-            );
-            assert.equal(
-              findings.find((row) => row.ruleId === retained.ruleId).severity
-                .level,
-              "high",
-            );
-            assert.deepEqual(result.coverage.deferred, [task]);
-            await acknowledge();
-          }
-          if (identity === "candidate" && !hasTerminal) {
-            const rejected = await f.write(
-              f.draft({
-                surfaces: [
-                  {
-                    id: "changing-surface",
-                    candidateId: "changing-candidate",
-                    label: "Finding under review",
-                    disposition: "rejected",
-                  },
-                ],
-              }),
-            );
-            assert.equal(rejected.findingCount, 1);
-            await acknowledge();
-            const reported = await f.write({
-              ...f.draft(),
-              findings: [finding],
-            });
-            assert.equal(reported.findingCount, 2);
-            await acknowledge();
-          }
-          // The final decision freezes this finding while unrelated work continues.
-          const terminal = {
-            ...finding,
-            severity: { level: "high" },
-            remediation: "Accepted final repair.",
-          };
-          await f.write({
-            ...f.draft({ deferred: [task] }, true),
-            findings: [terminal],
-          });
-          await acknowledge();
-          await f.write(f.draft());
-          await acknowledge();
-          await f.write({ ...f.draft(), findings: [finding] });
-          const final = (await readFindings()).find(
-            (row) => row.ruleId === finding.ruleId,
-          );
-          assert.equal(final.severity.level, "high");
-          assert.equal(final.remediation, terminal.remediation);
-          await acknowledge();
-          await f.write({
-            ...f.draft({ deferred: [task] }, true),
-            findings: [finding],
-          });
-          await acknowledge();
-          await f.write(f.draft());
-          await acknowledge();
-          await f.write({ ...f.draft(), findings: [terminal] });
-          const corrected = (await readFindings()).find(
-            (row) => row.ruleId === finding.ruleId,
-          );
-          assert.equal(corrected.severity.level, "low");
-          assert.equal(corrected.remediation, finding.remediation);
-        });
-      }
-    }
-  }
-}
-
-for (const disposition of ["rejected", "not_applicable"]) {
-  for (const implicitComplete of [false, true]) {
-    test(`conflicted reported checkpoint cannot replace an accepted ${disposition} (implicit complete: ${implicitComplete})`, async (t) => {
-      const f = await fixture(t, "standard");
-      const directory = path.dirname(f.root);
-      const state = path.join(directory, "state");
-      const repository = path.join(directory, "repository");
-      await mkdir(path.join(repository, "src"), { recursive: true });
-      await writeFile(
-        path.join(repository, "src/example.py"),
-        "# synthetic fixture\n",
+        },
       );
-      const python = process.env.PYTHON?.trim() || "python3";
-      const { stdout } = await execFileAsync(python, [
-        "-c",
-        `import json,sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from workbench_test_support import register
-print(json.dumps(register(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))))`,
-        fileURLToPath(new URL("../../tests", import.meta.url)),
-        state,
-        repository,
-        f.root,
-      ]);
-      const { scanId } = JSON.parse(stdout);
-      const draft = (coverage = {}, complete = false) => ({
-        ...f.draft(coverage, complete),
-        scanId,
-        handoffClaimToken: undefined,
-      });
-      const workbench = async (args) => {
-        const result = await execFileAsync(
-          python,
-          [
-            fileURLToPath(
-              new URL("../../scripts/workbench_db.py", import.meta.url),
-            ),
-            ...args,
-          ],
-          {
-            env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
-          },
+      assert.equal(conflicts, 1);
+      assert.equal(attempts, 2);
+      if (changed === "findings.json")
+        assert.deepEqual(
+          (await f.read(changed)).findings
+            .map((row) => row.identity.anchor)
+            .sort(),
+          ["concurrent", "initial"],
         );
-        return JSON.parse(result.stdout);
-      };
-      const { scan } = await workbench(["get-scan", "--scan-id", scanId]);
-      const context = {
-        ...f.context,
-        scanId,
-        repoRoot: repository,
-        handoffClaimToken: undefined,
-        targetContract: scan.contract,
-      };
-      const write = (input, runner = workbench, signal) =>
-        recordCodexSecurityScanDraftViaWorkbench(
-          context,
-          input,
-          runner,
-          signal,
-        );
-      const finding = findingFor("conflicted-candidate");
-      const task = { id: "independent-review", ...generic };
-      const report = { ...draft({}, true), findings: [finding] };
-      if (implicitComplete) delete report.complete;
-      await write(report);
-      const controller = new AbortController();
-      const interrupted = new Error(
-        "Synthetic conflicted publication interrupted.",
-      );
-      const surface = {
-        id: "accepted-outcome",
-        candidateId: "conflicted-candidate",
-        label: "Accepted review",
-        disposition,
-      };
-      let attempted = false;
-      await assert.rejects(
-        write(
-          report,
-          async (args) => {
-            assert.equal(attempted, false);
-            attempted = true;
-            await write(draft({ surfaces: [surface], deferred: [task] }, true));
-            try {
-              return await workbench(args);
-            } catch (error) {
-              assert.match(error.stderr, /scan_draft_conflict/);
-              controller.abort(interrupted);
-              throw error;
-            }
-          },
-          controller.signal,
-        ),
-        /Synthetic conflicted publication interrupted/,
-      );
-      assert.equal(attempted, true);
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const current = await write(draft({ deferred: [task] }));
-        assert.equal(current.findingCount, 0);
+      else if (changed === "coverage.json")
+        assert.equal((await f.read(changed)).deferred[0].id, "concurrent-work");
+      else
         assert.equal(
-          current.coverage.surfaces.find(
-            (row) => row.candidateId === "conflicted-candidate",
-          ).disposition,
-          disposition,
+          (await f.read(changed)).scan.threatModel.content,
+          "# Concurrent model\n",
         );
-        assert.ok(current.coverage.deferred.some((row) => row.id === task.id));
-      }
-      const corrected = await write(report);
-      assert.equal(corrected.findingCount, 1);
-    });
-  }
-}
-
-for (const acceptedProgress of [false, true]) {
-  for (const retryTerminal of [false, true]) {
-    test(`conflicted progress retains terminal assessments after stop (accepted progress: ${acceptedProgress}, terminal retry: ${retryTerminal})`, async (t) => {
-      const f = await fixture(t, "standard");
-      const directory = path.dirname(f.root);
-      const state = path.join(directory, "state");
-      const repository = path.join(directory, "repository");
-      await mkdir(path.join(repository, "src"), { recursive: true });
-      await writeFile(
-        path.join(repository, "src/example.py"),
-        "# synthetic fixture\n",
-      );
-      const python = process.env.PYTHON?.trim() || "python3";
-      const { stdout } = await execFileAsync(python, [
-        "-c",
-        `import json,sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from workbench_test_support import register
-print(json.dumps(register(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))))`,
-        fileURLToPath(new URL("../../tests", import.meta.url)),
-        state,
-        repository,
-        f.root,
-      ]);
-      const { scanId } = JSON.parse(stdout);
-      const workbench = async (args) => {
-        const result = await execFileAsync(
-          python,
-          [
-            fileURLToPath(
-              new URL("../../scripts/workbench_db.py", import.meta.url),
-            ),
-            ...args,
-          ],
-          { env: { ...process.env, CODEX_SECURITY_STATE_DIR: state } },
-        );
-        return JSON.parse(result.stdout);
-      };
-      const { scan } = await workbench(["get-scan", "--scan-id", scanId]);
-      const context = {
-        ...f.context,
-        scanId,
-        repoRoot: repository,
-        handoffClaimToken: undefined,
-        targetContract: scan.contract,
-      };
-      const draft = (coverage = {}, complete = false) => ({
-        ...f.draft(coverage, complete),
-        scanId,
-        handoffClaimToken: undefined,
-      });
-      const write = (input, runner = workbench, signal) =>
-        recordCodexSecurityScanDraftViaWorkbench(
-          context,
-          input,
-          runner,
-          signal,
-        );
-      const accepted = findingFor("accepted-candidate");
-      const task = { id: "independent-review", ...generic };
-      await write({
-        ...draft({ deferred: [task] }, true),
-        findings: [accepted],
-      });
-      if (acceptedProgress) await write(draft({ deferred: [task] }));
-      const update = {
-        ...accepted,
-        severity: { level: "high" },
-        remediation: "Unaccepted progress repair.",
-      };
-      const novel = {
-        ...findingFor("new-candidate"),
-        ruleId: "fixture.new-review",
-        identity: { anchor: "independent-new-review" },
-      };
-      const controller = new AbortController();
-      let checkpoint, checkpointBytes;
-      await assert.rejects(
-        write(
-          { ...draft({ deferred: [task] }), findings: [update, novel] },
-          async (args) => {
-            const composed = JSON.parse(
-              await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
-            );
-            const retained = composed.findings.findings.find(
-              (row) => row.provenance.candidateId === "accepted-candidate",
-            );
-            assert.equal(retained.severity.level, "low");
-            assert.equal(retained.remediation, accepted.remediation);
-            checkpoint = args[args.indexOf("--checkpoint-path") + 1];
-            checkpointBytes = await readFile(checkpoint);
-            const conflicted = [...args];
-            conflicted[conflicted.indexOf("--expected-draft-digest") + 1] =
-              "0".repeat(64);
-            try {
-              return await workbench(conflicted);
-            } catch (error) {
-              assert.match(error.stderr, /scan_draft_conflict/);
-              controller.abort(
-                new Error("Synthetic progress publication interrupted."),
-              );
-              throw error;
-            }
-          },
-          controller.signal,
-        ),
-        /Synthetic progress publication interrupted/,
-      );
-      if (retryTerminal) {
-        await write({
-          ...draft({ deferred: [task] }, true),
-          findings: [update, novel],
-        });
-      }
-      await workbench([
-        "fail-scan",
-        "--scan-id",
-        scanId,
-        "--message",
-        "Synthetic interruption",
-      ]);
-      const findings = JSON.parse(
-        await readFile(path.join(f.root, "findings.json"), "utf8"),
-      ).findings;
-      const retained = findings.find(
-        (row) => row.provenance.candidateId === "accepted-candidate",
-      );
-      assert.equal(retained.severity.level, retryTerminal ? "high" : "low");
-      assert.equal(
-        retained.remediation,
-        retryTerminal ? update.remediation : accepted.remediation,
-      );
-      assert.equal(findings.length, 2);
-      assert.ok(
-        findings.some((row) => row.provenance.candidateId === "new-candidate"),
-      );
-      assert.ok(
-        retained.provenance.previousFindings.some(
-          (row) =>
-            row.remediation === (retryTerminal ? accepted : update).remediation,
-        ),
-      );
-      assert.deepEqual(await readFile(checkpoint), checkpointBytes);
-      const name =
-        createHash("sha256").update(checkpointBytes).digest("hex") + ".json";
-      assert.deepEqual(
-        await readFile(path.join(f.root, "checkpoints", name)),
-        checkpointBytes,
-      );
     });
   }
 }

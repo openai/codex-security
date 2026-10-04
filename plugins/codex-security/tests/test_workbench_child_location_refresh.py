@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
     register,
@@ -86,7 +87,7 @@ def test_parent_recovers_child_location_correction(tmp_path: Path, change: str) 
     draft = saved_draft(child["scanId"], complete=True, findings=updated)
     draft["coverage"] = json.loads((child_dir / "coverage.json").read_text())
     saved = write_checkpoint(child_dir / "checkpoints", draft)
-    (child_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": saved.name}))
+    select_checkpoint(child_dir, saved)
     recovered_child = run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])[
         "scan"
     ]
@@ -151,7 +152,7 @@ def test_parent_recovery_recognizes_retained_unfrozen_child(
         raise OSError("Synthetic child recovery interruption before freezing sources.")
 
     with monkeypatch.context() as patch:
-        patch.setattr(saved, "_legacy_merge_saved_results", interrupt_recovery)
+        patch.setattr(saved, "merge_saved_results", interrupt_recovery)
         call_workbench(
             patch,
             state,
@@ -197,9 +198,7 @@ def test_parent_recovery_recognizes_retained_unfrozen_child(
         draft["coverage"] = json.loads((child_dir / "coverage.json").read_text())
         saved_path = write_checkpoint(child_dir / "checkpoints", draft)
         if new_evidence == "selected":
-            (child_dir / "checkpoint-head.json").write_text(
-                json.dumps({"checkpoint": saved_path.name})
-            )
+            select_checkpoint(child_dir, saved_path)
     changed = file_snapshot(parent_dir)
     for _ in range(2):
         observed = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]

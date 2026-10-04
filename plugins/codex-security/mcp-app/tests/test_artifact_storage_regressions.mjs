@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
 import { applicationRoot, buildServer } from "./build-server.mjs";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
@@ -36,7 +37,7 @@ await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
 await buildServer(bundle, {
   define: {
     __dirname: JSON.stringify(applicationRoot),
-    "import.meta.url": "__filename",
+    ...mcpBundleOptions.define,
   },
 });
 await build({
@@ -143,7 +144,6 @@ try {
     const context = {
       root: path.join(fixture, "deep-scan-allowed"),
       repoRoot: repository,
-      layout: "scan",
     };
     await fs.mkdir(context.root);
     const artifact = "artifacts/deep-scan/checkpoint.json";

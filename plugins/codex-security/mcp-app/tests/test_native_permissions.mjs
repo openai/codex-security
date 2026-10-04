@@ -94,6 +94,14 @@ assert.deepEqual(
             access: "none",
           },
           {
+            path: { type: "glob_pattern", pattern: "/repo/**/*.ts" },
+            access: "read",
+          },
+          {
+            path: { type: "glob_pattern", pattern: "/repo/generated/**" },
+            access: "write",
+          },
+          {
             path: { type: "glob_pattern", pattern: "/repo-a/**/.env" },
             access: "deny",
           },
@@ -277,19 +285,6 @@ for (const invalid of [
     ...pinnedReadOnly,
     file_system: {
       type: "restricted",
-      entries: [
-        rootRead,
-        {
-          path: { type: "glob_pattern", pattern: "/repo/**/*.env" },
-          access: "read",
-        },
-      ],
-    },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
       entries: [rootRead],
       glob_scan_max_depth: 0,
     },
@@ -334,6 +329,14 @@ for (const invalid of [
       error.message.startsWith("Deep Scan cannot preserve the parent sandbox:"),
   );
 }
+
+// Cwd is unused metadata; actual inherited paths remain independently checked.
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra(pinnedReadOnly, "relative/working-directory"),
+  ),
+  { filesystemDenies: [] },
+);
 
 function extra(permissionProfile, sandboxCwd, sandboxPolicy) {
   return {

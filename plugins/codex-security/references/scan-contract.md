@@ -22,6 +22,16 @@ This bundle records immutable scan observations. It is not a workflow-state data
 
 Retention is an explicit consumer decision. Producing a sealed bundle must not silently copy it into an archive.
 
+## Completion and recovery
+
+The shared SDK runner validates and seals ordinary child results, merges accepted observations, and finalizes the Deep Scan parent before returning success. Callers use that result without publishing another draft or completing the parent again. Standalone workbench cancellation and failure recovery retain accepted observations and unsealed child checkpoints when the SDK is no longer running.
+
+Current Deep Scan checkpoints use version 3. The small checkpoint refers to an immutable aggregate file; source findings and accepted revisions are stored once by ID and expanded only for public reports. Completed historical bundles remain readable. A valid sealed version-2 bundle can also finish recording its database completion through CLI or native rejoin after an interruption when completion does not require historical cost reconstruction; its old aggregate is not loaded, and a missing execution checkpoint does not prevent that database update. Unsealed scans from an older execution engine or checkpoint version must be recovered with their original version or replaced by a new scan; their saved files remain untouched.
+
+Child evidence stays in its original `artifacts/deep-scan/passes/<pass>/findings/` tree, including nested report paths. Parent write-up links reference that tree, preserving relative links inside each report.
+
+The internal `write-scan-draft` command accepts the existing staged paths, or reads `{documents, checkpoint}` from stdin when `--draft-path` is omitted. It commits prepared documents to `artifacts/scan-draft.json` under the scan lock before writing canonical exports. This committed snapshot is the authority for subsequent edits and interrupted export recovery. Failed commits leave pending checkpoints for the next draft or completion to reconcile; normal draft updates do not replay accepted checkpoint history. The host passes reconciled checkpoint names as `reconciledCheckpointIds` with the prepared documents, and records that batch in the committed snapshot before removing its pending markers. A later publication first retires the prior accepted batch; if that cleanup fails, it keeps the existing snapshot. Stopped recovery also preserves current file-authored results in an immutable checkpoint, so writes after the last committed draft survive failure or cancellation. `set-scan-thread` associates execution sessions with a scan; for terminal or sealed scans it preserves the original continuation thread.
+
 ## Manifest Semantics
 
 A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
@@ -112,9 +122,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+During [Deep Scan](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans), the host combines child scans’ reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. Parent coverage stays partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
 
-Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage.
 
 For Standard and diff scans, record:
 
@@ -163,6 +173,10 @@ Map detailed ledger closure into completed surface summaries in this order:
 | Otherwise, the surface is not applicable                               | `not_applicable`  |
 
 Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
+
+Draft updates must reuse finding `identity`, surface `id`, and deferred-work `id` values. The host assigns unique missing IDs once per draft operation and reuses them across publication retries; use the persisted IDs for subsequent updates. A finding without an `identity` or a surface without an `id` introduces a new row, even when its title, label, or candidate ID matches saved evidence. Deferred work with neither an `id` nor a `candidateId` also introduces a new row, even when its reason and paths match saved work. A deferred update with only a `candidateId` reuses a saved row’s ID when that candidate uniquely identifies one pending work unit; an ambiguous candidate-only update creates a new work unit, so use explicit IDs when several units share a candidate. Resolve deferred work explicitly through its `candidateId` or `surfaceIds`. Omitting a finding or deferred row does not remove accepted evidence, and changing a title or label does not establish a new identity.
+
+For stable finding matching across scans and reuse of severity or history, supply and reuse an explicit finding `identity.anchor` and optional `identity.instance`. Host-generated identities belong to one draft operation; findings without explicit identities do not match across separate scans merely because their titles agree.
 
 Detailed ledgers remain under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.

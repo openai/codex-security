@@ -1,4 +1,5 @@
 import type { ScanOptions } from "./api.js";
+import type { ScanMode } from "./targets.js";
 import type { ScanCost, ScanCostTracker } from "./cost.js";
 import type { WorkbenchCommandOptions, runWorkbench } from "./runtime.js";
 import type { ScanProgress } from "./worker-progress.js";
@@ -115,6 +116,7 @@ export class ScanProgressReporter {
   reviewedFileCount = 0;
 
   constructor(
+    private readonly mode: ScanMode,
     private readonly options: Pick<
       ScanOptions,
       "onProgress" | "onObserverError"
@@ -159,6 +161,9 @@ export class ScanProgressReporter {
       this.scopeFileCount = progress.filesTotal;
       tracker.setExpectedFilesTotal(this.scopeFileCount);
     }
-    this.report(progress);
+    this.report({
+      ...progress,
+      phase: this.mode === "deep" ? "discovery" : progress.phase,
+    });
   }
 }

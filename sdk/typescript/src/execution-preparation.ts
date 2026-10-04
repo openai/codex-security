@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
@@ -14,15 +14,14 @@ import {
   EXTERNAL_CODEX_PROVIDERS,
   deepMerge,
   providerProcessConfiguration,
+  codexConfigOverrides,
+  writeCodexConfig,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
-  modelProviderConfigOverride,
-  resolveCodexProfile,
   scanModelProvider,
+  resolveCodexProfile,
   scanCompositionOverrides,
-  setScanSubagentBudget,
-  writeCodexConfig,
   type JsonObject,
 } from "./config.js";
 import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
@@ -37,8 +36,8 @@ import {
   type ScanAuthentication,
 } from "./execution-auth.js";
 import {
-  acquireCodexSecurityCredentialHomeLock,
   codexSecurityStateDirectory,
+  acquireCodexSecurityCredentialHomeLock,
   environmentWithGit,
   executablePathForSpawn,
   pluginExecutionEnvironment,
@@ -154,8 +153,6 @@ export interface PreparedRuntime {
   preserveCodexHomeConfig?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
-  /** Legacy coordinator configuration, retained until joint activation. */
-  deepScanConfigPath?: string;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
@@ -180,22 +177,37 @@ export interface PreparedExecution {
   releaseCredentialHome: (() => Promise<void>) | null;
 }
 
+/** Hold the shared home until native startup reads this scan's config, then restore it. */
 export async function lockExecutionConfiguration(
-  session: PreparedExecution,
+  codexHome: string,
   config: JsonObject,
   signal?: AbortSignal,
-): Promise<(() => Promise<void>) | undefined> {
-  if (session.runtimeConfig === undefined) return undefined;
+): Promise<() => Promise<void>> {
   const release = await acquireCodexSecurityCredentialHomeLock(
-    session.runtime.codexHome,
+    codexHome,
     signal,
   );
+  const path = join(codexHome, "config.toml");
   try {
-    await writeCodexConfig(
-      join(session.runtime.codexHome, "config.toml"),
-      deepMerge({ ...session.runtimeConfig }, config),
+    const previous = await readFile(path, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
     );
-    return release;
+    const saved =
+      previous === null ? null : (parseToml(previous) as JsonObject);
+    await writeCodexConfig(path, config);
+    let restoration: Promise<void> | undefined;
+    return () =>
+      (restoration ??= (async () => {
+        try {
+          if (saved === null) await rm(path, { force: true });
+          else await writeCodexConfig(path, saved);
+        } finally {
+          await release();
+        }
+      })());
   } catch (error) {
     await release();
     throw error;
@@ -217,7 +229,6 @@ export function createExecutionCodex(
     apiKey,
     preserveProviderEnvironment,
   } = session.source;
-  const commandAuth = hasCommandAuth(sessionConfig);
   const environment: ProcessEnvironment = {
     ...environmentWithGit(
       pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
@@ -236,8 +247,14 @@ export function createExecutionCodex(
   if (session.safetyIdentifier !== undefined) {
     environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
   }
-  const launchConfig = { ...(config ?? sessionConfig) };
-  if (commandAuth && launchConfig["model_providers"] === undefined) {
+  const launchConfig = deepMerge(
+    { ...session.runtimeConfig },
+    config ?? sessionConfig,
+  );
+  if (
+    hasCommandAuth(sessionConfig) &&
+    launchConfig["model_providers"] === undefined
+  ) {
     launchConfig["model_providers"] = sessionConfig["model_providers"]!;
   }
   const launch = runtime.preserveCodexHomeConfig
@@ -245,11 +262,9 @@ export function createExecutionCodex(
     : { config: launchConfig, environment };
   const sdkCodexConfig = { ...launch.config };
   Object.assign(environment, launch.environment);
-  // Projects and permissions already live in generated TOML files; the SDK
-  // cannot safely encode their path and selector keys as dotted overrides.
-  delete sdkCodexConfig["projects"];
-  delete sdkCodexConfig["permissions"];
-  if (commandAuth) delete sdkCodexConfig["model_providers"];
+  const processConfig = { ...sdkCodexConfig };
+  // Native launches read project trust from config.toml, not a large argv override.
+  if (client.createCodex === undefined) delete processConfig["projects"];
   const checkPermissions =
     (session.policy !== "ordinary" ||
       session.inheritedPermissions !== undefined) &&
@@ -265,7 +280,7 @@ export function createExecutionCodex(
       session.policy === "ordinary"
         ? `${SCAN_PERMISSION_PROFILE}_execution`
         : "codex_security_deep_scan_worker";
-    sdkCodexConfig["default_permissions"] = profileId;
+    processConfig["default_permissions"] = profileId;
     configOverrides = [
       ...configOverrides,
       `permissions.${profileId}=${inlineToml(permissions[SCAN_PERMISSION_PROFILE]!)}`,
@@ -300,23 +315,27 @@ export function createExecutionCodex(
     client.createCodex ??
     (checkPermissions
       ? createPermissionCheckedCodex
-      : (options: CodexOptions) => new Codex(options));
+      : ({ config, configOverrides, ...options }: CodexOptions) =>
+          new Codex({
+            ...options,
+            configOverrides: [
+              ...codexConfigOverrides((config ?? {}) as JsonObject),
+              ...(configOverrides ?? []),
+            ],
+          }));
   const codex = createCodex({
     ...(codexPathOverride === undefined
       ? {}
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
     ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-    ...(commandAuth || configOverrides.length > 0
+    ...(configOverrides.length > 0
       ? {
-          configOverrides: [
-            ...(commandAuth ? modelProviderConfigOverride(launch.config) : []),
-            ...configOverrides,
-          ],
+          configOverrides: [...configOverrides],
         }
       : {}),
     env: sdkEnvironment,
     config: {
-      ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
+      ...(processConfig as NonNullable<CodexOptions["config"]>),
       responses_api_metadata: {
         ...configuredResponsesMetadata,
         codex_security_surface: client.surface,
@@ -326,9 +345,7 @@ export function createExecutionCodex(
   const deepWorker = session.policy !== "ordinary";
   if (session.runtimeConfig === undefined && !deepWorker)
     return { codex, environment };
-  const lockConfiguration = (signal?: AbortSignal) =>
-    lockExecutionConfiguration(session, config ?? sessionConfig, signal);
-  const wrapThread = (thread: CodexThreadLike): CodexThreadLike => ({
+  const wrap = (thread: CodexThreadLike): CodexThreadLike => ({
     get id() {
       return thread.id;
     },
@@ -336,7 +353,13 @@ export function createExecutionCodex(
       return {
         events: (async function* () {
           let release: (() => Promise<void>) | undefined =
-            await lockConfiguration(options.signal);
+            session.runtimeConfig === undefined
+              ? undefined
+              : await lockExecutionConfiguration(
+                  runtime.codexHome,
+                  sdkCodexConfig,
+                  options.signal,
+                );
           const controller = deepWorker ? new AbortController() : undefined;
           const forwardAbort = () => controller?.abort(options.signal?.reason);
           const detach = () =>
@@ -354,11 +377,9 @@ export function createExecutionCodex(
               controller ? { ...options, signal: controller.signal } : options,
             );
             for await (const event of events) {
-              // Native startup has loaded its config before emitting SDK events.
               await release?.();
               release = undefined;
-              // The Deep coordinator treats completion as the worker boundary.
-              // Ordinary scans drain the process to retain late exit errors.
+              // Deep workers finish at turn.completed; ordinary scans retain late exit errors.
               const completed = deepWorker && event.type === "turn.completed";
               if (completed) detach();
               yield event;
@@ -373,16 +394,16 @@ export function createExecutionCodex(
     },
   });
   return {
+    environment,
     codex: {
-      startThread: (options) => wrapThread(codex.startThread(options)),
+      startThread: (options) => wrap(codex.startThread(options)),
       ...(codex.resumeThread === undefined
         ? {}
         : {
             resumeThread: (id: string, options: ThreadOptions) =>
-              wrapThread(codex.resumeThread!(id, options)),
+              wrap(codex.resumeThread!(id, options)),
           }),
     },
-    environment,
   };
 }
 
@@ -454,9 +475,11 @@ export async function prepareAmbientExecution(
         );
     }
   }
-  const selectedEnvironment = configuredProvider
-    ? environment
-    : selectedScanEnvironment(environment, auth, modelProvider);
+  const selectedEnvironment = {
+    ...(configuredProvider
+      ? environment
+      : selectedScanEnvironment(environment, auth, modelProvider)),
+  };
   if (!configuredProvider && selectedEnvironment["CODEX_API_KEY"]?.trim())
     delete selectedEnvironment["OPENAI_API_KEY"];
 
@@ -473,7 +496,6 @@ export async function prepareAmbientExecution(
 export async function prepareAmbientRuntime(
   execution: AmbientExecution,
   signal?: AbortSignal,
-  preparedPlugin?: PluginInstall,
 ): Promise<PreparedRuntime> {
   const requestedHome =
     execution.environment["CODEX_HOME"] ||
@@ -482,26 +504,23 @@ export async function prepareAmbientRuntime(
   const codexHome = await realpath(requestedHome);
   const bootstrapWorkspace = await createIsolatedHome();
   try {
-    const marketplaceRoot =
-      preparedPlugin?.marketplaceRoot ??
-      (await createMarketplace(
-        bootstrapWorkspace,
-        execution.pluginRoot,
-        signal,
-      ));
+    const marketplaceRoot = await createMarketplace(
+      bootstrapWorkspace,
+      execution.pluginRoot,
+      signal,
+    );
     const pluginRoot = join(marketplaceRoot, "plugins", PLUGIN_NAME);
     return {
       codexHome,
       preserveCodexHomeConfig: true,
       bootstrapWorkspace,
       configPath: join(bootstrapWorkspace, "config-preflight.toml"),
-      deepScanConfigPath: join(bootstrapWorkspace, "deep-scan-config.toml"),
       environment: {
         ...definedEnvironment(execution.environment),
         CODEX_HOME: codexHome,
       },
       credentialsAvailable: false,
-      plugin: preparedPlugin ?? {
+      plugin: {
         pluginRoot,
         installedRoot: pluginRoot,
         marketplaceRoot,
@@ -517,7 +536,11 @@ export async function prepareAmbientRuntime(
 
 export async function nativeScanConfiguration(
   environment: NodeJS.ProcessEnv,
-  input: { recipe?: JsonObject; model?: string; reasoningEffort?: string },
+  input: {
+    recipe?: { config?: JsonObject };
+    model?: string;
+    reasoningEffort?: string;
+  },
   subagents: number,
 ): Promise<JsonObject> {
   const ambientPath = join(
@@ -563,7 +586,7 @@ function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
   return config;
 }
 
-/** Standard passes retain inherited permissions while isolating workbench tools. */
+/** A Standard pass preserves the caller's write and network policy. */
 export function prepareDiscoveryExecution(
   session: PreparedExecution,
 ): PreparedExecution {
@@ -574,14 +597,18 @@ export function prepareDiscoveryExecution(
   };
 }
 
-/** The merge retains inherited permissions and applies its own subagent budget. */
+/** The merge uses the same inherited policy while applying its subagent budget. */
 export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,
 ): PreparedExecution {
-  const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
-  setScanSubagentBudget(config, subagents);
-  return { ...session, policy: "merge", sessionConfig: config };
+  return {
+    ...session,
+    policy: "merge",
+    sessionConfig: deepWorkerConfig(
+      scanCompositionOverrides(session.sessionConfig, subagents),
+    ),
+  };
 }
 
 /** Read-only helpers retain denied paths while intentionally removing write access. */
@@ -613,7 +640,7 @@ export function prepareReadOnlyExecution(
   };
 }
 
-function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
+export function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
   return Object.fromEntries(
     Object.entries(filesystem).map(([path, access]) => [
       path,

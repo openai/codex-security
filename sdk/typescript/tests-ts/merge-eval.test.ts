@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, spyOn, test } from "bun:test";
 import { parse } from "smol-toml";
-import { validateScanMerge } from "../src/scan-merge.js";
+import { deepMerge, type JsonObject } from "../src/config.js";
+import { reconcileScanMerge } from "../src/scan-merge.js";
 import { executablePathForSpawn } from "../src/runtime.js";
-import { mergeFixtures } from "../scripts/merge-eval/fixtures.js";
+import { mergeFixtures, parentId } from "../scripts/merge-eval/fixtures.js";
 import { gradeMerge } from "../scripts/merge-eval/grade.js";
 import { fixtureSpawn } from "./support/codex-process.js";
 
@@ -67,7 +68,7 @@ if (args.includes("mcp")) {
   process.exit(0);
 }
 const index = fs.existsSync(${JSON.stringify(capture)}) ? fs.readFileSync(${JSON.stringify(capture)}, "utf8").trim().split("\\n").length : 0;
-const answer = ${JSON.stringify(mergeFixtures().map((fixture) => fixture.reference))}[index];
+const answer = { matches: [], uncertain: [], related: [], request: null };
 fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify(args) + "\\n");
 process.stdin.resume();
 process.stdin.on("end", () => {
@@ -109,12 +110,15 @@ process.stdin.on("end", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    expect(invocations).toHaveLength(mergeFixtures().length);
+    expect(invocations.length).toBeGreaterThan(0);
     for (const args of invocations) {
       const overrides = args.flatMap((value, index) =>
         value === "--config" || value === "-c" ? [args[index + 1]!] : [],
       );
-      const config = parse(overrides.join("\n"));
+      const config = overrides.reduce<JsonObject>(
+        (value, override) => deepMerge(value, parse(override) as JsonObject),
+        {},
+      );
       expect(config["mcp_servers"]).toEqual({
         "synthetic.tools": { enabled: false },
       });
@@ -136,7 +140,7 @@ process.stdin.on("end", () => {
     }
   } finally {
     process.argv = previous.argv;
-    process.exitCode = previous.exitCode;
+    process.exitCode = previous.exitCode ?? 0;
     if (previous.executable === undefined) delete process.env["CODEX_CLI_PATH"];
     else process.env["CODEX_CLI_PATH"] = previous.executable;
     spawning.mockRestore();
@@ -151,19 +155,34 @@ process.stdin.on("end", () => {
 
 test.each(mergeFixtures())("merge quality oracle: $name", (fixture) => {
   expect(gradeMerge(fixture.reference, fixture.expected)).toEqual([]);
-  expect(() =>
-    validateScanMerge(fixture.reference, fixture.inputs, fixture.previous),
-  ).not.toThrow();
-  if (!fixture.reference.groups.length) return;
+  const actual = reconcileScanMerge(
+    parentId,
+    fixture.groups,
+    fixture.inputs,
+    fixture.previous,
+  ).aggregate;
+  expect(gradeMerge(actual, fixture.expected)).toEqual([]);
+  if (!fixture.reference.findings.length) return;
+  for (const field of [
+    "remediation",
+    "remediationTests",
+    "preventiveControls",
+    "severity",
+  ]) {
+    const bad = structuredClone(fixture.reference);
+    bad.findings[0]![field] = field === "severity" ? { level: "critical" } : [];
+    // Full originals in provenance must not satisfy a canonical repair requirement.
+    (bad.findings[0]!["provenance"] as Record<string, unknown>)[
+      "sourceFindings"
+    ] = fixture.reference.findings;
+    expect(gradeMerge(bad, fixture.expected).length).toBeGreaterThan(0);
+  }
   const omitted = structuredClone(fixture.reference);
-  omitted.groups.pop();
+  omitted.findings.pop();
   expect(gradeMerge(omitted, fixture.expected).length).toBeGreaterThan(0);
   const duplicate = structuredClone(fixture.reference);
-  duplicate.groups.push(duplicate.groups[0]!);
+  duplicate.findings.push(duplicate.findings[0]!);
   expect(gradeMerge(duplicate, fixture.expected).length).toBeGreaterThan(0);
-  const unknown = structuredClone(fixture.reference);
-  unknown.groups[0]!.canonicalSourceFindingId = "unknown:0";
-  expect(gradeMerge(unknown, fixture.expected).length).toBeGreaterThan(0);
 });
 
 test("accounting for every source does not excuse collapsing independent findings", () => {
@@ -171,45 +190,44 @@ test("accounting for every source does not excuse collapsing independent finding
     (value) => value.name === "independent-similar-titles",
   )!;
   const collapsed = structuredClone(fixture.reference);
-  collapsed.groups.splice(1);
-  collapsed.groups[0]!.sourceFindingIds = fixture.expected.flatMap(
-    (group) => group.refs,
-  );
-  expect(() =>
-    validateScanMerge(collapsed, fixture.inputs, fixture.previous),
-  ).not.toThrow();
+  collapsed.findings.splice(1);
+  (collapsed.findings[0]!["provenance"] as Record<string, unknown>)[
+    "sourceFindingIds"
+  ] = fixture.expected.flatMap((group) => group.refs);
+  const accepted = reconcileScanMerge(
+    parentId,
+    [fixture.expected.flatMap((group) => group.refs)],
+    fixture.inputs,
+    fixture.previous,
+  ).aggregate;
+  expect(gradeMerge(accepted, fixture.expected).length).toBeGreaterThan(0);
   expect(gradeMerge(collapsed, fixture.expected).length).toBeGreaterThan(0);
 });
 
-test("canonical selection must reflect the supported severity assessment", () => {
+test("merge quality requires complete repair, test and control identifiers", () => {
   const fixture = mergeFixtures().find(
-    (value) => value.name === "conflicting-severity",
+    (value) => value.name === "independent-similar-titles",
   )!;
-  const wrong = structuredClone(fixture.reference);
-  wrong.groups[0]!.canonicalSourceFindingId = "lower:0";
-  expect(() =>
-    validateScanMerge(wrong, fixture.inputs, fixture.previous),
-  ).not.toThrow();
-  expect(gradeMerge(wrong, fixture.expected)).toEqual([
-    'Wrong canonical source: ["higher:0","lower:0"].',
-  ]);
+  for (const [field, wrong] of [
+    ["remediation", "Correct configuration repair-10."],
+    ["remediationTests", ["Verify repair-1-test-other."]],
+    ["preventiveControls", ["Maintain other-repair-1-control."]],
+  ] as const) {
+    const bad = structuredClone(fixture.reference);
+    Object.assign(bad.findings[1]!, { [field]: wrong });
+    expect(gradeMerge(bad, fixture.expected)).toEqual([
+      `Missing canonical ${field} fact ${fixture.expected[1]!.facts[field]![0]}: ["wide:1"].`,
+    ]);
+  }
 });
 
-test("retained history with an additional repair cannot collapse into the current observation", () => {
+test("retained history requires every original repair in the quality oracle", () => {
   const fixture = mergeFixtures().find(
-    (value) => value.name === "large-field-and-nested-history",
+    (value) => value.name === "large-field-and-retained-sources",
   )!;
-  const collapsed = {
-    scanId: fixture.reference.scanId,
-    groups: [
-      {
-        sourceFindingIds: ["history:0", "current:0"],
-        canonicalSourceFindingId: "current:0",
-      },
-    ],
-  };
-  expect(() =>
-    validateScanMerge(collapsed, fixture.inputs, fixture.previous),
-  ).not.toThrow();
+  const collapsed = structuredClone(fixture.reference);
+  collapsed.findings[0]!.remediation = fixture.inputs[0]!.sourceFindings[0]![
+    "remediation"
+  ] as string;
   expect(gradeMerge(collapsed, fixture.expected).length).toBeGreaterThan(0);
 });

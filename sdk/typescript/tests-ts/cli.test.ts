@@ -3352,6 +3352,7 @@ describe("CLI", () => {
           initial.run(repository, {
             outputDir: join(root, "initial"),
             auth: "api-key",
+            mode: command === "resume" ? "deep" : "standard",
           }),
         ).rejects.toThrow("Synthetic recipe captured");
         expect(savedRecipe).toBeDefined();

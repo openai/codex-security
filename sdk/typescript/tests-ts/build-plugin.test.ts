@@ -1,3 +1,7 @@
+import {
+  mcpSmokeInput,
+  mcpSmokeResponses,
+} from "../scripts/fixtures/mcp-smoke.mjs";
 import { execFile } from "node:child_process";
 import {
   chmod,
@@ -115,6 +119,24 @@ describe("bundled plugin build", () => {
     ]);
     expect(helper.stdout).toBe("[]\n");
     expect(helper.stderr).toBe("");
+    const execution = execFileAsync(
+      "node",
+      [join(destination, "server.mjs"), "--stdio"],
+      {
+        cwd: root,
+        timeout: 10_000,
+      },
+    );
+    execution.child.stdin?.end(mcpSmokeInput);
+    const standalone = await execution;
+    const responses = mcpSmokeResponses(standalone.stdout);
+    expect(
+      responses.find((response) => response.id === 2)?.result.tools,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "start_codex_security_deep_scan" }),
+      ]),
+    );
   });
 
   test("builds from a source snapshot without Git metadata", async () => {

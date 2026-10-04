@@ -19,41 +19,7 @@ export function registerPass(pass: DeepScanPass, scanId: string): void {
   if (pass.scanId !== undefined && pass.scanId !== scanId)
     throw new Error("Saved scan pass registration changed.");
   pass.scanId = scanId;
-}
-
-export function observePassCompletion(
-  state: DeepScanCheckpoint,
-  pass: DeepScanPass,
-  replayAfterSuccess = false,
-): boolean {
-  const observed =
-    replayAfterSuccess ||
-    (!pass.completed && !state.mergedScanIds.includes(pass.scanId!));
-  if (observed) state.consecutiveErrors = 0;
-  pass.completed = true;
-  return observed;
-}
-
-export function observePassFailure(
-  state: DeepScanCheckpoint,
-  pass: DeepScanPass,
-  replayAfterSuccess = false,
-): void {
-  if (pass.failed && !replayAfterSuccess) return;
-  pass.failed = true;
-  state.consecutiveErrors += 1;
-}
-
-export function exhaustPassRetries(
-  state: DeepScanCheckpoint,
-  pass: DeepScanPass,
-  errorLimit: number,
-): boolean {
-  observePassFailure(state, pass);
-  // This decision is durable in the same snapshot as the threshold counter.
-  const stopped = state.consecutiveErrors >= errorLimit;
-  if (stopped) stopDiscovery(state, "failed");
-  return stopped;
+  delete pass.failedBeforeRegistration;
 }
 
 export function acceptMerge(

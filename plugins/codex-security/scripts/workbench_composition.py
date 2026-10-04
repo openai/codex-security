@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -27,22 +28,10 @@ class _PassDirectory(TypedDict):
 
 class CompositionPass(_PassDirectory, total=False):
     scanId: str
-    failed: Literal[True]
-    completed: Literal[True]
-
-
-class _LegacyProgress(TypedDict):
-    discoveryRuns: int
-    coverage: dict[str, Any]
-
-
-class LegacyComposition(_LegacyProgress, total=False):
-    originThreadId: str | None
-    cost: dict[str, Any]
 
 
 class _CheckpointState(TypedDict):
-    version: Literal[2]
+    version: Literal[3]
     startedAt: str
     passes: list[CompositionPass]
     mergedScanIds: list[str]
@@ -58,11 +47,11 @@ class PendingCompositionStop(TypedDict):
 
 
 class CompositionCheckpoint(_CheckpointState, total=False):
+    pendingStop: PendingCompositionStop
     mergeFailures: int
     mergeStarted: bool
     costUnavailable: Literal[True]
-    legacy: LegacyComposition
-    pendingStop: PendingCompositionStop
+    aggregatePath: str | None
     terminalReason: Literal["saturated", "capped", "failed", "canceled"]
 
 
@@ -71,10 +60,13 @@ class CompositionView:
     checkpoint: CompositionCheckpoint | None
     children: tuple[sqlite3.Row, ...]
     execution_threads: tuple[str, ...]
-    legacy_run: sqlite3.Row | None
+    saved_review_count: int = 0
+    saved_review_maximum: int | None = None
 
 
-def read_composition_checkpoint(scan: sqlite3.Row) -> CompositionCheckpoint | None:
+def read_composition_checkpoint(
+    scan: sqlite3.Row, *, load_aggregate: bool = True
+) -> CompositionCheckpoint | None:
     scan_dir = Path(scan["scan_dir"])
     with scan_completion_lock(scan["id"]):
         try:
@@ -86,9 +78,34 @@ def read_composition_checkpoint(scan: sqlite3.Row) -> CompositionCheckpoint | No
             if isinstance(cause, FileNotFoundError) and cause.filename != str(scan_dir.absolute()):
                 return None
             raise
-    if checkpoint.get("version") != 2:
-        raise ContractError("Unsupported Deep Scan checkpoint version.")
-    # The host writes this versioned contract. Keep extension fields when reading it.
+    version = checkpoint.get("version")
+    if version not in {2, 3} or (load_aggregate and version != 3):
+        raise ContractError(
+            "This Deep Scan checkpoint uses an unsupported format. Recover unfinished work "
+            "with its original version, or start a new scan."
+        )
+    if load_aggregate:
+        path = checkpoint.get("aggregatePath")
+        aggregate = _read_scan_local_json(scan_dir, path, "Deep Scan aggregate") if path else None
+        if aggregate is not None:
+            for ids, field, directory in (
+                ("sourceFindingIds", "sourceFindings", "sources"),
+                ("revisionIds", "revisions", "revisions"),
+            ):
+                keys = aggregate.pop(ids, None)
+                if keys is not None:
+                    aggregate[field] = {
+                        key: _read_scan_local_json(
+                            scan_dir,
+                            f"artifacts/deep-scan/{directory}/{hashlib.sha256(key.encode()).hexdigest() if directory == 'sources' else key}.json",
+                            "Deep Scan retained finding",
+                        )
+                        for key in keys
+                    }
+        checkpoint["aggregate"] = aggregate
+    else:
+        checkpoint.pop("aggregate", None)
+        checkpoint.pop("legacy", None)
     return cast(CompositionCheckpoint, checkpoint)
 
 
@@ -106,8 +123,11 @@ def composition_execution_threads(
     return tuple(
         row["thread_id"]
         for row in connection.execute(
-            "SELECT thread_id FROM scan_execution_threads WHERE scan_id = ? ORDER BY thread_id",
-            (scan["id"],),
+            "SELECT thread_id FROM scan_execution_threads WHERE scan_id = ? "
+            "UNION SELECT sdk_thread_id FROM deep_scan_workers "
+            "WHERE scan_id = ? AND sdk_thread_id IS NOT NULL AND ? = 'deep' "
+            "ORDER BY thread_id",
+            (scan["id"], scan["id"], scan["mode"]),
         )
     )
 
@@ -116,14 +136,17 @@ def load_composition(
     connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
 ) -> CompositionView:
     if scan["mode"] != "deep":
-        return CompositionView(None, (), composition_execution_threads(connection, scan), None)
+        return CompositionView(None, (), composition_execution_threads(connection, scan))
+    saved = connection.execute(
+        "SELECT completion_sequence, max_discovery_runs FROM deep_scan_runs WHERE scan_id = ?",
+        (scan["id"],),
+    ).fetchone()
     return CompositionView(
-        read_composition_checkpoint(scan) if checkpoint else None,
+        read_composition_checkpoint(scan, load_aggregate=False) if checkpoint else None,
         tuple(composition_children(connection, scan)),
         composition_execution_threads(connection, scan),
-        connection.execute(
-            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone(),
+        saved["completion_sequence"] if saved is not None else 0,
+        saved["max_discovery_runs"] if saved is not None else None,
     )
 
 

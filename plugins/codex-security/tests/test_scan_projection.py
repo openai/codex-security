@@ -12,31 +12,6 @@ import pytest
 from workbench_test_support import checkpoint, register, run_workbench, write_completed_contract
 
 
-def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:
-    coverage = {
-        "completeness": "partial",
-        "surfaces": [{"id": "surface", "notes": "Earlier observation"}],
-    }
-    addition = {
-        "surfaces": [
-            {"notes": "Earlier observation", "id": "surface"},
-            {"id": "surface", "notes": "Later observation"},
-        ],
-        "openQuestions": [{"question": "Remaining coverage?"}],
-    }
-    workbench_api["saved_results"].merge_coverage(coverage, addition)
-    assert coverage == {
-        "completeness": "partial",
-        "surfaces": [
-            {"id": "surface", "notes": "Earlier observation"},
-            {"id": "surface", "notes": "Later observation"},
-        ],
-        "explicitExclusions": [],
-        "deferred": [],
-        "openQuestions": [{"question": "Remaining coverage?"}],
-    }
-
-
 @pytest.fixture
 def projection_fixture(tmp_path):
     target = tmp_path / "target"
@@ -77,9 +52,7 @@ def projection_fixture(tmp_path):
     return state, parent_dir, parent, child_dir, child, fixture
 
 
-def completed_projection(
-    state, parent_dir, parent, child_dir, child, *, descriptor_limit=None, **overrides
-):
+def completed_projection(state, parent_dir, parent, child_dir, child, **overrides):
     identity = parent_dir.stat()
     request = {
         "parentScanId": parent["scanId"],
@@ -89,22 +62,15 @@ def completed_projection(
         "expectedParentIdentity": {"dev": str(identity.st_dev), "ino": str(identity.st_ino)},
         **overrides,
     }
-    command = [sys.executable, "-I", "-X", "utf8", "-B"]
-    if descriptor_limit is not None:
-        command.extend(
-            [
-                "-c",
-                (
-                    "import resource, runpy, sys; "
-                    f"resource.setrlimit(resource.RLIMIT_NOFILE, ({descriptor_limit}, "
-                    "resource.getrlimit(resource.RLIMIT_NOFILE)[1])); "
-                    "runpy.run_path(sys.argv.pop(), run_name='__main__')"
-                ),
-            ]
-        )
-    command.append(str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"))
     return subprocess.run(
-        command,
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"),
+        ],
         input=json.dumps(request),
         env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
         capture_output=True,
@@ -264,7 +230,8 @@ def test_completed_projection_rejects_rewritten_saved_scan(
     assert {name: (child_dir / name).read_bytes() for name in source_bytes} == source_bytes
 
 
-def test_projection_preserves_long_report_references(tmp_path):
+@pytest.mark.parametrize("nested", [False, True])
+def test_projection_preserves_long_report_references(tmp_path, nested):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("\n" * 50)
@@ -275,7 +242,9 @@ def test_projection_preserves_long_report_references(tmp_path):
     child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
     write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
     slug = "a" * 250
-    report_path = f"findings/{slug}/{slug}.md"
+    report_path = (
+        "findings/original/secondary/report.md" if nested else f"findings/{slug}/{slug}.md"
+    )
     source = child_dir / report_path
     source.parent.mkdir(parents=True)
     source.write_text("# Synthetic report\n[Evidence](poc/trace.txt)\n")
@@ -336,7 +305,9 @@ def test_completed_projection_keeps_source_and_parent_binding(
 
 
 @pytest.mark.parametrize("directory", [False, True])
-def test_completed_projection_does_not_follow_symlink_evidence(projection_fixture, directory):
+def test_completed_projection_does_not_copy_or_follow_symlink_evidence(
+    projection_fixture, directory
+):
     state, parent_dir, parent, child_dir, child, _ = projection_fixture
     outside = parent_dir.parent / "outside-evidence.txt"
     if directory:
@@ -349,55 +320,6 @@ def test_completed_projection_does_not_follow_symlink_evidence(projection_fixtur
     assert completed.returncode == 0, completed.stderr
     assert not (parent_dir / "findings").exists()
     assert (child_dir / "findings/check/unsafe.txt").is_symlink()
-
-
-@pytest.mark.parametrize(
-    "depth, descriptor_limit",
-    [
-        pytest.param(
-            260,
-            256,
-            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptor limit"),
-        ),
-        pytest.param(
-            1050,
-            None,
-            marks=pytest.mark.skipif(
-                sys.platform != "linux", reason="Evidence path exceeds other platforms' limits"
-            ),
-        ),
-    ],
-)
-def test_completed_projection_copies_deep_evidence(projection_fixture, depth, descriptor_limit):
-    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
-    source = child_dir / "findings/check"
-    destination = child_dir / "findings/check"
-    components = ["d"] * depth
-    source_leaf = source.joinpath(*components, "evidence.bin")
-    destination_leaf = destination.joinpath(*components, "evidence.bin")
-    try:
-        directory = source
-        for component in components:
-            directory /= component
-            directory.mkdir()
-        source_leaf.write_bytes(b"\x00\xffSynthetic nested evidence")
-        completed = completed_projection(
-            state, parent_dir, parent, child_dir, child, descriptor_limit=descriptor_limit
-        )
-        assert completed.returncode == 0, completed.stderr
-        assert destination_leaf.read_bytes() == source_leaf.read_bytes()
-        assert len(json.loads(completed.stdout)["draft"]["findings"]) == len(
-            fixture["expected"]["sourceFindingIndexes"]
-        )
-    finally:
-        # Do not make test teardown depend on a recursive directory remover either.
-        for leaf, root in ((source_leaf, source),):
-            leaf.unlink(missing_ok=True)
-            directory = leaf.parent
-            while directory != root:
-                if directory.exists():
-                    directory.rmdir()
-                directory = directory.parent
 
 
 @pytest.mark.parametrize("terminal", ["unsealed", "interrupted"])
@@ -505,17 +427,26 @@ def test_projection_many_selected_paths_keeps_boundaries_and_source_order(
     assert project(["."])["sourceFindings"] == findings
 
 
-def test_reprojection_does_not_retain_removed_supporting_evidence(projection_fixture):
-    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
-    evidence = child_dir / "findings/check/transient.txt"
-    evidence.write_text("Synthetic supporting evidence\n")
-    first = completed_projection(state, parent_dir, parent, child_dir, child)
-    assert first.returncode == 0, first.stderr
-    finding = json.loads(first.stdout)["draft"]["findings"][0]
-    report = parent_dir / finding["writeup"]["reportPath"]
-    assert (report.parent / evidence.name).read_bytes() == evidence.read_bytes()
-    evidence.unlink()
-    second = completed_projection(state, parent_dir, parent, child_dir, child)
-    assert second.returncode == 0, second.stderr
-    assert not (report.parent / evidence.name).exists()
-    assert not (parent_dir / "findings" / child["scanId"]).exists()
+def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [{"id": "surface", "notes": "Earlier observation"}],
+    }
+    addition = {
+        "surfaces": [
+            {"notes": "Earlier observation", "id": "surface"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }
+    workbench_api["saved_results"].union_coverage(coverage, addition)
+    assert coverage == {
+        "completeness": "partial",
+        "surfaces": [
+            {"id": "surface", "notes": "Earlier observation"},
+            {"id": "surface", "notes": "Later observation"},
+        ],
+        "explicitExclusions": [],
+        "deferred": [],
+        "openQuestions": [{"question": "Remaining coverage?"}],
+    }

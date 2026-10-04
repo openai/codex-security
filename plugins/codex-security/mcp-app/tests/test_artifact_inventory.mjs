@@ -20,13 +20,13 @@ try {
   await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
-  await testWorkerReadsItsOwnBoundInventory();
+  await testScansReadTheirOwnBoundInventory();
   await testCursorAndLimitAreValidated();
   await testEmptyInventoryIsValid();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
   await testMissingInventoryIsReported();
-  await testWorkersCannotPrepareInventory();
+  await testUnboundContextCannotPrepareInventory();
   await testBoundScopeFailurePreservesPreviousInventory();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
@@ -291,18 +291,18 @@ async function testPrepareIncludesStagedAndUnstagedChanges() {
   });
 }
 
-async function testWorkerReadsItsOwnBoundInventory() {
-  const fixture = await createFixture("isolated worker inventory");
-  await writeInventory(fixture.scanInventory, "./src/parent.ts\n");
-  await writeInventory(fixture.workerInventory, "./src/worker.ts\n");
+async function testScansReadTheirOwnBoundInventory() {
+  const first = await createFixture("first scan inventory");
+  const second = await createFixture("second scan inventory");
+  await writeInventory(first.scanInventory, "./src/first.ts\n");
+  await writeInventory(second.scanInventory, "./src/second.ts\n");
 
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
-    items: [{ path: "./src/parent.ts" }],
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(first.scan), {
+    items: [{ path: "./src/first.ts" }],
   });
-  assert.deepEqual(
-    await inventory.listCodexSecurityReviewItems(fixture.worker),
-    { items: [{ path: "./src/worker.ts" }] },
-  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(second.scan), {
+    items: [{ path: "./src/second.ts" }],
+  });
 }
 
 async function testCursorAndLimitAreValidated() {
@@ -378,11 +378,14 @@ async function testMissingInventoryIsReported() {
   );
 }
 
-async function testWorkersCannotPrepareInventory() {
-  const fixture = await createFixture("worker cannot prepare");
+async function testUnboundContextCannotPrepareInventory() {
+  const fixture = await createFixture("unbound context cannot prepare");
 
   await assert.rejects(
-    inventory.prepareCodexSecurityReviewItems(fixture.worker),
+    inventory.prepareCodexSecurityReviewItems({
+      ...fixture.scan,
+      scanId: undefined,
+    }),
     /only a parent scan/i,
   );
 }
@@ -429,12 +432,10 @@ async function createFixture(label) {
   const fixtureRoot = path.join(root, label);
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");
-  const workerRoot = path.join(fixtureRoot, "worker");
   const pluginRoot = new URL("../../", import.meta.url).pathname;
   await Promise.all([
     mkdir(repoRoot, { recursive: true }),
     mkdir(scanRoot, { recursive: true }),
-    mkdir(workerRoot, { recursive: true }),
   ]);
   return {
     root,
@@ -445,25 +446,13 @@ async function createFixture(label) {
       "02_discovery",
       "in_scope_files.txt",
     ),
-    workerInventory: path.join(
-      workerRoot,
-      "artifacts",
-      "02_discovery",
-      "in_scope_files.txt",
-    ),
     scan: {
       root: scanRoot,
       repoRoot,
-      layout: "scan",
       scanId: "f84c8312-a602-4660-8e01-518a176cd75a",
       scope: ".",
       pluginRoot,
       pythonCommand: process.env.PYTHON ?? "python3",
-    },
-    worker: {
-      root: workerRoot,
-      repoRoot,
-      layout: "worker",
     },
   };
 }

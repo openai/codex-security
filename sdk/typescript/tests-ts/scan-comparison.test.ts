@@ -12,7 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, win32 } from "node:path";
+import { join, relative, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse, stringify } from "smol-toml";
 import {
@@ -24,14 +24,21 @@ import {
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
-import type { JsonObject } from "../src/config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  deepMerge,
+  type JsonObject,
+} from "../src/config.js";
+import { CodexSecurityError } from "../src/errors.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
+  disabledMcpServers,
   matchCompletedScan,
   matchScanFindings,
   matchScanFindingsInternal,
   runReadOnlyCodex,
+  unionFindingGroups,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -68,6 +75,21 @@ async function temporaryDirectory(prefix = "codex-security-comparison-") {
   return path;
 }
 
+function launchConfig(overrides: readonly string[]): JsonObject {
+  return overrides.reduce(
+    (config, value) => deepMerge(config, parse(value) as JsonObject),
+    {},
+  );
+}
+
+function argvConfig(argv: readonly string[]): JsonObject {
+  return launchConfig(
+    argv.flatMap((value, index) =>
+      value === "--config" ? [argv[index + 1]!] : [],
+    ),
+  );
+}
+
 function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
 }
@@ -99,6 +121,72 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("reconciles finding groups with native Node 20 built-ins", () => {
+    const script = `
+Reflect.deleteProperty(Map, "groupBy");
+const { matchScanFindings } = await import(${JSON.stringify(new URL("../src/scan-comparison.ts", import.meta.url).href)});
+const input = {
+  before: [{ findingId: "same-control", occurrenceId: "old" }],
+  after: [
+    { findingId: "same-control", occurrenceId: "retained" },
+    { findingId: "split-control", occurrenceId: "split" },
+  ],
+};
+const response = {
+  matches: [{ beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["split"], confidence: "high", reason: "The same control was split." }],
+  uncertain: [],
+};
+const codex = { startThread() { return { async run() { return { finalResponse: JSON.stringify(response) }; } }; } };
+console.log(JSON.stringify(await matchScanFindings(input, { codex })));
+`;
+    const result = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], { encoding: "utf8" }),
+    ) as ScanComparisonResult;
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]).toMatchObject({
+      beforeOccurrenceIds: ["old"],
+      afterOccurrenceIds: ["split", "retained"],
+      confidence: "high",
+    });
+    expect(result.uncertain).toEqual([]);
+  });
+
+  test("keeps the first accepted identity when joining finding groups", () => {
+    expect(
+      unionFindingGroups([
+        ["accepted-a", "repeated-a"],
+        ["accepted-b", "repeated-b"],
+        ["separate"],
+        ["repeated-b", "repeated-a", "new-a", "new-a"],
+        ["", " ", "independent-a"],
+        ["", "independent-b"],
+      ]),
+    ).toEqual([
+      ["accepted-a", "repeated-a", "accepted-b", "repeated-b", "new-a"],
+      ["separate"],
+      ["independent-a"],
+      ["independent-b"],
+    ]);
+    expect(unionFindingGroups([])).toEqual([]);
+  });
+
+  test.each([{}, { codexOverrides: { model_reasoning_effort: "high" } }])(
+    "merges default model settings for an injected client with %j",
+    async (config) => {
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        { codex, config },
+      );
+      expect(calls.threadOptions).toMatchObject({
+        model: DEFAULT_CODEX_CONFIG["model"],
+        modelReasoningEffort:
+          config.codexOverrides?.model_reasoning_effort ??
+          DEFAULT_CODEX_CONFIG["model_reasoning_effort"],
+      });
+    },
+  );
+
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
@@ -432,6 +520,7 @@ process.exit(0);
                   }
                 : {
                     codexOverrides: {
+                      default_permissions: "native",
                       permissions: { native: constraints },
                       projects: {
                         [join(home, "literal.[private]")]: {
@@ -472,8 +561,10 @@ process.exit(0);
         'default_permissions="codex_security_comparison"',
       );
       expect(overrides).toContain('approval_policy="never"');
-      expect(overrides).toContain("features.shell_tool=false");
-      expect(overrides).toContain("features.plugins=false");
+      expect(launchConfig(overrides)["features"]).toMatchObject({
+        shell_tool: false,
+        plugins: false,
+      });
       expect(constrained).not.toContain("--sandbox");
       expect(
         overrides.some((value) => value.startsWith("permissions.native")),
@@ -515,12 +606,13 @@ process.exit(0);
     ),
     {
       name: "custom",
-      provider: { env_key: "OPENAI_API_KEY" },
+      provider: { name: "Synthetic", env_key: "OPENAI_API_KEY" },
       ambient: false,
     },
     {
       name: "custom",
       provider: {
+        name: "Synthetic",
         auth: { type: "command", command: "synthetic-auth-provider" },
       },
       ambient: false,
@@ -746,18 +838,17 @@ process.exit(0);
           expect(native.argv).toContain('model="synthetic-native-model"');
           expect(native.argv).toContain('model_reasoning_effort="ultra"');
           if (provider["env_key"] !== undefined) {
-            const override = native.argv.find((value: string) =>
-              value.startsWith("model_providers="),
-            );
-            expect(parse(override) as JsonObject).toEqual({
-              model_providers: { [name]: provider },
+            expect(argvConfig(native.argv)["model_providers"]).toMatchObject({
+              [name]: { env_key: provider["env_key"] },
             });
           }
         }
         for (const capture of [native, ordinary]) {
           expect(capture.argv).toContain("read-only");
-          expect(capture.argv).toContain("features.shell_tool=false");
-          expect(capture.argv).toContain("features.plugins=false");
+          expect(argvConfig(capture.argv)["features"]).toMatchObject({
+            shell_tool: false,
+            plugins: false,
+          });
         }
         if (!usesOpenaiKey) {
           for (const capture of [native, ordinary]) {
@@ -769,18 +860,16 @@ process.exit(0);
           expect(ordinary.openai).toBeNull();
           expect(ordinary.codex).toBeNull();
           for (const capture of [native, ordinary]) {
-            const override = capture.argv.find((value: string) =>
-              value.startsWith("model_providers="),
-            );
-            const providerAuth = provider["auth"] as JsonObject;
-            expect(parse(override)).toEqual({
-              model_providers: {
-                custom: {
-                  ...provider,
-                  auth: {
-                    ...providerAuth,
-                    cwd: resolve(home, (providerAuth["cwd"] as string) ?? "."),
-                  },
+            expect(argvConfig(capture.argv)["model_providers"]).toMatchObject({
+              custom: {
+                ...provider,
+                auth: {
+                  ...(provider["auth"] as JsonObject),
+                  cwd: join(
+                    home,
+                    ((provider["auth"] as JsonObject)["cwd"] as
+                      string | undefined) ?? ".",
+                  ),
                 },
               },
             });
@@ -931,10 +1020,10 @@ process.exit(0);
           expect(calls.turnOptions?.cyberAccessProgram).toBe(
             options.cyberAccessProgram,
           );
-          const features = captured?.config?.["features"] as Record<
-            string,
-            unknown
-          >;
+          const features = deepMerge(
+            (captured?.config ?? {}) as JsonObject,
+            launchConfig(captured?.configOverrides ?? []),
+          )["features"] as Record<string, unknown>;
           expect(features["api_key_cyber_access_programs"]).toBe(
             selection === "unselected" ? undefined : selection === "default",
           );
@@ -1014,7 +1103,10 @@ process.exit(0);
                       model_provider: "synthetic.provider",
                       model_providers: {
                         "synthetic.provider": {
-                          auth: { args: ["override"], cwd: "~/helpers" },
+                          auth: {
+                            args: ["override"],
+                            cwd: join(home, "helpers"),
+                          },
                         },
                       },
                     },
@@ -1038,22 +1130,24 @@ process.exit(0);
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
         if (selection === "profile") {
-          expect(captured?.config?.["profile"]).toBeUndefined();
-          expect(captured?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
+          expect(
+            launchConfig(captured!.configOverrides!)["profile"],
+          ).toBeUndefined();
+          expect(
+            launchConfig(captured!.configOverrides!)["model_provider"],
+          ).toBe("synthetic.provider");
         }
         if (commandAuth) {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(parse(captured!.configOverrides![0]!)).toEqual({
+          expect(launchConfig(captured!.configOverrides!)).toMatchObject({
             model_providers: {
               "synthetic.provider": {
                 ...provider,
                 auth: {
                   ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  cwd: selection === "overrides" ? join(home, "helpers") : home,
                   args: selection === "overrides" ? ["override"] : ["original"],
                 },
               },
@@ -1063,7 +1157,9 @@ process.exit(0);
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
-          expect(captured?.configOverrides).toBeUndefined();
+          expect(
+            launchConfig(captured!.configOverrides!)["model_provider"],
+          ).toBe("openai");
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
@@ -1223,7 +1319,10 @@ process.exit(0);
         Codex.prototype,
         "startThread",
       ).mockImplementation(function (this: Codex, options) {
-        config = (this as unknown as { options: CodexOptions }).options.config;
+        config = launchConfig(
+          (this as unknown as { options: CodexOptions }).options
+            .configOverrides!,
+        ) as CodexOptions["config"];
         codexPath = (this as unknown as { options: CodexOptions }).options
           .codexPathOverride;
         codexEnvironment = (this as unknown as { options: CodexOptions })
@@ -1453,8 +1552,10 @@ process.exit(0);
         }
         expect(captured.argv).toContain('model="synthetic-requested-model"');
         expect(captured.argv).toContain('model_reasoning_effort="high"');
-        expect(captured.argv).toContain("features.shell_tool=false");
-        expect(captured.argv).toContain("features.plugins=false");
+        expect(argvConfig(captured.argv)["features"]).toMatchObject({
+          shell_tool: false,
+          plugins: false,
+        });
         expect(command.mock.calls.some((call) => call[1].includes("mcp"))).toBe(
           true,
         );
@@ -1468,6 +1569,43 @@ process.exit(0);
       }
     },
   );
+
+  test("enumerates project MCP servers with captured scan trust after shared-home changes", async () => {
+    const home = await temporaryDirectory("codex-security-matcher-trust-");
+    const repositoryPath = join(home, "repository");
+    await mkdir(join(repositoryPath, ".git"), { recursive: true });
+    const repository = await realpath(repositoryPath);
+    await mkdir(join(repository, ".codex"));
+    await writeFile(
+      join(repository, ".codex", "config.toml"),
+      stringify({ mcp_servers: { project: { command: "synthetic-project" } } }),
+    );
+    const capturedConfig = {
+      projects: { [repository]: { trust_level: "trusted" } },
+      features: { plugins: true },
+    };
+    const competingConfig = stringify({
+      projects: { [repository]: { trust_level: "untrusted" } },
+    });
+    await writeFile(join(home, "config.toml"), competingConfig);
+    const environment = {
+      PATH: process.env["PATH"] ?? "",
+      SystemRoot: process.env["SystemRoot"] ?? "",
+      TEMP: process.env["TEMP"] ?? "",
+      TMP: process.env["TMP"] ?? "",
+      CODEX_HOME: home,
+    };
+    const servers = await disabledMcpServers(
+      resolveCodexCommand(environment),
+      capturedConfig,
+      environment,
+      { workingDirectory: repository },
+    );
+    expect(servers).toEqual({ project: { enabled: false } });
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      competingConfig,
+    );
+  });
 
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await temporaryDirectory("codex-security-comparison-");
@@ -1793,6 +1931,7 @@ process.exit(0);
         preserveProviderEnvironment: true,
         config: {
           codexOverrides: {
+            model: "synthetic-model",
             model_reasoning_effort: "ultra",
             model_provider: "synthetic",
           },
@@ -1836,6 +1975,7 @@ process.exit(0);
             preserveProviderEnvironment: true,
             config: {
               codexOverrides: {
+                model: "synthetic-model",
                 model_reasoning_effort: "ultra",
                 model_provider: "synthetic",
               },
@@ -2203,6 +2343,223 @@ process.exit(0);
       ),
     ).rejects.toThrow("invalid JSON");
   });
+
+  test("corrects an unknown finding ID in the same matcher conversation", async () => {
+    const corrected: ScanComparisonResult = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["before"],
+          afterOccurrenceIds: ["after"],
+          confidence: "high",
+          reason: "The same control is missing.",
+        },
+      ],
+      uncertain: [],
+    };
+    const prompts: string[] = [];
+    const errors: unknown[] = [];
+    let threads = 0;
+    const result = await matchScanFindingsInternal(
+      { before: [finding("before")], after: [finding("after")] },
+      {
+        codex: {
+          startThread() {
+            threads += 1;
+            return {
+              async run(prompt) {
+                prompts.push(prompt);
+                return {
+                  finalResponse: JSON.stringify(
+                    prompts.length === 1
+                      ? {
+                          ...corrected,
+                          matches: [
+                            {
+                              ...corrected.matches[0],
+                              beforeOccurrenceIds: ["unknown"],
+                            },
+                          ],
+                        }
+                      : corrected,
+                  ),
+                };
+              },
+            };
+          },
+        },
+      },
+      {
+        surface: "sdk",
+        async onInvalidResponse(error) {
+          errors.push(error);
+          return true;
+        },
+      },
+    );
+    expect(result).toEqual(corrected);
+    expect(threads).toBe(1);
+    expect(prompts).toHaveLength(2);
+    expect(errors).toHaveLength(1);
+    expect(prompts[1]).toContain("unknown before occurrence");
+    expect(prompts[1]).not.toContain(prompts[0]!);
+  });
+
+  test.each(["returned JSON", "injected parser"])(
+    "keeps complete paged evidence after malformed %s",
+    async (source) => {
+      const input = {
+        before: [
+          { ...finding("before"), rootCause: "🙂".repeat(1 << 20) + "x" },
+        ],
+        after: [finding("after")],
+      };
+      const result: ScanComparisonResult = {
+        matches: [
+          {
+            beforeOccurrenceIds: ["before"],
+            afterOccurrenceIds: ["after"],
+            confidence: "high",
+            reason: "The same control is missing.",
+          },
+        ],
+        uncertain: [],
+      };
+      const pieces: string[] = [];
+      let expectedOffset = 0;
+      let turns = 0;
+      let invalidResponses = 0;
+      let threads = 0;
+      expect(
+        await matchScanFindingsInternal(
+          input,
+          {
+            codex: {
+              startThread() {
+                threads += 1;
+                return {
+                  async run(prompt) {
+                    expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
+                    const index = turns++;
+                    if (index === 2) {
+                      expect(prompt).toContain("invalid JSON");
+                      expect(prompt).not.toContain('"content"');
+                    } else if (index > 0) {
+                      const page = JSON.parse(prompt.split("\n").at(-1)!) as {
+                        offset: number;
+                        nextOffset: number | null;
+                        content: string;
+                      };
+                      expect(page.offset).toBe(expectedOffset);
+                      expect(page.content.isWellFormed()).toBe(true);
+                      pieces.push(page.content);
+                      expectedOffset += [...page.content].length;
+                      if (page.nextOffset !== null)
+                        expect(page.nextOffset).toBe(expectedOffset);
+                      if (index === 1) {
+                        expect(page.nextOffset).not.toBeNull();
+                        if (source === "injected parser")
+                          JSON.parse("not-json");
+                        return { finalResponse: "not-json" };
+                      }
+                    }
+                    return { finalResponse: JSON.stringify(result) };
+                  },
+                };
+              },
+            },
+          },
+          {
+            surface: "sdk",
+            requireFullEvidence: true,
+            async onInvalidResponse() {
+              invalidResponses += 1;
+              return true;
+            },
+          },
+        ),
+      ).toEqual(result);
+      expect(threads).toBe(1);
+      expect(invalidResponses).toBe(1);
+      expect(pieces.length).toBeGreaterThan(1);
+      expect(
+        Buffer.from(pieces.join("")).equals(Buffer.from(JSON.stringify(input))),
+      ).toBe(true);
+    },
+  );
+
+  test("stops when the owning scan exhausts its invalid-response budget", async () => {
+    let turns = 0;
+    let original: unknown;
+    await expect(
+      matchScanFindingsInternal(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          codex: {
+            startThread: () => ({
+              async run() {
+                turns += 1;
+                return { finalResponse: "not-json" };
+              },
+            }),
+          },
+        },
+        {
+          surface: "sdk",
+          async onInvalidResponse(error) {
+            original = error;
+            return false;
+          },
+        },
+      ).catch((error: unknown) => {
+        expect(error).toBe(original);
+        throw error;
+      }),
+    ).rejects.toThrow("invalid JSON");
+    expect(turns).toBe(1);
+  });
+
+  test.each(["transport", "permission", "cancellation", "aborted JSON"])(
+    "does not charge an invalid-response retry for %s failures",
+    async (kind) => {
+      const controller = new AbortController();
+      const error =
+        kind === "transport"
+          ? new CodexSecurityError("The connection closed.")
+          : kind === "permission"
+            ? Object.assign(new Error("Permission denied."), { code: "EACCES" })
+            : kind === "cancellation"
+              ? new DOMException("Canceled.", "AbortError")
+              : new SyntaxError("Incomplete JSON.");
+      let retries = 0;
+      let turns = 0;
+      await expect(
+        matchScanFindingsInternal(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            signal: controller.signal,
+            codex: {
+              startThread: () => ({
+                async run() {
+                  turns += 1;
+                  if (kind === "aborted JSON") controller.abort();
+                  throw error;
+                },
+              }),
+            },
+          },
+          {
+            surface: "sdk",
+            async onInvalidResponse() {
+              retries += 1;
+              return false;
+            },
+          },
+        ),
+      ).rejects.toBe(error);
+      expect(turns).toBe(1);
+      expect(retries).toBe(0);
+    },
+  );
 
   test("does not start Codex when either scan has no findings", async () => {
     const codex: NonNullable<ScanComparisonOptions["codex"]> = {

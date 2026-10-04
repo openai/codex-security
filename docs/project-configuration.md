@@ -350,3 +350,12 @@ and applies its severity policy to recovered findings.
 Workflow identity records explicitly requested deep settings, not ambient values
 or shipped defaults, so changing those defaults does not prevent resumption.
 Changing the explicit request still requires a different workflow ID.
+
+### Native executable selection
+
+Native plugin sessions use `CODEX_CLI_PATH` when supplied. Otherwise they search
+for a real `codex` executable on `PATH` (`codex.exe` on Windows). Windows also
+supports managed-package installations, npm package binaries beside `PATH`
+entries, and desktop package caches. WindowsApps aliases are skipped. The
+selected executable must be outside the scan target and reference-document
+repositories. Set `CODEX_CLI_PATH` to select an installed executable explicitly.
