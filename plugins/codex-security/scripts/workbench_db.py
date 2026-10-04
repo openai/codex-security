@@ -1724,12 +1724,15 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
             getattr(args, "claim_token", None),
             error_message="Scan execution is owned by another continuation.",
         )
-        if scan["status"] != "running":
-            raise SystemExit("Only a running scan can attach its execution thread.")
         connection.execute(
-            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
-            (args.thread_id, now(), scan["id"]),
+            "INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id) VALUES (?, ?)",
+            (scan["id"], args.thread_id),
         )
+        if scan["status"] == "running" and scan["seal_manifest_digest"] is None:
+            connection.execute(
+                "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
+                (args.thread_id, now(), scan["id"]),
+            )
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 

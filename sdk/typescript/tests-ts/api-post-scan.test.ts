@@ -1,22 +1,19 @@
-import { createHash } from "node:crypto";
 import {
   chmod,
-  cp,
   mkdir,
   open,
   readFile,
-  rename,
-  rm,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
-import { prepareScanArtifactRestorer } from "../src/runtime.js";
+import { loadContract } from "../src/contract.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { TestClient } from "./support/api-client.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
+import { ScanInterruptedError } from "../src/errors.js";
 import {
   completedEvents,
   createApiTestFixtures,
@@ -25,239 +22,246 @@ import {
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
-type ScanArtifactRestorer = Awaited<
-  ReturnType<typeof prepareScanArtifactRestorer>
->;
-
 afterEach(cleanup);
 
-interface FailedPostScanContext {
-  artifactPath: string;
-  outside: string;
-  scanDir: string;
-}
-
-interface FailedPostScanScenario {
-  artifact: string;
-  initialContents?: string | Uint8Array;
-  selectedPluginFinalizer?: string;
-  mutate(context: FailedPostScanContext): Promise<void>;
-  wrapRestorer?(
-    restorer: ScanArtifactRestorer,
-    context: FailedPostScanContext,
-  ): ScanArtifactRestorer;
-}
-
-async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-  yield {
-    type: "turn.failed",
-    error: { message: "Could not draft fixes." },
-  };
-}
-
-async function startFailedPostScan(scenario: FailedPostScanScenario) {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const codexHome = join(root, "codex-home");
-  const scanDir = join(root, "scan");
-  const outside = join(root, "outside");
-  const artifactPath = join(scanDir, scenario.artifact);
-  const context = { artifactPath, outside, scanDir };
-  const python = Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
-  await mkdir(repository);
-  await mkdir(codexHome);
-  await mkdir(scanDir, { mode: 0o700 });
-  const runtime = preparedRuntime(codexHome);
-  if (scenario.selectedPluginFinalizer !== undefined) {
-    const selectedPluginRoot = join(root, "selected-plugin");
-    await cp(PLUGIN_ROOT, selectedPluginRoot, { recursive: true });
-    await writeFile(
-      join(selectedPluginRoot, "scripts", "finalize_scan_contract.py"),
-      scenario.selectedPluginFinalizer,
-    );
-    runtime.plugin = {
-      ...runtime.plugin,
-      pluginRoot: selectedPluginRoot,
-      installedRoot: selectedPluginRoot,
-    };
-  }
-  let turns = 0;
-  let original = Buffer.alloc(0);
-  const client = new TestClient(
-    {},
-    {
-      environment: {},
-      prepareRuntime: async () => runtime,
-      resolvePluginPython: async () => python!,
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      prepareScanArtifactRestorer: async (...args) => {
-        const restorer = await prepareScanArtifactRestorer(...args);
-        return scenario.wrapRestorer?.(restorer, context) ?? restorer;
+describe("completed scan follow-up instructions", () => {
+  test("follow-up completes when saving its session fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const scanDir = await copyCompletedScan(root);
+    const warnings: string[] = [];
+    let started = 0;
+    let followUpCompleted = false;
+    const client = new TestClient(
+      {},
+      {
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => Bun.which("python3")!,
+        repositoryRevision: async () => "deadbeef",
+        prepareOutputDir: async () => scanDir,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "set-scan-thread" && args.includes("follow-up")) {
+            throw new Error("Synthetic history write failure");
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: () => ({
+          startThread() {
+            const id = ++started === 1 ? "primary" : "follow-up";
+            return {
+              id,
+              async runStreamed() {
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  for await (const event of completedEvents(id)) {
+                    if (id === "follow-up" && event.type === "turn.completed") {
+                      followUpCompleted = true;
+                    }
+                    yield event;
+                  }
+                }
+                return { events: events() };
+              },
+            };
+          },
+        }),
       },
-      createCodex: () => ({
-        startThread: () => ({
-          id: "thread-1",
-          async runStreamed() {
-            turns += 1;
-            if (turns === 1) {
-              await copyCompletedScan(root);
-              if (scenario.initialContents !== undefined) {
-                await mkdir(dirname(artifactPath), { recursive: true });
-                await writeFile(artifactPath, scenario.initialContents);
+    );
+    try {
+      const result = await client.run(repository, {
+        postScanPrompt: "Prepare follow-up notes.",
+        onWarning: (message) => warnings.push(message),
+      });
+      expect(result.scanDir).toBe(scanDir);
+      expect(followUpCompleted).toBe(true);
+      expect(
+        warnings.some((message) =>
+          message.includes("Synthetic history write failure"),
+        ),
+      ).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("failed follow-up writes fresh output without changing sealed evidence", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let turns = 0;
+    let original = Buffer.alloc(0);
+    const receipt = "artifacts/follow-up/evidence.json";
+    const evidence = '{"synthetic":"sealed receipt"}\n';
+    let followUpDirectory = "";
+    const warnings: string[] = [];
+    const client = new TestClient(
+      {},
+      {
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => Bun.which("python3")!,
+        repositoryRevision: async () => "deadbeef",
+        prepareOutputDir: async () => scanDir,
+        createCodex: (options) => ({
+          startThread: (threadOptions) => ({
+            id: "thread-1",
+            async runStreamed() {
+              turns++;
+              if (turns === 1) {
+                await copyCompletedScan(root);
+                await mkdir(dirname(join(scanDir, receipt)), {
+                  recursive: true,
+                });
+                await writeFile(join(scanDir, receipt), evidence);
+                const coveragePath = join(scanDir, "coverage.json");
+                const coverage = JSON.parse(
+                  await readFile(coveragePath, "utf8"),
+                );
+                coverage.surfaces[0].receiptRefs = [receipt];
+                const coverageBytes = JSON.stringify(coverage);
+                await writeFile(coveragePath, coverageBytes);
                 const manifestPath = join(scanDir, "scan-manifest.json");
                 const manifest = JSON.parse(
                   await readFile(manifestPath, "utf8"),
                 );
+                manifest.scan.artifacts.find(
+                  (artifact: { path: string }) =>
+                    artifact.path === "coverage.json",
+                ).sha256 = createHash("sha256")
+                  .update(coverageBytes)
+                  .digest("hex");
                 manifest.scan.artifacts.push({
-                  path: scenario.artifact,
-                  sha256: createHash("sha256")
-                    .update(await readFile(artifactPath))
-                    .digest("hex"),
-                  mediaType: scenario.artifact.endsWith(".bin")
-                    ? "application/octet-stream"
-                    : "application/json",
+                  path: receipt,
+                  sha256: createHash("sha256").update(evidence).digest("hex"),
+                  mediaType: "application/json",
                 });
                 await writeFile(manifestPath, JSON.stringify(manifest));
+                await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+                original = await readFile(join(scanDir, "report.md"));
+                return { events: completedEvents() };
               }
-              original = await readFile(artifactPath);
-              return { events: completedEvents() };
-            }
-            await scenario.mutate(context);
-            return { events: failedEvents() };
-          },
+              followUpDirectory = threadOptions!.workingDirectory!;
+              expect(options.config).toMatchObject({
+                permissions: {
+                  codex_security_scan: {
+                    filesystem: {
+                      [scanDir]: { ".": "read" },
+                      [followUpDirectory]: { ".": "write" },
+                    },
+                  },
+                },
+              });
+              await mkdir(followUpDirectory, { recursive: true });
+              await writeFile(
+                join(followUpDirectory, "evidence.json"),
+                "follow-up output",
+              );
+              async function* failed(): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "turn.failed",
+                  error: { message: "Synthetic follow-up failure" },
+                };
+              }
+              return { events: failed() };
+            },
+          }),
         }),
-      }),
-    },
-  );
-  const scan = client.run(repository, {
-    postScanPrompt: "Draft confirmed fixes.",
+      },
+    );
+    try {
+      const result = await client.run(repository, {
+        postScanPrompt: "Prepare follow-up notes.",
+        onWarning: (message) => warnings.push(message),
+      });
+      expect(result.scanDir).toBe(scanDir);
+      expect(turns).toBe(2);
+      expect(await readFile(result.reportPath)).toEqual(original);
+      expect(await readFile(join(scanDir, receipt), "utf8")).toBe(evidence);
+      expect(dirname(followUpDirectory)).toBe(
+        join(scanDir, "artifacts/follow-up"),
+      );
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(
+        warnings.some((message) =>
+          message.includes("Synthetic follow-up failure"),
+        ),
+      ).toBe(true);
+    } finally {
+      await client.close();
+    }
   });
-  return {
-    client,
-    scan,
-    scanDir,
-    artifactPath,
-    outside,
-    get turns() {
-      return turns;
-    },
-    get original() {
-      return original;
-    },
-  };
-}
 
-const ordinaryRestorationCases: ReadonlyArray<
-  readonly [string, FailedPostScanScenario]
-> = [
-  [
-    "missing report",
-    { artifact: "report.md", mutate: ({ artifactPath }) => rm(artifactPath) },
-  ],
-  [
-    "partial report",
-    {
-      artifact: "report.md",
-      mutate: async ({ artifactPath }) => {
-        await writeFile(artifactPath, "# Incomplete draft\n");
+  test("cancellation settles a stalled follow-up history write", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all(
+      [repository, codexHome, scanDir].map((path) =>
+        mkdir(path, { mode: 0o700 }),
+      ),
+    );
+    const controller = new AbortController();
+    let turns = 0;
+    let historyAborted = false;
+    const commands: string[] = [];
+    const client = new TestClient(
+      {},
+      {
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        prepareOutputDir: async () => scanDir,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              if (++turns === 1) await copyCompletedScan(root);
+              return {
+                events: completedEvents(turns === 1 ? "main" : "followup"),
+              };
+            },
+          }),
+        }),
+        runWorkbench: async (options, args, input) => {
+          commands.push(args[0]!);
+          if (args[0] === "set-scan-thread" && args.at(-1) === "followup") {
+            expect(options.signal).toBeDefined();
+            return await new Promise((_resolve, reject) => {
+              options.signal!.addEventListener(
+                "abort",
+                () => {
+                  historyAborted = true;
+                  reject(options.signal!.reason);
+                },
+                { once: true },
+              );
+              controller.abort(new Error("synthetic follow-up cancellation"));
+            });
+          }
+          return mockWorkbench(args, input);
+        },
       },
-    },
-  ],
-  [
-    "replaced report",
-    {
-      artifact: "report.md",
-      mutate: async ({ artifactPath }) => {
-        await rm(artifactPath);
-        await writeFile(artifactPath, "# Replacement\n");
-      },
-    },
-  ],
-  [
-    "invalid findings",
-    {
-      artifact: "findings.json",
-      mutate: async ({ artifactPath }) => {
-        await writeFile(artifactPath, "{invalid");
-      },
-    },
-  ],
-  [
-    "sealed nested artifact",
-    {
-      artifact: "artifacts/worker.json",
-      initialContents: '{"complete":true}\n',
-      mutate: async ({ artifactPath }) => {
-        await writeFile(artifactPath, '{"partial":true}');
-      },
-    },
-  ],
-  [
-    "binary artifact",
-    {
-      artifact: "artifacts/worker.bin",
-      initialContents: Buffer.from([0, 255, 10, 1]),
-      mutate: async ({ artifactPath }) => {
-        await writeFile(artifactPath, Buffer.from([9, 0, 8]));
-      },
-    },
-  ],
-  [
-    "selected custom plugin",
-    {
-      artifact: "report.md",
-      selectedPluginFinalizer:
-        "raise RuntimeError('selected plugin helper must not run')\n",
-      mutate: ({ artifactPath }) =>
-        writeFile(artifactPath, "# Incomplete draft\n"),
-    },
-  ],
-  [
-    "nested artifact with a missing parent",
-    {
-      artifact: "artifacts/worker.json",
-      initialContents: '{"complete":true}\n',
-      mutate: ({ artifactPath }) =>
-        rm(dirname(artifactPath), { recursive: true }),
-    },
-  ],
-];
-
-describe("completed scan follow-up instructions", () => {
-  test.each(ordinaryRestorationCases)(
-    "restores completed scan artifacts after failed post-scan instructions: %s",
-    async (_name, scenario) => {
-      const fixture = await startFailedPostScan(scenario);
-      expect(await fixture.scan).toMatchObject({ scanDir: fixture.scanDir });
-      expect(fixture.turns).toBe(2);
-      expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
-      await fixture.client.close();
-    },
-  );
-
-  test("does not rewrite artifacts unchanged by a failed follow-up", async () => {
-    let before: { dev: number; ino: number; mtimeMs: number } | null = null;
-    const fixture = await startFailedPostScan({
-      artifact: "report.md",
-      mutate: async ({ artifactPath }) => {
-        const metadata = await stat(artifactPath);
-        before = {
-          dev: Number(metadata.dev),
-          ino: Number(metadata.ino),
-          mtimeMs: Number(metadata.mtimeMs),
-        };
-      },
-    });
-
-    expect(await fixture.scan).toMatchObject({ scanDir: fixture.scanDir });
-    const after = await stat(fixture.artifactPath);
-    expect(before).not.toBeNull();
-    expect(Number(after.dev)).toBe(before!.dev);
-    expect(Number(after.ino)).toBe(before!.ino);
-    expect(Number(after.mtimeMs)).toBe(before!.mtimeMs);
-    await fixture.client.close();
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          postScanPrompt: "Write notes.",
+          signal: controller.signal,
+        }),
+      ).rejects.toBeInstanceOf(ScanInterruptedError);
+      expect(historyAborted).toBe(true);
+      expect(commands).toContain("complete-scan");
+      expect(commands).not.toContain("cancel-scan");
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    } finally {
+      await client.close();
+    }
   });
 
   test.skipIf(process.platform === "win32")(
@@ -360,99 +364,6 @@ describe("completed scan follow-up instructions", () => {
       }
     },
   );
-
-  test.skipIf(process.platform === "win32")(
-    "restores a changed artifact that cannot be read for comparison",
-    async () => {
-      const fixture = await startFailedPostScan({
-        artifact: "report.md",
-        mutate: async ({ artifactPath }) => {
-          await writeFile(artifactPath, "# Incomplete draft\n");
-          await chmod(artifactPath, 0);
-        },
-      });
-
-      expect(await fixture.scan).toMatchObject({ scanDir: fixture.scanDir });
-      expect(await readFile(fixture.artifactPath)).toEqual(fixture.original);
-      await fixture.client.close();
-    },
-  );
-
-  test("rejects a replaced artifact parent without writing through it", async () => {
-    const fixture = await startFailedPostScan({
-      artifact: "artifacts/worker.json",
-      initialContents: '{"complete":true}\n',
-      mutate: async ({ artifactPath, outside }) => {
-        await mkdir(outside);
-        await writeFile(join(outside, "worker.json"), "untouched\n");
-        await rm(dirname(artifactPath), { recursive: true });
-        await symlink(
-          outside,
-          dirname(artifactPath),
-          process.platform === "win32" ? "junction" : "dir",
-        );
-      },
-    });
-
-    await expect(fixture.scan).rejects.toThrow("scan directory");
-    expect(await readFile(join(fixture.outside, "worker.json"), "utf8")).toBe(
-      "untouched\n",
-    );
-    await fixture.client.close();
-  });
-
-  test("rejects an artifact parent swapped immediately before the bound write", async () => {
-    let swapped = false;
-    const artifact = "artifacts/worker.json";
-    const fixture = await startFailedPostScan({
-      artifact,
-      initialContents: '{"complete":true}\n',
-      mutate: async ({ artifactPath, outside }) => {
-        await mkdir(outside);
-        await writeFile(join(outside, "worker.json"), "untouched\n");
-        await writeFile(artifactPath, '{"partial":true}');
-      },
-      wrapRestorer: (restorer, { outside, scanDir }) => ({
-        ...restorer,
-        async restore(relativePath, contents) {
-          if (!swapped && relativePath === artifact) {
-            const parent = dirname(join(scanDir, relativePath));
-            await rename(parent, `${parent}.original`);
-            await symlink(
-              outside,
-              parent,
-              process.platform === "win32" ? "junction" : "dir",
-            );
-            swapped = true;
-          }
-          await restorer.restore(relativePath, contents);
-        },
-      }),
-    });
-
-    await expect(fixture.scan).rejects.toThrow("scan directory");
-    expect(await readFile(join(fixture.outside, "worker.json"), "utf8")).toBe(
-      "untouched\n",
-    );
-    await fixture.client.close();
-  });
-
-  test("rejects a scan root replaced after restoration setup", async () => {
-    const fixture = await startFailedPostScan({
-      artifact: "report.md",
-      mutate: async ({ scanDir }) => {
-        await rename(scanDir, `${scanDir}.original`);
-        await mkdir(scanDir, { mode: 0o700 });
-        await writeFile(join(scanDir, "scan-manifest.json"), "untouched\n");
-      },
-    });
-
-    await expect(fixture.scan).rejects.toThrow("scan directory");
-    expect(
-      await readFile(join(fixture.scanDir, "scan-manifest.json"), "utf8"),
-    ).toBe("untouched\n");
-    await fixture.client.close();
-  });
 
   test.skipIf(process.platform === "win32")(
     "keeps the final rename bound to the validated parent when its path is replaced",

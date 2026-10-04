@@ -887,8 +887,18 @@ test.each([
           expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
           expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
           return {
-            startThread() {
-              throw new Error("Resume must use the original session.");
+            startThread(threadOptions) {
+              expect(prompts).toHaveLength(1);
+              expect(threadOptions?.workingDirectory).toStartWith(
+                join(f.scanDir, "artifacts", "follow-up"),
+              );
+              return {
+                id: "follow-up",
+                async runStreamed(prompt) {
+                  prompts.push(prompt as string);
+                  return { events: completedEvents("follow-up") };
+                },
+              };
             },
             resumeThread(threadId) {
               expect(threadId).toBe(f.threadId);
@@ -919,7 +929,19 @@ test.each([
     );
     expect(code, stderr.text()).toBe(2);
     expect(prompts, stderr.text()).toHaveLength(2);
-    expect(prompts[1]).toBe(settings.postScanPrompt);
+    expect(prompts[1]).toContain(JSON.stringify(f.repository));
+    expect(prompts[1]).toContain(JSON.stringify(f.scanDir));
+    expect(prompts[1]?.endsWith(settings.postScanPrompt)).toBe(true);
+    expect(
+      (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+    ).toMatchObject({
+      ...JSON.parse(JSON.stringify(settings)),
+      deepScan: {
+        subagents: 0,
+        stopAfterConsecutiveErrors: 2,
+        maxTimeHours: 1.5,
+      },
+    });
     expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
@@ -929,6 +951,70 @@ test.each([
     });
   },
 );
+
+test("failed resume keeps its original session after follow-up work", async () => {
+  const f = await interruptedScan(
+    "deep",
+    false,
+    {
+      postScanPrompt: "Prepare follow-up notes.",
+    },
+    true,
+  );
+  const stdout = capture();
+  const stderr = capture();
+  let followUpCompleted = false;
+  const code = await main(
+    ["scans", "resume", f.scanId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      runWorkbench: f.command,
+      createSecurity: resumeClient(f, () => ({
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              async function* events() {
+                yield { type: "thread.started" as const, thread_id: threadId };
+                yield {
+                  type: "turn.failed" as const,
+                  error: { message: "Synthetic resumed scan failure" },
+                };
+              }
+              return { events: events() };
+            },
+          };
+        },
+        startThread(threadOptions) {
+          expect(threadOptions?.workingDirectory).toStartWith(
+            join(f.scanDir, "artifacts", "follow-up"),
+          );
+          return {
+            id: "follow-up",
+            async runStreamed() {
+              async function* events() {
+                for await (const event of completedEvents("follow-up")) {
+                  if (event.type === "turn.completed") followUpCompleted = true;
+                  yield event;
+                }
+              }
+              return { events: events() };
+            },
+          };
+        },
+      })),
+    },
+  );
+  expect(code).not.toBe(0);
+  expect(stderr.text()).toContain("Synthetic resumed scan failure");
+  expect(followUpCompleted, stderr.text()).toBe(true);
+  expect(
+    await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).toMatchObject({ threadId: f.threadId });
+});
 
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
