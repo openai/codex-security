@@ -11,7 +11,6 @@ import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./src/python_command.js";
-import type { ScanResults } from "./src/types.js";
 import { MCP_APP_VERSION } from "./src/version.js";
 import {
   handoffClaimTokenSchema,
@@ -129,7 +128,7 @@ async function scanRoot(): Promise<string> {
 
 interface WorkspaceState extends JsonObject {
   id: string;
-  results?: ScanResults & JsonObject;
+  results?: JsonObject;
   setup: {
     submitted: boolean;
   };
