@@ -85,11 +85,13 @@ for (const complete of [true, undefined]) {
             );
             assert.deepEqual(manifest.scan.threatModel, expectedModel);
             const checkpoints = await Promise.all(
-              (await readdir(join(root, "checkpoints"))).map(async (name) =>
-                JSON.parse(
-                  await readFile(join(root, "checkpoints", name), "utf8"),
+              (await readdir(join(root, "checkpoints")))
+                .filter((name) => name.endsWith(".json"))
+                .map(async (name) =>
+                  JSON.parse(
+                    await readFile(join(root, "checkpoints", name), "utf8"),
+                  ),
                 ),
-              ),
             );
             assert.ok(
               checkpoints.some(
@@ -109,7 +111,7 @@ for (const complete of [true, undefined]) {
               ),
             );
           } else {
-            await recordCodexSecurityScanDraftViaWorkbench(
+            const result = await recordCodexSecurityScanDraftViaWorkbench(
               context,
               terminal,
               async (args) => {
@@ -132,8 +134,12 @@ for (const complete of [true, undefined]) {
                 assert.deepEqual(checkpoint.threatModel, expectedModel);
                 assert.deepEqual(staged.coverage.deferred, []);
                 assert.deepEqual(staged.findings.findings, []);
+                return { warnings: ["Synthetic projection warning.", 42] };
               },
             );
+            assert.deepEqual(result.warnings, [
+              "Synthetic projection warning.",
+            ]);
           }
           assert.equal(terminal.threatModel, model);
         }
@@ -190,7 +196,9 @@ test("terminal Deep input remains checkpointed when reading the previous model f
       recordCodexSecurityScanDraft(context, draft({}, true)),
       /previous scan draft manifest/,
     );
-    const checkpoints = await readdir(join(root, "checkpoints"));
+    const checkpoints = (await readdir(join(root, "checkpoints"))).filter(
+      (name) => name.endsWith(".json"),
+    );
     assert.equal(checkpoints.length, 1);
     const saved = JSON.parse(
       await readFile(join(root, "checkpoints", checkpoints[0]), "utf8"),

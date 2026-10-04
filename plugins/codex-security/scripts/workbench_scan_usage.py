@@ -69,23 +69,24 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
-        cost_json = json.dumps(
-            {**existing, "cost": json.loads(cost_json)},
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
+
+
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Keep measured usage unless an incoming receipt explicitly replaces it."""
+    if incoming is None:
+        return existing
+    replacement = stored_scan_cost_fields(incoming)
+    if "usage" in replacement:
+        return json.dumps(replacement, allow_nan=False)
+    fields = {**stored_scan_cost_fields(existing), **replacement}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
 
 
 def collect_scan_usage(
@@ -229,8 +230,8 @@ def _scan_root_thread_ids(
         ).fetchone()
         if workspace is not None:
             candidates.append(workspace["thread_id"])
+    candidates.extend(composition.execution_threads)
     if scan["mode"] == "deep":
-        candidates.extend(composition.execution_threads)
         candidates.extend(child["continuation_thread_id"] for child in composition.children)
         candidates.extend(
             row["sdk_thread_id"]

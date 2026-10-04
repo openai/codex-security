@@ -94,6 +94,10 @@ class RecoverableContractError(ContractError):
     """Raised when report projection can safely be retried before publication."""
 
 
+class SealedArtifactError(ContractError):
+    """Raised when an export would overwrite a sealed scan artifact."""
+
+
 def _reject_non_finite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value!r} is not supported")
 
@@ -1035,11 +1039,10 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
 def _recover_unsealed_findings(
     manifest: dict[str, Any],
     findings: dict[str, Any],
-    schema_dir: Path,
+    schema: dict[str, Any],
     scan_dir: Path,
     warnings: list[str],
 ) -> list[str]:
-    schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -2902,7 +2905,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         raise ContractError(f"{relative_output}: unable to inspect export output") from exc
     for artifact_path in artifact_paths:
         if artifact_path == relative_output:
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
         if output_metadata is None:
@@ -2915,7 +2918,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         finally:
             os.close(descriptor)
         if os.path.samestat(output_metadata, artifact_metadata):
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
     write_scan_local_bytes(
@@ -3022,8 +3025,9 @@ def _prepare_scan_finalization(
         _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
+        schema = _read_json(schema_dir / "findings.schema.json")
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema, scan_dir, completion_warnings
         )
         _recover_unsealed_coverage(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings

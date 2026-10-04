@@ -716,6 +716,77 @@ def test_frozen_observations_survive_live_head_changes(
         merge(frozen)
 
 
+def test_composed_pending_sources_replay_the_frozen_accepted_head(
+    tmp_path: Path, checkpoint_scan
+) -> None:
+    scan_id, pending, closed, binding = checkpoint_scan
+    completed = write_checkpoint(tmp_path / "checkpoints", closed)
+    reopened = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(completed, ns=(100, 100))
+    os.utime(reopened, ns=(200, 200))
+    # The accepted head can reselect older immutable content after a newer attempt.
+    select(tmp_path, completed, 300)
+
+    def merge(frozen=None):
+        return saved.merge_saved_results(
+            tmp_path,
+            scan_id,
+            binding,
+            [],
+            stopped=True,
+            reason="interrupted",
+            frozen_source_digests=frozen,
+        )
+
+    first = merge()
+    frozen = first[0]["scan"]["preservedSources"]
+    assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
+    # Acknowledging a checkpoint and changing the live head cannot rewrite a receipt.
+    (tmp_path / "checkpoints" / "pending" / completed.name).unlink()
+    select(tmp_path, reopened, 400)
+    replay = merge(frozen)
+    assert replay[2] == first[2]
+    assert replay[0]["scan"]["preservedSources"] == frozen
+
+
+def test_composed_recovery_retains_accepted_findings_after_file_authored_omission(
+    tmp_path: Path, checkpoint_scan
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    fixture = Path(__file__).parent / "fixtures/scan-projection/canonical-child.json"
+    finding = json.loads(fixture.read_text())["findings"][0]
+    accepted = write_checkpoint(
+        tmp_path / "checkpoints", saved_draft(scan_id, findings=[finding], complete=True)
+    )
+    os.utime(accepted, ns=(100, 100))
+    select(tmp_path, accepted, 200)
+    (tmp_path / "checkpoints/pending" / accepted.name).unlink()
+    accepted_bytes = accepted.read_bytes()
+    # A file-authored progress update can omit a finding without rejecting it.
+    write_saved_parent(tmp_path, saved_draft(scan_id), 300)
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(tmp_path / name, ns=(300, 300))
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], stopped=True, reason="interrupted"
+    )
+    assert len(first[1]["findings"]) == 1
+    assert first[1]["findings"][0]["title"] == finding["title"]
+    frozen = first[0]["scan"]["preservedSources"]
+    assert accepted.relative_to(tmp_path).as_posix() in frozen
+    assert accepted.read_bytes() == accepted_bytes
+    replay = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    assert replay[1] == first[1]
+    assert replay[0]["scan"]["preservedSources"] == frozen
+
+
 def test_multiple_parent_observations_keep_latest_selection_and_pending_ties(
     tmp_path: Path, checkpoint_scan
 ) -> None:
@@ -806,6 +877,68 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
             reason="interrupted",
             frozen_source_digests=frozen,
         )
+
+
+def test_tied_parent_surfaces_keep_their_ids_on_frozen_replay(tmp_path: Path) -> None:
+    scan_id = "tied-5"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("synthetic\n" * 60)
+    write_completed_contract(
+        tmp_path,
+        scan_id,
+        target,
+        relative_path="app.py",
+        target_id="synthetic",
+        snapshot_digest="codex-security-snapshot/v1:sha256:" + "a" * 64,
+    )
+    target_binding = json.loads((tmp_path / "scan-manifest.json").read_text())["scan"]["target"]
+    binding = {
+        **saved_binding(),
+        "target": target_binding,
+        "allowedTargetKinds": [target_binding["kind"]],
+    }
+    finding = json.loads((tmp_path / "findings.json").read_text())["findings"][0]
+    finding["provenance"]["candidateId"] = "candidate-review"
+    surface = {
+        "id": "candidate-surface",
+        "label": "Candidate review",
+        "candidateId": "candidate-review",
+        "disposition": "reported",
+        "receiptRefs": [],
+    }
+    reported = saved_draft(scan_id, findings=[finding], surfaces=[surface], complete=False)
+    rejected = saved_draft(
+        scan_id,
+        surfaces=[{**surface, "disposition": "rejected", "finding": finding}],
+        complete=True,
+    )
+    write_saved_parent(tmp_path, reported, 100)
+    for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(tmp_path / filename, ns=(100, 100))
+    for draft in (reported, rejected):
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
+        os.utime(checkpoint, ns=(100, 100))
+        select(tmp_path, checkpoint, 100)
+        saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
+    originals = {path: path.read_bytes() for path in (tmp_path / "checkpoints").glob("*.json")}
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], stopped=True, reason="interrupted"
+    )
+    frozen = first[0]["scan"]["preservedSources"]
+    replay = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    assert len(first[1]["findings"]) == len(replay[1]["findings"]) == 1
+    assert replay[2] == first[2]
+    assert replay[0]["scan"]["preservedSources"] == frozen
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])

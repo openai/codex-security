@@ -16,11 +16,17 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
+from workbench.handoff import require_current_continuation
 from workbench_composition import CompositionView
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
-from workbench_scan_start import scan_target_identity
+from workbench_scan_start import scan_target_identity, stored_diff_target
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_target import git_output, require_scan_target_identity
+from workbench_target import (
+    git_output,
+    git_revision,
+    require_scan_target_identity,
+    worktree_content_digest,
+)
 from workbench_validation import reject_non_finite_json
 
 
@@ -49,6 +55,94 @@ def preserve_sealed_completion(
 
 
 def cli_scan_resume(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    parse_scan_recipe: Callable[..., dict[str, Any]],
+    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
+    sealed_producer_version: Callable[[sqlite3.Row], str | None],
+    claim_token: str | None = None,
+) -> dict[str, Any]:
+    if scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a scan with a saved launch recipe.")
+    if scan["status"] != "running" or scan["canceled_at"] is not None:
+        raise SystemExit(
+            "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
+        )
+    require_current_continuation(
+        scan, claim_token, error_message="Resume requires the original owning CLI session."
+    )
+    try:
+        repository = require_scan_target_identity(scan)
+    except SystemExit as exc:
+        raise SystemExit(
+            "Cannot resume: the original checkout is missing or was replaced."
+        ) from exc
+    producer_version = sealed_producer_version(scan)
+    if producer_version is None:
+        diff_target = stored_diff_target(scan)
+        if scan_target_identity(repository, diff_target) != (
+            scan["target_revision"],
+            scan["target_snapshot_digest"],
+            scan["target_device"],
+            scan["target_inode"],
+        ):
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+        if diff_target is not None and diff_target["kind"] == "working_tree":
+            if (
+                git_revision(repository) != diff_target["headRevision"]
+                or worktree_content_digest(repository) != diff_target["contentDigest"]
+            ):
+                raise SystemExit(
+                    "Cannot resume: the original checkout revision or contents changed."
+                )
+    recipe = parse_scan_recipe(
+        scan["recipe_json"], repository, require_existing_paths=producer_version is None
+    )
+    result = scan_registration(connection, scan, scan_contract)
+    result["recipe"] = recipe
+    if producer_version is None:
+        require_current_deep_scan(connection, scan)
+    else:
+        result["sealedProducerVersion"] = producer_version
+    return result
+
+
+def require_current_deep_scan(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+    if (
+        scan["mode"] == "deep"
+        and connection.execute(
+            "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+        is not None
+    ):
+        raise SystemExit("This Deep Scan uses a retired runtime. Start a fresh scan.")
+
+
+def scan_registration(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
+) -> dict[str, Any]:
+    progress = connection.execute(
+        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
+    ).fetchone()
+    return {
+        "contract": scan_contract(scan),
+        "recipe": json.loads(scan["recipe_json"]),
+        "scanDir": scan["scan_dir"],
+        "scanId": scan["id"],
+        "scopeFileCount": progress["scope_file_count"],
+        "startedAt": scan["started_at"],
+        "targetId": scan["target_id"],
+        "targetRevision": scan["target_revision"],
+        "threadId": scan["continuation_thread_id"],
+        "claimToken": scan["handoff_claim_token"],
+        "userContext": scan["user_context"],
+    }
+
+
+def _legacy_cli_scan_resume(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     workspace: sqlite3.Row,
@@ -110,6 +204,7 @@ def cli_scan_resume(
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
         "threadId": thread_id,
+        "claimToken": scan["handoff_claim_token"],
         "userContext": scan["user_context"],
     }
     # Active coordinators may still be writing drafts. Validate sealed results
@@ -313,6 +408,7 @@ def list_scans(
                 "mode": row["mode"],
                 "model": row["model"],
                 "parentScanId": row["parent_scan_id"],
+                "parentScanRole": row["parent_scan_role"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
                     "coverage": {
