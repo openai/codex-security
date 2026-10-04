@@ -536,7 +536,6 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
         (True, True, "recorded"),
         (False, False, "recorded"),
         (False, True, "missing"),
-        (False, True, "legacy_missing"),
         (False, True, "deterministic"),
     ],
 )
@@ -625,9 +624,6 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
             connection.execute(
                 "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
             )
-    if merge_kind == "legacy_missing":
-        document["version"] = 2
-        document.pop("mergeStarted")
     if prior_session_unavailable:
         document["costUnavailable"] = True
     checkpoint.write_text(json.dumps(document))
@@ -646,11 +642,7 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    incomplete = (
-        prior_session_unavailable
-        or not child_session_saved
-        or merge_kind in ("missing", "legacy_missing")
-    )
+    incomplete = prior_session_unavailable or not child_session_saved or merge_kind == "missing"
     assert usage == {
         "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",
@@ -844,6 +836,48 @@ def test_completed_accounting_and_sidecar_sessions_survive_migration(tmp_path: P
     )["scan"]
     assert reopened["executionThreadIds"] == migrated["executionThreadIds"]
     assert reopened["usage"] == completed["usage"]
+
+
+def test_historical_worker_sessions_still_contribute_after_schema_migration(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    timestamp = fixture.started_at.isoformat()
+    # This database has already applied the execution-thread migration. Older
+    # versions could subsequently append worker associations to their own table.
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO deep_scan_workers "
+            "(id, scan_id, kind, status, sdk_thread_id, prompt_path, artifact_dir, "
+            "created_at, updated_at) VALUES (?, ?, 'discovery', 'succeeded', ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                fixture.scan_id,
+                "historical-worker",
+                str(tmp_path / "prompt.md"),
+                str(tmp_path / "worker"),
+                timestamp,
+                timestamp,
+            ),
+        )
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)]),
+            "historical-worker": _rollout(
+                tmp_path, "historical-worker", [_token_event(counted, 100, 0)]
+            ),
+        },
+        [],
+    )
+    completed = _complete_scan(fixture)["scan"]
+    assert completed["usage"] == {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(110, 0, 0),
+        "threadCount": 2,
+    }
+    assert "historical-worker" in completed["executionThreadIds"]
+    assert "historical-worker" in completed["threadIds"]
 
 
 @pytest.mark.parametrize("include_cost", [False, True])

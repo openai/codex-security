@@ -71,14 +71,14 @@ EXPECTED_TABLES = {
     "finding_triage",
     "finding_workflow_reviews",
     "finding_severity_assessments",
-    "scan_severity_assessments",
-    "scan_execution_threads",
     "scan_severity_classifications",
+    "scan_severity_assessments",
     "finding_workflows",
     "findings",
     "scan_artifacts",
     "scan_comparison_matches",
     "scan_comparisons",
+    "scan_execution_threads",
     "scan_progress",
     "scans",
     "schema_migrations",
@@ -348,19 +348,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         "thread-i",
         environment={"CODEX_HOME": str(codex_home)},
     )
-    manifest_path = scan_dir / "coordinator-manifest.json"
-    manifest_path.write_text("{}\n")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            """
-            UPDATE deep_scan_runs
-            SET status = 'succeeded', phase = 'terminal',
-                terminal_reason = 'capped', manifest_path = ?,
-                completed_at = updated_at
-            WHERE scan_id = ?
-            """,
-            (str(manifest_path), scan_id),
-        )
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(
         scan_dir,
         scan_id,

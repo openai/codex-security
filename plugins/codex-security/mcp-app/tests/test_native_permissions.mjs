@@ -335,6 +335,14 @@ for (const invalid of [
   );
 }
 
+// Cwd is unused metadata; actual inherited paths remain independently checked.
+assert.deepEqual(
+  resolveNativeParentSandbox(
+    extra(pinnedReadOnly, "relative/working-directory"),
+  ),
+  { filesystemDenies: [] },
+);
+
 function extra(permissionProfile, sandboxCwd, sandboxPolicy) {
   return {
     _meta: {

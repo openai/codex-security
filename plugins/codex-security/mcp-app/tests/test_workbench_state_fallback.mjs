@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
@@ -50,16 +51,10 @@ async function testWorkbenchStateFallback() {
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFakePython(fakePythonPath);
   await build({
-    bundle: true,
-    define: { "import.meta.url": "__filename" },
+    ...mcpBundleOptions,
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
     logLevel: "silent",
     outfile: serverBundlePath,
-    platform: "node",
-    target: "node20",
   });
 
   try {
