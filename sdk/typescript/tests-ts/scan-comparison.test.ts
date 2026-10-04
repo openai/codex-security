@@ -121,6 +121,36 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("reconciles finding groups with native Node 20 built-ins", () => {
+    const script = `
+Reflect.deleteProperty(Map, "groupBy");
+const { matchScanFindings } = await import(${JSON.stringify(new URL("../src/scan-comparison.ts", import.meta.url).href)});
+const input = {
+  before: [{ findingId: "same-control", occurrenceId: "old" }],
+  after: [
+    { findingId: "same-control", occurrenceId: "retained" },
+    { findingId: "split-control", occurrenceId: "split" },
+  ],
+};
+const response = {
+  matches: [{ beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["split"], confidence: "high", reason: "The same control was split." }],
+  uncertain: [],
+};
+const codex = { startThread() { return { async run() { return { finalResponse: JSON.stringify(response) }; } }; } };
+console.log(JSON.stringify(await matchScanFindings(input, { codex })));
+`;
+    const result = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], { encoding: "utf8" }),
+    ) as ScanComparisonResult;
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]).toMatchObject({
+      beforeOccurrenceIds: ["old"],
+      afterOccurrenceIds: ["split", "retained"],
+      confidence: "high",
+    });
+    expect(result.uncertain).toEqual([]);
+  });
+
   test("keeps the first accepted identity when joining finding groups", () => {
     expect(
       unionFindingGroups([

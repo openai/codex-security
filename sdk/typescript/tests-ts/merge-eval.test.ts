@@ -140,7 +140,7 @@ process.stdin.on("end", () => {
     }
   } finally {
     process.argv = previous.argv;
-    process.exitCode = previous.exitCode;
+    process.exitCode = previous.exitCode ?? 0;
     if (previous.executable === undefined) delete process.env["CODEX_CLI_PATH"];
     else process.env["CODEX_CLI_PATH"] = previous.executable;
     spawning.mockRestore();

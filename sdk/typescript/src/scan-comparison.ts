@@ -913,9 +913,13 @@ function reconcileComparison(
       group.map(({ occurrenceId }) => [occurrenceId, index] as const),
     ),
   );
-  const semanticGroups = Map.groupBy(response.matches, (match) =>
-    groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
-  );
+  const semanticGroups = new Map<number, ScanComparisonResult["matches"]>();
+  for (const match of response.matches) {
+    const index = groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!;
+    const matches = semanticGroups.get(index) ?? [];
+    matches.push(match);
+    semanticGroups.set(index, matches);
+  }
   const orderedGroups = new Set([...semanticGroups.keys(), ...groups.keys()]);
   const matches = [...orderedGroups].flatMap((index) => {
     const semanticMatches = semanticGroups.get(index) ?? [];

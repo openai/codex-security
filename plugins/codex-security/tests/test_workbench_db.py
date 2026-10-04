@@ -16,10 +16,12 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     SCRIPT,
+    composition_payload,
     create_saved_git_workspace,
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_aggregate_ready,
+    register,
     run_workbench,
     stable_target_id,
     start_delivered_scan,
@@ -175,6 +177,65 @@ def test_budget_completion_preserves_ordinary_aggregate_and_unresolved_work(
     assert retained["completeness"] == "partial"
     assert any(row["reason"] == coverage["deferred"][0]["reason"] for row in retained["deferred"])
     assert any(row["reason"] == BUDGET_WARNING for row in retained["deferred"])
+
+
+def test_budget_completion_publishes_accepted_work_after_an_earlier_parent_draft(
+    tmp_path: Path,
+) -> None:
+    state, target, directory, scan_id, checkpoint = budget_scan_fixture(tmp_path)
+    documents = {
+        key: json.loads((directory / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["findings"]["findings"] = []
+    run_workbench(
+        state,
+        "write-scan-draft",
+        "--scan-id",
+        scan_id,
+        input_text=json.dumps({"documents": documents}),
+    )
+    child_dir = directory / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=scan_id, role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    child_findings = json.loads((child_dir / "findings.json").read_text())["findings"]
+    accepted = {
+        **json.loads(checkpoint.read_text()),
+        "passes": [
+            {"directory": child_dir.relative_to(directory).as_posix(), "scanId": child["scanId"]}
+        ],
+        "mergedScanIds": [child["scanId"]],
+        "terminalReason": "capped",
+        "aggregate": {
+            "scanId": scan_id,
+            "findings": child_findings,
+            "coverage": documents["coverage"],
+        },
+    }
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan_id,
+        "--artifact-path",
+        "artifacts/deep-scan/checkpoint.json",
+        input_text=composition_payload(directory, accepted),
+    )
+
+    completed = complete_budget_scan(state, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["cost"] == BUDGET_COST
+    assert completed["findingCount"] == 1
+    retained = json.loads((directory / "findings.json").read_text())["findings"][0]
+    assert retained["title"] == child_findings[0]["title"]
+    assert retained["summary"] == child_findings[0]["summary"]
+    assert json.loads((directory / "scan-manifest.json").read_text())["scan"]["sealedAt"]
 
 
 @pytest.mark.parametrize("failure", ["below_limit", "unfinished", "standard"])

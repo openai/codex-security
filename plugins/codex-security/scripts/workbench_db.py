@@ -1157,32 +1157,35 @@ def complete_budget_exhausted_scan(
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
         warnings = json.loads(scan["completion_warnings_json"])
-        if artifact_path(scan_dir, "scan-manifest.json", required=False) is None:
-            saved_results.save_composed_checkpoint(
-                _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
-            )
-            documents = saved_results.merge_saved_results(
-                scan_dir,
-                scan_id,
-                workbench_completion_binding(scan, now()),
-                warnings,
-                stopped=True,
-                reason=warning,
-            )
-            if documents is not None:
-                saved_results.write_draft_documents(
-                    _WORKBENCH_DB_CONTEXT,
-                    scan,
-                    scan_dir,
-                    dict(zip(("manifest", "findings", "coverage"), documents, strict=True)),
+        manifest_path = artifact_path(scan_dir, "scan-manifest.json", required=False)
+        if manifest_path is not None:
+            manifest_scan = read_json_object(manifest_path).get("scan", {})
+            if manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") not in (
+                None,
+                [],
+            ):
+                raise SystemExit(
+                    "Budget-exhausted scan cannot replace an already sealed scan draft."
                 )
-        manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
-        manifest_scan = manifest.get("scan", {})
-        if manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") not in (
-            None,
-            [],
-        ):
-            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+        saved_results.save_composed_checkpoint(
+            _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
+        )
+        documents = saved_results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            workbench_completion_binding(scan, now()),
+            warnings,
+            stopped=True,
+            reason=warning,
+        )
+        if documents is not None:
+            saved_results.write_draft_documents(
+                _WORKBENCH_DB_CONTEXT,
+                scan,
+                scan_dir,
+                dict(zip(("manifest", "findings", "coverage"), documents, strict=True)),
+            )
+        artifact_path(scan_dir, "scan-manifest.json", required=True)
         committed_path = artifact_path(scan_dir, "artifacts/scan-draft.json", required=False)
         draft = read_json_object(committed_path) if committed_path is not None else None
         coverage = (
@@ -1191,6 +1194,11 @@ def complete_budget_exhausted_scan(
             else read_json_object(artifact_path(scan_dir, "coverage.json", required=True))
         )
         coverage["completeness"] = "partial"
+        coverage["deferred"] = [
+            item
+            for item in coverage.get("deferred", [])
+            if item != {"id": "scan-stopped", "reason": warning}
+        ]
         if not any(item.get("reason") == warning for item in coverage.setdefault("deferred", [])):
             coverage["deferred"].append({"id": "scan-cost-limit", "reason": warning})
         if draft is not None:

@@ -42,11 +42,14 @@ const usage = { input_tokens: 10, cached_input_tokens: 0, output_tokens: 3 };
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-async function fixture(partialCheckpoint?: "active" | "completed") {
+async function fixture(
+  partialCheckpoint?: "active" | "completed",
+  native = false,
+) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const home = join(root, "home");
-  const outputDir = join(root, "scan");
+  let outputDir = join(root, "scan");
   const knowledgePath = join(root, "context.md");
   await mkdir(repository);
   await mkdir(home, { mode: 0o700 });
@@ -500,7 +503,31 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
       },
       { surface: "sdk" },
     );
+  let registeredScan: ScanOptions["registeredScan"];
+  if (native) {
+    const started = await runWorkbench(
+      { python: Bun.which("python3")!, pluginRoot, environment },
+      [
+        "begin-deep-scan",
+        "--thread-id",
+        "native-owner",
+        "--target-path",
+        repository,
+        "--scan-root",
+        join(root, "native-scans"),
+      ],
+    );
+    const scan = started["scan"] as JsonObject;
+    outputDir = scan["scanDir"] as string;
+    registeredScan = {
+      scanId: scan["scanId"] as string,
+      scanDir: outputDir,
+      threadId: "native-owner",
+      handoffClaimToken: scan["handoffClaimToken"] as string,
+    };
+  }
   const options: ScanOptions = {
+    ...(registeredScan === undefined ? {} : { registeredScan }),
     outputDir,
     signal: controller.signal,
     mode: "deep",
@@ -1020,6 +1047,91 @@ test.each(["live", "archived"])(
       passCost.estimatedUsd * 2,
       12,
     );
+  },
+);
+
+test.each([
+  ["sdk", false],
+  ["native", false],
+  ["native", true],
+] as const)(
+  "%s resume retains archived reducer subagent usage (budget: %p)",
+  async (resume, budget) => {
+    const h = await fixture(undefined, resume === "native");
+    const options = {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      ...(budget
+        ? {
+            maxCostUsd:
+              estimateScanCost("gpt-6-astra", usage)!.estimatedUsd * 10,
+          }
+        : {}),
+    };
+    h.failPublication(true);
+    await using first = h.makeClient();
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      DeepScanPublicationError,
+    );
+    const [parentId, parent] = [...h.records].find(
+      ([, record]) => record.mode === "deep",
+    )!;
+    const reducerThreadId = [...h.threadScans].find(
+      ([, scanId]) => scanId === parentId,
+    )![0];
+    const archivedUsage = { input_tokens: 1000, output_tokens: 100 };
+    await mkdir(join(h.home, "archived_sessions"));
+    await writeFile(
+      join(h.home, "archived_sessions", "reducer-subagent.jsonl"),
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: "archived-reducer-subagent",
+            cwd: join(h.outputDir, "artifacts", "deep-scan", "merge"),
+            parent_thread_id: reducerThreadId,
+            timestamp: new Date().toISOString(),
+          },
+        },
+        tokenUsageEvent(archivedUsage),
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+    h.failPublication(false);
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, {
+      ...options,
+      ...(resume === "native"
+        ? { registeredScan: options.registeredScan! }
+        : { resumeScanId: parentId }),
+    });
+    expect(result.cost).toMatchObject({
+      inputTokens: usage.input_tokens * 3 + archivedUsage.input_tokens,
+      outputTokens: usage.output_tokens * 3 + archivedUsage.output_tokens,
+    });
+    expect(result.cost?.estimatedUsd).toBeCloseTo(
+      estimateScanCost("gpt-6-astra", {
+        input_tokens: usage.input_tokens * 3 + archivedUsage.input_tokens,
+        cached_input_tokens: 0,
+        output_tokens: usage.output_tokens * 3 + archivedUsage.output_tokens,
+      })!.estimatedUsd,
+      12,
+    );
+    expect(h.launches).toHaveLength(3);
+    if (budget) {
+      expect(result.cost!.estimatedUsd).toBeGreaterThan(options.maxCostUsd!);
+      expect(result.coverage.completeness).toBe("partial");
+      expect(h.commands).toContain("complete-budget-exhausted-scan");
+    }
+    const completed = await runWorkbench(
+      { ...parent.options, signal: undefined },
+      ["get-scan", "--scan-id", parentId],
+    );
+    expect(completed["scan"]).toMatchObject({
+      cost: result.cost,
+      progress: { status: "complete" },
+    });
   },
 );
 

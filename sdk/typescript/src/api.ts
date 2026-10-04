@@ -1911,7 +1911,7 @@ export class CodexSecurity {
           mode === "deep"
             ? join(scanDir, "artifacts", "deep-scan", "merge")
             : scanDir,
-        includeArchivedSessions: options.resumeScanId !== undefined,
+        includeArchivedSessions: typeof resumeThreadId === "string",
         maxCostUsd: options.maxCostUsd,
         workerNumber,
         onActivity:
