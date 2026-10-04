@@ -138,8 +138,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  const pending = [...traversed];
-  for (const parentId of pending) {
+  for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
     for (const [session] of logs.values()) {
       if (
@@ -152,7 +151,6 @@ export async function readScanLogs(options: ScanLogOptions) {
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
-        pending.push(session.threadId);
       }
     }
   }

@@ -242,21 +242,19 @@ export class ScanCostTracker {
         }
       }
     }
-    let changed = true;
-    while (changed) {
-      changed = false;
+    let previousSize: number;
+    do {
+      previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
+          included.has(session.parentThreadId)
         ) {
           included.add(session.threadId);
-          changed = true;
         }
       }
-    }
+    } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
     }
