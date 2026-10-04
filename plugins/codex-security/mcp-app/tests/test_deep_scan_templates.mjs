@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { importSource } from "./import-module.mjs";
 
@@ -5,6 +6,16 @@ const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
   new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
   { loader: { ".md": "text" } },
 );
+
+for (const name of ["discovery", "dedup"]) {
+  const template = await readFile(
+    new URL(`../templates/deep-scan/${name}.md`, import.meta.url),
+    "utf8",
+  );
+  for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? []) {
+    assert.equal(key, `{{${name.toUpperCase()}_CONTEXT_JSON}}`);
+  }
+}
 
 const discoveryInput = {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
@@ -51,16 +62,7 @@ const withFeedback = renderDiscoveryPrompt({ ...discoveryInput }, feedbackPath);
 assert.deepEqual(firstJsonBlock(withFeedback), discoveryContext);
 assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 
-const dedup = renderDedupPrompt({
-  reducerLabel: "dedup-0001",
-  claimedWorkerIds: ["worker-001"],
-  discoveries: [
-    {
-      workerId: "worker-001",
-      resultPath: "/fixture/worker/result.json",
-    },
-  ],
-});
+const dedup = renderDedupPrompt("dedup-0001", ["worker-001"]);
 const dedupContext = firstJsonBlock(dedup);
 assert.doesNotMatch(dedup, /\bcoverage\b/i);
 assert.match(
@@ -85,12 +87,7 @@ for (const field of [
   assert.equal(Object.hasOwn(dedupContext, field), false);
 }
 
-const previousReduction = firstJsonBlock(
-  renderDedupPrompt({
-    reducerLabel: "dedup-0002",
-    claimedWorkerIds: [],
-  }),
-);
+const previousReduction = firstJsonBlock(renderDedupPrompt("dedup-0002", []));
 assert.deepEqual(previousReduction, {
   reducerLabel: "dedup-0002",
   claimedWorkerIds: [],

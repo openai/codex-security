@@ -1,3 +1,4 @@
+import type { JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -11,18 +12,19 @@ import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./src/python_command.js";
-import { MCP_APP_VERSION } from "./src/version.js";
+import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
   recoveryHandoffClaimTokenSchema,
   registerScanHandoffTools,
+  type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
-  DeepScanStartLock,
+  AsyncLock,
   startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
 import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
@@ -48,12 +50,10 @@ const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
   "read-artifact",
 ]);
 
-type JsonObject = Record<string, unknown>;
-
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
 let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
-let workbenchStateSelectionTail: Promise<void> = Promise.resolve();
+const workbenchStateSelectionLock = new AsyncLock();
 
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
@@ -124,14 +124,6 @@ async function scanRoot(): Promise<string> {
   if (typeof result.scanRoot !== "string")
     throw new Error("Missing scan artifact root.");
   return result.scanRoot;
-}
-
-interface WorkspaceState extends JsonObject {
-  id: string;
-  results?: JsonObject;
-  setup: {
-    submitted: boolean;
-  };
 }
 
 const diffTargetSchema = z.discriminatedUnion("kind", [
@@ -613,7 +605,8 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
   const deepScanCoordinators = new DeepScanCoordinatorRegistry();
-  const deepScanStartLock = new DeepScanStartLock();
+  // Serialize start-or-join so a scan creates only one coordinator.
+  const deepScanStartLock = new AsyncLock();
   const deepScanStore = new WorkbenchDeepScanStore(runWorkbench);
   const authenticatedArtifactClaims = new Map<
     string,
@@ -1799,7 +1792,7 @@ export function createCodexSecurityServer(): McpServer {
         message,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
-      deepScanCoordinators.failExternallyPersisted(scanId, message);
+      deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",
@@ -2323,12 +2316,11 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
       "Codex Security prompt-only scan returned malformed context; no prompt-driven scan was started.",
     );
   }
-  const disposition = startDisposition === "joined" ? "Rejoined" : "Started";
   return {
     content: [
       {
         type: "text" as const,
-        text: `${disposition} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
+        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
       },
     ],
     structuredContent: promptOnly,
@@ -2424,15 +2416,14 @@ async function logUserInputFailure(
 function boundedErrorData(error: unknown): { message: string; name: string } {
   const name =
     error instanceof Error && error.name.trim() ? error.name : "UnknownError";
-  const message =
-    error instanceof Error
+  return {
+    name: name.slice(0, 128),
+    message: (error instanceof Error
       ? error.message
       : typeof error === "string"
         ? error
-        : "Unknown user-input elicitation failure.";
-  return {
-    name: name.slice(0, 128),
-    message: message.slice(0, 1000),
+        : "Unknown user-input elicitation failure."
+    ).slice(0, 1000),
   };
 }
 
@@ -2532,7 +2523,7 @@ async function executeWorkbenchWithStateSelection(
   if (persistentWorkbenchStateSucceeded) {
     return await executeWorkbench(pythonCommand, args, undefined, input);
   }
-  return await withWorkbenchStateSelectionLock(async () => {
+  return await workbenchStateSelectionLock.run(async () => {
     if (fallbackWorkbenchStateDir) {
       return await executeWorkbench(
         pythonCommand,
@@ -2565,22 +2556,6 @@ async function executeWorkbenchWithStateSelection(
       );
     }
   });
-}
-
-async function withWorkbenchStateSelectionLock<T>(
-  operation: () => Promise<T>,
-): Promise<T> {
-  const predecessor = workbenchStateSelectionTail;
-  let release!: () => void;
-  workbenchStateSelectionTail = new Promise<void>((resolvePromise) => {
-    release = resolvePromise;
-  });
-  await predecessor;
-  try {
-    return await operation();
-  } finally {
-    release();
-  }
 }
 
 async function executeWorkbench(
@@ -2807,12 +2782,10 @@ function deepScanInvocationFailureMessage(error: unknown): string {
 }
 
 function deepScanFailureMessage(run: DeepScanRunState): string {
-  const manifest = run.manifestPath
-    ? ` Failure manifest: ${run.manifestPath}.`
-    : "";
-  const diagnostic = `${run.error ?? `Deep Scan ${run.scanId} ${run.status}.`}${manifest}`;
   return [
-    diagnostic,
+    `${run.error ?? `Deep Scan ${run.scanId} ${run.status}.`}${
+      run.manifestPath ? ` Failure manifest: ${run.manifestPath}.` : ""
+    }`,
     "This is a terminal failure of this logical Deep Scan; no successful discovery manifest was returned.",
     "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with incomplete coverage.",
     "Do not call start_codex_security_deep_scan again in this response.",
@@ -2822,12 +2795,11 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
 }
 
 function isUnwritableSqliteOpenError(error: unknown): boolean {
-  const diagnostic = isExecError(error)
-    ? error.stderr
-    : error instanceof Error
-      ? error.message
-      : "";
   return /sqlite3\.OperationalError:\s*unable to open database file/i.test(
-    diagnostic,
+    isExecError(error)
+      ? error.stderr
+      : error instanceof Error
+        ? error.message
+        : "",
   );
 }
