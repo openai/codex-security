@@ -85,7 +85,7 @@ export async function fixture(t, layout) {
   );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const root = path.join(directory, "output");
-  await mkdir(root);
+  await mkdir(root, { mode: 0o700 });
   return draftFixture(root, layout);
 }
 

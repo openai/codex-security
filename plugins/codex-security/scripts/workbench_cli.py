@@ -163,6 +163,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--claim-token")
     set_scan_thread.add_argument("--thread-id", required=True)
 
     set_scan_cost_limit = subparsers.add_parser("set-scan-cost-limit")
@@ -174,6 +175,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_cli_scan_resume = subparsers.add_parser("get-cli-scan-resume")
     get_cli_scan_resume.add_argument("--scan-id", required=True)
+    get_cli_scan_resume.add_argument("--claim-token")
     get_cli_scan_resume.add_argument("--allow-unavailable", action="store_true")
 
     compare_scans = subparsers.add_parser("compare-scans")
@@ -244,24 +246,41 @@ def parse_args(description: str) -> argparse.Namespace:
 
     complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
     complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--claim-token")
     complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
     complete_budget_exhausted_scan.add_argument("--message")
 
+    defer_publication_help = (
+        "Record the stop without publishing; after workers stop, run "
+        "preserve-scan-results --after-stop (default: publish immediately)."
+    )
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument(
+        "--defer-publication", action="store_true", help=defer_publication_help
+    )
 
     fail_scan = subparsers.add_parser("fail-scan")
     fail_scan.add_argument("--scan-id", required=True)
     fail_scan.add_argument("--message", required=True)
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    fail_scan.add_argument("--defer-publication", action="store_true", help=defer_publication_help)
 
     preserve_scan = subparsers.add_parser("preserve-scan-results")
     preserve_scan.add_argument("--scan-id", required=True)
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
     preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+    preserve_scan.add_argument(
+        "--cost-json", help="Save a JSON cost or {usage, cost} receipt with the retained results."
+    )
+    preserve_scan.add_argument(
+        "--after-stop",
+        action="store_true",
+        help="After workers stop, stop remaining child records and publish the saved results.",
+    )
 
     recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
     recover_scan = subparsers.add_parser(
