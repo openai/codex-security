@@ -705,7 +705,23 @@ export async function runDeepScans(
       );
       reportPassCost(pass.directory, result.cost);
       executionSignal.throwIfAborted();
-      await save();
+      try {
+        await save();
+      } catch (cause) {
+        if (
+          discoverySignal.aborted ||
+          cause instanceof ScanTransportClosedError ||
+          cause instanceof ScanCostTrackingError ||
+          cause instanceof ScanCostLimitExceededError ||
+          cause instanceof ScanPermissionError
+        )
+          throw cause;
+        throw new DeepScanRecoveryError(
+          `Could not retain completed child results; resume to retry: ${errorMessage(cause)}`,
+          scanDir,
+          { cause },
+        );
+      }
     } catch (error) {
       if (
         error instanceof ScanTransportClosedError ||

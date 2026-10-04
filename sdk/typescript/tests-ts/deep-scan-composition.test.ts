@@ -11,6 +11,7 @@ import { estimateScanCost } from "../src/cost.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   DeepScanPublicationError,
+  DeepScanRecoveryError,
   runDeepScans,
   ScanCostTrackingError,
   type DeepScanComposition,
@@ -1034,6 +1035,60 @@ test("a failed pass contributes its saved final receipt before the next pass", a
   expect(
     h.operations.filter((command) => command === "list-scans"),
   ).toHaveLength(1);
+});
+
+test("a completed child remains resumable after one checkpoint write fails", async () => {
+  const h = await fixture({ workers: 1, stopAfterConsecutiveErrors: 3 });
+  h.setExecute(async () => {
+    if (h.calls.length === 1) throw new Error("Synthetic discovery failure");
+  });
+  const persistenceFailure = new Error("Synthetic one-shot checkpoint failure");
+  const workbench = h.input.workbench;
+  let injected = false;
+  h.input.workbench = async (args, contents) => {
+    if (
+      !injected &&
+      args[0] === "save-scan-artifact" &&
+      args[4] === DEEP_SCAN_CHECKPOINT &&
+      JSON.parse(contents!).consecutiveErrors === 0 &&
+      [...h.records.values()].some(
+        (record) => record.progress.status === "complete",
+      )
+    ) {
+      injected = true;
+      throw persistenceFailure;
+    }
+    return workbench(args, contents);
+  };
+  let caught: unknown;
+  try {
+    await runDeepScans(h.input);
+  } catch (error) {
+    caught = error;
+  }
+  expect(injected).toBe(true);
+  expect(caught).toBeInstanceOf(DeepScanRecoveryError);
+  expect((caught as Error).cause).toBe(persistenceFailure);
+  expect((caught as Error).message).toContain(persistenceFailure.message);
+  const saved = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+  expect(saved.terminalReason).toBeUndefined();
+  expect(saved.pendingStop).toBeUndefined();
+  expect(h.calls).toHaveLength(2);
+  expect(
+    [...h.records.values()].map((record) => record.progress.status),
+  ).toEqual(["failed", "complete"]);
+  expect(h.publications).toHaveLength(0);
+  const resumed = await runDeepScans(h.input);
+  expect(resumed.terminalReason).toBe("capped");
+  expect(resumed.consecutiveErrors).toBe(0);
+  expect(resumed.mergedScanIds).toEqual([
+    [...h.records.values()].find(
+      (record) => record.progress.status === "complete",
+    )!.scanId,
+  ]);
+  expect(h.publications.at(-1)!.findings).toHaveLength(1);
+  expect(h.calls).toHaveLength(2);
+  expect(h.metrics().merges).toBe(0);
 });
 
 test("a failure before registration consumes one reserved discovery slot", async () => {
