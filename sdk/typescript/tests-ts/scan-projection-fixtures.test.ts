@@ -245,14 +245,14 @@ test("completed projection follows the shared canonical child fixture", async ()
     fixture.sourceScanId,
     h.source,
   );
-  const { parsePersistedScanDraft } = await import(
+  const { parseScanDraft } = await import(
     new URL(
       "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
       import.meta.url,
     ).href
   );
   expect(() =>
-    parsePersistedScanDraft({
+    parseScanDraft({
       ...projected.draft,
       scanId: fixture.parentScanId,
     }),

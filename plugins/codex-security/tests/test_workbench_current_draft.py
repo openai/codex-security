@@ -456,7 +456,15 @@ def test_cancellation_reconciles_current_surface_resolution_and_late_checkpoint_
     ],
 )
 def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
-    tmp_path, workbench_api, monkeypatch, command, resolution, complete
+    tmp_path,
+    workbench_api,
+    monkeypatch,
+    command,
+    resolution,
+    complete,
+    timestamp="unchanged",
+    interrupted_at="findings.json",
+    legacy_export=False,
 ):
     target = tmp_path / "target"
     target.mkdir()
@@ -571,14 +579,22 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
         )
     later_coverage["openQuestions"] = [{"question": "Which control governs the new surface?"}]
     (directory / "coverage.json").write_text(json.dumps(later_coverage))
+    manifest_path = directory / "scan-manifest.json"
+    later_manifest = json.loads(manifest_path.read_text())
+    if timestamp == "changed":
+        later_manifest["scan"]["completedAt"] = "2030-01-01T00:00:00Z"
+    elif timestamp == "omitted":
+        later_manifest["scan"].pop("completedAt", None)
+    if timestamp != "unchanged":
+        manifest_path.write_text(json.dumps(later_manifest))
     if resolution in {"stale", "stale_after_rejection"}:
-        # A later commit that fails before its first export leaves these files stale.
+        # A later commit may leave a mixture of old and current exports.
         monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
         saved = workbench_api["saved_results"]
         write = saved.write_scan_local_bytes
 
         def fail_export(root, relative, contents, **kwargs):
-            if relative == "findings.json":
+            if relative == interrupted_at:
                 raise OSError("Synthetic export interruption")
             return write(root, relative, contents, **kwargs)
 
@@ -598,6 +614,11 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
                     ),
                 )
         committed = (directory / "artifacts/scan-draft.json").read_bytes()
+    if legacy_export:
+        legacy = json.loads(committed)
+        legacy.pop("canonicalExport")
+        committed = json.dumps(legacy).encode()
+        (directory / "artifacts/scan-draft.json").write_bytes(committed)
     run_workbench(
         state,
         command,
@@ -673,6 +694,47 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     assert "New deferred review." in report
     assert "Which control governs the new surface?" in report
     assert ("Candidate needs validation." in report) is unresolved
+
+
+@pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("timestamp", ["changed", "omitted"])
+def test_stopped_scan_retains_authored_results_with_new_completion_timestamp(
+    tmp_path, workbench_api, monkeypatch, command, timestamp
+):
+    test_stopped_scan_retains_canonical_results_written_after_committed_draft(
+        tmp_path, workbench_api, monkeypatch, command, "reported", False, timestamp=timestamp
+    )
+
+
+@pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("interrupted_at", ["findings.json", "coverage.json", "scan-manifest.json"])
+def test_stopped_scan_does_not_reopen_committed_rejection_after_interrupted_export(
+    tmp_path, workbench_api, monkeypatch, command, interrupted_at
+):
+    test_stopped_scan_retains_canonical_results_written_after_committed_draft(
+        tmp_path,
+        workbench_api,
+        monkeypatch,
+        command,
+        "stale_after_rejection",
+        False,
+        interrupted_at=interrupted_at,
+    )
+
+
+@pytest.mark.parametrize("resolution", ["reported", "stale_after_rejection"])
+def test_stopped_scan_preserves_legacy_export_selection(
+    tmp_path, workbench_api, monkeypatch, resolution
+):
+    test_stopped_scan_retains_canonical_results_written_after_committed_draft(
+        tmp_path,
+        workbench_api,
+        monkeypatch,
+        "cancel-scan",
+        resolution,
+        False,
+        legacy_export=True,
+    )
 
 
 @pytest.mark.parametrize("distinct_instances", [False, True])

@@ -632,14 +632,35 @@ def merge_saved_results(
         # Retain those observations without replacing the committed reconciliation head.
         try:
             current_manifest, current = _read_saved_parent_result(scan_dir, scan_id, canonical=True)
-            # The manifest is exported last. Only a matching envelope admits
-            # later file-authored edits; older exports cannot reopen accepted history.
+            committed = _read_scan_local_json(
+                scan_dir, "artifacts/scan-draft.json", "Committed scan draft"
+            )
+            export_state = committed.get("canonicalExport")
+            if isinstance(export_state, dict):
+                # Any mixture of the writer's previous/current bytes is an
+                # interrupted export, not a new observation. Authored timestamps
+                # need not match the provisional timestamp of an MCP checkpoint.
+                unchanged_export = all(
+                    _sha256_scan_local_file(scan_dir, filename, "Saved scan export")
+                    in (
+                        export_state.get("previous", {}).get(filename),
+                        export_state.get("current", {}).get(filename),
+                    )
+                    for filename in ("scan-manifest.json", "findings.json", "coverage.json")
+                )
+            else:
+                # Older snapshots have no export digests; retain their existing
+                # matching-envelope rule instead of replaying stale history.
+                unchanged_export = not (
+                    parent_manifest
+                    and current_manifest["scan"].get("completedAt") is not None
+                    and current_manifest["scan"]["completedAt"]
+                    == parent_manifest["scan"].get("completedAt")
+                )
             if (
                 not current_manifest["scan"].get("sealedAt")
                 and parent_manifest
-                and current_manifest["scan"].get("completedAt") is not None
-                and current_manifest["scan"]["completedAt"]
-                == parent_manifest["scan"].get("completedAt")
+                and not unchanged_export
             ):
                 payload = _encoded(current)
                 current_checkpoint = f"checkpoints/{_digest(current)}.json"
