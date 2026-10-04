@@ -10,12 +10,16 @@ test("does not request completed findings after a prompt-only scan", async () =>
 
   const promptOnlyScanResult = new Function(
     "isJsonObject2",
-    "string2",
+    "z6",
     "toolErrorResult",
     `${source}\nreturn promptOnlyScanResult;`,
   )(
     (value: unknown) => value !== null && typeof value === "object",
-    () => ({ uuid: () => ({ safeParse: () => ({ success: true }) }) }),
+    {
+      string: () => ({
+        uuid: () => ({ safeParse: () => ({ success: true }) }),
+      }),
+    },
     (message: string) => ({ content: [{ text: message }], isError: true }),
   ) as (input: {
     startDisposition: string;

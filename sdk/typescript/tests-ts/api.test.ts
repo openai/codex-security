@@ -1,3 +1,4 @@
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import {
   appendFile,
   chmod,
@@ -2476,6 +2477,55 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("reused clients reject repository-local temporary storage for snapshot-only documents", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const temporaryRoot = join(repository, "tmp");
+    const document = join(root, "context.md");
+    await mkdir(temporaryRoot, { recursive: true });
+    await mkdir(codexHome);
+    await writeFile(document, "Synthetic document context.");
+    const snapshot = await readKnowledgeBaseSnapshot([document]);
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread() {
+            throw new Error("synthetic stop");
+          },
+        }),
+      },
+    );
+    const temporaryVariable = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    const previous = process.env[temporaryVariable];
+    try {
+      await expect(
+        client.run(repository, { outputDir: join(root, "first") }),
+      ).rejects.toThrow("synthetic stop");
+      process.env[temporaryVariable] = temporaryRoot;
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "second"),
+          knowledgeBaseSnapshot: snapshot,
+        }),
+      ).rejects.toMatchObject({
+        name: OutputInsideProtectedRootError.name,
+        outputDirectory: temporaryRoot,
+        protectedRoot: repository,
+        pathKind: "temporary",
+      });
+    } finally {
+      if (previous === undefined) delete process.env[temporaryVariable];
+      else process.env[temporaryVariable] = previous;
+      await client.close();
+    }
+  });
+
   test("rejects unsupported Git repository overrides before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2777,10 +2827,13 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       threadSource: "security_scan",
-      workingDirectory: scanDir,
+      workingDirectory: expect.any(String),
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
     });
+    expect(
+      dirname((threadOptions as ThreadOptions | null)?.workingDirectory ?? ""),
+    ).toBe(join(scanDir, "artifacts/follow-up"));
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
       "Codex_Home",
@@ -2835,7 +2888,9 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain(
       "Additional scan instructions:\nFocus on authentication and authorization.",
     );
-    expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
+    expect(followUpPrompt).toContain("Draft fixes for confirmed findings.");
+    expect(followUpPrompt).toContain(JSON.stringify(scanDir));
+    expect(followUpPrompt).toContain("report.md");
     expect(commands[0]).toContain("--registration-json-stdin");
     expect(JSON.parse(registrationInput!).userContext).toBe(
       "Focus on authentication and authorization.",
@@ -4669,7 +4724,7 @@ describe("CodexSecurity orchestration", () => {
       } else {
         expect((await result).coverage.completeness).toBe(outcome);
       }
-      expect(prompts.at(-1)).toBe("Record the scan cost.");
+      expect(prompts.at(-1)).toContain("Record the scan cost.");
       expect(prompts).toHaveLength(2);
       expect(warnings).toEqual(
         followUpFails

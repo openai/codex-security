@@ -220,6 +220,7 @@ describe("plugin runtime preparation", () => {
     expect(candidates).toEqual([
       join(packageRoot, "dist", "_bundled_plugin"),
       join(packageRoot, "_bundled_plugin"),
+      packageRoot,
     ]);
     expect(
       candidates.every((candidate) => {
@@ -229,6 +230,9 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
+    expect(bundledPluginCandidates(join(packageRoot, "mcp"))).toContain(
+      packageRoot,
+    );
   });
 
   test("forwards configured provider credentials through the MCP worker environment", async () => {

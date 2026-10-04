@@ -18,10 +18,10 @@ import {
 } from "./auth.js";
 import {
   deepMerge,
+  codexConfigOverrides,
   hasCommandAuth,
   mergedCodexConfig,
   resolveCodexProfile,
-  modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanModelConfiguration,
   scanModelProvider,
@@ -539,40 +539,43 @@ export async function matchScanFindingsInternal(
   }
 }
 
-interface PreparedReadOnlyClient {
-  model: ReturnType<typeof scanModelConfiguration> | undefined;
-  config: JsonObject;
-  create: NonNullable<ReadOnlyCodexOptions["createCodex"]>;
-  configOverrides: string[];
-}
-
-/** Standalone callers resolve credentials once; scan helpers arrive with a prepared factory. */
-async function prepareReadOnlyClient(
+async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-): Promise<PreparedReadOnlyClient> {
-  const requestedConfig = options.createCodex
-    ? options.config?.codexOverrides
-    : options.config
-      ? await mergedCodexConfig(options.config)
-      : undefined;
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    threadSource: ReadOnlyCodexThreadSource;
+  },
+): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
+  const preparedFactory =
+    options.codex === undefined ? options.createCodex : () => options.codex!;
+  const requestedConfig =
+    options.createCodex !== undefined
+      ? options.config?.codexOverrides
+      : options.config === undefined
+        ? undefined
+        : await mergedCodexConfig(options.config);
   const config =
     requestedConfig === undefined
       ? undefined
       : resolveCodexProfile(requestedConfig);
-  const model =
+  const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
-  if (options.codex || options.createCodex)
-    return {
-      model,
-      config: { ...config, mcp_servers: disabledMcpConfiguration(config, []) },
-      create: options.codex ? () => options.codex! : options.createCodex!,
-      configOverrides: [],
-    };
+  const model = options.model ?? configuredModel?.model;
+  const reasoningEffort =
+    options.reasoningEffort ??
+    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
+    "medium";
   const source = options.environment ?? process.env;
-  const providerConfig = resolveCommandAuthConfig(
-    deepMerge(await readCodexHomeConfig(source, options.signal), config ?? {}),
-    configuredCodexHome(source),
-  );
+  const providerConfig =
+    preparedFactory === undefined
+      ? resolveCommandAuthConfig(
+          deepMerge(
+            await readCodexHomeConfig(source, options.signal),
+            config ?? {},
+          ),
+          configuredCodexHome(source),
+        )
+      : {};
   const commandAuth = hasCommandAuth(providerConfig);
   if (
     commandAuth &&
@@ -586,67 +589,57 @@ async function prepareReadOnlyClient(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const environment = await comparisonEnvironment(
-    options.environment,
-    accountStatus,
-    options.signal,
-    undefined,
-    providerConfig,
-    options.preserveProviderEnvironment,
-  );
-  const command = resolveCodexCommand(environment);
-  const mcpServers = await disabledMcpServers(
-    command,
-    config,
-    environment,
-    options,
-  );
-  const sdkConfig = { ...config };
-  if (commandAuth) delete sdkConfig["model_providers"];
-  return {
-    model,
-    config: { ...sdkConfig, mcp_servers: mcpServers },
-    configOverrides: commandAuth
-      ? modelProviderConfigOverride(providerConfig)
-      : [],
-    create: (settings) =>
-      new Codex({
-        ...settings,
-        codexPathOverride: executablePathForSpawn(command.command),
-        env: environment,
-        apiKey: options.preserveProviderEnvironment
-          ? undefined
-          : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-            environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-            undefined,
-      }),
-  };
-}
-
-async function startReadOnlyCodexThread(
-  options: ReadOnlyCodexOptions,
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    threadSource: ReadOnlyCodexThreadSource;
-  },
-): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
-  const client = await prepareReadOnlyClient(options);
-  const config = client.config;
-  const configuredModel = client.model;
-  const model = options.model ?? configuredModel?.model;
-  const reasoningEffort =
-    options.reasoningEffort ??
-    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
   const prepared = prepareReadOnlyExecution(
-    config,
+    config ?? {},
     options.inheritedPermissions,
   );
-  const configOverrides = [...client.configOverrides, ...prepared.overrides];
-  const codex = await client.create({
-    ...(configOverrides.length ? { configOverrides } : {}),
+  const sdkConfig = prepared.config;
+  if (commandAuth)
+    sdkConfig["model_providers"] = providerConfig["model_providers"]!;
+  const configOverrides = prepared.overrides;
+  const environment =
+    preparedFactory === undefined
+      ? await comparisonEnvironment(
+          options.environment,
+          accountStatus,
+          options.signal,
+          undefined,
+          providerConfig,
+          options.preserveProviderEnvironment,
+        )
+      : undefined;
+  const command =
+    environment === undefined ? undefined : resolveCodexCommand(environment);
+  const createCodex =
+    preparedFactory ??
+    (({ config, configOverrides, ...settings }: CodexOptions) =>
+      new Codex({
+        ...settings,
+        configOverrides: [
+          ...codexConfigOverrides((config ?? {}) as JsonObject),
+          ...(configOverrides ?? []),
+        ],
+      }));
+  const codex = await createCodex({
+    ...(command === undefined
+      ? {}
+      : {
+          codexPathOverride: executablePathForSpawn(command.command),
+          // Helpers retain the provider credentials selected by comparisonEnvironment.
+          env: environment,
+          // The SDK forwards apiKey as CODEX_API_KEY for Codex exec.
+          apiKey: options.preserveProviderEnvironment
+            ? undefined
+            : environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
+              environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+              undefined,
+        }),
+    ...(configOverrides.length === 0 ? {} : { configOverrides }),
     config: {
-      ...prepared.config,
+      ...sdkConfig,
+      mcp_servers: preparedFactory
+        ? disabledMcpConfiguration(config, [])
+        : await disabledMcpServers(command!, config, environment!, options),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       responses_api_metadata: {
@@ -708,6 +701,7 @@ export async function disabledMcpServers(
   config: JsonObject | undefined,
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
+  configOverrides: readonly string[] = [],
 ): Promise<JsonObject> {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
   const { success, stdout, stderr } = await runCodexCommand(
@@ -715,6 +709,9 @@ export async function disabledMcpServers(
     [
       "-C",
       workingDirectory,
+      ...[...codexConfigOverrides(config ?? {}), ...configOverrides].flatMap(
+        (value) => ["--config", value],
+      ),
       "-c",
       "features.plugins=false",
       "mcp",
