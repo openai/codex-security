@@ -721,11 +721,3 @@ async function readExistingHardeningPortfolio(
   }
   return { portfolioPath: "hardening/hardening.md" };
 }
-
-export {
-  recordCodexSecurityWorkerScanDraft,
-  saveScanDraftCheckpoint,
-  parsePersistedScanDraft,
-  preserveFindingDetails,
-  scanFindingIdentity,
-} from "./artifact-worker-scan-draft.js";
