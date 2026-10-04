@@ -100,15 +100,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
-        onCodex: (_args, output, environment) =>
-          runCodexSkillCommand(
-            ["-e", source],
-            output,
-            {
-              command: process.execPath,
-            },
-            environment,
-          ),
+        onCodex: nodeCodex(source),
       },
     );
     expect(outcome.status).toBe(0);
@@ -269,15 +261,7 @@ lines.on("line", (line) => {
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
-          onCodex: (_args, output, environment) =>
-            runCodexSkillCommand(
-              ["-e", source],
-              output,
-              {
-                command: process.execPath,
-              },
-              environment,
-            ),
+          onCodex: nodeCodex(source),
         },
       );
       expect(outcome.status).toBe(2);
@@ -293,3 +277,13 @@ lines.on("line", (line) => {
     },
   );
 });
+
+function nodeCodex(source: string): NonNullable<FixtureOptions["onCodex"]> {
+  return (_args, output, environment) =>
+    runCodexSkillCommand(
+      ["-e", source],
+      output,
+      { command: process.execPath },
+      environment,
+    );
+}

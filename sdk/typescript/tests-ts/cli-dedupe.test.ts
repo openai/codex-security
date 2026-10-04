@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { throwing, rejecting } from "./support/errors.js";
 
 const args = [
   "dedupe",
@@ -33,10 +34,7 @@ test.each([false, true])(
     deps.deduplicateScan = async () => result;
     const stdout = capture();
     const stderr = capture();
-    if (brokenLog)
-      stderr.stream.write = () => {
-        throw new Error("Synthetic logging failure");
-      };
+    if (brokenLog) stderr.stream.write = throwing("Synthetic logging failure");
     expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result);
     if (!brokenLog) {
@@ -161,11 +159,10 @@ test.each(["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"])(
   "dedupe rejects invalid concurrency %s before calling the SDK",
   async (value) => {
     const deps = dependencies();
-    let called = false;
-    deps.deduplicateScan = async () => {
-      called = true;
-      throw new Error("Invalid concurrency must not reach the SDK");
-    };
+    const deduplicateScan = mock(
+      rejecting("Invalid concurrency must not reach the SDK"),
+    );
+    deps.deduplicateScan = deduplicateScan;
     const stderr = capture();
     expect(
       await main(
@@ -176,7 +173,7 @@ test.each(["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"])(
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("concurrency");
-    expect(called).toBe(false);
+    expect(deduplicateScan).not.toHaveBeenCalled();
   },
 );
 
@@ -225,11 +222,8 @@ test("dedupe help and schema expose concurrency and its default", async () => {
 
 test("dedupe requires both explicit inputs and reports SDK failures", async () => {
   const deps = dependencies();
-  let called = false;
-  deps.deduplicateScan = async () => {
-    called = true;
-    throw new Error("Finding has not been indexed");
-  };
+  const deduplicateScan = mock(rejecting("Finding has not been indexed"));
+  deps.deduplicateScan = deduplicateScan;
   for (const flags of [
     [],
     ["--scan", "latest"],
@@ -244,12 +238,12 @@ test("dedupe requires both explicit inputs and reports SDK failures", async () =
       ),
     ).not.toBe(0);
   }
-  expect(called).toBe(false);
+  expect(deduplicateScan).not.toHaveBeenCalled();
   const stdout = capture();
   const stderr = capture();
   expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
   expect(stdout.text()).toBe("");
-  expect(stderr.text()).toContain("Finding has not been indexed");
+  expect(stderr.text()).toBe("codex-security: Finding has not been indexed\n");
 });
 
 test("dedupe forwards cancellation and removes signal handlers", async () => {

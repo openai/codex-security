@@ -1,5 +1,6 @@
+import { rejecting } from "./support/errors.js";
 import { resolve } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
@@ -88,11 +89,8 @@ test("classify-severity accepts external scan directories and defaults to existi
 
 test("classify-severity rejects missing or conflicting selectors and surfaces SDK errors", async () => {
   const deps = dependencies();
-  let calls = 0;
-  deps.classifyScanSeverity = async () => {
-    calls++;
-    throw new Error("The scan is incomplete");
-  };
+  const classifyScanSeverity = mock(rejecting("The scan is incomplete"));
+  deps.classifyScanSeverity = classifyScanSeverity;
   for (const args of [[], ["--scan", "latest", "--scan-dir", "saved"]]) {
     expect(
       await main(
@@ -103,7 +101,7 @@ test("classify-severity rejects missing or conflicting selectors and surfaces SD
       ),
     ).toBe(2);
   }
-  expect(calls).toBe(0);
+  expect(classifyScanSeverity).toHaveBeenCalledTimes(0);
   const stderr = capture();
   expect(
     await main(
@@ -113,7 +111,7 @@ test("classify-severity rejects missing or conflicting selectors and surfaces SD
       deps,
     ),
   ).toBe(2);
-  expect(stderr.text()).toContain("The scan is incomplete");
+  expect(stderr.text()).toBe("codex-security: The scan is incomplete\n");
 });
 
 test.each([

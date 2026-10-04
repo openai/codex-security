@@ -186,8 +186,7 @@ function optionRow(row: Row, command: string): Row {
     if (choices.length > 1) {
       description += `${description.endsWith(".") ? "" : "."} Choices: ${choices.join(", ")}.`;
     }
-    const value = VALUE_LABELS[name] ?? (type === "number" ? "count" : name);
-    return `<${value}>`;
+    return `<${VALUE_LABELS[name] ?? (type === "number" ? "count" : name)}>`;
   });
   label = label.replace(/^--([\w-]+), (-\w)/u, "$2, --$1");
   if (command === "scan" && !/default:/iu.test(description)) {
