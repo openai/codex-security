@@ -8,11 +8,9 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
-    create_saved_workspace,
-    mark_deep_coordinator_succeeded,
+    checkpoint,
     register,
     run_workbench,
-    start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -85,26 +83,6 @@ def test_committed_draft_survives_partial_export_and_blocks_stale_writer(
     assert "typed scan tools" in blocked["stderr"]
 
 
-def _register_draft_scan(state, target, directory, mode):
-    if mode != "deep":
-        return register(state, target, directory, mode=mode)
-    workspace = create_saved_workspace(state, target, thread_id="draft-owner", mode="deep")
-    scan = start_delivered_scan(
-        state, "--workspace-id", str(workspace["id"]), "--scan-root", str(directory)
-    )["results"]
-    run_workbench(
-        state,
-        "begin-deep-scan",
-        "--scan-id",
-        scan["scanId"],
-        "--thread-id",
-        "draft-owner",
-        environment={"CODEX_HOME": str(directory.parent / "codex-home")},
-    )
-    mark_deep_coordinator_succeeded(state, scan["scanId"], Path(scan["scanDir"]))
-    return scan
-
-
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 @pytest.mark.parametrize("complete", [False, True])
 @pytest.mark.parametrize("existing_exports", [False, True])
@@ -115,8 +93,10 @@ def test_completion_uses_committed_documents_after_interrupted_export(
     target.mkdir()
     (target / "app.py").write_text("pass\n" * 50)
     state = tmp_path / "state"
-    scan = _register_draft_scan(state, target, tmp_path / "scan", mode)
+    scan = register(state, target, tmp_path / "scan", mode=mode)
     directory = Path(scan["scanDir"])
+    if mode == "deep":
+        checkpoint(state, scan, terminal="saturated")
     write_completed_contract(
         directory,
         scan["scanId"],
@@ -215,8 +195,9 @@ def test_deep_completion_keeps_strict_validation_for_committed_findings(tmp_path
     target.mkdir()
     (target / "app.py").write_text("pass\n" * 50)
     state = tmp_path / "state"
-    scan = _register_draft_scan(state, target, tmp_path / "scan", "deep")
+    scan = register(state, target, tmp_path / "scan", mode="deep")
     directory = Path(scan["scanDir"])
+    checkpoint(state, scan, terminal="saturated")
     write_completed_contract(
         directory,
         scan["scanId"],
