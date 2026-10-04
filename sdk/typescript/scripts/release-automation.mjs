@@ -560,6 +560,28 @@ export function verifyGitHubPublishedRelease(
   return verifyPublishedRelease(metadata, archive, expected);
 }
 
+function readProvenance(verified) {
+  const provenance = Array.isArray(verified.attestationBundles)
+    ? verified.attestationBundles.find(
+        (candidate) => candidate?.predicateType === provenancePredicate,
+      )
+    : undefined;
+  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
+  if (typeof encodedStatement !== "string") {
+    throw new Error("The verified SLSA provenance bundle is missing.");
+  }
+
+  let statement;
+  try {
+    statement = JSON.parse(
+      Buffer.from(encodedStatement, "base64").toString("utf8"),
+    );
+  } catch {
+    throw new Error("The verified SLSA provenance statement is invalid.");
+  }
+  return { provenance, statement };
+}
+
 export function verifySignatureAudit(report, archive, expected) {
   if (
     !Array.isArray(report?.invalid) ||
@@ -605,24 +627,7 @@ export function verifySignatureAudit(report, archive, expected) {
     throw new Error("The verified npm package must have SLSA v1 provenance.");
   }
 
-  const provenance = Array.isArray(verified.attestationBundles)
-    ? verified.attestationBundles.find(
-        (candidate) => candidate?.predicateType === provenancePredicate,
-      )
-    : undefined;
-  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
-  if (typeof encodedStatement !== "string") {
-    throw new Error("The verified SLSA provenance bundle is missing.");
-  }
-
-  let statement;
-  try {
-    statement = JSON.parse(
-      Buffer.from(encodedStatement, "base64").toString("utf8"),
-    );
-  } catch {
-    throw new Error("The verified SLSA provenance statement is invalid.");
-  }
+  const { provenance, statement } = readProvenance(verified);
   if (
     statement?._type !== "https://in-toto.io/Statement/v1" ||
     statement.predicateType !== provenancePredicate
@@ -745,24 +750,7 @@ export function verifyRecoveredSignatureAudit(report, archive, expected) {
     );
   }
 
-  const provenance = Array.isArray(verified.attestationBundles)
-    ? verified.attestationBundles.find(
-        (candidate) => candidate?.predicateType === provenancePredicate,
-      )
-    : undefined;
-  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
-  if (typeof encodedStatement !== "string") {
-    throw new Error("The verified SLSA provenance bundle is missing.");
-  }
-
-  let statement;
-  try {
-    statement = JSON.parse(
-      Buffer.from(encodedStatement, "base64").toString("utf8"),
-    );
-  } catch {
-    throw new Error("The verified SLSA provenance statement is invalid.");
-  }
+  const { statement } = readProvenance(verified);
 
   const prefix = `https://github.com/${expected.repository}/actions/runs/`;
   const invocation = statement?.predicate?.runDetails?.metadata?.invocationId;
@@ -932,24 +920,25 @@ function main() {
     return;
   }
 
-  if (command === "verify-publication" && process.argv.length === 6) {
+  if (
+    (command === "verify-publication" && process.argv.length === 6) ||
+    (command === "verify-github-publication" && process.argv.length === 8) ||
+    (command === "verify-provenance" && process.argv.length === 8) ||
+    (command === "verify-recovered-provenance" && process.argv.length === 7)
+  ) {
     const metadata = JSON.parse(readFileSync(0, "utf8"));
     const archive = readFileSync(process.argv[3]);
-    const verified = verifyPublishedRelease(metadata, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-    });
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (command === "verify-github-publication" && process.argv.length === 8) {
-    const metadata = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const provenance = JSON.parse(
-      process.env.CODEX_SECURITY_VERIFIED_PROVENANCE ?? "null",
-    );
-    const verified = verifyGitHubPublishedRelease(
+    const provenance =
+      command === "verify-github-publication"
+        ? JSON.parse(process.env.CODEX_SECURITY_VERIFIED_PROVENANCE ?? "null")
+        : undefined;
+    const verify = {
+      "verify-publication": verifyPublishedRelease,
+      "verify-github-publication": verifyGitHubPublishedRelease,
+      "verify-provenance": verifySignatureAudit,
+      "verify-recovered-provenance": verifyRecoveredSignatureAudit,
+    }[command];
+    const verified = verify(
       metadata,
       archive,
       {
@@ -960,31 +949,6 @@ function main() {
       },
       provenance,
     );
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (command === "verify-provenance" && process.argv.length === 8) {
-    const report = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const verified = verifySignatureAudit(report, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-      repository: process.argv[6],
-      runId: process.argv[7],
-    });
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (command === "verify-recovered-provenance" && process.argv.length === 7) {
-    const report = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const verified = verifyRecoveredSignatureAudit(report, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-      repository: process.argv[6],
-    });
     console.log(JSON.stringify(verified));
     return;
   }
