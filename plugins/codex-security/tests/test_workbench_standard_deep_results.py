@@ -446,7 +446,7 @@ def test_explicit_recovery_preserves_unfrozen_parent_with_late_checkpoint(
         codex_home,
         "def fail_before_sources_are_frozen(*args, **kwargs):\n"
         "    raise OSError('injected early publication failure')\n"
-        "workbench_saved_results.merge_saved_results = fail_before_sources_are_frozen\n",
+        "workbench_saved_results._legacy_merge_saved_results = fail_before_sources_are_frozen\n",
         "fail-deep-scan",
         "--scan-id",
         scan_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -43,6 +44,9 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
+    if checkpoint_dir.name == "checkpoints":
+        (checkpoint_dir / "pending").mkdir(exist_ok=True)
+        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     return checkpoint_path
 
@@ -464,7 +468,7 @@ def write_completed_contract(
 
 
 def windows_file_backend() -> mock.Mock:
-    backend = mock.Mock()
+    backend = mock.Mock(_MISSING_ERRORS={errno.ENOENT, errno.ENOTDIR})
 
     def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
         return os.open(scan_dir / relative_path, os.O_RDONLY)
@@ -480,7 +484,12 @@ def windows_file_backend() -> mock.Mock:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+    def unlink_if_exists(
+        scan_dir: Path,
+        relative_path: str,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
 
     backend.open_read_fd.side_effect = open_read_fd

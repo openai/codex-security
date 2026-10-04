@@ -71,6 +71,7 @@ EXPECTED_MIGRATIONS = [
     (41, "checkpoint finding severity assessments"),
     (42, "preserve severity assessments per scan"),
     (43, "persist composition child membership"),
+    (44, "reuse scan severity assessments"),
     (45, "persist scan execution sessions"),
     (46, "recover unindexed severity assessments"),
     (48, "repair stored composition membership"),
@@ -456,7 +457,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
