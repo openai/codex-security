@@ -871,16 +871,18 @@ describe("semantic scan comparison", () => {
       sandboxMode: "read-only",
       networkAccessEnabled: false,
     });
-    await matchScanFindings(input, {
-      config,
-      codex,
-      model: "explicit-model",
-      reasoningEffort: "max",
-    });
-    expect(calls.threadOptions).toMatchObject({
-      model: "explicit-model",
-      modelReasoningEffort: "max",
-    });
+    for (const reasoningEffort of ["max", "none", "minimal"] as const) {
+      await matchScanFindings(input, {
+        config,
+        codex,
+        model: "explicit-model",
+        reasoningEffort,
+      });
+      expect(calls.threadOptions).toMatchObject({
+        model: "explicit-model",
+        modelReasoningEffort: reasoningEffort,
+      });
+    }
   });
 
   test("rejects a confirmed match with conflicting same-scan uncertainty", async () => {

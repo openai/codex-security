@@ -945,10 +945,17 @@ max_concurrent_threads_per_session = 9
 sandbox = "unelevated"
 ```
 
-Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
+Use `--model` to choose a model and `--effort none|minimal|low|medium|high|xhigh|max`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
 `policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
 `scans match`, and `scans compare`.
+
+Effort values are passed through to Codex unchanged; support depends on the
+selected model and inference provider. `minimal` and `none` are distinct values,
+and neither is supported by every model. If a provider rejects an effort, choose
+one of the supported values in its error response and retry with `--effort`.
+For example, use `--effort none` to disable reasoning when the provider lists
+`none`, or `--effort low` for a supported low reasoning budget.
 
 Model IDs are passed through to Codex, including `gpt-6-astra`, `gpt-6.1-sol`,
 and `gpt-6-luna`; availability depends on your credentials and inference provider.

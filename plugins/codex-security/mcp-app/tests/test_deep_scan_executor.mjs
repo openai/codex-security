@@ -1190,6 +1190,8 @@ async function testWorkerRuntimeSettings() {
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "synthetic-no-reasoning-model", reasoningEffort: "none" },
+        { model: "synthetic-minimal-model", reasoningEffort: "minimal" },
       ];
       const providerKeys = [
         "synthetic-gateway-key-0",

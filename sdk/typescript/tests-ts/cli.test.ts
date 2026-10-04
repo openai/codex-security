@@ -162,7 +162,7 @@ describe("CLI", () => {
           verbose: { type: "boolean" },
           showCost: { type: "boolean", default: false },
           effort: {
-            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
           },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
@@ -2477,6 +2477,8 @@ describe("CLI", () => {
         { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
       ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
+      [["--effort", "none"], { model_reasoning_effort: "none" }],
+      [["--effort=none"], { model_reasoning_effort: "none" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
       [["--effort", "max"], { model_reasoning_effort: "max" }],
@@ -2513,6 +2515,43 @@ describe("CLI", () => {
         ),
       ).toBe(0);
       expect(config?.codexOverrides).toEqual(expected);
+    }
+  });
+
+  test("preserves a provider's rejected effort and accepts its none alternative", async () => {
+    const rejection = JSON.stringify({
+      error: {
+        message:
+          "Unsupported value: 'minimal' is not supported with the 'fixture-model' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+        type: "invalid_request_error",
+        param: "reasoning.effort",
+        code: "unsupported_value",
+      },
+    });
+    for (const effort of ["minimal", "none"] as const) {
+      let selectedEffort: unknown;
+      let attempts = 0;
+      const stderr = capture();
+      const exit = await main(
+        ["scan", ".", "--model", "fixture-model", "--effort", effort],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onConfig: (config) => {
+            selectedEffort = config.codexOverrides?.["model_reasoning_effort"];
+          },
+          onRun: () => {
+            attempts += 1;
+            if (selectedEffort === "minimal") {
+              throw new CodexSecurityError(`HTTP 400: ${rejection}`);
+            }
+          },
+        }),
+      );
+      expect(selectedEffort).toBe(effort);
+      expect(attempts).toBe(1);
+      expect(exit).toBe(effort === "minimal" ? 2 : 0);
+      if (effort === "minimal") expect(stderr.text()).toContain(rejection);
     }
   });
 
@@ -2817,7 +2856,7 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, xhigh, or max",
+        "--effort must be none, minimal, low, medium, high, xhigh, or max",
       ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
