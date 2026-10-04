@@ -1,13 +1,14 @@
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
 
 async function run(args: string[], deps = dependencies()) {
   const stdout = capture();
@@ -22,9 +23,7 @@ async function run(args: string[], deps = dependencies()) {
 }
 
 test("feedback selects the newest saved scan when an older scan is still running", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "feedback-history-")),
-  );
+  const root = await temporaryDirectory("feedback-history-", true);
   try {
     const python = await resolvePluginPython();
     const repository = join(root, "repository");
@@ -170,13 +169,9 @@ for (const args of [
 ]) {
   test(`feedback rejects invalid arguments ${JSON.stringify(args)}`, async () => {
     const deps = dependencies({
-      onWorkbench: () => {
-        throw new Error("Must not read scans");
-      },
+      onWorkbench: throwing("Must not read scans"),
     });
-    deps.sendFeedback = async () => {
-      throw new Error("Must not upload");
-    };
+    deps.sendFeedback = rejecting("Must not upload");
     const result = await run(args, deps);
     expect(result.code).toBe(2);
     expect(result.stdout).toBe("");
@@ -192,9 +187,7 @@ for (const missingScan of [false, true]) {
         return { scans: [] };
       },
     });
-    const upload = mock(async () => {
-      throw new Error("Upload failed");
-    });
+    const upload = mock(rejecting("Upload failed"));
     deps.sendFeedback = upload;
     const result = await run(
       [
