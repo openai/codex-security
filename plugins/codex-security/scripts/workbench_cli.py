@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import deep_scan_workbench as deep_scan
 import workbench_remediation as remediation
 from workbench_constants import (
     DIFF_TARGET_KINDS,
@@ -117,7 +116,25 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_content_digest=None,
     )
 
-    deep_scan.register_subcommands(subparsers, positive_int)
+    begin_deep_scan = subparsers.add_parser("begin-deep-scan")
+    begin_deep_scan.add_argument("--thread-id", required=True)
+    begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
+    begin_target.add_argument("--scan-id")
+    begin_target.add_argument("--target-path")
+    begin_deep_scan.add_argument("--scope", default=".")
+    add_user_context(begin_deep_scan)
+    begin_deep_scan.add_argument("--scan-root")
+    begin_deep_scan.add_argument("--claim-token")
+    begin_deep_scan.add_argument("--model")
+    begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.set_defaults(
+        mode="deep",
+        target_summary=None,
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+    )
 
     get_scan = subparsers.add_parser("get-scan")
     get_scan.add_argument("--scan-id", required=True)
@@ -228,7 +245,6 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
-    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
@@ -270,7 +286,6 @@ def parse_args(description: str) -> argparse.Namespace:
     preserve_scan.add_argument("--scan-id", required=True)
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
-    preserve_scan.add_argument("--coordinator-generation", type=positive_int)
     preserve_scan.add_argument(
         "--cost-json", help="Save a JSON cost or {usage, cost} receipt with the retained results."
     )

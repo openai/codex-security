@@ -209,7 +209,7 @@ try {
   );
 
   await assertNoMutation(
-    { ...context, layout: "worker" },
+    { ...context, scanId: undefined },
     ledger,
     {
       validations: updates,
@@ -276,7 +276,7 @@ async function scanContext(root, directory, scanId) {
     }),
     mkdir(repository, { recursive: true }),
   ]);
-  return { root: scanRoot, repoRoot: repository, layout: "scan", scanId };
+  return { root: scanRoot, repoRoot: repository, scanId };
 }
 
 function candidate(candidateId, sourcePath) {

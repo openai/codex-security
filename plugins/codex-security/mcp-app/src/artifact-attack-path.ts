@@ -1,7 +1,7 @@
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateLedgerRowSchema } from "./artifact-candidate.js";
 import {
   artifactDestination,
   readArtifactJsonl,
@@ -50,12 +50,6 @@ interface CandidateAttackPathsPayload {
 }
 
 /** The stored JSON Schema is the sole source of the nested attack-path contract. */
-export const candidateAttackPathSchema = loadArtifactZodSchema(
-  documents,
-  attackPathSchema.$id,
-  "attackPath",
-) as z.ZodType<CandidateAttackPathRecord>;
-
 const candidateAttackPathsPayloadSchema = loadArtifactZodSchema(
   documents,
   attackPathSchema.$id,
@@ -68,8 +62,6 @@ export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
   attackPathSchema.$id,
   "input",
 ) as z.ZodType<CandidateAttackPathsPayload & { scanId: string }>;
-
-const candidateLedgerRowSchema = candidateSchemaV1.passthrough();
 
 const candidateLedgerComponents = [
   "artifacts",
@@ -86,7 +78,7 @@ export async function recordCodexSecurityCandidateAttackPaths(
   operation: "replace";
   rowsWritten: number;
 }> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       "Candidate attack-path analysis requires a scan-bound artifact context.",
     );

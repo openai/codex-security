@@ -7,10 +7,12 @@ import {
 
 function workbenchResult(
   independentReviews?: Record<string, unknown>,
+  status?: string,
 ): Record<string, unknown> {
   return {
     scan: {
       progress: {
+        ...(status === undefined ? {} : { status }),
         ...(independentReviews === undefined ? {} : { independentReviews }),
       },
     },
@@ -80,6 +82,7 @@ describe("Deep Scan progress", () => {
     const progress: DeepScanProgress[] = [];
     let readCount = 0;
     let aborted = false;
+    let stopped = false;
     const tracker = new DeepScanProgressTracker({
       read: async (signal) => {
         readCount += 1;
@@ -89,7 +92,10 @@ describe("Deep Scan progress", () => {
             () => {
               aborted = true;
               resolve(
-                workbenchResult({ completed: 1, active: 0, maximum: 40 }),
+                workbenchResult(
+                  { completed: 1, active: 0, maximum: 40 },
+                  "failed",
+                ),
               );
             },
             { once: true },
@@ -97,16 +103,35 @@ describe("Deep Scan progress", () => {
         });
       },
       onProgress: (update) => progress.push(update),
+      onStopped: () => {
+        stopped = true;
+      },
     });
 
     const first = tracker.refresh();
-    await Bun.sleep(0);
     const second = tracker.refresh();
     tracker.stop();
     await Promise.all([first, second]);
 
     expect(readCount).toBe(1);
     expect(aborted).toBe(true);
+    expect(stopped).toBe(false);
     expect(progress).toEqual([]);
   });
+
+  test.each(["failed", "canceled"])(
+    "reports external %s status while polling",
+    async (status) => {
+      let stopped = false;
+      const tracker = new DeepScanProgressTracker({
+        read: async () => workbenchResult(undefined, status),
+        onProgress() {},
+        onStopped: () => {
+          stopped = true;
+        },
+      });
+      await tracker.refresh();
+      expect(stopped).toBe(true);
+    },
+  );
 });

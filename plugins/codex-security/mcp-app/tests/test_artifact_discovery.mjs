@@ -117,14 +117,13 @@ try {
     "first\nsecond\n",
   );
 
-  const scan = await createContext(root, repoRoot, "scan", "scan");
+  const scan = await createContext(root, repoRoot, "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles(root, repoRoot);
   await verifyEmptyReplacement(scan);
-  await verifyWorkerContext(root, repoRoot);
   await verifyMalformedLedgerIsNotModified(root, repoRoot);
   await verifySymlinkRejection(root, repoRoot);
 } finally {
@@ -282,12 +281,11 @@ async function verifyNormalizationAndPagination(context) {
       true,
     );
   }
-
   const row = all.rows[0];
   assert.deepEqual(candidateSchemaV1.parse(row), row);
   const extended = { ...row, savedExtension: { retained: true } };
   assert.equal(candidateSchemaV1.safeParse(extended).success, false);
-  assert.deepEqual(candidateSchemaV1.passthrough().parse(extended), extended);
+  assert.deepEqual(compactDiscoveryCandidateSchema.parse(extended), extended);
   for (const invalid of [
     { ...row, candidate_id: "  " },
     {
@@ -301,7 +299,7 @@ async function verifyNormalizationAndPagination(context) {
   ]) {
     assert.equal(candidateSchemaV1.safeParse(invalid).success, false);
     assert.equal(
-      candidateSchemaV1.passthrough().safeParse(invalid).success,
+      compactDiscoveryCandidateSchema.safeParse(invalid).success,
       false,
     );
   }
@@ -419,7 +417,7 @@ async function verifyNormalizerFailuresPreserveOutput(context) {
 }
 
 async function verifyDiffInventoryAllowsDeletedFiles(root, repoRoot) {
-  const context = await createContext(root, repoRoot, "diff-output", "scan");
+  const context = await createContext(root, repoRoot, "diff-output");
   const inventory = path.join(
     context.root,
     "artifacts",
@@ -507,27 +505,8 @@ async function verifyEmptyReplacement(context) {
   assert.equal(content, "");
 }
 
-async function verifyWorkerContext(root, repoRoot) {
-  const worker = await createContext(root, repoRoot, "worker-output", "worker");
-  const result = await recordCodexSecurityDiscoveryCandidates(
-    {
-      candidates: [rawCandidate()],
-    },
-    worker,
-  );
-  assert.deepEqual(result, { operation: "replace", candidatesRecorded: 1 });
-  const page = await listCodexSecurityCandidates({}, worker);
-  assert.equal(page.rows.length, 1);
-  assert.match(page.rows[0].candidate_id, /^candidate-[a-f0-9]{16}$/u);
-}
-
 async function verifyMalformedLedgerIsNotModified(root, repoRoot) {
-  const context = await createContext(
-    root,
-    repoRoot,
-    "malformed-output",
-    "scan",
-  );
+  const context = await createContext(root, repoRoot, "malformed-output");
   const destination = path.join(
     context.root,
     "artifacts",
@@ -546,7 +525,7 @@ async function verifyMalformedLedgerIsNotModified(root, repoRoot) {
 async function verifySymlinkRejection(root, repoRoot) {
   if (process.platform === "win32") return;
 
-  const context = await createContext(root, repoRoot, "unsafe-output", "scan");
+  const context = await createContext(root, repoRoot, "unsafe-output");
   const outside = path.join(root, "outside.jsonl");
   await writeFile(outside, "outside must not change\n");
   const destination = path.join(
@@ -571,7 +550,7 @@ async function verifySymlinkRejection(root, repoRoot) {
   );
 }
 
-async function createContext(root, repoRoot, name, layout) {
+async function createContext(root, repoRoot, name) {
   const artifactRoot = path.join(root, name);
   const discoveryDirectory = path.join(
     artifactRoot,
@@ -586,7 +565,6 @@ async function createContext(root, repoRoot, name, layout) {
   return {
     root: artifactRoot,
     repoRoot,
-    layout,
     pluginRoot,
   };
 }

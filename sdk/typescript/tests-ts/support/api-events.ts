@@ -2,7 +2,8 @@ import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { CodexSecurity, runScanEvents } from "../../src/api.js";
+import { CodexSecurity } from "../../src/api.js";
+import { runScanTurn } from "../../src/scan-events.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
 
@@ -30,12 +31,38 @@ export function preparedRuntime(codexHome: string): PreparedRuntime {
   };
 }
 
+export async function copyPluginVariant(
+  directory: string,
+  marker: string,
+): Promise<string> {
+  const root = join(directory, marker);
+  await cp(PLUGIN_ROOT, root, { recursive: true });
+  await writeFile(
+    join(root, ".codex-plugin", "plugin.json"),
+    JSON.stringify({
+      name: "codex-security",
+      version: "0.1.0",
+      skills: "./skills/",
+      mcpServers: "./.mcp.json",
+    }),
+  );
+  await writeFile(
+    join(root, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        "synthetic-plugin": { command: process.execPath, args: [marker] },
+      },
+    }),
+  );
+  return root;
+}
+
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
 
 type ScanEventOptions = Pick<
-  Parameters<typeof runScanEvents>[0],
+  Parameters<typeof runScanTurn>[0],
   | "authentication"
   | "expectedFilesTotal"
   | "onActivity"
@@ -105,9 +132,9 @@ export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   options: ScanEventOptions = {},
-): ReturnType<typeof runScanEvents> {
+): ReturnType<typeof runScanTurn> {
   const { abortController = new AbortController(), ...observers } = options;
-  return runScanEvents({
+  return runScanTurn({
     thread: {
       id: null,
       async runStreamed() {
@@ -117,41 +144,8 @@ export function runEvents(
     events,
     signal: abortController.signal,
     scanDir,
-    pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
     ...observers,
-    expectation: {
-      repository: "/repository",
-      repositoryRevision: "deadbeef",
-      target: { kind: "repository", paths: [] },
-      mode: "standard",
-      pluginVersion: "0.1.0",
-    },
+    repository: "/repository",
   });
-}
-
-export async function copyPluginVariant(
-  directory: string,
-  marker: string,
-): Promise<string> {
-  const root = join(directory, marker);
-  await cp(PLUGIN_ROOT, root, { recursive: true });
-  await writeFile(
-    join(root, ".codex-plugin", "plugin.json"),
-    JSON.stringify({
-      name: "codex-security",
-      version: "0.1.0",
-      skills: "./skills/",
-      mcpServers: "./.mcp.json",
-    }),
-  );
-  await writeFile(
-    join(root, ".mcp.json"),
-    JSON.stringify({
-      mcpServers: {
-        "synthetic-plugin": { command: process.execPath, args: [marker] },
-      },
-    }),
-  );
-  return root;
 }

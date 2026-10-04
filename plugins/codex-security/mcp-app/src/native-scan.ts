@@ -4,10 +4,8 @@ import {
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
 import type { JsonObject } from "../../../../sdk/typescript/src/config.js";
-import {
-  ScanSettingsSchema,
-  type DeepScanOptions,
-} from "../../../../sdk/typescript/src/scan-settings.js";
+import { ScanSettingsSchema } from "../../../../sdk/typescript/src/scan-settings.js";
+import type { SavedScanRecipe } from "../../../../sdk/typescript/src/scan-registration.js";
 import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
 import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
 import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
@@ -30,8 +28,7 @@ import type { ScanResults } from "./types.js";
 
 export interface NativeScanInput {
   scan: ScanResults;
-  recipe?: JsonObject;
-  savedDeepScanSettings?: DeepScanOptions;
+  recipe?: SavedScanRecipe;
   threadId: string;
   pluginRoot: string;
   pythonPath: string;
@@ -118,13 +115,12 @@ export async function prepareNativeScan(
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
   const inheritedEnvironment = await snapshotNativeEnvironment();
-  const recipe = input.recipe ?? {};
+  const recipe = input.recipe;
   const options = ScanSettingsSchema.parse({
-    ...input.savedDeepScanSettings,
-    ...(recipe.deepScan as JsonObject | undefined),
-    auth: recipe.auth,
+    ...recipe?.deepScan,
+    auth: recipe?.auth,
     knowledgeBasePaths:
-      input.recipe !== undefined
+      recipe !== undefined
         ? recipe.knowledgeBasePaths
         : inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
           ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
@@ -161,8 +157,7 @@ export async function prepareNativeScan(
   delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
-  const savedPermissions =
-    recipe.inheritedPermissions as ScanOptions["inheritedPermissions"];
+  const savedPermissions = recipe?.inheritedPermissions;
   const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
   const inheritedPermissions = {
     filesystem: Object.fromEntries([
@@ -229,15 +224,13 @@ export async function prepareNativeScan(
       inheritedPermissions,
       ...(configuredProvider ? { preserveProviderEnvironment: true } : {}),
       target:
-        (recipe.target as JsonObject | undefined)?.kind === "paths"
-          ? ((recipe.target as JsonObject).paths as string[])
+        recipe?.target?.kind === "paths"
+          ? recipe.target.paths
           : input.scan.scope && input.scan.scope !== "."
             ? [input.scan.scope]
             : "repository",
       safetyIdentifier:
-        typeof recipe.safetyIdentifier === "string"
-          ? recipe.safetyIdentifier
-          : environment.CODEX_SAFETY_IDENTIFIER,
+        recipe?.safetyIdentifier ?? environment.CODEX_SAFETY_IDENTIFIER,
       registeredScan: {
         scanId: input.scan.scanId,
         scanDir: input.scan.scanDir,

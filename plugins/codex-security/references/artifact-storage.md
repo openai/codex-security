@@ -1,6 +1,6 @@
 # Artifact Storage
 
-Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy. Bound Deep workers keep their existing narrow artifact tools and read-only execution profile.
+Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy.
 
 ## Scan ownership
 
@@ -54,3 +54,5 @@ End each shared threat model with these two lines:
 - `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
 
 Completed/sealed scan files cannot be edited through the save tool. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.
+
+Semantic draft recovery accepts the current tool schema. Saved drafts requiring older alias or malformed-field normalization must start a new scan; the original files remain evidence. Draft saves reconcile with the single committed snapshot. Retained historical checkpoints are evidence and are not replayed after acceptance.

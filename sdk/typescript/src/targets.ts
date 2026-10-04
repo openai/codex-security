@@ -501,6 +501,24 @@ export async function normalizeTarget(
   target: ScanTarget,
   signal?: AbortSignal,
 ): Promise<NormalizedTarget> {
+  return normalizeTargetPaths(repository, target, signal, false);
+}
+
+/** Normalize a sealed read scope; the workbench still validates its saved binding. */
+export async function normalizeSealedReadTarget(
+  repository: string,
+  target: ScanTarget,
+  signal?: AbortSignal,
+): Promise<NormalizedTarget> {
+  return normalizeTargetPaths(repository, target, signal, true);
+}
+
+async function normalizeTargetPaths(
+  repository: string,
+  target: ScanTarget,
+  signal: AbortSignal | undefined,
+  allowMissingPaths: boolean,
+): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
   if (target === "repository") {
@@ -584,12 +602,25 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    if (!existsSync(candidate)) {
+    if (!allowMissingPaths && !existsSync(candidate)) {
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
     }
     let canonical: string;
     try {
-      canonical = await abortable(() => realpath(candidate), signal);
+      for (let ancestor = candidate; ; ancestor = dirname(ancestor)) {
+        try {
+          const resolved = await abortable(() => realpath(ancestor), signal);
+          canonical = resolve(resolved, relative(ancestor, candidate));
+          break;
+        } catch (error) {
+          if (
+            !allowMissingPaths ||
+            (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+            dirname(ancestor) === ancestor
+          )
+            throw error;
+        }
+      }
     } catch (error) {
       throwIfAborted(signal);
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
