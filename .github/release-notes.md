@@ -74,6 +74,7 @@
 - simplify artifact projections ([#1227](https://github.com/openai/codex-security/pull/1227))
 - simplify workbench persistence ([#1226](https://github.com/openai/codex-security/pull/1226))
 - reuse parsed artifact tool inputs ([#1224](https://github.com/openai/codex-security/pull/1224))
+- reuse parsing and Git helpers ([#1222](https://github.com/openai/codex-security/pull/1222))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

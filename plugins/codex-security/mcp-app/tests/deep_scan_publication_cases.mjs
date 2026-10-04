@@ -7,7 +7,6 @@ export async function testDeepScanPublication({
   FakeStore,
   FakeExecutor,
   createCoordinator,
-  deferred,
   eventually,
 }) {
   async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
