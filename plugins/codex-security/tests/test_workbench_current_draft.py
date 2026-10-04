@@ -637,3 +637,45 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     assert "New deferred review." in report
     assert "Which control governs the new surface?" in report
     assert ("Candidate needs validation." in report) is unresolved
+
+
+@pytest.mark.parametrize("distinct_instances", [False, True])
+def test_checkpoint_recovery_retains_refinement_and_distinct_instances(
+    tmp_path, distinct_instances
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("pass\n" * 50)
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan")
+    directory = Path(scan["scanDir"])
+    write_completed_contract(directory, scan["scanId"], target, relative_path="app.py")
+    findings = json.loads((directory / "findings.json").read_text())["findings"]
+    original = json.loads(json.dumps(findings[0]))
+    if distinct_instances:
+        findings[0]["identity"]["instance"] = "first"
+        original["identity"]["instance"] = "second"
+        findings.append(original)
+    else:
+        findings[0]["locations"][0]["startLine"] = 24
+        findings[0]["provenance"]["previousFindings"] = [original]
+    write_checkpoint(
+        directory / "checkpoints",
+        {
+            "scanId": scan["scanId"],
+            "complete": False,
+            "findings": findings,
+            "coverage": json.loads((directory / "coverage.json").read_text()),
+        },
+    )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (directory / name).unlink()
+    saved = run_workbench(
+        state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop"
+    )["scan"]
+    actual = json.loads((directory / "findings.json").read_text())["findings"]
+    assert saved["findingCount"] == len(actual) == (2 if distinct_instances else 1)
+    if distinct_instances:
+        assert {finding["identity"]["instance"] for finding in actual} == {"first", "second"}
+    else:
+        assert actual[0]["provenance"]["previousFindings"] == [original]

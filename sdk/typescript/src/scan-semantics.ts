@@ -399,7 +399,9 @@ export function prepareSemanticScanDraft(
   const target = buildTarget(context, contract, trustedTarget);
   const scope = buildScope(context, trustedScope, input.scope);
   return {
-    findings: { findings: prepareScanFindings(input.findings, context.mode) },
+    findings: {
+      findings: prepareScanFindings(input.findings, context.mode),
+    },
     coverage: buildCoverage(context, contract, input.coverage, scope, target),
     manifest: {
       scan: {
@@ -600,15 +602,21 @@ export function prepareScanFindings(
       identity,
     };
   });
-  if (mode !== "deep") return identified;
-
-  // Keep distinct findings when independent scans reuse an ID.
-  // Add a numeric suffix to make each ID unique.
-  const reserved = new Set(identified.map(scanFindingIdentity));
+  // Missing IDs introduce new findings; explicit IDs can revise saved findings.
+  const assigned = new Set([
+    ...findings.filter((finding) => finding.identity).map(scanFindingIdentity),
+  ]);
+  const reserved = new Set([
+    ...assigned,
+    ...identified.map(scanFindingIdentity),
+  ]);
   const used = new Set<string>();
-  return identified.map((finding) => {
+  return identified.map((finding, index) => {
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
+    const generated = generatedIdentities[index] !== undefined;
+    const collision = used.has(key) || (generated && assigned.has(key));
+    // Deep Scan also retains independent sources that supplied the same ID.
+    if (!collision || (!generated && mode !== "deep")) {
       used.add(key);
       return finding;
     }
@@ -626,12 +634,14 @@ export function prepareScanFindings(
       reserved.has(scanFindingIdentity(distinct)) ||
       used.has(scanFindingIdentity(distinct))
     );
-    const provenance = finding.provenance;
-    distinct["provenance"] = {
-      ...provenance,
-      preservedIdentity:
-        provenance["preservedIdentity"] ?? structuredClone(identity),
-    };
+    if (mode === "deep") {
+      const provenance = finding.provenance;
+      distinct["provenance"] = {
+        ...provenance,
+        preservedIdentity:
+          provenance["preservedIdentity"] ?? structuredClone(identity),
+      };
+    }
     used.add(scanFindingIdentity(distinct));
     return distinct;
   });
@@ -678,7 +688,7 @@ function buildCoverage(
       typeof item["id"] === "string" ? [item["id"]] : [],
     ),
   );
-  const reservedCandidateIds = new Set(
+  const reservedGeneratedIds = new Set(
     deferred.flatMap((item) =>
       typeof item["candidateId"] === "string" ? [item["candidateId"]] : [],
     ),
@@ -704,7 +714,7 @@ function buildCoverage(
     let suffix = 2;
     while (
       deferredIds.has(id) ||
-      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
+      (typeof candidateId !== "string" && reservedGeneratedIds.has(id))
     ) {
       id = `${baseId}-${suffix}`;
       suffix += 1;

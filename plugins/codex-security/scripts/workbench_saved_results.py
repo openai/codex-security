@@ -3106,10 +3106,11 @@ def write_draft_documents(db: Any, scan: Any, scan_dir: Path, draft: dict[str, A
     _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
     _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
     _validate_completion_binding(manifest, findings, coverage, binding)
-    # Failed physical cleanup must not reopen accepted evidence on a later write.
-    remaining = set(_committed_checkpoint_ids(scan_dir)) & set(
-        _children(scan_dir, "checkpoints/pending")
+    # Keep acknowledgments while those files remain eligible for recovery.
+    history = (
+        "checkpoints/pending" if (scan_dir / "checkpoints/pending").exists() else "checkpoints"
     )
+    remaining = set(_committed_checkpoint_ids(scan_dir)) & set(_children(scan_dir, history))
     draft["reconciledCheckpointIds"] = sorted(
         remaining | set(_checkpoint_ids(draft.get("reconciledCheckpointIds", [])))
     )
@@ -3162,3 +3163,14 @@ def _pending_result_paths(scan_dir: Path) -> list[str]:
         for name in _children(scan_dir, "checkpoints/pending")
         if re.fullmatch(r"[0-9a-f]{64}\.json", name) and name not in acknowledged
     ]
+
+
+def union_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        rows = target.setdefault(field, [])
+        seen = {_encoded(row) for row in rows}
+        for row in source.get(field, []):
+            key = _encoded(row)
+            if key not in seen:
+                seen.add(key)
+                rows.append(copy.deepcopy(row))
