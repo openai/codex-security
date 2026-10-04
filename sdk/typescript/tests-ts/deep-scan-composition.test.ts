@@ -1,6 +1,13 @@
 import * as childProcess from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +15,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { Codex } from "@openai/codex-sdk";
 import type { ScanOptions } from "../src/api.js";
 import { estimateScanCost } from "../src/cost.js";
+import { OutputDirectoryError } from "../src/errors.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   DeepScanPublicationError,
@@ -21,6 +29,7 @@ import {
   newDeepScanCheckpoint,
 } from "../src/deep-scan-checkpoint.js";
 import { ScanResult } from "../src/result.js";
+import { prepareScanArtifactRestorer } from "../src/runtime.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import { readCodexTurn } from "../src/scan-events.js";
 import {
@@ -411,6 +420,75 @@ test.each([
     expect(h.publications.at(-1)!.findings).toHaveLength(calls);
     expect(h.calls).toHaveLength(calls);
     expect(h.metrics().merges).toBe(phase === "merge-start" ? 1 : 0);
+  },
+);
+
+test.each([
+  { findings: false, blocked: "merge-context.json" },
+  { findings: true, blocked: "sources" },
+  { findings: true, blocked: "merge-context.json" },
+])(
+  "merge source writes recover completed children after a filesystem failure (%p)",
+  async ({ findings, blocked }) => {
+    const h = await fixture();
+    if (!findings) {
+      const projectChild = h.input.projectChild;
+      h.input.projectChild = async (...args) => {
+        const child = await projectChild(...args);
+        return {
+          ...child,
+          sourceFindings: [],
+          draft: { ...child.draft, findings: [] },
+        };
+      };
+    }
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    h.input.writer = await prepareScanArtifactRestorer(
+      { python: python!, pluginRoot, environment: {} },
+      h.input.scanDir,
+    );
+    const blockedPath = join(h.input.scanDir, "artifacts/deep-scan", blocked);
+    await mkdir(dirname(blockedPath), { recursive: true, mode: 0o700 });
+    if (blocked === "sources")
+      await writeFile(blockedPath, "Synthetic temporary filesystem blocker");
+    else await mkdir(blockedPath);
+
+    const failure = await runDeepScans(h.input).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(DeepScanRecoveryError);
+    expect((failure as Error).cause).toBeInstanceOf(OutputDirectoryError);
+    const saved = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(saved.terminalReason).toBeUndefined();
+    expect(saved.pendingStop).toBeUndefined();
+    expect(saved.mergeFailures ?? 0).toBe(0);
+    expect(h.metrics().merges).toBe(0);
+    expect(h.publications).toHaveLength(0);
+    expect(h.operations).not.toContain("fail-scan");
+    expect(
+      [...h.records.values()].map((record) => record.progress.status),
+    ).toEqual(["complete", "complete"]);
+    if (findings && blocked === "merge-context.json")
+      expect(
+        await readdir(join(h.input.scanDir, "artifacts/deep-scan/sources")),
+      ).toHaveLength(2);
+
+    await rm(blockedPath, { recursive: true });
+    const resumed = await runDeepScans(h.input);
+    expect(resumed.terminalReason).toBe("capped");
+    expect(resumed.mergedScanIds).toHaveLength(2);
+    expect(h.calls).toHaveLength(2);
+    expect(h.metrics().merges).toBe(findings ? 1 : 0);
+    expect(h.publications.at(-1)!.findings).toHaveLength(findings ? 2 : 0);
+    expect(Object.values(resumed.aggregate!.sourceFindings)).toEqual(
+      findings
+        ? [...h.projected.values()].flatMap((child) => child.sourceFindings)
+        : [],
+    );
+    expect((await loadDeepScanCheckpoint(h.input.scanDir))!.aggregate).toEqual(
+      resumed.aggregate,
+    );
   },
 );
 

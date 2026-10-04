@@ -164,6 +164,26 @@ export async function runDeepScans(
     executionSignal,
     deadlineController.signal,
   ]);
+  const persist = async (write: () => Promise<unknown>): Promise<void> => {
+    try {
+      await write();
+    } catch (cause) {
+      if (
+        discoverySignal.aborted ||
+        cause instanceof DeepScanRecoveryError ||
+        cause instanceof ScanTransportClosedError ||
+        cause instanceof ScanCostTrackingError ||
+        cause instanceof ScanCostLimitExceededError ||
+        cause instanceof ScanPermissionError
+      )
+        throw cause;
+      throw new DeepScanRecoveryError(
+        `Could not retain Deep Scan progress; resume to retry: ${errorMessage(cause)}`,
+        scanDir,
+        { cause },
+      );
+    }
+  };
   let saveTail = Promise.resolve();
   let savedSnapshot: string | undefined;
   let savedAggregate = state.aggregate;
@@ -209,8 +229,8 @@ export async function runDeepScans(
           : [{ path: aggregatePath!, contents: Buffer.from(contents) }]),
         { path: DEEP_SCAN_CHECKPOINT, contents: Buffer.from(snapshot) },
       ]) {
-        try {
-          await workbench(
+        await persist(() =>
+          workbench(
             [
               "save-scan-artifact",
               "--scan-id",
@@ -219,23 +239,8 @@ export async function runDeepScans(
               artifact.path,
             ],
             Buffer.from(artifact.contents).toString("utf8"),
-          );
-        } catch (cause) {
-          if (
-            discoverySignal.aborted ||
-            cause instanceof DeepScanRecoveryError ||
-            cause instanceof ScanTransportClosedError ||
-            cause instanceof ScanCostTrackingError ||
-            cause instanceof ScanCostLimitExceededError ||
-            cause instanceof ScanPermissionError
-          )
-            throw cause;
-          throw new DeepScanRecoveryError(
-            `Could not retain Deep Scan progress; resume to retry: ${errorMessage(cause)}`,
-            scanDir,
-            { cause },
-          );
-        }
+          ),
+        );
       }
       if (aggregateChanged)
         for (const id of Object.keys(aggregate?.revisions ?? {}))
@@ -564,7 +569,15 @@ export async function runDeepScans(
     }
     const contextPath = join(
       scanDir,
-      await saveScanMergeSources(pending, input.writer, state.aggregate),
+      await saveScanMergeSources(
+        pending,
+        {
+          ...input.writer,
+          restoreMany: (artifacts) =>
+            persist(() => input.writer.restoreMany(artifacts)),
+        },
+        state.aggregate,
+      ),
     );
     let merged: Awaited<ReturnType<typeof mergeScans>>;
     let validationError: unknown;
