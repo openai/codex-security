@@ -1,3 +1,4 @@
+import type { JsonObject } from "./types.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -20,8 +21,6 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
-
-type JsonObject = Record<string, unknown>;
 
 export interface ScanDraftInput {
   scanId: string;
@@ -1126,10 +1125,7 @@ async function readSavedCheckpoints(
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
-  if (
-    checkpointRootMetadata.isSymbolicLink() ||
-    !checkpointRootMetadata.isDirectory()
-  ) {
+  if (!checkpointRootMetadata.isDirectory()) {
     throw new Error(
       `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
     );
@@ -1165,7 +1161,7 @@ async function readSavedCheckpoints(
   for (const entry of entries) {
     const checkpointPath = join(checkpointRoot, entry.name);
     const checkpointMetadata = await fs.lstat(checkpointPath);
-    if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
+    if (!checkpointMetadata.isFile()) {
       throw new Error(
         `scan checkpoint: ${kind} checkpoint is not a safe file.`,
       );
@@ -1326,7 +1322,7 @@ async function readArchivedWorkerCheckpoints(
   const attemptsRoot = join(workerRoot, "attempts");
   const attemptsMetadata = await lstatIfExists(attemptsRoot);
   if (attemptsMetadata === undefined) return [];
-  if (attemptsMetadata.isSymbolicLink() || !attemptsMetadata.isDirectory()) {
+  if (!attemptsMetadata.isDirectory()) {
     throw new Error(
       "scan checkpoint: archived attempts are not a safe directory.",
     );
@@ -1345,10 +1341,11 @@ async function readArchivedWorkerCheckpoints(
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .filter((entry) => entry.isDirectory())
     .sort(
       (left, right) =>
-        archivedAttemptNumber(right.name) - archivedAttemptNumber(left.name) ||
+        Number(/^attempt-(\d+)$/.exec(right.name)?.[1] ?? -1) -
+          Number(/^attempt-(\d+)$/.exec(left.name)?.[1] ?? -1) ||
         right.name.localeCompare(left.name),
     );
   for (const attempt of attempts) {
@@ -1382,7 +1379,7 @@ async function readArchivedWorkerCheckpoints(
       join(attemptRoot, "result.json"),
     );
     if (resultMetadata !== undefined) {
-      if (resultMetadata.isSymbolicLink() || !resultMetadata.isFile()) {
+      if (!resultMetadata.isFile()) {
         throw new Error("scan checkpoint: archived result is not a safe file.");
       }
       const saved = await readArtifactTextWithMetadata(
@@ -1434,11 +1431,6 @@ async function readArchivedWorkerCheckpoints(
     );
   }
   return archived;
-}
-
-function archivedAttemptNumber(name: string): number {
-  const match = /^attempt-(\d+)$/.exec(name);
-  return match ? Number(match[1]) : -1;
 }
 
 async function lstatIfExists(
@@ -2241,29 +2233,27 @@ function buildScope(
 ): JsonObject {
   const includePaths = trustedScope.requiredIncludePaths;
   const excludePaths = trustedScope.requiredExcludePaths;
-  const resolvedIncludePaths =
-    includePaths === undefined
-      ? [
-          typeof trustedScope.requestedPath === "string"
-            ? trustedScope.requestedPath
-            : (context.scope ?? "."),
-        ]
-      : requireTextArray(
-          includePaths,
-          "scan draft: authoritative included scope",
-        );
-  const resolvedExcludePaths =
-    excludePaths === undefined
-      ? []
-      : requireTextArray(
-          excludePaths,
-          "scan draft: authoritative excluded scope",
-        );
 
   return {
     ...semanticScope,
-    includePaths: resolvedIncludePaths,
-    excludePaths: resolvedExcludePaths,
+    includePaths:
+      includePaths === undefined
+        ? [
+            typeof trustedScope.requestedPath === "string"
+              ? trustedScope.requestedPath
+              : (context.scope ?? "."),
+          ]
+        : requireTextArray(
+            includePaths,
+            "scan draft: authoritative included scope",
+          ),
+    excludePaths:
+      excludePaths === undefined
+        ? []
+        : requireTextArray(
+            excludePaths,
+            "scan draft: authoritative excluded scope",
+          ),
   };
 }
 

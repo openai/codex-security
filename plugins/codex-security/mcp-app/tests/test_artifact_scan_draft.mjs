@@ -1,19 +1,18 @@
+import { mock } from "node:test";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { promises as fsPromises } from "node:fs";
 import {
   mkdir,
-  mkdtemp,
   readdir,
   readFile,
-  realpath,
   rename,
   rm,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   claimToken,
@@ -32,9 +31,9 @@ const {
   scanDraftInputSchema,
 } = draftApi;
 
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-scan-draft-")),
-);
+const surfaceDisposition = ({ id, disposition }) => ({ id, disposition });
+
+const root = await temporaryDirectory("codex-security-scan-draft-", true);
 
 try {
   const { context } = draftFixture(root, "standard");
@@ -337,14 +336,9 @@ try {
     ...workerInput,
     complete: false,
   });
-  const {
-    scope: _scope,
-    threatModel: _threatModel,
-    ...workerWithoutContext
-  } = workerInput;
   await recordCodexSecurityWorkerScanDraft(
     carriedContext,
-    workerWithoutContext,
+    withoutScanContext(workerInput),
   );
   const carriedWorker = JSON.parse(
     await readFile(path.join(carriedContextRoot, "result.json"), "utf8"),
@@ -394,13 +388,9 @@ try {
   const progressedCoverage = JSON.parse(
     await readFile(path.join(coverageProgressRoot, "result.json"), "utf8"),
   ).coverage;
-  assert.deepEqual(
-    progressedCoverage.surfaces.map(({ id, disposition }) => ({
-      id,
-      disposition,
-    })),
-    [{ id: "surface-archive", disposition: "reported" }],
-  );
+  assert.deepEqual(progressedCoverage.surfaces.map(surfaceDisposition), [
+    { id: "surface-archive", disposition: "reported" },
+  ]);
   assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
   assert.equal(progressedCoverage.completeness, "complete");
 
@@ -719,14 +709,9 @@ try {
     true,
   );
 
-  const {
-    scope: _parentScope,
-    threatModel: _parentThreatModel,
-    ...parentWithoutContext
-  } = input;
   await recordCodexSecurityScanDraft(
     { ...context, root: parentCheckpointRoot },
-    parentWithoutContext,
+    withoutScanContext(input),
   );
   const carriedParentManifest = await readJson(
     parentCheckpointRoot,
@@ -866,34 +851,31 @@ try {
     "obsolete.json",
   );
   await writeFile(obsoleteCheckpointPath, "{malformed obsolete checkpoint\n");
-  let deepWorkbenchWrites = 0;
+  const deepWorkbenchWrites = mock.fn(async (arguments_) => {
+    assert.deepEqual(arguments_.slice(0, 3), [
+      "write-scan-draft",
+      "--scan-id",
+      scanId,
+    ]);
+    assert.equal(arguments_.includes("--expected-draft-digest"), false);
+    assert.deepEqual(arguments_.slice(-2), ["--claim-token", claimToken]);
+    const draftPath = arguments_[arguments_.indexOf("--draft-path") + 1];
+    const checkpointPath =
+      arguments_[arguments_.indexOf("--checkpoint-path") + 1];
+    const staged = JSON.parse(await readFile(draftPath, "utf8"));
+    const stagedCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    assert.deepEqual(staged.findings, acceptedDeepFindings);
+    assert.deepEqual(staged.coverage, acceptedDeepCoverage);
+    assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
+    assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
+  });
   await recordCodexSecurityScanDraftViaWorkbench(
     deepParentContext,
     acceptedDeepDraft,
-    async (arguments_) => {
-      deepWorkbenchWrites += 1;
-      assert.deepEqual(arguments_.slice(0, 3), [
-        "write-scan-draft",
-        "--scan-id",
-        scanId,
-      ]);
-      assert.equal(arguments_.includes("--expected-draft-digest"), false);
-      assert.deepEqual(arguments_.slice(-2), ["--claim-token", claimToken]);
-      const draftPath = arguments_[arguments_.indexOf("--draft-path") + 1];
-      const checkpointPath =
-        arguments_[arguments_.indexOf("--checkpoint-path") + 1];
-      const staged = JSON.parse(await readFile(draftPath, "utf8"));
-      const stagedCheckpoint = JSON.parse(
-        await readFile(checkpointPath, "utf8"),
-      );
-      assert.deepEqual(staged.findings, acceptedDeepFindings);
-      assert.deepEqual(staged.coverage, acceptedDeepCoverage);
-      assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
-      assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
-    },
+    deepWorkbenchWrites,
   );
   assert.equal(
-    deepWorkbenchWrites,
+    deepWorkbenchWrites.mock.callCount(),
     1,
     "terminal Deep drafts still publish through the workbench lock despite obsolete malformed checkpoints",
   );
@@ -1782,23 +1764,22 @@ try {
   assert.equal(retried.status, "draft_written");
 
   const conflictAbort = new AbortController();
-  let abortedConflictAttempts = 0;
+  const abortedConflictAttempts = mock.fn(async () => {
+    conflictAbort.abort(new Error("draft publication canceled"));
+    throw Object.assign(new Error("scan_draft_conflict"), {
+      code: "scan_draft_conflict",
+    });
+  });
   await assert.rejects(
     recordCodexSecurityScanDraft(
       context,
       input,
-      async () => {
-        abortedConflictAttempts += 1;
-        conflictAbort.abort(new Error("draft publication canceled"));
-        throw Object.assign(new Error("scan_draft_conflict"), {
-          code: "scan_draft_conflict",
-        });
-      },
+      abortedConflictAttempts,
       conflictAbort.signal,
     ),
     /draft publication canceled/,
   );
-  assert.equal(abortedConflictAttempts, 1);
+  assert.equal(abortedConflictAttempts.mock.callCount(), 1);
 
   const monotonicRoot = path.join(root, "monotonic-final-draft");
   await mkdir(monotonicRoot);
@@ -1849,13 +1830,9 @@ try {
         );
       }
       assert.notEqual(staged.manifest.scan.complete, false);
-      assert.deepEqual(
-        staged.coverage.surfaces.map(({ id, disposition }) => ({
-          id,
-          disposition,
-        })),
-        [{ id: "surface-archive", disposition: "reported" }],
-      );
+      assert.deepEqual(staged.coverage.surfaces.map(surfaceDisposition), [
+        { id: "surface-archive", disposition: "reported" },
+      ]);
     },
   );
   assert.equal(monotonicWrites, 2);
@@ -1884,13 +1861,8 @@ try {
     path.join(archivedRetryRoot, "attempts", "attempt-01"),
   );
   await mkdir(archivedRetryOutput);
-  const {
-    scope: _archivedScope,
-    threatModel: _archivedThreatModel,
-    ...replacementAttempt
-  } = workerInput;
   await recordCodexSecurityWorkerScanDraft(archivedRetryContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     findings: [],
   });
   const archivedRetryResult = JSON.parse(
@@ -1947,7 +1919,7 @@ try {
   );
   await mkdir(archivedResolutionOutput);
   await recordCodexSecurityWorkerScanDraft(archivedResolutionContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     findings: [],
   });
   const archivedResolutionResult = JSON.parse(
@@ -2023,7 +1995,7 @@ try {
   );
   await mkdir(repeatedCheckpointOutput);
   await recordCodexSecurityWorkerScanDraft(repeatedCheckpointContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     findings: [],
   });
   const repeatedCheckpointResult = JSON.parse(
@@ -2053,7 +2025,7 @@ try {
   );
   await mkdir(multiAttemptOutput);
   await recordCodexSecurityWorkerScanDraft(multiAttemptContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     complete: false,
     findings: [],
     coverage: {
@@ -2069,7 +2041,7 @@ try {
   );
   await mkdir(multiAttemptOutput);
   await recordCodexSecurityWorkerScanDraft(multiAttemptContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     findings: [],
   });
   const multiAttemptResult = JSON.parse(
@@ -2111,7 +2083,7 @@ try {
   );
   await mkdir(malformedArchivedOutput);
   await recordCodexSecurityWorkerScanDraft(malformedArchivedContext, {
-    ...replacementAttempt,
+    ...withoutScanContext(workerInput),
     findings: [],
   });
   assert.deepEqual(
@@ -2146,7 +2118,7 @@ try {
   await mkdir(crossScanRetryOutput);
   await assert.rejects(
     recordCodexSecurityWorkerScanDraft(crossScanRetryContext, {
-      ...replacementAttempt,
+      ...withoutScanContext(workerInput),
       findings: [],
     }),
     /scanId does not match the authoritative workbench scan/u,
@@ -3462,4 +3434,12 @@ async function recordFreshScanDraft(context, input) {
     }),
   ]);
   return recordCodexSecurityScanDraft(context, input);
+}
+
+function withoutScanContext({
+  scope: _scope,
+  threatModel: _threatModel,
+  ...input
+}) {
+  return input;
 }

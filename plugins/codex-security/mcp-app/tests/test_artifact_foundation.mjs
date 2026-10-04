@@ -18,12 +18,25 @@ const compiled = await build({
   entryPoints: [
     new URL("../src/artifact-io.ts", import.meta.url).pathname,
     new URL("../src/artifact-context.ts", import.meta.url).pathname,
+    new URL("../artifact-writer-main.ts", import.meta.url).pathname,
     new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
   ],
   format: "esm",
   outdir: "codex-security-artifact-foundation",
   platform: "node",
   write: false,
+  plugins: [
+    {
+      name: "observe-worker-context",
+      setup(builder) {
+        builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
+          contents:
+            "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
+          loader: "js",
+        }));
+      },
+    },
+  ],
 });
 const modules = new Map(
   compiled.outputFiles.map((file) => [
@@ -34,6 +47,7 @@ const modules = new Map(
 );
 const io = await import(modules.get("artifact-io.js"));
 const contextApi = await import(modules.get("artifact-context.js"));
+const writerApi = await import(modules.get("artifact-writer-main.js"));
 const schemas = await import(modules.get("artifact-schema-loader.js"));
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -272,12 +286,14 @@ async function testWorkerStandardLayout() {
   const root = path.join(fixture, "worker", "output");
   const repoRoot = path.join(fixture, "repository");
   await mkdir(root, { recursive: true });
-  const context = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    scope: ".",
-    pluginRoot: "/fixture/plugin",
-  });
+  const environment = {
+    CODEX_SECURITY_ARTIFACT_ROOT: root,
+    CODEX_SECURITY_REPO_ROOT: repoRoot,
+    CODEX_SECURITY_SCOPE: ".",
+    CODEX_SECURITY_PLUGIN_ROOT: "/fixture/plugin",
+  };
+  const { context } =
+    await writerApi.createCodexSecurityArtifactWriterServer(environment);
   const inventory = await io.artifactDestination(
     context,
     ["artifacts", "02_discovery", "in_scope_files.txt"],
@@ -310,24 +326,26 @@ async function testWorkerStandardLayout() {
   assert.equal(context.scope, ".");
 
   await assert.rejects(
-    contextApi.createWorkerArtifactContext({
-      root,
-      repoRoot,
-      deepReducer: { scanRoot: root, claimedWorkers: [] },
+    writerApi.createCodexSecurityArtifactWriterServer({
+      ...environment,
+      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
+        scanRoot: root,
+        claimedWorkers: [],
+      }),
     }),
-    /reducer-bound context/,
+    /coordinator-bound reducer context/,
   );
-  const reducer = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot: root,
-      claimedWorkers: [
-        { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-      ],
-    },
-  });
+  const { context: reducer } =
+    await writerApi.createCodexSecurityArtifactWriterServer({
+      ...environment,
+      CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
+      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
+        scanRoot: root,
+        claimedWorkers: [
+          { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
+        ],
+      }),
+    });
   assert.equal(reducer.layout, "reducer");
   assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
 }
@@ -480,6 +498,8 @@ async function testUnsafeArtifacts() {
 
   const outside = path.join(fixture, "outside");
   await mkdir(outside, { recursive: true });
+  const outsideFile = path.join(outside, "candidate_ledger.jsonl");
+  await writeFile(outsideFile, "outside remains unchanged\n");
   const symlinkPath = path.join(context.root, "linked");
   await symlink(outside, symlinkPath);
   await assert.rejects(
@@ -491,11 +511,19 @@ async function testUnsafeArtifacts() {
     /not a regular directory/,
   );
 
+  assert.equal(
+    await readFile(outsideFile, "utf8"),
+    "outside remains unchanged\n",
+  );
   const linkedFile = path.join(context.root, "linked.json");
-  await symlink(path.join(outside, "outside.json"), linkedFile);
+  await symlink(outsideFile, linkedFile);
   await assert.rejects(
     io.artifactDestination(context, ["linked.json"], "scan_manifest"),
     /not a regular file/,
+  );
+  assert.equal(
+    await readFile(outsideFile, "utf8"),
+    "outside remains unchanged\n",
   );
 
   const linkedRoot = path.join(fixture, "linked-root");

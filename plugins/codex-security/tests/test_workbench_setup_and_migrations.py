@@ -26,6 +26,50 @@ from workbench_test_support import (
     write_completed_contract,
 )
 
+EXPECTED_MIGRATIONS = [
+    (1, "initial workbench schema"),
+    (2, "persist capability preflight summaries"),
+    (3, "finding management schema"),
+    (4, "scan handoff delivery claims"),
+    (5, "finding remediation action claims"),
+    (6, "thread-scoped workspaces"),
+    (7, "remediation host delivery state"),
+    (8, "sealed manifest digests"),
+    (9, "scan target filesystem identity"),
+    (10, "scan cancellation state"),
+    (11, "deep scan orchestration state"),
+    (12, "scan continuation threads"),
+    (13, "scan scope file counts"),
+    (14, "imported triage results"),
+    (15, "append-only finding decisions"),
+    (16, "stable repository targets"),
+    (17, "scan target summaries"),
+    (18, "clear legacy delivered handoff claims"),
+    (19, "persist setup workspace preference"),
+    (20, "phase-specific scan progress"),
+    (21, "current scan preflight state"),
+    (22, "replayable scan launch recipes"),
+    (23, "semantic scan comparison matches"),
+    (24, "persist scan cost estimates"),
+    (25, "persist scan model settings"),
+    (26, "persist scan completion warnings"),
+    (27, "persist deep scan consecutive discovery failures"),
+    (28, "persist deep scan discovery time limit"),
+    (29, "persist finding publication associations"),
+    (30, "preserve team-only finding publication associations"),
+    (31, "freeze stopped scan source digests"),
+    (32, "separate deep scan publication failures"),
+    (33, "store complete findings and embeddings without a scan"),
+    (34, "associate findings with repositories"),
+    (35, "persist finding dedupe groups"),
+    (36, "persist local findings workflows"),
+    (37, "checkpoint validated dedupe reviews"),
+    (38, "store findings workflow metadata in columns"),
+    (39, "store dedupe checkpoint bindings in columns"),
+    (40, "index finding identity and comparison history"),
+    (41, "checkpoint finding severity assessments"),
+]
+
 
 def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
     source = tmp_path / "source.sqlite3"
@@ -825,49 +869,10 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-            (1, "initial workbench schema"),
-            (2, "persist capability preflight summaries"),
-            (3, "finding management schema"),
-            (4, "scan handoff delivery claims"),
-            (5, "finding remediation action claims"),
-            (6, "thread-scoped workspaces"),
-            (7, "remediation host delivery state"),
-            (8, "sealed manifest digests"),
-            (9, "scan target filesystem identity"),
-            (10, "scan cancellation state"),
-            (11, "deep scan orchestration state"),
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
+            == EXPECTED_MIGRATIONS
+        )
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
             "diff_base_revision",
@@ -1954,49 +1959,10 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-            (1, "initial workbench schema"),
-            (2, "persist capability preflight summaries"),
-            (3, "finding management schema"),
-            (4, "scan handoff delivery claims"),
-            (5, "finding remediation action claims"),
-            (6, "thread-scoped workspaces"),
-            (7, "remediation host delivery state"),
-            (8, "sealed manifest digests"),
-            (9, "scan target filesystem identity"),
-            (10, "scan cancellation state"),
-            (11, "deep scan orchestration state"),
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
+            == EXPECTED_MIGRATIONS
+        )
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
         }
@@ -2046,40 +2012,12 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-        ).fetchall() == [
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute(
+                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS[11:]
+        )
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
         }
@@ -2137,40 +2075,12 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-        ).fetchall() == [
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute(
+                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS[11:]
+        )
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
         }

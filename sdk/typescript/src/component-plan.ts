@@ -12,6 +12,7 @@ import {
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
+  nullIfMissingFile,
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
@@ -294,10 +295,7 @@ async function inventoryFiles(
     for (const path of stdout.split("\0").filter(Boolean)) {
       signal?.throwIfAborted();
       const metadata = await lstat(join(repository, path)).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
+        nullIfMissingFile,
       );
       if (metadata?.isFile()) files.push(join(repository, path));
     }

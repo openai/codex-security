@@ -1,6 +1,6 @@
-export function pythonExecutable(): string | null {
+export function pythonExecutable(inheritEnvironment = true): string | null {
   return (
-    process.env["PYTHON"] ??
+    (inheritEnvironment ? process.env["PYTHON"] : undefined) ??
     Bun.which("python3") ??
     Bun.which("python") ??
     Bun.which("py")

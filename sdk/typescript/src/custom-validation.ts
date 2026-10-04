@@ -83,7 +83,7 @@ async function writeJson(
 ) {
   let directory = scanDir;
   const root = await lstat(directory);
-  if (!root.isDirectory() || root.isSymbolicLink())
+  if (!root.isDirectory())
     throw new IncompleteScanError(
       "The scan directory is no longer a real directory.",
     );
@@ -91,8 +91,7 @@ async function writeJson(
   for (const part of name.split("/").slice(0, -1)) {
     directory = join(directory, part);
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const metadata = await lstat(directory);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+    if (!(await lstat(directory)).isDirectory())
       throw new IncompleteScanError(
         "Custom validation output must stay inside the scan directory.",
       );
