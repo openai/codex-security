@@ -41,9 +41,8 @@ const fixture = await realpath(
 try {
   await testSchemaSourceOfTruth();
   await testScanContext();
-  await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
-  await testAtomicReplaceAndAppend();
+  await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
 } finally {
@@ -197,11 +196,9 @@ async function testScanContext() {
   assert.deepEqual(calls, [["get-scan", "--scan-id", scanId]]);
   assert.equal(context.root, await realpath(root));
   assert.equal(context.repoRoot, await realpath(repoRoot));
-  assert.equal(context.layout, "scan");
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
-  assert.equal(context.targetSnapshotDigest, "sha256:fixture");
   assert.equal(context.handoffClaimToken, "fixture-claim");
   assert.equal(context.pluginRoot, "/fixture/plugin");
   assert.equal(context.pythonCommand, "python3");
@@ -236,75 +233,10 @@ async function testScanContext() {
   );
 }
 
-async function testWorkerStandardLayout() {
-  const root = path.join(fixture, "worker", "output");
-  const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  const context = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    scope: ".",
-    pluginRoot: "/fixture/plugin",
-  });
-  const inventory = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "in_scope_files.txt"],
-    "review_items",
-  );
-  const candidates = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
-    "discovery_candidates",
-  );
-  assert.equal(
-    inventory,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "in_scope_files.txt",
-    ),
-  );
-  assert.equal(
-    candidates,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    ),
-  );
-  assert.equal(context.layout, "worker");
-  assert.equal(context.scope, ".");
-
-  await assert.rejects(
-    contextApi.createWorkerArtifactContext({
-      root,
-      repoRoot,
-      deepReducer: { scanRoot: root, claimedWorkers: [] },
-    }),
-    /reducer-bound context/,
-  );
-  const reducer = await contextApi.createWorkerArtifactContext({
-    root,
-    repoRoot,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot: root,
-      claimedWorkers: [
-        { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-      ],
-    },
-  });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
-}
-
 async function testSafeJsonAndJsonl() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
@@ -344,10 +276,10 @@ async function testSafeJsonAndJsonl() {
     manifestComponents,
     "scan_manifest",
   );
-  await io.replaceArtifactJson(manifest, {
-    scanId: "fixture",
-    extension: true,
-  });
+  await io.replaceArtifactText(
+    manifest,
+    JSON.stringify({ scanId: "fixture", extension: true }) + "\n",
+  );
   assert.deepEqual(
     await io.readArtifactJsonObject(
       context,
@@ -381,11 +313,10 @@ async function testSafeJsonAndJsonl() {
   );
 }
 
-async function testAtomicReplaceAndAppend() {
+async function testAtomicReplacement() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
@@ -396,30 +327,24 @@ async function testAtomicReplaceAndAppend() {
   await io.replaceArtifactJsonl(destination, []);
   assert.equal(await readFile(destination, "utf8"), "");
 
-  await writeFile(destination, '{"candidate_id":"without-newline"}', "utf8");
-  await io.appendArtifactJsonl(destination, [{ candidate_id: "appended" }]);
-  assert.deepEqual(
-    await io.readArtifactJsonl(context, components, "discovery_candidates"),
-    [{ candidate_id: "without-newline" }, { candidate_id: "appended" }],
-  );
-
-  await io.replaceArtifactJsonl(destination, []);
+  const versions = Array.from({ length: 12 }, (_, index) => [
+    {
+      candidate_id: "concurrent-" + index,
+      evidence: String(index).repeat(8192),
+    },
+    { candidate_id: "tail-" + index },
+  ]);
+  const expected = new Set(versions.map((rows) => JSON.stringify(rows)));
   await Promise.all(
-    Array.from({ length: 12 }, (_, index) =>
-      io.appendArtifactJsonl(destination, [
-        { candidate_id: "concurrent-" + index },
-      ]),
-    ),
-  );
-  const rows = await io.readArtifactJsonl(
-    context,
-    components,
-    "discovery_candidates",
-  );
-  assert.equal(rows.length, 12);
-  assert.deepEqual(
-    rows.map((row) => row.candidate_id).sort(),
-    Array.from({ length: 12 }, (_, index) => "concurrent-" + index).sort(),
+    versions.map(async (rows) => {
+      await io.replaceArtifactJsonl(destination, rows);
+      const observed = await io.readArtifactJsonl(
+        context,
+        components,
+        "discovery_candidates",
+      );
+      assert.ok(expected.has(JSON.stringify(observed)));
+    }),
   );
 }
 
@@ -458,7 +383,6 @@ async function testUnsafeArtifacts() {
   const context = {
     root: path.join(fixture, "scan"),
     repoRoot: path.join(fixture, "repository"),
-    layout: "scan",
   };
   for (const components of [
     [],

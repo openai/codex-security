@@ -2439,7 +2439,7 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
         {"id": "retained", "scan_dir": str(root / "retained")},
     ]
     composition = workbench_api["load_composition"].__globals__["CompositionView"](
-        None, tuple(children), (), None
+        None, tuple(children), ()
     )
     db = mock.Mock(
         require_scan=lambda _, child_id: next(
