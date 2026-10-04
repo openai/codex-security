@@ -1,4 +1,4 @@
-import { asRecord as record } from "../record.js";
+import { asRecord as record, isNonEmptyString } from "../record.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -272,10 +272,6 @@ function isValidSpecialPath(value: Record<string, unknown>): boolean {
     return value.subpath === undefined || value.subpath === null;
   }
   return false;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function hasGlobMetacharacters(value: string): boolean {

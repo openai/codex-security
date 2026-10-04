@@ -1,6 +1,8 @@
+/// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -162,7 +164,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(error),
       });
-      this.failLocally(error);
+      if (this.stopLocally()) this.rejectTerminal(error);
     });
   }
 
@@ -325,7 +327,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: schedulerResult.reason,
       });
-      this.finishLocally(this.state);
+      if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
         return;
@@ -447,29 +449,17 @@ export class DeepScanCoordinator {
         });
       }
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
-      this.finishLocally(this.state);
+      if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     }
   }
 
-  private finishLocally(state: DeepScanRunState): void {
-    if (this.markTerminal()) this.resolveTerminal(cloneState(state));
-  }
-
-  private failLocally(error: unknown): void {
-    if (this.markTerminal()) this.rejectTerminal(error);
-  }
-
-  private markTerminal(): boolean {
+  private stopLocally(): boolean {
     if (this.terminal) return false;
     this.terminal = true;
-    if (this.heartbeatTimeout !== undefined) {
-      clearTimeout(this.heartbeatTimeout);
-      this.heartbeatTimeout = undefined;
-    }
-    if (this.discoveryTimeout !== undefined) {
-      clearTimeout(this.discoveryTimeout);
-      this.discoveryTimeout = undefined;
-    }
+    clearTimeout(this.heartbeatTimeout);
+    this.heartbeatTimeout = undefined;
+    clearTimeout(this.discoveryTimeout);
+    this.discoveryTimeout = undefined;
     return true;
   }
 
@@ -601,7 +591,7 @@ export class DeepScanCoordinator {
     } else {
       this.state = current;
     }
-    this.finishLocally(this.state);
+    if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     return true;
   }
 
@@ -667,11 +657,9 @@ export class DeepScanCoordinator {
       );
     }
     if (reducerFailures >= errorLimit) {
-      const failure = [...(this.state.persistedWorkers ?? [])]
-        .reverse()
-        .find(
-          (worker) => worker.kind === "dedup" && worker.status === "failed",
-        );
+      const failure = (this.state.persistedWorkers ?? []).findLast(
+        (worker) => worker.kind === "dedup" && worker.status === "failed",
+      );
       throw reducerErrorLimitError(
         reducerFailures,
         errorLimit,
@@ -1046,10 +1034,8 @@ export class DeepScanCoordinator {
 
   private trackSchedulerWork<T>(promise: Promise<T>): Promise<T> {
     this.schedulerWork.add(promise);
-    void promise.then(
-      () => this.schedulerWork.delete(promise),
-      () => this.schedulerWork.delete(promise),
-    );
+    const cleanup = () => this.schedulerWork.delete(promise);
+    void promise.then(cleanup, cleanup);
     return promise;
   }
 
@@ -1103,22 +1089,11 @@ export class DeepScanCoordinator {
 const systemClock: DeepScanClock = {
   now: () => Date.now(),
   sleep: async (delayMs, signal) => {
-    if (signal.aborted) throw abortError(signal.reason);
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolvePromise();
-      }, delayMs);
-      const onAbort = (): void => {
-        cleanup();
-        rejectPromise(abortError(signal.reason));
-      };
-      const cleanup = (): void => {
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", onAbort);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    try {
+      await delay(delayMs, undefined, { signal });
+    } catch (error) {
+      throw signal.aborted ? abortError(signal.reason) : error;
+    }
   },
 };
 

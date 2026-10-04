@@ -1,12 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  cp,
-  mkdir,
-  readFile,
-  realpath,
-  symlink,
-} from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { prepareScanPublication } from "../src/publication.js";
@@ -16,12 +9,14 @@ import type {
   ScanManifest,
   SeverityLevel,
 } from "../src/models.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson, writeJson } from "./support/json.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-publication-",
+  false,
+);
 function publicationOptions(scanDirectory: string) {
   return {
     destination: "linear",
@@ -34,12 +29,12 @@ function publicationOptions(scanDirectory: string) {
   } as const;
 }
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 async function copyExample(): Promise<string> {
-  const root = await temporaryDirectories.create("codex-security-publication-");
+  const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
-  await cp(EXAMPLE, scanDirectory, { recursive: true });
+  await copyCompletedScanFixture(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   return scanDirectory;
 }
@@ -194,14 +189,12 @@ describe("scan publication preparation", () => {
   });
 
   test("uses the canonical scan directory beneath an aliased parent", async () => {
-    const root = await temporaryDirectories.create(
-      "codex-security-publication-alias-",
-    );
+    const root = await temporaryDirectory("codex-security-publication-alias-");
     const parent = join(root, "actual-parent");
     const alias = join(root, "aliased-parent");
     const scanDirectory = join(parent, "scan");
     await mkdir(parent, { mode: 0o700 });
-    await cp(EXAMPLE, scanDirectory, { recursive: true });
+    await copyCompletedScanFixture(scanDirectory);
     if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
     await symlink(
       parent,

@@ -1,10 +1,9 @@
-import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { loadContract } from "./contract.js";
+import { loadContract, sha256Text as sha256 } from "./contract.js";
 import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
@@ -90,9 +89,8 @@ export async function publishFindingsCsvToCloud(
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
-  const digest = hash("sha256", source);
-  const scanId = `scan_csv_${hash(
-    "sha256",
+  const digest = sha256(source);
+  const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
   ).slice(0, 24)}`;
   const findings = rows.map((row) => csvRowFinding(row, scanId));
@@ -144,12 +142,12 @@ export async function publishFindingsCsvToCloud(
     artifacts: [
       {
         path: "findings.json",
-        sha256: hash("sha256", findingsDocument),
+        sha256: sha256(findingsDocument),
         mediaType: "application/json",
       },
       {
         path: "coverage.json",
-        sha256: hash("sha256", coverageDocument),
+        sha256: sha256(coverageDocument),
         mediaType: "application/json",
       },
       {

@@ -1,6 +1,7 @@
+import { rejecting } from "./support/errors.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import type { Finding, FindingsDocument } from "../src/models.js";
@@ -123,21 +124,17 @@ test("splits bulk requests at the provider token budget and renews credentials p
 test("does not resolve credentials for empty input or reuse a key after renewal fails", async () => {
   for (const failure of ["throw", "empty"]) {
     let credentials = 0;
-    let requests = 0;
-    const embedder = new OpenAiFindingEmbedder(
-      () => {
-        if (++credentials === 1) return "synthetic-key";
-        if (failure === "throw") throw new Error("synthetic-private-token");
-        return "";
-      },
-      async () => {
-        requests++;
-        return Response.json({
-          model: EMBEDDING_MODEL,
-          data: [{ index: 0, embedding: vector() }],
-        });
-      },
-    );
+    const observeRequests = mock(async () => {
+      return Response.json({
+        model: EMBEDDING_MODEL,
+        data: [{ index: 0, embedding: vector() }],
+      });
+    });
+    const embedder = new OpenAiFindingEmbedder(() => {
+      if (++credentials === 1) return "synthetic-key";
+      if (failure === "throw") throw new Error("synthetic-private-token");
+      return "";
+    }, observeRequests);
     expect(await embedder.embed([])).toEqual([]);
     expect(credentials).toBe(0);
     await embedder.embed([example]);
@@ -146,21 +143,18 @@ test("does not resolve credentials for empty input or reuse a key after renewal 
       message: "Could not reach the embedding provider.",
     });
     expect(credentials).toBe(2);
-    expect(requests).toBe(1);
+    expect(observeRequests).toHaveBeenCalledTimes(1);
   }
 });
 
 test("does not call the provider for empty input or missing credentials", async () => {
-  let calls = 0;
-  const embedder = new OpenAiFindingEmbedder(undefined, async () => {
-    calls++;
-    throw new Error("Must not call");
-  });
+  const observeCalls = mock(rejecting("Must not call"));
+  const embedder = new OpenAiFindingEmbedder(undefined, observeCalls);
   expect(await embedder.embed([])).toEqual([]);
   await expect(embedder.embed([example])).rejects.toMatchObject({
     code: "embedding_unavailable",
   });
-  expect(calls).toBe(0);
+  expect(observeCalls).toHaveBeenCalledTimes(0);
 });
 
 test("reports provider failures without echoing response bodies or credentials", async () => {

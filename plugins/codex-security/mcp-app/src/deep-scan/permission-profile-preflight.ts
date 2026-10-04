@@ -1,8 +1,9 @@
-import { asRecord as record } from "../record.js";
+import type { JsonObject as JsonRecord } from "../types.js";
+import { asRecord as record, isNonEmptyString } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { MCP_APP_VERSION } from "../version.js";
+import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
 import { executablePathForSpawn } from "./executable-path.js";
 
@@ -29,8 +30,6 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly expectedProfile: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
 }
-
-type JsonRecord = Record<string, unknown>;
 
 type PendingRequest = {
   readonly id: number;
@@ -140,12 +139,11 @@ class AppServerPreflightClient {
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    this.stdoutLines.on("error", () => {
+    const onStdioError = () => {
       this.fail(codexExecutableStdioError(options.codexPath));
-    });
-    this.child.stdin.on("error", () => {
-      this.fail(codexExecutableStdioError(options.codexPath));
-    });
+    };
+    this.stdoutLines.on("error", onStdioError);
+    this.child.stdin.on("error", onStdioError);
     this.child.on("error", (error) => {
       this.fail(codexExecutableStartError(options.codexPath, error));
     });
@@ -427,10 +425,10 @@ function validateOptions(
   options: DeepScanPermissionProfilePreflightOptions,
 ): void {
   if (
-    !nonEmptyString(options.codexPath) ||
-    !nonEmptyString(options.cwd) ||
+    !isNonEmptyString(options.codexPath) ||
+    !isNonEmptyString(options.cwd) ||
     !Array.isArray(options.configOverrides) ||
-    options.configOverrides.some((value) => !nonEmptyString(value)) ||
+    options.configOverrides.some((value) => !isNonEmptyString(value)) ||
     !record(options.expectedProfile) ||
     !options.signal ||
     typeof options.signal.addEventListener !== "function"
@@ -438,10 +436,6 @@ function validateOptions(
     throw malformedPreflightError();
   }
   comparableProfile(options.expectedProfile);
-}
-
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 // Verified permission incompatibilities explicitly stop the scan. A failed
@@ -504,14 +498,13 @@ function jsonRpcPreflightError(
       ? error.code
       : undefined;
   if (code === -32601) return unsupportedCodexApiError(codexPath, method);
-  const codeDetail = code === undefined ? "" : " (JSON-RPC code " + code + ")";
   return new Error(
     "Deep Scan cannot safely verify its read-only worker permission profile because " +
       "the selected Codex executable " +
       JSON.stringify(codexPath) +
       " returned an error for " +
       JSON.stringify(method) +
-      codeDetail +
+      (code === undefined ? "" : " (JSON-RPC code " + code + ")") +
       ". Check the Codex configuration and retry. Deep Scan did not run.",
   );
 }
@@ -523,11 +516,10 @@ function codexExecutableStartError(codexPath: string, error: Error): Error {
       ? value
       : undefined;
   const codeDetail = code === undefined ? "" : " (" + code + ")";
-  const message = codexExecutableFailureMessage(
-    codexPath,
-    "could not start" + codeDetail,
+  return new Error(
+    codexExecutableFailureMessage(codexPath, "could not start" + codeDetail),
+    { cause: error },
   );
-  return new Error(message, { cause: error });
 }
 
 function codexExecutableExitError(

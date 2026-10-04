@@ -16,3 +16,8 @@ export function parseJson(read: () => string): unknown {
     return null;
   }
 }
+
+/** @internal */
+export const findingEntry = <T extends { findingId: string }>(
+  finding: T,
+): [string, T] => [finding.findingId, finding];

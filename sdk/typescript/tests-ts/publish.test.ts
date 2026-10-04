@@ -1,6 +1,8 @@
 import { sha256 } from "./support/finding-identity.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { execFileSync } from "node:child_process";
+import { readJsonLines } from "./support/json.js";
+import { cancelInspection } from "./support/workbench-fakes.js";
+import { resolving } from "./support/promises.js";
+import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -16,7 +18,7 @@ import {
   NetworkLinearError,
   UnknownLinearError,
 } from "@linear/sdk";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import {
   forceTerminatePublicationProcesses,
   publishScanInternal,
@@ -31,6 +33,17 @@ import type {
   PreparedPublicationIssue,
   PreparedScanPublication,
 } from "../src/publication.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
+
+const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
+  async (_prepared, issues) => {
+    return [...issues];
+  };
+
+function issueMapping(record: Record<string, unknown>) {
+  return [record["findingId"], record["issueIdentifier"]];
+}
 
 const OPTIONS: PublishScanOptions = {
   destination: "linear",
@@ -39,9 +52,10 @@ const OPTIONS: PublishScanOptions = {
 };
 const CLAIM_COLLISION_ERROR =
   "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
-const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-publication-environment-", false);
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 function preparedPublication(
   count = 1,
@@ -334,22 +348,11 @@ describe("skip-recorded publication", () => {
           publication,
           {},
           {
-            inspectPublicationStore: async (
-              _publication,
-              _environment,
-              signal,
-            ) => {
-              expect(signal).toBe(controller.signal);
-              controller.abort(reason);
-              signal!.throwIfAborted();
-              return [];
-            },
-            preparePublicationStore: async () => {
-              throw new Error("Canceled retries must not write history.");
-            },
-            resolveCodex: () => {
-              throw new Error("Canceled retries must not start Codex.");
-            },
+            inspectPublicationStore: cancelInspection(controller, reason),
+            preparePublicationStore: rejecting(
+              "Canceled retries must not write history.",
+            ),
+            resolveCodex: throwing("Canceled retries must not start Codex."),
           },
         ),
       ),
@@ -371,15 +374,9 @@ describe("skip-recorded publication", () => {
           expect(prepared).toBe(publication);
           return [recorded];
         },
-        preparePublicationStore: async () => {
-          throw new Error("Previews must not write history.");
-        },
-        resolveCodex: () => {
-          throw new Error("Previews must not start Codex.");
-        },
-        writeReceipt: async () => {
-          throw new Error("Previews must not write receipts.");
-        },
+        preparePublicationStore: rejecting("Previews must not write history."),
+        resolveCodex: throwing("Previews must not start Codex."),
+        writeReceipt: rejecting("Previews must not write receipts."),
       },
     );
     const ordinary = await publishScanInternal(
@@ -387,9 +384,7 @@ describe("skip-recorded publication", () => {
       { ...OPTIONS, dryRun: true },
       {
         ...injected,
-        inspectPublicationStore: async () => {
-          throw new Error("Ordinary previews stay offline.");
-        },
+        inspectPublicationStore: rejecting("Ordinary previews stay offline."),
       },
     );
     expect(ordinary.issues).toEqual(publication.issues);
@@ -424,21 +419,11 @@ describe("skip-recorded publication", () => {
         {},
         {
           inspectPublicationStore: async () => [recorded],
-          preparePublicationStore: async () => {
-            throw new Error("Nothing needs publication.");
-          },
-          resolveCodex: () => {
-            throw new Error("Nothing needs publication.");
-          },
-          linearClient: () => {
-            throw new Error("Nothing needs publication.");
-          },
-          recordPublishedIssues: async () => {
-            throw new Error("Nothing needs publication.");
-          },
-          writeReceipt: async () => {
-            throw new Error("Nothing needs publication.");
-          },
+          preparePublicationStore: unexpectedPublicationWork,
+          resolveCodex: throwing("Nothing needs publication."),
+          linearClient: throwing("Nothing needs publication."),
+          recordPublishedIssues: unexpectedPublicationWork,
+          writeReceipt: unexpectedPublicationWork,
         },
       ),
     );
@@ -546,12 +531,10 @@ describe("skip-recorded publication", () => {
           publication,
           {},
           {
-            inspectPublicationStore: async () => {
-              throw new Error("History is unavailable.");
-            },
-            resolveCodex: () => {
-              throw new Error("Must not publish without verified history.");
-            },
+            inspectPublicationStore: rejecting("History is unavailable."),
+            resolveCodex: throwing(
+              "Must not publish without verified history.",
+            ),
           },
         ),
       ),
@@ -589,23 +572,17 @@ describe("direct Linear API publication", () => {
     ]) {
       const publication = preparedPublication();
       if (scenario.teamOnly) delete publication.destination.projectId;
-      const inputs: LinearIssueInput[] = [];
-      let configuredKey = "";
+      const inputs = mock((_input: LinearIssueInput) => {});
+      const configured = mock<(key: string) => void>();
       const injected = dependencies(
         publication,
         {},
         {
           linearClient: linearApiClient(publication, {
-            configured: (key) => {
-              configuredKey = key;
-            },
-            create: (input) => {
-              inputs.push(input);
-            },
+            configured,
+            create: inputs,
           }),
-          resolveCodex: () => {
-            throw new Error("Direct publication must not start Codex.");
-          },
+          resolveCodex: throwing("Direct publication must not start Codex."),
         },
       );
       injected.environment!["CODEX_SECURITY_LINEAR_API_KEY"] =
@@ -623,10 +600,10 @@ describe("direct Linear API publication", () => {
         injected,
       );
 
-      expect(configuredKey).toBe(
+      expect(configured.mock.lastCall?.[0] ?? "").toBe(
         scenario.requested === undefined ? "environment-key" : "explicit-key",
       );
-      expect(inputs).toEqual([
+      expect(inputs.mock.calls.map(([value]) => value)).toEqual([
         {
           teamId: OPTIONS.teamId,
           ...(scenario.teamOnly ? {} : { projectId: OPTIONS.projectId }),
@@ -639,7 +616,7 @@ describe("direct Linear API publication", () => {
         },
       ]);
       if (scenario.assigned === undefined) {
-        expect(inputs[0]).not.toHaveProperty("assigneeId");
+        expect(inputs.mock.calls[0]?.[0]).not.toHaveProperty("assigneeId");
       }
       expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
     }
@@ -724,9 +701,7 @@ describe("direct Linear API publication", () => {
             persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
             return [...issues];
           },
-          writeReceipt: async (receipt) => {
-            receipts.push(structuredClone(receipt));
-          },
+          writeReceipt: recordReceipts(receipts),
         },
       );
 
@@ -772,15 +747,9 @@ describe("direct Linear API publication", () => {
       );
       const handoffDirectories = await readdir(handoffRoot);
       expect(handoffDirectories).toHaveLength(1);
-      const handoffRecords = (
-        await readFile(
-          join(handoffRoot, handoffDirectories[0]!, "issues.jsonl"),
-          "utf8",
-        )
-      )
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const handoffRecords = await readJsonLines<Record<string, unknown>>(
+        join(handoffRoot, handoffDirectories[0]!, "issues.jsonl"),
+      );
       expect(handoffRecords).toHaveLength(2);
       expect(
         handoffRecords.find(
@@ -799,8 +768,7 @@ describe("direct Linear API publication", () => {
     let started = 0;
     let completed = 0;
     let completedAtFirstIssueProgress: number | undefined;
-    const { promise: firstBatchStarted, resolve: releaseFirstBatch } =
-      Promise.withResolvers<void>();
+    const firstBatchStarted = Promise.withResolvers<void>();
     const result = await publishScanInternal(
       publication.scanDirectory,
       {
@@ -828,8 +796,8 @@ describe("direct Linear API publication", () => {
                 ({ title }) => title === input.title,
               );
               started += 1;
-              if (started === 20) releaseFirstBatch?.();
-              if (index < 20) await firstBatchStarted;
+              if (started === 20) firstBatchStarted.resolve();
+              if (index < 20) await firstBatchStarted.promise;
               else expect(completed).toBeGreaterThanOrEqual(20);
               completed += 1;
               if (index === 21)
@@ -883,9 +851,7 @@ describe("direct Linear API publication", () => {
           persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
           return [...issues];
         },
-        writeReceipt: async (receipt) => {
-          receipts.push(structuredClone(receipt));
-        },
+        writeReceipt: recordReceipts(receipts),
       },
     );
 
@@ -978,7 +944,7 @@ describe("direct Linear API publication", () => {
       let started = 0;
       let stopped = 0;
       let persisted: string[] = [];
-      let receipt: PublishScanResult | undefined;
+      const writeReceipt = mock(async (_result: PublishScanResult) => {});
       const injected = dependencies(
         publication,
         {},
@@ -1005,9 +971,7 @@ describe("direct Linear API publication", () => {
             persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
             return [...issues];
           },
-          writeReceipt: async (result) => {
-            receipt = result;
-          },
+          writeReceipt,
         },
       );
 
@@ -1036,6 +1000,7 @@ describe("direct Linear API publication", () => {
           (_, index) => `SEC-${index + 1 + Number(skipExisting)}`,
         ),
       });
+      const receipt = writeReceipt.mock.lastCall?.[0];
       expect(receipt?.skipped).toEqual(skipExisting ? [recorded] : undefined);
       expect(receipt).toMatchObject({
         counts: {
@@ -1073,12 +1038,12 @@ describe("connected Linear publication", () => {
     const publication = preparedPublication();
     const controller = new AbortController();
     controller.abort(new Error("Publication was canceled before it started."));
-    let prepared = false;
-    let verified = false;
-    let resolved = false;
-    let started = false;
-    let persisted = false;
-    let receipt = false;
+    const prepare = mock(resolving(publication));
+    const preparePublicationStore = mock(async () => {});
+    const resolveCodex = mock(unusedCodexCommand);
+    const runCodex = mock(successfulCodexResult);
+    const persisted = mock(copyPublishedIssues);
+    const writeReceipt = mock(async () => {});
 
     await expect(
       publishScanInternal(
@@ -1088,47 +1053,31 @@ describe("connected Linear publication", () => {
           publication,
           {},
           {
-            prepare: async () => {
-              prepared = true;
-              return publication;
-            },
-            preparePublicationStore: async () => {
-              verified = true;
-            },
-            resolveCodex: () => {
-              resolved = true;
-              return { command: "must-not-run" };
-            },
-            runCodex: async () => {
-              started = true;
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
-            recordPublishedIssues: async (_prepared, issues) => {
-              persisted = true;
-              return [...issues];
-            },
-            writeReceipt: async () => {
-              receipt = true;
-            },
+            prepare,
+            preparePublicationStore,
+            resolveCodex,
+            runCodex,
+            recordPublishedIssues: persisted,
+            writeReceipt,
           },
         ),
       ),
     ).rejects.toThrow("Publication was canceled before it started.");
 
-    expect(prepared).toBe(false);
-    expect(verified).toBe(false);
-    expect(resolved).toBe(false);
-    expect(started).toBe(false);
-    expect(persisted).toBe(false);
-    expect(receipt).toBe(false);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(preparePublicationStore).not.toHaveBeenCalled();
+    expect(resolveCodex).not.toHaveBeenCalled();
+    expect(runCodex).not.toHaveBeenCalled();
+    expect(persisted).not.toHaveBeenCalled();
+    expect(writeReceipt).not.toHaveBeenCalled();
   });
 
   test("does not create publication state when cancellation interrupts preparation", async () => {
     const publication = preparedPublication();
     const controller = new AbortController();
-    let verified = false;
-    let resolved = false;
-    let started = false;
+    const preparePublicationStore = mock(async () => {});
+    const resolveCodex = mock(unusedCodexCommand);
+    const runCodex = mock(successfulCodexResult);
 
     await expect(
       publishScanInternal(
@@ -1142,25 +1091,17 @@ describe("connected Linear publication", () => {
               controller.abort(new Error("Publication preparation stopped."));
               return publication;
             },
-            preparePublicationStore: async () => {
-              verified = true;
-            },
-            resolveCodex: () => {
-              resolved = true;
-              return { command: "must-not-run" };
-            },
-            runCodex: async () => {
-              started = true;
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
+            preparePublicationStore,
+            resolveCodex,
+            runCodex,
           },
         ),
       ),
     ).rejects.toThrow("Publication preparation stopped.");
 
-    expect(verified).toBe(false);
-    expect(resolved).toBe(false);
-    expect(started).toBe(false);
+    expect(preparePublicationStore).not.toHaveBeenCalled();
+    expect(resolveCodex).not.toHaveBeenCalled();
+    expect(runCodex).not.toHaveBeenCalled();
   });
 
   test("publishes team-only findings with project-free handoffs and recovered mappings", async () => {
@@ -1216,12 +1157,9 @@ describe("connected Linear publication", () => {
               type: "linear",
               teamId: "team-example",
             });
-            const recovered = (
-              await readFile(publicationData(prompt!).handoffFile, "utf8")
-            )
-              .trim()
-              .split("\n")
-              .map((line) => JSON.parse(line) as Record<string, unknown>);
+            const recovered = await readJsonLines<Record<string, unknown>>(
+              publicationData(prompt!).handoffFile,
+            );
             expect(
               recovered.map((record) => record["issueIdentifier"]),
             ).toEqual(["TEAM-1", "TEAM-2"]);
@@ -1255,9 +1193,7 @@ describe("connected Linear publication", () => {
 
   test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
     const publication = preparedPublication();
-    const stateDirectory = await temporaryDirectories.create(
-      "codex-security-publication-environment-",
-    );
+    const stateDirectory = await temporaryDirectory();
     const environment = {
       CODEX_HOME: "/existing/connected-codex-home",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -1543,7 +1479,7 @@ describe("connected Linear publication", () => {
     for (const stdout of outputs) {
       const publication = preparedPublication(3);
       const updates: PublishScanProgress[] = [];
-      let receipt: unknown;
+      const writeReceipt = mock(async (_saved: unknown) => {});
       const result = await publishScanInternal(
         publication.scanDirectory,
         { ...OPTIONS, onProgress: (event) => updates.push(event) },
@@ -1577,9 +1513,7 @@ describe("connected Linear publication", () => {
                 url: `https://linear.app/example/database/${issue.issueIdentifier}`,
               }));
             },
-            writeReceipt: async (saved) => {
-              receipt = saved;
-            },
+            writeReceipt,
           },
         ),
       );
@@ -1594,7 +1528,7 @@ describe("connected Linear publication", () => {
       );
       expect(result.failed).toEqual([]);
       expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
-      expect(receipt).toEqual(result);
+      expect(writeReceipt.mock.lastCall?.[0]).toEqual(result);
       expect(
         updates
           .filter((event) => event.type === "issue_completed")
@@ -2133,9 +2067,7 @@ describe("connected Linear publication", () => {
               persisted = issues.map((issue) => issue.issueIdentifier);
               return [...issues];
             },
-            writeReceipt: async (receipt) => {
-              receipts.push(structuredClone(receipt));
-            },
+            writeReceipt: recordReceipts(receipts),
           },
         ),
       );
@@ -2356,10 +2288,9 @@ describe("connected Linear publication", () => {
             };
           },
           recordPublishedIssues: async (_prepared, created) => {
-            const records = (await readFile(recovered!, "utf8"))
-              .trim()
-              .split("\n")
-              .map((line) => JSON.parse(line) as Record<string, unknown>);
+            const records = await readJsonLines<Record<string, unknown>>(
+              recovered!,
+            );
             expect(records.map((record) => record["findingId"])).toEqual([
               "finding-1",
               "finding-3",
@@ -2411,11 +2342,9 @@ describe("connected Linear publication", () => {
                 stderr: "",
               };
             },
-            recordPublishedIssues: async () => {
-              throw new Error(
-                "Synthetic local history token=diagnostic-only is unavailable.",
-              );
-            },
+            recordPublishedIssues: rejecting(
+              "Synthetic local history token=diagnostic-only is unavailable.",
+            ),
           },
         ),
       ),
@@ -2423,13 +2352,8 @@ describe("connected Linear publication", () => {
       /Could not persist created Linear issues: Synthetic local history token=diagnostic-only is unavailable\..*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(
-      records.map((record) => [record["findingId"], record["issueIdentifier"]]),
-    ).toEqual([
+    const records = await readJsonLines<Record<string, unknown>>(handoffFile!);
+    expect(records.map(issueMapping)).toEqual([
       ["finding-1", "SEC-RECOVERABLE"],
       ["finding-2", undefined],
       ["finding-2", "SEC-2"],
@@ -2524,16 +2448,8 @@ describe("connected Linear publication", () => {
     expect(JSON.stringify(receipt)).not.toContain("SEC-UNVERIFIED");
     expect(updates.some((event) => event.type === "completed")).toBe(false);
 
-    const recovery = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(
-      recovery.map((record) => [
-        record["findingId"],
-        record["issueIdentifier"],
-      ]),
-    ).toEqual([
+    const recovery = await readJsonLines<Record<string, unknown>>(handoffFile!);
+    expect(recovery.map(issueMapping)).toEqual([
       ["finding-1", "SEC-WRITTEN"],
       ["finding-3", "SEC-UNVERIFIED"],
       ["finding-2", "SEC-SALVAGED"],
@@ -2550,7 +2466,7 @@ describe("connected Linear publication", () => {
     const publication = preparedPublication(2);
     const controller = new AbortController();
     let handoffFile: string | undefined;
-    let receipt = false;
+    const writeReceipt = mock(async () => {});
 
     await expect(
       publishScanInternal(
@@ -2576,12 +2492,10 @@ describe("connected Linear publication", () => {
                 stderr: "",
               };
             },
-            recordPublishedIssues: async () => {
-              throw new Error("The publication database is unavailable.");
-            },
-            writeReceipt: async () => {
-              receipt = true;
-            },
+            recordPublishedIssues: rejecting(
+              "The publication database is unavailable.",
+            ),
+            writeReceipt,
           },
         ),
       ),
@@ -2589,17 +2503,9 @@ describe("connected Linear publication", () => {
       /database is unavailable.*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
-    expect(receipt).toBe(false);
-    const recovery = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(
-      recovery.map((record) => [
-        record["findingId"],
-        record["issueIdentifier"],
-      ]),
-    ).toEqual([
+    expect(writeReceipt).not.toHaveBeenCalled();
+    const recovery = await readJsonLines<Record<string, unknown>>(handoffFile!);
+    expect(recovery.map(issueMapping)).toEqual([
       ["finding-1", "SEC-WRITTEN"],
       ["finding-2", "SEC-SALVAGED"],
     ]);
@@ -2610,7 +2516,7 @@ describe("connected Linear publication", () => {
     const controller = new AbortController();
     const diagnostic = "Synthetic token cache unavailable";
     let handoffFile: string | undefined;
-    let persisted = false;
+    const persisted = mock(copyPublishedIssues);
     let failure: unknown;
 
     try {
@@ -2631,13 +2537,8 @@ describe("connected Linear publication", () => {
               controller.abort("SIGINT");
               return { exitCode: 130, stdout: "", stderr: "" };
             },
-            recordPublishedIssues: async (_prepared, issues) => {
-              persisted = true;
-              return [...issues];
-            },
-            writeReceipt: async () => {
-              throw new Error(diagnostic);
-            },
+            recordPublishedIssues: persisted,
+            writeReceipt: rejecting(diagnostic),
           },
         ),
       );
@@ -2650,7 +2551,7 @@ describe("connected Linear publication", () => {
     expect(message).toMatch(
       /partial receipt could not be saved: Synthetic token cache unavailable\..*publication handoff remains at.*avoid creating duplicate issues/u,
     );
-    expect(persisted).toBe(true);
+    expect(persisted).toHaveBeenCalled();
     expect(await readFile(handoffFile!, "utf8")).toContain("SEC-SAVED");
   });
 
@@ -2669,7 +2570,7 @@ describe("connected Linear publication", () => {
     ].join("\n");
     let handoffFile: string | undefined;
     let persisted: string[] = [];
-    let receipt: unknown;
+    const writeReceipt = mock(async (_result: unknown) => {});
 
     await expect(
       publishScanInternal(
@@ -2700,9 +2601,7 @@ describe("connected Linear publication", () => {
               persisted = created.map((issue) => issue.issueIdentifier);
               return [...created];
             },
-            writeReceipt: async (result) => {
-              receipt = result;
-            },
+            writeReceipt,
           },
         ),
       ),
@@ -2711,7 +2610,7 @@ describe("connected Linear publication", () => {
     );
 
     expect(persisted).toEqual(["SEC-2"]);
-    expect(receipt).toMatchObject({
+    expect(writeReceipt.mock.lastCall?.[0]).toMatchObject({
       counts: { findings: 2, created: 1, failed: 1 },
       failed: [
         {
@@ -2720,10 +2619,7 @@ describe("connected Linear publication", () => {
         },
       ],
     });
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const records = await readJsonLines<Record<string, unknown>>(handoffFile!);
     expect(records.map((record) => record["issueIdentifier"])).toEqual([
       "SYNTH-DUPLICATE-A",
       "SYNTH-DUPLICATE-B",
@@ -2827,7 +2723,7 @@ describe("connected Linear publication", () => {
 
     for (const scenario of scenarios) {
       const publication = preparedPublication();
-      let receipt: unknown;
+      const writeReceipt = mock(async (_result: unknown) => {});
       const operation = publishScanInternal(
         publication.scanDirectory,
         OPTIONS,
@@ -2845,9 +2741,7 @@ describe("connected Linear publication", () => {
                 stderr: "",
               };
             },
-            writeReceipt: async (result) => {
-              receipt = result;
-            },
+            writeReceipt,
           },
         ),
       );
@@ -2855,7 +2749,7 @@ describe("connected Linear publication", () => {
       await expect(operation).rejects.toThrow(
         "could not verify every completed mutation",
       );
-      expect(receipt, scenario.name).toMatchObject({
+      expect(writeReceipt.mock.lastCall?.[0], scenario.name).toMatchObject({
         created: [],
         failed: [{ findingId: "finding-1" }],
       });
@@ -2868,9 +2762,7 @@ describe("connected Linear publication", () => {
       publication,
       {},
       {
-        resolveCodex: () => {
-          throw new Error("The Codex executable could not be resolved.");
-        },
+        resolveCodex: throwing("The Codex executable could not be resolved."),
         runCodex: undefined,
       },
     );
@@ -2895,7 +2787,7 @@ describe("connected Linear publication", () => {
 
   test("removes source-bearing handoffs when the Codex executable cannot be spawned", async () => {
     const publication = preparedPublication();
-    let persisted = false;
+    const persisted = mock(copyPublishedIssues);
     const missingExecutable = join(
       tmpdir(),
       `codex-security-missing-executable-${randomUUID()}`,
@@ -2906,10 +2798,7 @@ describe("connected Linear publication", () => {
       {
         resolveCodex: () => ({ command: missingExecutable }),
         runCodex: undefined,
-        recordPublishedIssues: async (_publication, issues) => {
-          persisted = true;
-          return [...issues];
-        },
+        recordPublishedIssues: persisted,
       },
     );
 
@@ -2924,7 +2813,7 @@ describe("connected Linear publication", () => {
       "handoffs",
     );
     expect(await readdir(handoffRoot)).toEqual([]);
-    expect(persisted).toBe(false);
+    expect(persisted).not.toHaveBeenCalled();
   });
 
   test("retains handoffs when an injected publisher rejects after a possible mutation", async () => {
@@ -2958,8 +2847,8 @@ describe("connected Linear publication", () => {
 
   test("verifies the existing publication database before starting Codex or creating issues", async () => {
     const publication = preparedPublication();
-    let resolved = false;
-    let started = false;
+    const resolveCodex = mock(unusedCodexCommand);
+    const runCodex = mock(successfulCodexResult);
 
     await expect(
       publishScanInternal(
@@ -2969,26 +2858,18 @@ describe("connected Linear publication", () => {
           publication,
           {},
           {
-            preparePublicationStore: async () => {
-              throw new Error(
-                "The local scan history does not contain this finding.",
-              );
-            },
-            resolveCodex: () => {
-              resolved = true;
-              return { command: "must-not-run" };
-            },
-            runCodex: async () => {
-              started = true;
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
+            preparePublicationStore: rejecting(
+              "The local scan history does not contain this finding.",
+            ),
+            resolveCodex,
+            runCodex,
           },
         ),
       ),
     ).rejects.toThrow("local scan history does not contain this finding");
 
-    expect(resolved).toBe(false);
-    expect(started).toBe(false);
+    expect(resolveCodex).not.toHaveBeenCalled();
+    expect(runCodex).not.toHaveBeenCalled();
   });
 
   test("previews every finding without starting Codex or writing a receipt", async () => {
@@ -3000,15 +2881,9 @@ describe("connected Linear publication", () => {
         publication,
         {},
         {
-          resolveCodex: () => {
-            throw new Error("dry runs must not resolve Codex");
-          },
-          runCodex: async () => {
-            throw new Error("dry runs must not start Codex");
-          },
-          writeReceipt: async () => {
-            throw new Error("dry runs must not write receipts");
-          },
+          resolveCodex: throwing("dry runs must not resolve Codex"),
+          runCodex: rejecting("dry runs must not start Codex"),
+          writeReceipt: rejecting("dry runs must not write receipts"),
         },
       ),
     );
@@ -3030,8 +2905,8 @@ describe("connected Linear publication", () => {
     const controller = new AbortController();
     const reason = new Error("Publication was canceled before startup.");
     controller.abort(reason);
-    let prepared = false;
-    let started = false;
+    const prepare = mock(resolving(publication));
+    const runCodex = mock(successfulCodexResult);
 
     await expect(
       publishScanInternal(
@@ -3041,20 +2916,14 @@ describe("connected Linear publication", () => {
           publication,
           {},
           {
-            prepare: async () => {
-              prepared = true;
-              return publication;
-            },
-            runCodex: async () => {
-              started = true;
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
+            prepare,
+            runCodex,
           },
         ),
       ),
     ).rejects.toBe(reason);
-    expect(prepared).toBe(false);
-    expect(started).toBe(false);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runCodex).not.toHaveBeenCalled();
   });
 
   test("forwards cancellation and saves verified issues before reporting interruption", async () => {
@@ -3112,7 +2981,7 @@ describe("connected Linear publication", () => {
   ] as const)(
     "cancellation stops %s and its signal-resistant Codex descendants",
     async (_name, ignoresSignal, signal, verifyTaskkill) => {
-      const directory = await temporaryDirectories.create(
+      const directory = await temporaryDirectory(
         "codex-security-publication-cancel-",
       );
       const publication = preparedPublication(2);
@@ -3169,11 +3038,7 @@ describe("connected Linear publication", () => {
             CODEX_PUBLICATION_IGNORE_TERMINATION: ignoresSignal ? "1" : "0",
             CODEX_PUBLICATION_EVENT: issueEvent(publication.issues[0]!),
           },
-          resolveCodex: () => ({
-            command: execFileSync("node", ["-p", "process.execPath"], {
-              encoding: "utf8",
-            }).trim(),
-          }),
+          resolveCodex: nodeCommand,
         },
       );
       delete injected.runCodex;
@@ -3255,7 +3120,7 @@ describe("connected Linear publication", () => {
   );
 
   test("streams dotted Linear events, ordered progress, and a partial-publication receipt", async () => {
-    const directory = await temporaryDirectories.create(
+    const directory = await temporaryDirectory(
       "codex-security-publication-stream-",
     );
     const publication = preparedPublication(3);
@@ -3326,11 +3191,7 @@ describe("connected Linear publication", () => {
             failure,
           ]),
         },
-        resolveCodex: () => ({
-          command: execFileSync("node", ["-p", "process.execPath"], {
-            encoding: "utf8",
-          }).trim(),
-        }),
+        resolveCodex: nodeCommand,
       },
     );
     delete injected.runCodex;
@@ -3509,15 +3370,12 @@ describe("connected Linear publication", () => {
 
   test("does not allow a failing progress observer to stop issue publication", async () => {
     const publication = preparedPublication();
-    let observations = 0;
+    const onProgress = mock(throwing("The optional progress display failed."));
     const result = await publishScanInternal(
       publication.scanDirectory,
       {
         ...OPTIONS,
-        onProgress: () => {
-          observations += 1;
-          throw new Error("The optional progress display failed.");
-        },
+        onProgress,
       },
       dependencies(
         publication,
@@ -3539,7 +3397,7 @@ describe("connected Linear publication", () => {
     );
 
     expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
-    expect(observations).toBe(4);
+    expect(onProgress).toHaveBeenCalledTimes(4);
   });
 
   test("does not start Codex or write a receipt when the scan has no findings", async () => {
@@ -3551,12 +3409,8 @@ describe("connected Linear publication", () => {
         publication,
         {},
         {
-          resolveCodex: () => {
-            throw new Error("empty scans must not resolve Codex");
-          },
-          writeReceipt: async () => {
-            throw new Error("empty scans must not write receipts");
-          },
+          resolveCodex: throwing("empty scans must not resolve Codex"),
+          writeReceipt: rejecting("empty scans must not write receipts"),
         },
       ),
     );
@@ -3607,11 +3461,9 @@ describe("connected Linear publication", () => {
               persisted = issues.map((issue) => issue.issueIdentifier);
               return [...issues];
             },
-            writeReceipt: async () => {
-              throw new Error(
-                "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
-              );
-            },
+            writeReceipt: rejecting(
+              "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
+            ),
           },
         ),
       );
@@ -3659,7 +3511,7 @@ describe("connected Linear publication", () => {
 
   test("keeps receipt failures fatal when no Linear issues were created", async () => {
     const publication = preparedPublication();
-    let persisted = false;
+    const persisted = mock(copyPublishedIssues);
 
     await expect(
       publishScanInternal(
@@ -3669,19 +3521,14 @@ describe("connected Linear publication", () => {
           publication,
           { stdout: "" },
           {
-            recordPublishedIssues: async (_prepared, issues) => {
-              persisted = true;
-              return [...issues];
-            },
-            writeReceipt: async () => {
-              throw new Error("The receipt disk is unavailable.");
-            },
+            recordPublishedIssues: persisted,
+            writeReceipt: rejecting("The receipt disk is unavailable."),
           },
         ),
       ),
     ).rejects.toThrow("The receipt disk is unavailable.");
 
-    expect(persisted).toBe(false);
+    expect(persisted).not.toHaveBeenCalled();
   });
 
   test("preserves successful issues when another creation fails", async () => {
@@ -3774,7 +3621,7 @@ describe("connected Linear publication", () => {
   });
 
   test("preserves both private receipts when the same scan is published concurrently", async () => {
-    const stateDirectory = await temporaryDirectories.create(
+    const stateDirectory = await temporaryDirectory(
       "codex-security-concurrent-publication-receipts-",
     );
     const publication = preparedPublication();
@@ -3837,7 +3684,7 @@ describe("connected Linear publication", () => {
   });
 
   test("keeps publication receipts outside sealed scans and hashes unsafe scan IDs", async () => {
-    const stateDirectory = await temporaryDirectories.create(
+    const stateDirectory = await temporaryDirectory(
       "codex-security-publication-receipt-",
     );
     const publication = preparedPublication(1, "../../outside/scan");
@@ -3881,9 +3728,7 @@ describe("connected Linear publication", () => {
             publication,
             {},
             {
-              prepare: async () => {
-                throw new Error("invalid destinations must not load scans");
-              },
+              prepare: rejecting("invalid destinations must not load scans"),
             },
           ),
         ),
@@ -3891,3 +3736,18 @@ describe("connected Linear publication", () => {
     }
   });
 });
+
+const unexpectedPublicationWork = rejecting("Nothing needs publication.");
+
+async function successfulCodexResult() {
+  return { exitCode: 0, stdout: "", stderr: "" };
+}
+
+function unusedCodexCommand() {
+  return { command: "must-not-run" };
+}
+
+const recordReceipts =
+  (receipts: PublishScanResult[]) => async (receipt: PublishScanResult) => {
+    receipts.push(structuredClone(receipt));
+  };

@@ -11,11 +11,6 @@ export interface DiscoveryPromptInput {
   subagents: number;
 }
 
-export interface DedupPromptInput {
-  reducerLabel: string;
-  claimedWorkerIds: string[];
-}
-
 // Every worker starts in a fresh Codex thread. A single typed JSON object
 // makes its complete input explicit without duplicating raw and escaped values.
 
@@ -23,17 +18,19 @@ export function renderDiscoveryPrompt(
   input: DiscoveryPromptInput,
   falsePositiveFeedbackPath?: string,
 ): string {
-  const prompt = renderDeepScanTemplate(discoveryTemplate, {
-    DISCOVERY_CONTEXT_JSON: formattedJson({
-      scanId: input.scanId,
-      pluginRoot: input.pluginRoot,
-      targetPath: input.targetPath,
-      scope: input.scope,
-      userContext: input.userContext ?? null,
-      workerLabel: input.workerLabel,
-      subagents: input.subagents,
-    }),
+  const context = formattedJson({
+    scanId: input.scanId,
+    pluginRoot: input.pluginRoot,
+    targetPath: input.targetPath,
+    scope: input.scope,
+    userContext: input.userContext ?? null,
+    workerLabel: input.workerLabel,
+    subagents: input.subagents,
   });
+  const prompt = discoveryTemplate.replaceAll(
+    "{{DISCOVERY_CONTEXT_JSON}}",
+    () => context,
+  );
   if (!falsePositiveFeedbackPath) return prompt;
   return (
     `${prompt.trimEnd()}\n\nDuring validation, read existing reviewer false-positive feedback at ` +
@@ -42,34 +39,15 @@ export function renderDiscoveryPrompt(
   );
 }
 
-export function renderDedupPrompt(input: DedupPromptInput): string {
-  return renderDeepScanTemplate(dedupTemplate, {
-    DEDUP_CONTEXT_JSON: formattedJson({
-      reducerLabel: input.reducerLabel,
-      claimedWorkerIds: input.claimedWorkerIds,
-    }),
-  });
-}
-
-function renderDeepScanTemplate(
-  template: string,
-  values: Record<string, string>,
+export function renderDedupPrompt(
+  reducerLabel: string,
+  claimedWorkerIds: string[],
 ): string {
-  const placeholders = [...template.matchAll(/\{\{([A-Z0-9_]+)\}\}/g)];
-  const missing = placeholders
-    .map((match) => match[1])
-    .filter(
-      (key): key is string => key !== undefined && !Object.hasOwn(values, key),
-    );
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing Deep Scan template values: ${[...new Set(missing)].join(", ")}`,
-    );
-  }
-  return template.replace(
-    /\{\{([A-Z0-9_]+)\}\}/g,
-    (_placeholder, key: string) => String(values[key]),
-  );
+  const context = formattedJson({
+    reducerLabel,
+    claimedWorkerIds,
+  });
+  return dedupTemplate.replaceAll("{{DEDUP_CONTEXT_JSON}}", () => context);
 }
 
 function formattedJson(value: unknown): string {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isNonEmptyString } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -84,7 +85,7 @@ import {
   environmentEntry,
   readCodexHomeConfig,
 } from "./auth.js";
-import { loadContract } from "./contract.js";
+import { loadContract, sha256Text } from "./contract.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -711,10 +712,7 @@ class PublicationProgressPresenter {
         this.#repository,
       )) {
         const item = (event.event as Record<string, unknown>)["item"];
-        const tool =
-          typeof item === "object" && item !== null && !Array.isArray(item)
-            ? (item as Record<string, unknown>)["tool"]
-            : undefined;
+        const tool = isJsonObject(item) ? item["tool"] : undefined;
         const hidesShellCommand =
           activity.kind === "command" ||
           (activity.kind === "tool" &&
@@ -867,19 +865,14 @@ class FindingProgressPresenter {
   public observe(event: Readonly<Record<string, unknown>>): void {
     const method = event["method"];
     const params = event["params"];
-    if (
-      typeof params !== "object" ||
-      params === null ||
-      Array.isArray(params)
-    ) {
+    if (!isJsonObject(params)) {
       return;
     }
-    const values = params as Record<string, unknown>;
     let normalized: Record<string, unknown>;
 
     if (method === "item/reasoning/summaryTextDelta") {
-      const id = values["itemId"];
-      const delta = values["delta"];
+      const id = params["itemId"];
+      const delta = params["delta"];
       if (typeof id !== "string" || typeof delta !== "string") return;
       if (this.#dashboard === null) return;
       const text = `${this.#reasoning.get(id) ?? ""}${delta}`;
@@ -889,29 +882,28 @@ class FindingProgressPresenter {
         item: { id, type: "reasoning", text },
       };
     } else if (method === "item/started" || method === "item/completed") {
-      const item = values["item"];
-      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      const item = params["item"];
+      if (!isJsonObject(item)) {
         return;
       }
-      const current = item as Record<string, unknown>;
-      const type = current["type"];
+      const type = item["type"];
       let converted: Record<string, unknown>;
       if (type === "commandExecution") {
-        converted = { ...current, type: "command_execution" };
+        converted = { ...item, type: "command_execution" };
       } else if (type === "mcpToolCall") {
-        converted = { ...current, type: "mcp_tool_call" };
+        converted = { ...item, type: "mcp_tool_call" };
       } else if (type === "agentMessage") {
-        if (current["phase"] !== "commentary") return;
-        converted = { ...current, type: "agent_message" };
+        if (item["phase"] !== "commentary") return;
+        converted = { ...item, type: "agent_message" };
       } else if (type === "reasoning") {
-        const summary = current["summary"];
+        const summary = item["summary"];
         const text = Array.isArray(summary)
           ? summary
               .filter((entry): entry is string => typeof entry === "string")
               .join("\n")
-          : current["text"];
+          : item["text"];
         if (typeof text !== "string") return;
-        converted = { ...current, text };
+        converted = { ...item, text };
       } else {
         return;
       }
@@ -990,10 +982,9 @@ type DeepCliOptionName = Extract<
   readonly [string, string, string, string]
 >[0];
 const DEEP_SCAN_OPTION_SCHEMAS = Object.fromEntries(
-  DEEP_SCAN_SETTINGS.filter(([, , , flag]) => flag !== null).map(([name]) => [
-    name,
-    DeepScanSettingsSchema.shape[name],
-  ]),
+  DEEP_SCAN_SETTINGS.flatMap(([name, , , flag]) =>
+    flag !== null ? [[name, DeepScanSettingsSchema.shape[name]]] : [],
+  ),
 ) as Pick<typeof DeepScanSettingsSchema.shape, DeepCliOptionName>;
 
 export function resolveCliPath(directory: string, value: string): AbsolutePath {
@@ -1307,14 +1298,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
-    const python = await resolvePluginPython({
-      configuredPath: pythonPath,
-      environment,
-      signal,
-    });
     return await runWorkbench(
       {
-        python,
+        python: await resolvePluginPython({
+          configuredPath: pythonPath,
+          environment,
+          signal,
+        }),
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,
@@ -1327,6 +1317,16 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   matchFindings: (input, options) =>
     matchScanFindingsInternal(input, options, { surface: "cli" }),
 };
+
+function signalHandlers(
+  dependencies: CliDependencies,
+  operation: "add" | "remove",
+  interrupt: () => void,
+  terminate: () => void,
+): void {
+  dependencies[`${operation}SignalListener`]("SIGINT", interrupt);
+  dependencies[`${operation}SignalListener`]("SIGTERM", terminate);
+}
 
 export async function runCodexSkillCommand(
   args: readonly string[],
@@ -1811,7 +1811,7 @@ export async function main(
       : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
-  let frameworkOutput = "";
+  const frameworkCapture = captureOutput();
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
@@ -1891,11 +1891,9 @@ export async function main(
     const onInterrupt = (): void => cancel("SIGINT");
     const onTerminate = (): void => cancel("SIGTERM");
     const removeListeners = (): void => {
-      dependencies.removeSignalListener("SIGINT", onInterrupt);
-      dependencies.removeSignalListener("SIGTERM", onTerminate);
+      signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
     };
-    dependencies.addSignalListener("SIGINT", onInterrupt);
-    dependencies.addSignalListener("SIGTERM", onTerminate);
+    signalHandlers(dependencies, "add", onInterrupt, onTerminate);
     let previousProgress = "";
     try {
       const result = await operation({
@@ -1922,8 +1920,7 @@ export async function main(
       return result;
     } catch (error) {
       const interrupted = controller.signal.reason;
-      exitCode =
-        interrupted === "SIGINT" ? 130 : interrupted === "SIGTERM" ? 143 : 2;
+      exitCode = interruptedExitCode(controller.signal) ?? 2;
       const message =
         interrupted === "SIGINT"
           ? "Finding matching canceled by Ctrl-C. Saved comparisons are preserved."
@@ -2354,8 +2351,7 @@ export async function main(
             const sourcePath = imported["sourcePath"];
             const format = imported["format"];
             if (
-              typeof sourcePath !== "string" ||
-              sourcePath.length === 0 ||
+              !isNonEmptyString(sourcePath) ||
               (format !== "csv" && format !== "json")
             ) {
               throw new CodexSecurityError(
@@ -2656,8 +2652,7 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       const removeSignalListeners = (): void => {
         if (!observingSignals) return;
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
         observingSignals = false;
       };
       try {
@@ -2747,8 +2742,7 @@ export async function main(
               )
             : undefined;
         if (options.to !== "linear") {
-          dependencies.addSignalListener("SIGINT", onInterrupt);
-          dependencies.addSignalListener("SIGTERM", onTerminate);
+          signalHandlers(dependencies, "add", onInterrupt, onTerminate);
           observingSignals = true;
         }
         if (csvPath !== undefined) {
@@ -2807,16 +2801,13 @@ export async function main(
               listedScans.map(async (scan) => {
                 if (!isJsonObject(scan)) return undefined;
                 const directory = scan["scanDir"];
-                if (typeof directory !== "string" || directory.length === 0) {
+                if (!isNonEmptyString(directory)) {
                   return undefined;
                 }
                 const metadata = await lstat(
                   resolveCliPath(currentDirectory, directory),
                 ).catch(() => undefined);
-                return metadata?.isDirectory() === true &&
-                  !metadata.isSymbolicLink()
-                  ? scan
-                  : undefined;
+                return metadata?.isDirectory() === true ? scan : undefined;
               }),
             )
           ).filter((scan): scan is JsonObject => scan !== undefined);
@@ -2836,10 +2827,8 @@ export async function main(
             const scanId = scan["scanId"];
             const directory = scan["scanDir"];
             if (
-              typeof scanId !== "string" ||
-              scanId.length === 0 ||
-              typeof directory !== "string" ||
-              directory.length === 0 ||
+              !isNonEmptyString(scanId) ||
+              !isNonEmptyString(directory) ||
               !isJsonObject(progress) ||
               progress["status"] !== "complete"
             ) {
@@ -3063,8 +3052,7 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         observingSignals = true;
         if (!options.dryRun) {
           progress.start();
@@ -3630,20 +3618,9 @@ export async function main(
           } = resolveScanSettings(
             project,
             {
-              auth: options.auth,
+              ...pickScanSettings(options),
               target: scope.target,
-              cyberAccessProgram: options.cyberAccessProgram,
               knowledgeBasePaths: options.knowledgeBase,
-              scanPromptFile: options.scanPromptFile,
-              validationPromptFile: options.validationPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
-              mode: options.mode,
-              workers: options.workers,
-              subagents: options.subagents,
-              stopAfterNoNew: options.stopAfterNoNew,
-              maxDiscoveryRuns: options.maxDiscoveryRuns,
-              maxTimeHours: options.maxTimeHours,
-              outputDir: options.outputDir,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
               codexOverrides: parseCodexOverrides(
@@ -3853,7 +3830,7 @@ export async function main(
           errorOutput.write(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
           removeSignals();
@@ -3951,7 +3928,7 @@ export async function main(
           errorOutput.write(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
           removeSignals();
@@ -4077,7 +4054,7 @@ export async function main(
                 : diagnosticValue(error)
             }\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
           removeSignals();
@@ -4193,9 +4170,7 @@ export async function main(
         };
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
-
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(directory, args.repository ?? ".");
@@ -4206,12 +4181,8 @@ export async function main(
           const resolved = resolveScanSettings(
             project,
             {
-              auth: options.auth,
-              cyberAccessProgram: options.cyberAccessProgram,
-              outputDir: options.outputDir,
+              ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
-              scanPromptFile: options.scanPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
               maxCostUsd: options.maxCost,
               codexOverrides: parseCodexOverrides(
                 options.codex,
@@ -4353,8 +4324,7 @@ export async function main(
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
           stopDashboard();
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
         }
       },
     })
@@ -4470,12 +4440,8 @@ export async function main(
             dependencies,
           );
           const overrides = {
-            mode: options.mode,
-            outputDir: options.outputDir,
+            ...pickScanSettings({ ...options, workers: undefined }),
             knowledgeBasePaths: options.knowledgeBase,
-            scanPromptFile: options.scanPromptFile,
-            validationPromptFile: options.validationPromptFile,
-            postScanPromptFile: options.postScanPromptFile,
             maxCostUsd: options.maxCost,
           };
           const resolved = resolveScanSettings(
@@ -4969,21 +4935,8 @@ export async function main(
             const environment =
               imports.length === 0
                 ? undefined
-                : Object.fromEntries(
-                    Object.entries(dependencies.environment).filter(
-                      ([name]) =>
-                        !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
-                          name,
-                        ),
-                    ),
-                  );
-            let response = "";
-            const verificationOutput: Writable = {
-              write(value: string | Uint8Array): boolean {
-                response += value.toString();
-                return true;
-              },
-            };
+                : withoutLinearCredentials(dependencies.environment);
+            const response = captureOutput();
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
@@ -4996,7 +4949,7 @@ export async function main(
                 "verify-fix",
                 selected === undefined ? [...positionals, ...imports] : [],
                 options,
-                verificationOutput,
+                response.stream,
                 errorOutput,
                 dependencies,
                 {
@@ -5017,7 +4970,7 @@ export async function main(
 
               let reported: unknown;
               try {
-                reported = JSON.parse(response);
+                reported = JSON.parse(response.text());
               } catch {
                 throw new CodexSecurityError(
                   "Verification results were not valid JSON.",
@@ -5331,14 +5284,7 @@ export async function main(
           const environment =
             imports.length === 0
               ? undefined
-              : Object.fromEntries(
-                  Object.entries(dependencies.environment).filter(
-                    ([name]) =>
-                      !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
-                        name,
-                      ),
-                  ),
-                );
+              : withoutLinearCredentials(dependencies.environment);
           const patchGitBase =
             options.assessPatchRisk || options.createPr
               ? await snapshotPatchTree(repository, dependencies)
@@ -5353,17 +5299,12 @@ export async function main(
               dependencies,
             );
           }
-          let report = "";
+          const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
             options,
-            {
-              write: (value) => {
-                report += value.toString();
-                return true;
-              },
-            },
+            report.stream,
             errorOutput,
             dependencies,
             {
@@ -5373,7 +5314,7 @@ export async function main(
               validationPrompt,
             },
           );
-          if (!jsonOutput) output.write(report);
+          if (!jsonOutput) output.write(report.text());
           const files = await changedPatchFiles(
             repository,
             patchBase,
@@ -5429,7 +5370,7 @@ export async function main(
           if (structuredOutput)
             return {
               ...patchResult,
-              ...(jsonOutput ? { report } : {}),
+              ...(jsonOutput ? { report: report.text() } : {}),
             };
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
@@ -5542,14 +5483,13 @@ export async function main(
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
-            )
-              .filter(
-                ([name, value]) =>
-                  value?.trim() &&
-                  (name.toUpperCase() === "OPENAI_API_KEY" ||
-                    name.toUpperCase() === "CODEX_API_KEY"),
-              )
-              .map(([name]) => name);
+            ).flatMap(([name, value]) =>
+              value?.trim() &&
+              (name.toUpperCase() === "OPENAI_API_KEY" ||
+                name.toUpperCase() === "CODEX_API_KEY")
+                ? name
+                : [],
+            );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
               : "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
@@ -5894,9 +5834,7 @@ export async function main(
           : [argument],
       ),
       {
-        stdout: (value) => {
-          frameworkOutput += value;
-        },
+        stdout: frameworkCapture.stream.write,
         exit: (code) => {
           frameworkExit = code;
         },
@@ -5908,6 +5846,7 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  const frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
     if (policyFullOutput || patchStructuredError || scanStructuredError) {
@@ -5975,7 +5914,7 @@ async function runScanImport(
         : errorMessage(error);
     errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
     return {
-      exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
+      exitCode: interruptedExitCode(controller.signal) ?? 2,
       error: message,
     };
   } finally {
@@ -6076,7 +6015,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const repository = recipe["repository"];
-  if (typeof repository !== "string" || repository.length === 0) {
+  if (!isNonEmptyString(repository)) {
     throw new CodexSecurityError(
       "The saved scan recipe does not contain a repository.",
     );
@@ -6086,12 +6025,7 @@ async function prepareScanArgumentsFromRecipe(
     throw new CodexSecurityError("The saved scan recipe contains no target.");
   }
   const paths = target["paths"];
-  if (
-    !Array.isArray(paths) ||
-    !paths.every(
-      (path): path is string => typeof path === "string" && path.length > 0,
-    )
-  ) {
+  if (!Array.isArray(paths) || !paths.every(isNonEmptyString)) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid paths.",
     );
@@ -6099,9 +6033,7 @@ async function prepareScanArgumentsFromRecipe(
   const knowledgeBasePaths = recipe["knowledgeBasePaths"] ?? [];
   if (
     !Array.isArray(knowledgeBasePaths) ||
-    !knowledgeBasePaths.every(
-      (path): path is string => typeof path === "string" && path.length > 0,
-    )
+    !knowledgeBasePaths.every(isNonEmptyString)
   ) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid knowledge base paths.",
@@ -6140,7 +6072,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const head = target["headRef"];
-  if (head !== undefined && (typeof head !== "string" || head.length === 0)) {
+  if (head !== undefined && !isNonEmptyString(head)) {
     throw new CodexSecurityError(
       "The saved scan recipe has an invalid Git head.",
     );
@@ -6680,9 +6612,8 @@ async function selectSavedFindings(
   }
 
   const selected = findings.filter((finding) => {
-    const triage = finding["triage"] as JsonObject | undefined;
     return (
-      triage?.["status"] !== "closed" &&
+      (finding["triage"] as JsonObject | undefined)?.["status"] !== "closed" &&
       (identifiers.length === 0 ||
         identifiers.includes(finding.occurrenceId) ||
         identifiers.includes(finding.findingId)) &&
@@ -6757,10 +6688,9 @@ function directPatchDigest(
   positionals: readonly string[],
   imports: readonly ImportedIssue[],
 ): string {
-  return `issues-${createHash("sha256")
-    .update(JSON.stringify([...positionals, ...imports.map(({ id }) => id)]))
-    .digest("hex")
-    .slice(0, 12)}`;
+  return `issues-${sha256Text(
+    JSON.stringify([...positionals, ...imports.map(({ id }) => id)]),
+  ).slice(0, 12)}`;
 }
 
 async function publishPatchBranch(
@@ -7172,18 +7102,12 @@ async function assessPatchRisk(
     for await (const chunk of createReadStream(patchPath)) {
       digest.update(chunk);
     }
-    let report = "";
-    const stdout: Writable = {
-      write(value: string | Uint8Array): boolean {
-        report += value.toString();
-        return true;
-      },
-    };
+    const report = captureOutput();
     const status = await runSkill(
       "assess-patch-risk",
       [],
       request.configuration,
-      stdout,
+      report.stream,
       stderr,
       dependencies,
       {
@@ -7206,7 +7130,7 @@ async function assessPatchRisk(
         `Patch risk assessment exited with status ${status}.`,
       );
     }
-    return { report: report.trim() };
+    return { report: report.text().trim() };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -7269,13 +7193,7 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
-    let response = "";
-    const stdout: Writable = {
-      write(value: string | Uint8Array): boolean {
-        response += value.toString();
-        return true;
-      },
-    };
+    const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
       stderr,
@@ -7299,7 +7217,7 @@ async function runFindingPatches(
         "fix-finding",
         [],
         configuration,
-        stdout,
+        response.stream,
         patchErrors,
         dependencies,
         {
@@ -7335,7 +7253,7 @@ async function runFindingPatches(
       patch = failed(`Patch command exited with status ${status}.`);
     } else {
       try {
-        const reported = JSON.parse(response) as { patches?: unknown };
+        const reported = JSON.parse(response.text()) as { patches?: unknown };
         const entries = Array.isArray(reported?.patches)
           ? reported.patches
           : [];
@@ -7381,6 +7299,19 @@ async function runFindingPatches(
     patches.push(patch);
   }
   return patches;
+}
+
+function captureOutput() {
+  let text = "";
+  return {
+    stream: {
+      write(value: string | Uint8Array): boolean {
+        text += value.toString();
+        return true;
+      },
+    },
+    text: () => text,
+  };
 }
 
 async function runSkill(
@@ -7681,13 +7612,11 @@ export async function readSkillCommandOutput(
 ): Promise<{
   message?: string;
   error?: string;
-  malformed: boolean;
   completed?: boolean;
   sandboxUnavailable?: boolean;
 }> {
   let message: string | undefined;
   let error: string | undefined;
-  let malformed = false;
   let threadId: string | undefined;
   let turnId: string | undefined;
   let completed = false;
@@ -7742,11 +7671,9 @@ export async function readSkillCommandOutput(
     try {
       event = JSON.parse(line);
     } catch {
-      malformed = true;
       continue;
     }
     if (typeof event !== "object" || event === null) {
-      malformed = true;
       continue;
     }
     const value = event as Record<string, unknown>;
@@ -7966,7 +7893,6 @@ export async function readSkillCommandOutput(
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
-    malformed,
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
   };
@@ -8242,11 +8168,9 @@ async function executeScan(
   const onInterrupt = signalListener("SIGINT");
   const onTerminate = signalListener("SIGTERM");
   const removeSignalListeners = (): void => {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
+    signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
   };
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  signalHandlers(dependencies, "add", onInterrupt, onTerminate);
 
   let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
     null;
@@ -9038,12 +8962,10 @@ function authenticationFailureMessage(
     );
   }
   if (authentication?.method === "api_key") {
-    const openAiKey =
-      authentication.source === "OPENAI_API_KEY" ||
-      authentication.source === "CODEX_API_KEY";
     return (
       `Authentication failed using ${authentication.source}. ` +
-      (openAiKey
+      (authentication.source === "OPENAI_API_KEY" ||
+      authentication.source === "CODEX_API_KEY"
         ? "Retry with '--auth chatgpt' or provide a valid API key."
         : `Provide a valid ${authentication.source} for the selected provider.`)
     );
@@ -9344,20 +9266,18 @@ function protectedRootErrorMessage(
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
-  const recovery =
+  return [
+    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
+    `  Resolved path:  ${error.outputDirectory}`,
+    `  Protected root: ${error.protectedRoot}`,
+    `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
         ? "Choose a private output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
-        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`;
-  return [
-    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
-    `  Resolved path:  ${error.outputDirectory}`,
-    `  Protected root: ${error.protectedRoot}`,
-    `  Reason:         ${reason}`,
-    recovery,
+        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
   ].join("\n");
 }
 
@@ -9810,4 +9730,15 @@ function listenForAbort(
     dependencies.removeSignalListener("SIGINT", onInterrupt);
     dependencies.removeSignalListener("SIGTERM", onTerminate);
   };
+}
+
+function withoutLinearCredentials(
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(name),
+    ),
+  );
 }

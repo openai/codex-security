@@ -263,15 +263,13 @@ export class DeepScanWorkerRunner {
     const promptRoot = join(reducerRoot, "prompts");
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
-    const basePrompt = renderDedupPrompt({
-      reducerLabel,
-      claimedWorkerIds: consumed.map((worker) => worker.id),
-    });
+    const workerIds = consumed.map((worker) => worker.id);
+    const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
       id: reducerId,
       scanId: run.scanId,
-      workerIds: consumed.map((worker) => worker.id),
+      workerIds,
       promptPath,
       artifactDir,
     });
@@ -428,8 +426,8 @@ export class DeepScanWorkerRunner {
         const result = await this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
-          // Discovery workers write only to their isolated directory. Setup and
-          // dedup workers own shared scan artifacts; the target remains read-only.
+          // Discovery workers write only to their isolated directory. Reducers
+          // own shared scan artifacts; the target remains read-only.
           workingDirectory:
             input.kind === "discovery"
               ? input.artifactDir

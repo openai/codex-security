@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
 import { readJson as readJsonFile } from "./support/json.js";
+import { initializeMcpClient } from "./support/mcp-client.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -124,60 +124,7 @@ async function startMcp() {
     [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
-  const messages = createInterface({ input: child.stdout })[
-    Symbol.asyncIterator
-  ]();
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  let nextId = 0;
-
-  async function request(
-    method: string,
-    params: JsonObject,
-  ): Promise<JsonObject> {
-    const id = ++nextId;
-    child.stdin.write(
-      `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-    );
-    while (true) {
-      const message = await messages.next();
-      if (message.done) {
-        throw new Error(`MCP server exited before replying: ${stderr}`);
-      }
-      const response = JSON.parse(message.value) as JsonObject;
-      if (response["id"] !== id) continue;
-      if (response["error"] !== undefined) {
-        throw new Error(JSON.stringify(response["error"]));
-      }
-      return response["result"] as JsonObject;
-    }
-  }
-
-  await request("initialize", {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "finding-detail-contract-test", version: "1.0.0" },
-  });
-  child.stdin.write(
-    `${JSON.stringify({
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-      params: {},
-    })}\n`,
-  );
-
-  return {
-    request,
-    async close(): Promise<void> {
-      child.stdin.end();
-      await new Promise<void>((resolve) => {
-        child.once("close", () => resolve());
-      });
-    },
-  };
+  return initializeMcpClient(child, "finding-detail-contract-test", false);
 }
 
 describe("bundled plugin finding detail contracts", () => {

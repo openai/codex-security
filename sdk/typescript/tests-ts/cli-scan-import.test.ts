@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import {
   capture,
@@ -7,13 +7,12 @@ import {
   fakeResult,
   FakeSignals,
 } from "./cli-fixtures.js";
+import { rejecting, throwing } from "./support/errors.js";
 
 function importDependencies() {
   const deps = dependencies({
     currentDirectory: resolve("workspace"),
-    onConfig: () => {
-      throw new Error("Import must not create a model client");
-    },
+    onConfig: throwing("Import must not create a model client"),
   });
   const calls: Parameters<NonNullable<typeof deps.importScan>>[0][] = [];
   deps.importScan = async (options, settings) => {
@@ -186,11 +185,9 @@ describe("scan import", () => {
   test("ordinary scan retains repository arguments and the --json output shortcut", async () => {
     const stdout = capture();
     const stderr = capture();
-    let scans = 0;
+    const onRun = mock();
     const deps = dependencies({
-      onRun: () => {
-        scans += 1;
-      },
+      onRun,
     });
     expect(
       await main(
@@ -200,7 +197,7 @@ describe("scan import", () => {
         deps,
       ),
     ).toBe(0);
-    expect(scans).toBe(1);
+    expect(onRun).toHaveBeenCalledTimes(1);
     expect(JSON.parse(stdout.text())).toMatchObject({
       manifest: { scan: { id: "scan" } },
     });
@@ -231,9 +228,7 @@ describe("scan import", () => {
         ["scan", "import", "--csv", "findings.csv", "--format", "json"],
         stdout.stream,
         {
-          write() {
-            throw new Error("closed progress stream");
-          },
+          write: throwing("closed progress stream"),
         },
         deps,
       ),
@@ -307,9 +302,7 @@ describe("scan import", () => {
   test("reports import errors without leaving signal handlers", async () => {
     const signals = new FakeSignals();
     const deps = dependencies({ signals });
-    deps.importScan = async () => {
-      throw new Error("Input JSON is not a findings document.");
-    };
+    deps.importScan = rejecting("Input JSON is not a findings document.");
     const stderr = capture();
     expect(
       await main(
@@ -319,7 +312,9 @@ describe("scan import", () => {
         deps,
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain("Input JSON is not a findings document.");
+    expect(stderr.text()).toBe(
+      "codex-security: Input JSON is not a findings document.\n",
+    );
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });

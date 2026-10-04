@@ -1,4 +1,4 @@
-import { randomUUID, hash } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { z } from "incur";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
@@ -34,17 +34,15 @@ export function recordsReviewAttribution(
       return observationId;
     }),
   );
-  const beneficiaryObservationIds = [...participants]
-    .filter((id) => anchors.has(id))
-    .sort();
+  const beneficiaryObservationIds = [
+    ...participants.intersection(anchors),
+  ].sort();
   if (beneficiaryObservationIds.length === 0)
     throw new Error("Records review has no incoming observation participants.");
   return {
     version: 1,
     beneficiaryObservationIds,
-    contextObservationIds: [...participants]
-      .filter((id) => !anchors.has(id))
-      .sort(),
+    contextObservationIds: [...participants.difference(anchors)].sort(),
   };
 }
 

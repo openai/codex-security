@@ -1,3 +1,4 @@
+import { findingEntry } from "./value.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
@@ -146,12 +147,7 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
-  const cached = new Map(
-    (await checkpoint?.load(result))?.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const cached = new Map((await checkpoint?.load(result))?.map(findingEntry));
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
@@ -263,7 +259,7 @@ export function validateSeverityClassification(
   result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  const byId = new Map(findings.map((finding) => [finding.findingId, finding]));
+  const byId = new Map(findings.map(findingEntry));
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);
     if (
