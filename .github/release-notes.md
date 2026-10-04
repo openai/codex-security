@@ -71,6 +71,8 @@
 - simplify Deep Scan worker launch ([#1212](https://github.com/openai/codex-security/pull/1212))
 - support long inventory output filenames ([#1214](https://github.com/openai/codex-security/pull/1214))
 - share progress and event parsing ([#1209](https://github.com/openai/codex-security/pull/1209))
+- simplify artifact projections ([#1227](https://github.com/openai/codex-security/pull/1227))
+- simplify workbench persistence ([#1226](https://github.com/openai/codex-security/pull/1226))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
