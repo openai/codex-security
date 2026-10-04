@@ -772,7 +772,7 @@ describe("bundled plugin finding detail contracts", () => {
       "findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
       "warnings = []",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
-      "finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
+      "finalizer['_recover_unsealed_findings'](manifest, findings, json.loads((plugin / 'schemas' / 'findings.schema.json').read_text()), examples, warnings)",
       "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'rootCause': findings['findings'][0].get('root_cause'), 'warnings': warnings}))",
     ].join("\n");
     const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
@@ -808,7 +808,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    second['rootCause'] = {'summary': 'Richer root cause', **detail}",
       "    findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
       "    warnings = []",
-      "    finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
+      "    finalizer['_recover_unsealed_findings'](manifest, findings, json.loads((plugin / 'schemas' / 'findings.schema.json').read_text()), examples, warnings)",
       "    results[name] = {'summary': findings['findings'][0]['summary'], 'warnings': warnings}",
       "print(json.dumps(results))",
     ].join("\n");

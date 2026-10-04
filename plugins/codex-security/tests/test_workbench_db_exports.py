@@ -160,6 +160,49 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     assert unchanged["updatedAt"] == recovered["updatedAt"]
 
 
+def test_draft_publication_preserves_pre_index_checkpoint_history(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": documents["coverage"]},
+    )
+    original = checkpoint.read_bytes()
+    shutil.rmtree(scan_dir / "checkpoints/pending")
+    documents["reconciledCheckpointIds"] = [checkpoint.name]
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    assert not (scan_dir / "checkpoints/pending").exists()
+    result = run_workbench(
+        state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)
+    )
+    assert result["status"] == "draft_written"
+    assert checkpoint.read_bytes() == original
+    assert not staged.exists()
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"]
+
+
 def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -1788,3 +1831,50 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         canonical = json.loads((scan_dir / "coverage.json").read_text())
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]
+
+
+def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = workbench_api["require_scan"](connection, scan_id)
+        binding = workbench_api["workbench_completion_binding"](scan, workbench_api["now"]())
+    manifest, _, _ = workbench_api["finalize_scan"](scan_dir, completion_binding=binding)
+    csv_path = scan_dir / "exports" / "findings.csv"
+    sealed_csv = b"original,sealed,export\n"
+    csv_path.write_bytes(sealed_csv)
+    manifest["scan"]["artifacts"].append(
+        {
+            "path": "exports/findings.csv",
+            "sha256": hashlib.sha256(sealed_csv).hexdigest(),
+            "mediaType": "text/csv",
+        }
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n")
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    sealed_manifest = manifest_path.read_bytes()
+
+    rejected = run_workbench(
+        state_dir, "export-findings", "--scan-id", scan_id, "--format", "csv", check=False
+    )
+
+    assert rejected["returncode"] != 0
+    assert "CSV output path cannot overwrite a sealed scan artifact" in rejected["stderr"]
+    assert csv_path.read_bytes() == sealed_csv
+    assert manifest_path.read_bytes() == sealed_manifest
+    exported = run_workbench(state_dir, "export-findings", "--scan-id", scan_id, "--format", "json")
+    assert exported["export"]["path"] == str(scan_dir / "findings.json")

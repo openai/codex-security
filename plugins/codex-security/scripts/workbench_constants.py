@@ -77,5 +77,9 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def reject_nonstandard_json_number(value: str) -> None:
+    raise ValueError(f"invalid JSON number {value}")
+
+
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
