@@ -228,7 +228,9 @@ try {
     JSON.parse(await readFile(path.join(outputRoot, "result.json"), "utf8")),
     mergedWithSources,
   );
-  const checkpointNames = await readdir(path.join(outputRoot, "checkpoints"));
+  const checkpointNames = (
+    await readdir(path.join(outputRoot, "checkpoints"))
+  ).filter((name) => name.endsWith(".json"));
   assert.equal(checkpointNames.length, 1);
   assert.deepEqual(
     JSON.parse(

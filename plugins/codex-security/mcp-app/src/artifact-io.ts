@@ -80,8 +80,10 @@ export async function readArtifactTextWithMetadata(
     } finally {
       await handle.close();
     }
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (cause) {
+    throw new Error(label + ": the requested artifact cannot be read.", {
+      cause,
+    });
   }
 }
 
@@ -111,8 +113,13 @@ async function artifactSourcePath(
     }
   }
 
-  const canonical = await fs.realpath(current).catch(() => undefined);
-  if (!canonical || !canonical.startsWith(root + sep)) {
+  const canonical = await fs.realpath(current).catch((cause: unknown) => {
+    throw new Error(
+      label + ": the requested artifact escaped its bound context.",
+      { cause },
+    );
+  });
+  if (!canonical.startsWith(root + sep)) {
     throw new Error(
       label + ": the requested artifact escaped its bound context.",
     );

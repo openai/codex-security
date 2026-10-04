@@ -1035,11 +1035,10 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
 def _recover_unsealed_findings(
     manifest: dict[str, Any],
     findings: dict[str, Any],
-    schema_dir: Path,
+    schema: dict[str, Any],
     scan_dir: Path,
     warnings: list[str],
 ) -> list[str]:
-    schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -3022,8 +3021,9 @@ def _prepare_scan_finalization(
         _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
+        schema = _read_json(schema_dir / "findings.schema.json")
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema, scan_dir, completion_warnings
         )
         _recover_unsealed_coverage(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings

@@ -61,6 +61,82 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+@pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
+def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    if linked_writeup:
+        finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
+    finding["remediation"] = "Validate the record length."
+    finding["remediationTests"] = ["Reject a record longer than the allowed size."]
+    finding["preventiveControls"] = ["Centralize record validation."]
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "review-1:0", "finding": {"remediation": "Validate the record length."}},
+            {
+                "id": "review-2:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Reject a record longer than the allowed size.",
+                        "Cover duplicate keys in parser tests.",
+                    ],
+                    "preventiveControls": [
+                        "Centralize record validation.",
+                        "Track keys while parsing a record.",
+                    ],
+                },
+            },
+            {
+                "id": "review-3:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Cover duplicate keys in parser tests.",
+                        "Reject case-variant duplicate keys.",
+                    ],
+                    "preventiveControls": ["Track keys while parsing a record."],
+                },
+            },
+        ]
+    }
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    if linked_writeup:
+        assert "findings/parser/parser.md" in markdown
+    assert "Source review-2:0: Reject duplicate record keys." in markdown
+    for text in (
+        "Validate the record length.",
+        "Reject duplicate record keys.",
+        "Reject a record longer than the allowed size.",
+        "Cover duplicate keys in parser tests.",
+        "Reject case-variant duplicate keys.",
+        "Centralize record validation.",
+        "Track keys while parsing a record.",
+    ):
+        assert markdown.count(text) == 1
+
+
+def test_retained_findings_visit_sources_before_history_and_handle_cycles() -> None:
+    previous = {"remediation": "Retain the earlier fix."}
+    source = {"provenance": {"previousFindings": [previous, None]}}
+    finding = {
+        "provenance": {
+            "sourceFindings": [{"id": "source:0", "finding": source}, {"finding": None}],
+            "previousFindings": [previous],
+        }
+    }
+    previous["provenance"] = {"previousFindings": [finding]}
+    assert [
+        (source_id, id(value)) for source_id, value in PROJECTION.retained_findings(finding)
+    ] == [
+        ("finding", id(finding)),
+        ("source:0", id(source)),
+        ("source:0", id(previous)),
+    ]
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
@@ -447,6 +523,34 @@ def test_projection_links_detailed_writeup_without_repeating_inline_finding() ->
     assert "### [1] Parser" in markdown
     assert "See the [detailed technical write-up]" in markdown
     assert "## Injected remediation" not in markdown
+
+
+@pytest.mark.parametrize("source_count", [1, 2])
+def test_projection_renders_composed_details_alongside_source_writeup(source_count: int) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    finding = findings["findings"][0]
+    report_path = "findings/first-parser/first-parser.md"
+    finding["writeup"] = {"reportPath": report_path}
+    finding["provenance"] = {
+        "source": "local_plugin",
+        "sourceFindingIds": [f"scan-{index}:0" for index in range(source_count)],
+        "sourceFindings": [
+            {"id": f"scan-{index}:0", "finding": copy.deepcopy(finding)}
+            for index in range(source_count)
+        ],
+    }
+    finding["summary"] = "Combined evidence establishes both affected entry points."
+    finding["remediation"] = "Apply the shared fix to both entry points."
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert finding["summary"] in markdown
+    assert finding["remediation"] in markdown
+    assert f"]({report_path})" in markdown
+    assert "See the [detailed technical write-up]" not in markdown
+    assert findings == original
 
 
 @pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])

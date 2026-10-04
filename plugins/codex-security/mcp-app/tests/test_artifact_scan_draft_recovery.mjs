@@ -25,6 +25,10 @@ import {
 const { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } =
   draftApi;
 const execFileAsync = promisify(execFile);
+async function checkpointNames(directory) {
+  return (await readdir(directory)).filter((name) => name.endsWith(".json"));
+}
+
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id, reason = "Review completed.") => ({ id, reason });
 const findingFor = (candidateId) => ({
@@ -39,6 +43,24 @@ const findingFor = (candidateId) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+test("Standard pending checkpoint indexes retain the accepted head", async (t) => {
+  const f = await fixture(t, "standard");
+  const task = { id: "review", ...generic };
+  await f.write(f.draft({ deferred: [task] }));
+  const checkpoints = path.join(f.root, "checkpoints");
+  const [pendingName] = await checkpointNames(checkpoints);
+  await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
+  assert.deepEqual((await f.read()).deferred, []);
+  await mkdir(path.join(checkpoints, "pending"), { recursive: true });
+  // The accepted immutable checkpoint remains authoritative after its marker is gone.
+  const headPath = path.join(f.root, "checkpoint-head.json");
+  await writeFile(headPath, JSON.stringify({ checkpoint: pendingName }));
+  const observed = Date.now() / 1000 + 10;
+  await utimes(headPath, observed, observed);
+  await f.write(f.draft({}, true));
+  assert.deepEqual((await f.read()).deferred, [task]);
+});
+
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
     const f = await fixture(t, "worker");
@@ -50,7 +72,7 @@ for (const observation of ["checkpoint head", "worker result"]) {
     await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
     assert.deepEqual((await f.read()).deferred, []);
     const checkpoints = path.join(f.root, "checkpoints");
-    for (const name of await readdir(checkpoints)) {
+    for (const name of await checkpointNames(checkpoints)) {
       const checkpointPath = path.join(checkpoints, name);
       const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
       const time = checkpoint.coverage.deferred.length ? 50 : 100;
@@ -168,7 +190,7 @@ for (const headTime of [1, 2, 3]) {
     for (const filename of [
       resultPath,
       headPath,
-      ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
+      ...(await checkpointNames(path.join(f.root, "checkpoints"))).map((name) =>
         path.join(f.root, "checkpoints", name),
       ),
     ]) {
@@ -686,7 +708,7 @@ for (const layout of ["standard", "diff", "worker"]) {
     assert.deepEqual(updatedDraft.coverage.deferred, [enriched]);
     const checkpointRoot = path.join(f.root, "checkpoints");
     const originals = await Promise.all(
-      (await readdir(checkpointRoot)).map(async (name) => [
+      (await checkpointNames(checkpointRoot)).map(async (name) => [
         name,
         await readFile(path.join(checkpointRoot, name), "utf8"),
       ]),
@@ -950,7 +972,7 @@ for (const layout of ["standard", "diff", "worker"]) {
       );
       await f.write(closed);
       const checkpoints = path.join(f.root, "checkpoints");
-      for (const name of await readdir(checkpoints)) {
+      for (const name of await checkpointNames(checkpoints)) {
         const file = path.join(checkpoints, name);
         const row = JSON.parse(await readFile(file, "utf8"));
         const time = row.coverage.resolvedDeferred?.length ? 2 : 1;
@@ -960,7 +982,7 @@ for (const layout of ["standard", "diff", "worker"]) {
         ? ["result.json", "checkpoint-head.json"]
         : ["coverage.json", "scan-manifest.json", "findings.json"])
         await utimes(path.join(f.root, name), 2, 2);
-      const before = new Set(await readdir(checkpoints));
+      const before = new Set(await checkpointNames(checkpoints));
       const followUp = {
         ...surface,
         notes: "A new caller needs review.",
@@ -978,7 +1000,7 @@ for (const layout of ["standard", "diff", "worker"]) {
         ),
         false,
       );
-      for (const name of await readdir(checkpoints)) {
+      for (const name of await checkpointNames(checkpoints)) {
         if (!before.has(name)) {
           const time = observation === "tied" ? 2 : 3;
           await utimes(path.join(checkpoints, name), time, time);
@@ -1023,7 +1045,7 @@ for (const layout of ["standard", "diff", "worker"]) {
       assert.deepEqual((await f.read()).resolvedDeferred, [close(pending.id)]);
       const checkpointRoot = path.join(f.root, "checkpoints");
       const originalClosures = [];
-      for (const name of await readdir(checkpointRoot)) {
+      for (const name of await checkpointNames(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);
         const saved = JSON.parse(await readFile(file, "utf8"));
         if (saved.coverage.resolvedDeferred?.length)
@@ -1066,7 +1088,7 @@ test("worker: inherited closures cannot erase ambiguous legacy tasks", async (t)
     f.draft({ resolvedDeferred: [close("review")] }, true),
   );
   const checkpoints = path.join(f.root, "checkpoints");
-  for (const name of await readdir(checkpoints)) {
+  for (const name of await checkpointNames(checkpoints)) {
     const filename = path.join(checkpoints, name);
     const saved = JSON.parse(await readFile(filename, "utf8"));
     const timestamp = saved.coverage.deferred.length ? 100 : 200;
@@ -1214,7 +1236,9 @@ for (const layout of ["standard", "diff", "worker"]) {
       assert.equal(typeof task.id, "string");
       assert.deepEqual(initial.coverage, await f.read());
       assert.deepEqual(input, original);
-      for (const name of await readdir(path.join(f.root, "checkpoints"))) {
+      for (const name of await checkpointNames(
+        path.join(f.root, "checkpoints"),
+      )) {
         const checkpoint = JSON.parse(
           await readFile(path.join(f.root, "checkpoints", name), "utf8"),
         );
@@ -1387,7 +1411,9 @@ for (const layout of ["standard", "diff"]) {
       await f.write(closed);
       await f.write(f.draft({ deferred: [pending] }));
       let selected;
-      for (const name of await readdir(path.join(f.root, "checkpoints"))) {
+      for (const name of await checkpointNames(
+        path.join(f.root, "checkpoints"),
+      )) {
         const file = path.join(f.root, "checkpoints", name);
         const value = JSON.parse(await readFile(file, "utf8"));
         const time = value.coverage.resolvedDeferred?.length ? 100 : 200;
@@ -1478,7 +1504,7 @@ for (const complete of [false, true]) {
       complete,
     );
     await assert.rejects(f.write(submitted), /stored JSON is malformed/);
-    const files = await readdir(path.join(f.root, "checkpoints"));
+    const files = await checkpointNames(path.join(f.root, "checkpoints"));
     assert.equal(files.length, 1);
     assert.deepEqual(
       JSON.parse(
@@ -1716,5 +1742,426 @@ for (const layout of ["standard", "diff", "worker"]) {
         );
       });
     }
+  }
+}
+
+for (const layout of ["standard", "diff"]) {
+  for (const operation of ["open", "realpath"]) {
+    for (const removed of ["marker", "stage"]) {
+      test(`${layout}: reopens checkpoint history when acknowledgement removes its ${removed} during ${operation}`, async (t) => {
+        const f = await fixture(t, layout);
+        await f.write(f.draft());
+        const task = { id: "concurrent-review", ...generic };
+        const contents = JSON.stringify(f.draft({ deferred: [task] }));
+        const name =
+          createHash("sha256").update(contents).digest("hex") + ".json";
+        const stageRelative =
+          "drafts/00000000-0000-4000-8000-000000000001.checkpoint.json";
+        const stage = path.join(f.root, stageRelative);
+        const marker = path.join(f.root, "checkpoints", "pending", name);
+        const history = path.join(f.root, "checkpoints", name);
+        await mkdir(path.dirname(stage), { recursive: true });
+        await mkdir(path.dirname(marker), { recursive: true });
+        await writeFile(stage, contents);
+        await writeFile(marker, stageRelative);
+        const original = fsPromises[operation];
+        let acknowledged = false;
+        fsPromises[operation] = async (filename, ...args) => {
+          if (
+            !acknowledged &&
+            filename === (removed === "marker" ? marker : stage)
+          ) {
+            acknowledged = true;
+            await writeFile(history, contents);
+            await rm(marker);
+            await rm(stage);
+          }
+          return original(filename, ...args);
+        };
+        try {
+          await f.write(f.draft({}, true));
+        } finally {
+          fsPromises[operation] = original;
+        }
+        assert.ok(acknowledged);
+        assert.deepEqual((await f.read()).deferred, [task]);
+      });
+    }
+  }
+}
+for (const layout of ["standard", "diff"]) {
+  for (const disposition of ["rejected", "not_applicable"]) {
+    test(`${layout}: stopped ${disposition} retains every acknowledged finding variant`, async (t) => {
+      const f = await fixture(t, layout);
+      const variants = [1, 2].map((line) => ({
+        ...findingFor("candidate-review"),
+        identity: { anchor: "review", instance: `variant-${line}` },
+        summary: `Synthetic finding variant ${line}.`,
+        locations: [{ path: "src/example.py", startLine: line }],
+      }));
+      await f.write({ ...f.draft(), findings: variants });
+      const checkpoints = path.join(f.root, "checkpoints");
+      const originals = new Map(
+        await Promise.all(
+          (await checkpointNames(checkpoints)).map(async (name) => [
+            name,
+            await readFile(path.join(checkpoints, name), "utf8"),
+          ]),
+        ),
+      );
+      const acknowledge = async () => {
+        const pending = path.join(checkpoints, "pending");
+        await mkdir(pending, { recursive: true });
+        for (const name of await checkpointNames(pending))
+          await rm(path.join(pending, name));
+      };
+      const surface = {
+        id: "candidate-surface",
+        candidateId: "candidate-review",
+        label: "Candidate",
+        disposition,
+      };
+      await acknowledge();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await f.write(f.draft({ surfaces: [surface] }, true));
+        await acknowledge();
+      }
+      const { stdout } = await execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+root=Path(sys.argv[2])
+binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{"kind":"git_revision","repository":"synthetic","revision":"head"},"scope":{"includePaths":["."],"excludePaths":[]},"coverageMode":"repository"}
+result=merge_saved_results(root,sys.argv[3],binding,[],stopped=True,reason="interrupted")
+print(json.dumps(result))`,
+          fileURLToPath(new URL("../../scripts", import.meta.url)),
+          f.root,
+          f.context.scanId,
+        ],
+      );
+      const [, findings, coverage] = JSON.parse(stdout);
+      assert.deepEqual(findings.findings, []);
+      assert.deepEqual(coverage.deferred, [
+        { id: "scan-stopped", reason: "interrupted" },
+      ]);
+      const rejected = coverage.surfaces.find(
+        (row) => row.candidateId === surface.candidateId,
+      );
+      assert.equal(rejected.disposition, disposition);
+      const evidence = [
+        rejected.finding,
+        ...(rejected.finding?.provenance?.previousFindings ?? []),
+        ...(rejected.previousFindings ?? []),
+      ].filter(Boolean);
+      for (const variant of variants) {
+        assert.ok(
+          evidence.some(
+            (finding) =>
+              finding.summary === variant.summary &&
+              isDeepStrictEqual(finding.locations, variant.locations),
+          ),
+          variant.summary,
+        );
+      }
+      await f.write({
+        ...f.draft({}, true),
+        findings: [{ ...variants[0], summary: "Updated review outcome." }],
+      });
+      const reported = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      ).findings;
+      assert.equal(reported.length, 1);
+      for (const variant of variants)
+        assert.ok(
+          reported[0].provenance.previousFindings.some(
+            (finding) =>
+              finding.summary === variant.summary &&
+              isDeepStrictEqual(finding.locations, variant.locations),
+          ),
+        );
+      for (const [name, contents] of originals)
+        assert.equal(
+          await readFile(path.join(checkpoints, name), "utf8"),
+          contents,
+        );
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"]) {
+  for (const disposition of ["rejected", "not_applicable"]) {
+    test(`${layout}: repeated ${disposition} retains acknowledged finding evidence`, async (t) => {
+      const f = await fixture(t, layout);
+      const finding = findingFor("candidate-review");
+      await f.write({ ...f.draft(), findings: [finding] });
+      const surface = {
+        id: "candidate-surface",
+        candidateId: "candidate-review",
+        label: "Candidate",
+        disposition,
+      };
+      const pending = path.join(f.root, "checkpoints", "pending");
+      const acknowledge = async () => {
+        // Successful workbench publication retires markers, retaining immutable history.
+        await mkdir(pending, { recursive: true });
+        for (const name of await checkpointNames(pending))
+          await rm(path.join(pending, name));
+      };
+      await acknowledge();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const result = await f.write(f.draft({ surfaces: [surface] }, true));
+        const saved = result.coverage.surfaces.find(
+          ({ candidateId }) => candidateId === surface.candidateId,
+        );
+        assert.equal(saved.disposition, disposition);
+        assert.equal(saved.finding.summary, finding.summary);
+        assert.deepEqual(saved.finding.locations, finding.locations);
+        assert.equal(result.findingCount, 0);
+        await acknowledge();
+      }
+      const restored = { ...finding, summary: "Updated review outcome." };
+      await f.write({ ...f.draft({}, true), findings: [restored] });
+      const published = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      ).findings[0];
+      assert.equal(published.summary, restored.summary);
+      assert.ok(
+        published.provenance.previousFindings.some(
+          (previous) => previous.summary === finding.summary,
+        ),
+      );
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"]) {
+  for (const complete of [false, true]) {
+    for (const pendingOnly of [false, true]) {
+      test(`${layout}: acknowledged generic review restores its surface on reopening, complete=${complete}, pending=${pendingOnly}`, async (t) => {
+        const f = await fixture(t, layout);
+        const task = { id: "api-review", ...generic, surfaceIds: ["api"] };
+        const other = { id: "other-review", ...generic };
+        const surface = {
+          id: "api",
+          label: "API",
+          disposition: "needs_follow_up",
+          notes: "The caller needs review.",
+        };
+        const acknowledge = async () => {
+          const pending = path.join(f.root, "checkpoints", "pending");
+          await mkdir(pending, { recursive: true });
+          for (const name of await checkpointNames(pending))
+            await rm(path.join(pending, name));
+        };
+        await f.write(
+          f.draft({ deferred: [task, other], surfaces: [surface] }),
+        );
+        await acknowledge();
+        await f.write(
+          f.draft(
+            {
+              resolvedDeferred: [close(task.id), close(other.id)],
+              surfaces: [{ ...surface, disposition: "no_issue_found" }],
+            },
+            true,
+          ),
+        );
+        await acknowledge();
+        const reopening = f.draft({ deferred: [task] }, complete);
+        if (pendingOnly) {
+          const originalRename = fsPromises.rename;
+          let checkpointWrites = 0;
+          fsPromises.rename = async (source, destination) => {
+            if (
+              path.dirname(destination) === path.join(f.root, "checkpoints") &&
+              destination.endsWith(".json") &&
+              ++checkpointWrites === 2
+            )
+              throw new Error("interrupted reconciled checkpoint");
+            return originalRename(source, destination);
+          };
+          try {
+            await assert.rejects(
+              f.write(reopening),
+              /interrupted reconciled checkpoint/,
+            );
+            assert.equal(checkpointWrites, 2);
+          } finally {
+            fsPromises.rename = originalRename;
+          }
+          assert.equal(
+            (await f.read()).surfaces.find(({ id }) => id === "api")
+              .disposition,
+            "no_issue_found",
+          );
+        }
+        const checkpoints = path.join(f.root, "checkpoints");
+        const evidence = await Promise.all(
+          (await checkpointNames(checkpoints)).map(async (name) => [
+            name,
+            await readFile(path.join(checkpoints, name)),
+          ]),
+        );
+        await f.write(pendingOnly ? f.draft({}, complete) : reopening);
+        for (const [name, contents] of evidence) {
+          assert.deepEqual(
+            await readFile(path.join(checkpoints, name)),
+            contents,
+          );
+        }
+        const coverage = await f.read();
+        assert.deepEqual(coverage.deferred, [task]);
+        assert.equal(
+          coverage.surfaces.find(({ id }) => id === "api").disposition,
+          "needs_follow_up",
+        );
+        assert.deepEqual(coverage.resolvedDeferred, [close(other.id)]);
+        await acknowledge();
+        await f.write(f.draft());
+        assert.equal(
+          (await f.read()).surfaces.find(({ id }) => id === "api").disposition,
+          "needs_follow_up",
+        );
+      });
+    }
+  }
+}
+
+for (const layout of ["standard", "diff"]) {
+  for (const complete of [false, true]) {
+    test(`${layout}: accepted closures survive two acknowledged progress updates before reopening, complete=${complete}`, async (t) => {
+      const f = await fixture(t, layout);
+      const task = { id: "api-review", ...generic, surfaceIds: ["api"] };
+      const other = { id: "other-review", ...generic };
+      const surface = {
+        id: "api",
+        label: "API",
+        disposition: "needs_follow_up",
+        notes: "The caller needs review.",
+        receiptRefs: ["artifacts/review.md"],
+      };
+      const acknowledge = async () => {
+        const pending = path.join(f.root, "checkpoints", "pending");
+        await mkdir(pending, { recursive: true });
+        for (const name of await checkpointNames(pending))
+          await rm(path.join(pending, name));
+      };
+      await f.write(f.draft({ deferred: [task, other], surfaces: [surface] }));
+      await acknowledge();
+      await f.write(
+        f.draft(
+          {
+            resolvedDeferred: [close(task.id)],
+            surfaces: [{ ...surface, disposition: "no_issue_found" }],
+          },
+          true,
+        ),
+      );
+      await acknowledge();
+      const checkpoints = path.join(f.root, "checkpoints");
+      const evidence = await Promise.all(
+        (await checkpointNames(checkpoints)).map(async (name) => [
+          name,
+          await readFile(path.join(checkpoints, name)),
+        ]),
+      );
+      for (let update = 0; update < 2; update++) {
+        const result = await f.write(
+          f.draft({ openQuestions: [{ question: `Progress ${update}` }] }),
+        );
+        assert.deepEqual(result.coverage.deferred, [other]);
+        assert.deepEqual(result.coverage.resolvedDeferred, [close(task.id)]);
+        assert.equal(
+          result.coverage.surfaces.find(({ id }) => id === "api").disposition,
+          "no_issue_found",
+        );
+        await acknowledge();
+      }
+      await f.write(f.draft({ deferred: [task] }, complete));
+      const saved = await f.read();
+      assert.deepEqual(
+        new Set(saved.deferred.map(({ id }) => id)),
+        new Set([task.id, other.id]),
+      );
+      assert.deepEqual(saved.resolvedDeferred ?? [], []);
+      assert.deepEqual(
+        saved.surfaces.find(({ id }) => id === "api"),
+        surface,
+      );
+      for (const [name, contents] of evidence)
+        assert.deepEqual(
+          await readFile(path.join(checkpoints, name)),
+          contents,
+        );
+      await acknowledge();
+      await f.write(f.draft());
+      assert.deepEqual(
+        (await f.read()).surfaces.find(({ id }) => id === "api"),
+        surface,
+      );
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"]) {
+  for (const disposition of ["rejected", "not_applicable"]) {
+    test(`${layout}: terminal ${disposition} survives acknowledged progress findings`, async (t) => {
+      const f = await fixture(t, layout);
+      const finding = findingFor("candidate-review");
+      const task = { id: "other-review", ...generic };
+      const surface = {
+        id: "candidate-surface",
+        candidateId: "candidate-review",
+        label: "Candidate",
+        disposition,
+      };
+      const acknowledge = async () => {
+        const pending = path.join(f.root, "checkpoints", "pending");
+        await mkdir(pending, { recursive: true });
+        for (const name of await checkpointNames(pending))
+          await rm(path.join(pending, name));
+      };
+      await f.write({ ...f.draft({ deferred: [task] }), findings: [finding] });
+      await acknowledge();
+      await f.write(f.draft({ surfaces: [surface], deferred: [task] }, true));
+      await acknowledge();
+      const checkpoints = path.join(f.root, "checkpoints");
+      const evidence = await Promise.all(
+        (await checkpointNames(checkpoints)).map(async (name) => [
+          name,
+          await readFile(path.join(checkpoints, name)),
+        ]),
+      );
+      await f.write(
+        f.draft({ openQuestions: [{ question: "Other review continues." }] }),
+      );
+      await acknowledge();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await f.write({ ...f.draft(), findings: [finding] });
+        assert.equal(result.findingCount, 0);
+        assert.deepEqual(result.coverage.deferred, [task]);
+        assert.equal(
+          result.coverage.surfaces.find(
+            (row) => row.candidateId === "candidate-review",
+          ).disposition,
+          disposition,
+        );
+        await acknowledge();
+      }
+      await interruptDraftWrite(path.join(f.root, "findings.json"), () =>
+        f.write({ ...f.draft({}, true), findings: [finding] }),
+      );
+      const restored = await f.write(f.draft());
+      assert.equal(restored.findingCount, 1);
+      for (const [name, contents] of evidence)
+        assert.deepEqual(
+          await readFile(path.join(checkpoints, name)),
+          contents,
+        );
+    });
   }
 }

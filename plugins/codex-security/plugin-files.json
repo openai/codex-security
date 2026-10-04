@@ -93,6 +93,7 @@
     "scripts/workbench_progress.py",
     "scripts/workbench_publication.py",
     "scripts/workbench_remediation.py",
+    "scripts/workbench_result_merge.py",
     "scripts/workbench_saved_results.py",
     "scripts/workbench_scan_history.py",
     "scripts/workbench_scan_start.py",
