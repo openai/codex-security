@@ -12,7 +12,11 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { ScanPermissionError } from "./scan-execution.js";
+import {
+  ScanPermissionError,
+  ScanTransportClosedError,
+} from "./scan-execution.js";
+import { ScanCostTrackingError } from "./deep-scan.js";
 import type { ScanExpectation } from "./contract.js";
 import type { ScanResult } from "./result.js";
 import { collectResult, type CompletedScanTurn } from "./scan-publication.js";
@@ -86,7 +90,12 @@ function throwScanFailure(
   error: unknown,
   options: Pick<ScanEventRunOptions, "signal" | "scanDir">,
 ): never {
-  if (options.signal.reason instanceof ScanCostLimitExceededError)
+  if (
+    options.signal.reason instanceof ScanCostLimitExceededError ||
+    options.signal.reason instanceof ScanCostTrackingError ||
+    options.signal.reason instanceof ScanPermissionError ||
+    options.signal.reason instanceof ScanTransportClosedError
+  )
     throw options.signal.reason;
   if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
     throw new ScanInterruptedError(
@@ -105,15 +114,9 @@ export async function runScanEvents(
   try {
     const completed = await runScanTurn(options);
     const result = await collectResult(
-      completed.turnResult,
-      completed.threadId,
-      options.scanDir,
-      options.pluginRoot,
-      options.expectation,
-      options.signal,
+      options,
+      completed,
       options.workbenchValidated,
-      options.pythonPath,
-      options.protectedRoot,
     );
     throwIfAborted(options.signal, options.scanDir);
     return result;
@@ -199,12 +202,7 @@ export async function runScanTurn(
     });
     const { status, threadId, finalResponse, lastStreamError } = turn;
     let { usage } = turn;
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-      );
-    }
+    throwIfAborted(options.signal, options.scanDir);
     if (status !== "completed") {
       throw new IncompleteScanError(
         lastStreamError ??
@@ -507,7 +505,9 @@ export function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   if (!signal?.aborted) return;
   if (
     signal.reason instanceof ScanCostLimitExceededError ||
-    signal.reason instanceof ScanPermissionError
+    signal.reason instanceof ScanCostTrackingError ||
+    signal.reason instanceof ScanPermissionError ||
+    signal.reason instanceof ScanTransportClosedError
   )
     throw signal.reason;
   const message = scanDir

@@ -16,7 +16,7 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { candidateSchemaV1 } from "./artifact-candidate.js";
 
 const execFileAsync = promisify(execFile);
 const discoveryComponents = ["artifacts", "02_discovery"] as const;

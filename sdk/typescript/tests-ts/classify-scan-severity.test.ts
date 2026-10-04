@@ -2,7 +2,7 @@ import { findingFingerprint, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
 import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   classifyScanDirectorySeverity,
   classifyScanSeverityInternal,
@@ -13,6 +13,7 @@ import {
   type ClassifySeverityOptions,
 } from "../src/classify-severity.js";
 import { loadContract } from "../src/contract.js";
+import { SeverityStore } from "../src/severity-store.js";
 import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
@@ -184,10 +185,23 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
   calls.length = 0;
-  expect(
-    (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
-  ).toEqual(complete.assessments);
-  expect(calls).toEqual([]);
+  const workbench = spyOn(
+    SeverityStore.prototype as unknown as {
+      run(args: string[], input?: JsonObject): Promise<JsonObject>;
+    },
+    "run",
+  );
+  try {
+    expect(
+      (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
+    ).toEqual(complete.assessments);
+    expect(calls).toEqual([]);
+    expect(workbench.mock.calls.map(([, input]) => input?.["action"])).toEqual([
+      "begin",
+    ]);
+  } finally {
+    workbench.mockRestore();
+  }
   expect(
     await query(
       environment,
@@ -306,6 +320,53 @@ test.each(["same", "different"])(
     expect(firstModel.calls).toEqual([]);
   },
 );
+
+test("classifies identical findings independently in each scan", async () => {
+  const first = await fixture();
+  const second = await fixture("scan_example_002");
+  const environment = first.environment;
+  const firstModel = recordingClassifier();
+  const firstOptions = {
+    environment,
+    rubricPath: first.rubricPath,
+    codex: firstModel.codex,
+  };
+  const original = await classifyScanDirectorySeverity(
+    first.scanDirectory,
+    firstOptions,
+  );
+  const originalRows = await query(
+    environment,
+    "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
+  );
+  const secondModel = recordingClassifier();
+  secondModel.control.excluded = true;
+  const classified = await classifyScanDirectorySeverity(second.scanDirectory, {
+    environment,
+    rubricPath: second.rubricPath,
+    codex: secondModel.codex,
+  });
+  expect(secondModel.calls).toHaveLength(2);
+  expect(
+    classified.assessments.map((assessment) => assessment.decision),
+  ).toEqual(["excluded", "excluded"]);
+  expect(
+    classified.assessments.map((assessment) => assessment.occurrenceId),
+  ).toEqual(second.findings.map((finding) => finding.occurrenceId));
+  firstModel.calls.length = 0;
+  const resumed = await classifyScanDirectorySeverity(
+    first.scanDirectory,
+    firstOptions,
+  );
+  expect(firstModel.calls).toEqual([]);
+  expect(resumed.assessments).toEqual(original.assessments);
+  expect(
+    await query(
+      environment,
+      `SELECT * FROM scan_severity_assessments WHERE scan_id = '${first.scanId}' ORDER BY finding_id`,
+    ),
+  ).toEqual(originalRows);
+});
 
 test("migration preserves assessments for unindexed scan directories", async () => {
   const first = await fixture();
