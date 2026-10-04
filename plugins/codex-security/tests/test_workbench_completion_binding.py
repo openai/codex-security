@@ -1301,6 +1301,9 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     linked_path = scan_dir / linked_report
     linked_path.parent.mkdir(parents=True)
     linked_path.write_text("# Verified finding\n")
+    shared_report = "findings/linked-writeup/other.md"
+    shared_path = scan_dir / shared_report
+    shared_path.write_text("# Another verified finding\n")
     symlink_report = "findings/symlink-writeup/symlink-writeup.md"
     symlink_path = scan_dir / symlink_report
     symlink_path.parent.mkdir(parents=True)
@@ -1309,6 +1312,7 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     for anchor, writeup in (
         ("linked-writeup", {"reportPath": linked_report}),
         ("duplicate-writeup", {"reportPath": linked_report}),
+        ("shared-directory-writeup", {"reportPath": shared_report}),
         ("missing-writeup", {"reportPath": "findings/missing-writeup/missing-writeup.md"}),
         ("symlink-writeup", {"reportPath": symlink_report}),
         ("unsafe-writeup", {"reportPath": "../outside.md"}),
@@ -1323,11 +1327,12 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 7
+    assert completed["scan"]["findingCount"] == 8
     warnings = completed["scan"]["warnings"]
-    assert len(warnings) == 5
+    assert len(warnings) == 6
     assert all(warning.startswith("Skipped malformed writeup for finding") for warning in warnings)
     assert any("duplicate report path" in warning for warning in warnings)
+    assert any("shared evidence directory" in warning for warning in warnings)
     assert any("inside the scan directory" in warning for warning in warnings)
     assert any("non-symlink" in warning for warning in warnings)
     assert any("schema pattern" in warning for warning in warnings)
@@ -1340,13 +1345,55 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     assert recovered["linked-writeup"]["writeup"] == {"reportPath": linked_report}
     for anchor in (
         "duplicate-writeup",
+        "shared-directory-writeup",
         "missing-writeup",
         "symlink-writeup",
         "unsafe-writeup",
         "invalid-writeup",
     ):
         assert "writeup" not in recovered[anchor]
+        assert recovered[anchor]["codeEvidence"] == valid["codeEvidence"]
+    assert linked_path.read_text() == "# Verified finding\n"
+    assert shared_path.read_text() == "# Another verified finding\n"
+    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("replacement_directory", ["original", "replacement"])
+def test_completion_tracks_writeup_directories_after_stronger_finding_replacement(
+    tmp_path: Path, replacement_directory: str
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    original = findings["findings"][0]
+    original["writeup"] = {"reportPath": "findings/original/first.md"}
+    stronger = copy.deepcopy(original)
+    stronger["severity"]["level"] = "critical"
+    stronger["writeup"] = {"reportPath": f"findings/{replacement_directory}/updated.md"}
+    other = copy.deepcopy(original)
+    other["identity"]["anchor"] = "another-finding"
+    available_directory = "original" if replacement_directory == "replacement" else "other"
+    other["writeup"] = {"reportPath": f"findings/{available_directory}/other.md"}
+    findings["findings"] = [original, stronger, other]
+    for finding in findings["findings"]:
+        path = scan_dir / finding["writeup"]["reportPath"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Verified finding\n")
+    findings_path.write_text(json.dumps(findings))
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 2
+    warnings = completed["scan"]["warnings"]
+    assert len(warnings) == 1
+    assert "retained stronger duplicate logical finding" in warnings[0]
+    recovered = json.loads(findings_path.read_text())["findings"]
+    assert recovered[0]["writeup"] == stronger["writeup"]
+    assert recovered[0]["severity"]["level"] == "critical"
+    assert recovered[1]["writeup"] == other["writeup"]
+    assert recovered[0]["provenance"]["previousFindings"][0]["writeup"] == original["writeup"]
 
 
 def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path) -> None:

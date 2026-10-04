@@ -235,7 +235,10 @@ export function createExecutionCodex(
     (session.policy !== "ordinary" ||
       session.inheritedPermissions !== undefined) &&
     client.createCodex === undefined;
-  if (session.inheritedPermissions !== undefined || checkPermissions) {
+  if (
+    (session.inheritedPermissions !== undefined || checkPermissions) &&
+    sdkCodexConfig["default_permissions"] === SCAN_PERMISSION_PROFILE
+  ) {
     const permissions = sessionConfig["permissions"] as JsonObject;
     // A stable argv-only profile supports managed allowlists without merging
     // the runtime home's persisted scan defaults into inherited permissions.
@@ -394,4 +397,45 @@ export function prepareMergeExecution(
   const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
   setScanSubagentBudget(config, subagents);
   return { ...session, policy: "merge", sessionConfig: config };
+}
+/** Read-only helpers retain denied paths while intentionally removing write access. */
+export function prepareReadOnlyExecution(
+  config: JsonObject,
+  permissions?: ScanPermissions,
+): {
+  config: JsonObject;
+  overrides: string[];
+} {
+  const prepared = structuredClone(config);
+  if (permissions === undefined) {
+    delete prepared["default_permissions"];
+    return { config: prepared, overrides: [] };
+  }
+  delete prepared["permissions"];
+  delete prepared["projects"];
+  delete prepared["sandbox_mode"];
+  prepared["default_permissions"] = "codex_security_comparison";
+  return {
+    config: prepared,
+    overrides: [
+      `permissions.codex_security_comparison=${inlineToml({
+        extends: ":read-only",
+        filesystem: readOnlyFilesystem(permissions.filesystem),
+        network: { enabled: false },
+      })}`,
+    ],
+  };
+}
+
+function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
+  return Object.fromEntries(
+    Object.entries(filesystem).map(([path, access]) => [
+      path,
+      access === "write"
+        ? "read"
+        : isRecord(access)
+          ? readOnlyFilesystem(access as JsonObject)
+          : access,
+    ]),
+  );
 }

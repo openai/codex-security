@@ -13,6 +13,9 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { Codex, type ThreadOptions } from "@openai/codex-sdk";
+import { stringify } from "smol-toml";
+import type { JsonObject } from "../src/config.js";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
@@ -1573,3 +1576,112 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+test.each([
+  {
+    name: "explicit model and effort",
+    overrides: { model: "requested-model", model_reasoning_effort: "high" },
+    model: "requested-model",
+    effort: "high",
+  },
+  {
+    name: "explicit model",
+    overrides: { model: "requested-model" },
+    model: "requested-model",
+    effort: "low",
+  },
+  {
+    name: "explicit effort",
+    overrides: { model_reasoning_effort: "high" },
+    model: "ambient-model",
+    effort: "high",
+  },
+  {
+    name: "explicit profile",
+    overrides: {
+      profile: "requested",
+      profiles: {
+        requested: { model: "profile-model", model_reasoning_effort: "medium" },
+      },
+    },
+    model: "profile-model",
+    effort: "medium",
+  },
+  {
+    name: "inherited profile",
+    overrides: {},
+    model: "ambient-model",
+    effort: "low",
+  },
+])(
+  "component helpers preserve $name over ambient profile settings",
+  async ({ overrides, model, effort }) => {
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const home = join(paths.root, "home");
+    await mkdir(home, { mode: 0o700 });
+    const homeConfig = stringify({
+      profile: "ambient",
+      profiles: {
+        ambient: { model: "ambient-model", model_reasoning_effort: "low" },
+      },
+    });
+    await writeFile(join(home, "config.toml"), homeConfig);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+      OPENAI_API_KEY: "synthetic-component-key",
+    };
+    const config = { codexOverrides: overrides as JsonObject };
+    const launches: Array<ThreadOptions | undefined> = [];
+    let planning = true;
+    const synthetic = fakeCodex(() => (planning ? { components } : noMatches));
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation((options) => {
+      launches.push(options);
+      return synthetic.startThread(options!) as ReturnType<
+        Codex["startThread"]
+      >;
+    });
+    // Profile merging belongs to the wrapper; MCP enumeration is independent.
+    const mcpCommand = spyOn(runtime, "runCodexCommand").mockImplementation(
+      async (_command, args) => {
+        expect(args).toContain("mcp");
+        return { success: true, exitCode: 0, stdout: "[]", stderr: "" };
+      },
+    );
+    try {
+      const plan = await planComponents(paths.repository, {
+        config,
+        environment,
+      });
+      expect(plan.components).toContainEqual(components[0]!);
+      planning = false;
+      const summary = await scan(paths, {
+        components: components.slice(0, 2),
+        config,
+        environment,
+        matchFindings: undefined,
+      });
+      expect(summary.deduplication?.status).toBe("completed");
+      expect(launches).toHaveLength(2);
+      for (const launch of launches)
+        expect(launch).toMatchObject({
+          model,
+          modelReasoningEffort: effort,
+          sandboxMode: "read-only",
+          networkAccessEnabled: false,
+        });
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+        homeConfig,
+      );
+    } finally {
+      startThread.mockRestore();
+      mcpCommand.mockRestore();
+    }
+  },
+);

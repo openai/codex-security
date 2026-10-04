@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -77,6 +78,7 @@ EXPECTED_TABLES = {
     "scan_artifacts",
     "scan_comparison_matches",
     "scan_comparisons",
+    "scan_execution_threads",
     "scan_progress",
     "scans",
     "schema_migrations",
@@ -1043,7 +1045,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (43,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -4039,7 +4041,17 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
     assert manifest["scan"]["target"]["revision"] == "deadbeef"
 
 
-def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "report_path",
+    [
+        "findings/unsafe-archive-extraction/unsafe-archive-extraction.md",
+        "findings/" + "/".join(["a" * 190] * 11) + "/report.md",
+    ],
+    ids=["original", "long-nested"],
+)
+def test_completed_finding_projects_writeup_and_poc_artifact_paths(
+    tmp_path: Path, report_path: str
+) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
@@ -4049,8 +4061,7 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
 
-    slug = "unsafe-archive-extraction"
-    report_path = f"findings/{slug}/{slug}.md"
+    report_directory = report_path.rsplit("/", 1)[0]
     findings_path = scan_dir / "findings.json"
     findings = json.loads(findings_path.read_text())
     findings["findings"][0]["writeup"] = {"reportPath": report_path}
@@ -4060,7 +4071,12 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     report = scan_dir / report_path
     poc = report.parent / "poc"
     fixtures = poc / "fixtures"
-    fixtures.mkdir(parents=True)
+    try:
+        fixtures.mkdir(parents=True)
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            pytest.skip("The host filesystem cannot create the long-path fixture.")
+        raise
     report.write_text("# Unsafe archive extraction\n")
     (poc / "README.md").write_text("Run the reproduction in a disposable directory.\n")
     (poc / "reproduce.py").write_text("print('reproduced')\n")
@@ -4072,9 +4088,9 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(tmp_path: Pat
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     assert completed["scan"]["findings"][0]["artifactPaths"] == [
         report_path,
-        f"findings/{slug}/poc/README.md",
-        f"findings/{slug}/poc/reproduce.py",
-        f"findings/{slug}/poc/fixtures/payload.txt",
+        f"{report_directory}/poc/README.md",
+        f"{report_directory}/poc/reproduce.py",
+        f"{report_directory}/poc/fixtures/payload.txt",
     ]
 
 

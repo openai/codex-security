@@ -13,6 +13,9 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { importSource } from "./import-module.mjs";
 
+const { candidateSchemaV1 } = await importSource(
+  new URL("../src/artifact-candidate.ts", import.meta.url).pathname,
+);
 const {
   compactDiscoveryCandidateSchema,
   discoveryCandidatesInputSchema,
@@ -284,6 +287,29 @@ async function verifyNormalizationAndPagination(context) {
     assert.equal(
       row.locations.every((location) => "end_line" in location),
       true,
+    );
+  }
+
+  const row = all.rows[0];
+  assert.deepEqual(candidateSchemaV1.parse(row), row);
+  const extended = { ...row, savedExtension: { retained: true } };
+  assert.equal(candidateSchemaV1.safeParse(extended).success, false);
+  assert.deepEqual(candidateSchemaV1.passthrough().parse(extended), extended);
+  for (const invalid of [
+    { ...row, candidate_id: "  " },
+    {
+      ...row,
+      locations: [{ ...row.locations[0], start_line: 2, end_line: 1 }],
+    },
+    {
+      ...row,
+      locations: [{ ...row.locations[0], unexpected: true }],
+    },
+  ]) {
+    assert.equal(candidateSchemaV1.safeParse(invalid).success, false);
+    assert.equal(
+      candidateSchemaV1.passthrough().safeParse(invalid).success,
+      false,
     );
   }
 
