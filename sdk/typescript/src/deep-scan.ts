@@ -157,6 +157,13 @@ export async function runDeepScans(
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
+  const deadlineController = new AbortController();
+  const externalStop = new AbortController();
+  const executionSignal = AbortSignal.any([signal, externalStop.signal]);
+  const discoverySignal = AbortSignal.any([
+    executionSignal,
+    deadlineController.signal,
+  ]);
   let saveTail = Promise.resolve();
   let savedSnapshot: string | undefined;
   let savedAggregate = state.aggregate;
@@ -201,17 +208,35 @@ export async function runDeepScans(
           ? []
           : [{ path: aggregatePath!, contents: Buffer.from(contents) }]),
         { path: DEEP_SCAN_CHECKPOINT, contents: Buffer.from(snapshot) },
-      ])
-        await workbench(
-          [
-            "save-scan-artifact",
-            "--scan-id",
-            scanId,
-            "--artifact-path",
-            artifact.path,
-          ],
-          Buffer.from(artifact.contents).toString("utf8"),
-        );
+      ]) {
+        try {
+          await workbench(
+            [
+              "save-scan-artifact",
+              "--scan-id",
+              scanId,
+              "--artifact-path",
+              artifact.path,
+            ],
+            Buffer.from(artifact.contents).toString("utf8"),
+          );
+        } catch (cause) {
+          if (
+            discoverySignal.aborted ||
+            cause instanceof DeepScanRecoveryError ||
+            cause instanceof ScanTransportClosedError ||
+            cause instanceof ScanCostTrackingError ||
+            cause instanceof ScanCostLimitExceededError ||
+            cause instanceof ScanPermissionError
+          )
+            throw cause;
+          throw new DeepScanRecoveryError(
+            `Could not retain Deep Scan progress; resume to retry: ${errorMessage(cause)}`,
+            scanDir,
+            { cause },
+          );
+        }
+      }
       if (aggregateChanged)
         for (const id of Object.keys(aggregate?.revisions ?? {}))
           persistedRevisions.add(id);
@@ -455,7 +480,6 @@ export async function runDeepScans(
     Date.parse(state.startedAt) + settings.maxTimeHours * 3_600_000;
   const discoveryActive =
     state.terminalReason === undefined && Date.now() < deadline;
-  const deadlineController = new AbortController();
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const tick = (): void => {
     const remaining = deadline - Date.now();
@@ -466,15 +490,9 @@ export async function runDeepScans(
     else deadlineTimer = setTimeout(tick, Math.min(remaining, 2_147_483_647));
   };
   tick();
-  const externalStop = new AbortController();
   const consecutiveErrorLimit = new Error(
     "Deep Scan reached its consecutive error limit.",
   );
-  const executionSignal = AbortSignal.any([signal, externalStop.signal]);
-  const discoverySignal = AbortSignal.any([
-    executionSignal,
-    deadlineController.signal,
-  ]);
   const stopReason = (): "failed" | "capped" | "canceled" =>
     externalStop.signal.reason === consecutiveErrorLimit
       ? "failed"
@@ -586,6 +604,7 @@ export async function runDeepScans(
           externalStop.abort(error);
         if (
           executionSignal.aborted ||
+          error instanceof DeepScanRecoveryError ||
           error instanceof ScanTransportClosedError ||
           error instanceof ScanPermissionError ||
           (state.mergeFailures ?? 0) >= settings.stopAfterConsecutiveErrors ||
@@ -663,6 +682,7 @@ export async function runDeepScans(
           },
         });
       } catch (error) {
+        if (error instanceof DeepScanRecoveryError) throw error;
         if (
           error instanceof ScanCostTrackingError ||
           error instanceof ScanCostLimitExceededError ||
@@ -705,23 +725,7 @@ export async function runDeepScans(
       );
       reportPassCost(pass.directory, result.cost);
       executionSignal.throwIfAborted();
-      try {
-        await save();
-      } catch (cause) {
-        if (
-          discoverySignal.aborted ||
-          cause instanceof ScanTransportClosedError ||
-          cause instanceof ScanCostTrackingError ||
-          cause instanceof ScanCostLimitExceededError ||
-          cause instanceof ScanPermissionError
-        )
-          throw cause;
-        throw new DeepScanRecoveryError(
-          `Could not retain completed child results; resume to retry: ${errorMessage(cause)}`,
-          scanDir,
-          { cause },
-        );
-      }
+      await save();
     } catch (error) {
       if (
         error instanceof ScanTransportClosedError ||

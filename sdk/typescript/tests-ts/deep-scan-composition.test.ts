@@ -85,11 +85,6 @@ async function fixture(
       async run(_repository, options = {}) {
         calls.push(options);
         const childId = options.resumeScanId ?? randomUUID();
-        await options.onRegisteredScan?.({
-          scanId: childId,
-          threadId: "session",
-          scanDir: options.outputDir!,
-        });
         records.set(childId, {
           scanId: childId,
           scanDir: options.outputDir!,
@@ -98,6 +93,11 @@ async function fixture(
           parentScanRole: "deep_pass",
           continuationThreadId: "session",
           progress: { status: "running" },
+        });
+        await options.onRegisteredScan?.({
+          scanId: childId,
+          threadId: "session",
+          scanDir: options.outputDir!,
         });
         await execute(options);
         const finding = semanticFinding({
@@ -348,34 +348,69 @@ test("pass bookkeeping reuses persisted aggregates across saves and resume", asy
   expect(writes).toHaveLength(3);
 });
 
-test.each([false, true])(
-  "failed aggregate writes are retried (partial write: %p)",
-  async (partial) => {
-    const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+test.each([
+  { phase: "aggregate", partial: false },
+  { phase: "aggregate", partial: true },
+  { phase: "accepted-checkpoint", partial: false },
+  { phase: "merge-start", partial: false },
+])(
+  "merge persistence failures remain resumable (%p)",
+  async ({ phase, partial }) => {
+    const h = await fixture({
+      workers: phase === "merge-start" ? 2 : 1,
+      maxDiscoveryRuns: phase === "merge-start" ? 2 : 1,
+    });
     const workbench = h.input.workbench;
-    const attempts: string[] = [];
+    const persistenceFailure = new Error(
+      "Synthetic one-shot merge persistence failure",
+    );
+    let failedPath: string | undefined;
     h.input.workbench = async (args, contents) => {
-      if (
-        args[0] === "save-scan-artifact" &&
-        args[4]!.startsWith("artifacts/deep-scan/aggregates/")
-      ) {
-        attempts.push(args[4]!);
-        if (attempts.length === 1) {
-          if (partial) await h.write(args[4]!, contents!);
-          throw new Error("Synthetic aggregate write failure");
+      if (!failedPath && args[0] === "save-scan-artifact") {
+        const path = args[4]!;
+        const checkpoint =
+          path === DEEP_SCAN_CHECKPOINT ? JSON.parse(contents!) : null;
+        const selected =
+          phase === "aggregate"
+            ? path.startsWith("artifacts/deep-scan/aggregates/")
+            : phase === "accepted-checkpoint"
+              ? checkpoint?.mergedScanIds.length > 0
+              : checkpoint?.mergeStarted === true;
+        if (selected) {
+          failedPath = path;
+          if (partial) await h.write(path, contents!);
+          throw persistenceFailure;
         }
       }
       return workbench(args, contents);
     };
-
-    await expect(runDeepScans(h.input)).rejects.toThrow(
-      "Synthetic aggregate write failure",
-    );
-    expect(attempts).toHaveLength(2);
-    expect(attempts[1]).toBe(attempts[0]);
-    const saved = await loadDeepScanCheckpoint(h.input.scanDir);
-    expect(saved!.terminalReason).toBe("failed");
-    expect(saved!.aggregate!.findings).toHaveLength(1);
+    let caught: unknown;
+    try {
+      await runDeepScans(h.input);
+    } catch (error) {
+      caught = error;
+    }
+    expect(failedPath).toBeDefined();
+    expect(caught).toBeInstanceOf(DeepScanRecoveryError);
+    expect((caught as Error).cause).toBe(persistenceFailure);
+    const saved = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(saved.terminalReason).toBeUndefined();
+    expect(saved.pendingStop).toBeUndefined();
+    expect(saved.mergeFailures ?? 0).toBe(0);
+    expect(h.metrics().merges).toBe(0);
+    expect(h.publications).toHaveLength(0);
+    expect(
+      [...h.records.values()].every(
+        (record) => record.progress.status === "complete",
+      ),
+    ).toBe(true);
+    const calls = h.calls.length;
+    const resumed = await runDeepScans(h.input);
+    expect(resumed.terminalReason).toBe("capped");
+    expect(resumed.mergedScanIds).toHaveLength(calls);
+    expect(h.publications.at(-1)!.findings).toHaveLength(calls);
+    expect(h.calls).toHaveLength(calls);
+    expect(h.metrics().merges).toBe(phase === "merge-start" ? 1 : 0);
   },
 );
 
@@ -1378,5 +1413,54 @@ test.each(["before recovery", "during recovery"])(
     } finally {
       clock.mockRestore();
     }
+  },
+);
+
+test.each([false, true])(
+  "registration persistence retries preserve the child and required accounting (%p)",
+  async (requireCost) => {
+    const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+    h.input.scanOptions.requireCost = requireCost;
+    const workbench = h.input.workbench;
+    let injected = false;
+    h.input.workbench = async (args, contents) => {
+      if (
+        !injected &&
+        args[0] === "save-scan-artifact" &&
+        args[4] === DEEP_SCAN_CHECKPOINT &&
+        JSON.parse(contents!).passes.some(
+          (pass: { scanId?: string }) => pass.scanId !== undefined,
+        )
+      ) {
+        injected = true;
+        throw new Error("Synthetic one-shot registration checkpoint failure");
+      }
+      return workbench(args, contents);
+    };
+    await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+      DeepScanRecoveryError,
+    );
+    expect(injected).toBe(true);
+    expect(h.calls).toHaveLength(1);
+    expect(h.operations).not.toContain("fail-scan");
+    expect(
+      (await loadDeepScanCheckpoint(h.input.scanDir))!.terminalReason,
+    ).toBeUndefined();
+    const child = [...h.records.values()][0]!;
+    expect(child.progress.status).toBe("running");
+    if (requireCost) {
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanCostTrackingError,
+      );
+      expect(h.calls).toHaveLength(1);
+      expect(child.progress.status).toBe("failed");
+      expect(h.publications).toHaveLength(0);
+    } else {
+      await runDeepScans(h.input);
+      expect(h.calls).toHaveLength(2);
+      expect(h.calls[1]!.resumeScanId).toBe(child.scanId);
+      expect(h.publications.at(-1)!.findings).toHaveLength(1);
+    }
+    expect(h.records.size).toBe(1);
   },
 );
