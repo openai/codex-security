@@ -1830,6 +1830,7 @@ export class CodexSecurity {
       ) => {
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
+          includeArchivedSessions: true,
           model,
           repository: repo,
           scanDirectory,

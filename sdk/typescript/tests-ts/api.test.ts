@@ -5725,6 +5725,7 @@ describe("CodexSecurity orchestration", () => {
           process.platform === "win32" ? "junction" : "dir",
         );
       }
+      let preparedPersistentConfig: string | undefined;
       const client = new TestClient(
         {
           pluginPath: PLUGIN_ROOT,
@@ -5744,7 +5745,13 @@ describe("CodexSecurity orchestration", () => {
             [apiKey]: "synthetic-transient-key",
           },
           resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
+          prepareOutputDir: async () => {
+            preparedPersistentConfig = await readFile(
+              join(codexHome, "config.toml"),
+              "utf8",
+            );
+            return scanDir;
+          },
           repositoryRevision: async () => "deadbeef",
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
@@ -5800,8 +5807,8 @@ describe("CodexSecurity orchestration", () => {
       );
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
-      expect(persistentConfig["model"]).toBe(model);
-      expect(persistentConfig["model_provider"]).toBe(provider ?? "openai");
+      expect(preparedPersistentConfig).toBeDefined();
+      expect(persistentConfig).toEqual(parseToml(preparedPersistentConfig!));
     },
   );
 

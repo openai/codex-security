@@ -4,6 +4,7 @@ import {
   cp,
   mkdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -995,24 +996,32 @@ async function interruptedSealedChild() {
   };
 }
 
-test("a sealed child resumes from session accounting and counts against the Deep Scan budget", async () => {
-  const { h, childId, childRecord, passCost, resumeOptions } =
-    await interruptedSealedChild();
-  await using resumed = h.makeClient();
-  const result = await resumed.run(h.repository, resumeOptions);
-  const saved = await runWorkbench(
-    { ...childRecord.options, signal: undefined },
-    ["get-scan", "--scan-id", childId],
-  );
-  expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
-    status: "complete",
-  });
-  expect(saved["scan"]).toMatchObject({ cost: passCost });
-  expect(h.launches).toHaveLength(2);
-  expect(h.commands).toContain("complete-budget-exhausted-scan");
-  expect(result.findings.findings).toHaveLength(2);
-  expect(result.cost?.estimatedUsd).toBeCloseTo(passCost.estimatedUsd * 2, 12);
-});
+test.each(["live", "archived"])(
+  "a sealed child resumes from %s session accounting and counts against the Deep Scan budget",
+  async (storage) => {
+    const { h, childId, childRecord, passCost, resumeOptions } =
+      await interruptedSealedChild();
+    if (storage === "archived")
+      await rename(join(h.home, "sessions"), join(h.home, "archived_sessions"));
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, resumeOptions);
+    const saved = await runWorkbench(
+      { ...childRecord.options, signal: undefined },
+      ["get-scan", "--scan-id", childId],
+    );
+    expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+      status: "complete",
+    });
+    expect(saved["scan"]).toMatchObject({ cost: passCost });
+    expect(h.launches).toHaveLength(2);
+    expect(h.commands).toContain("complete-budget-exhausted-scan");
+    expect(result.findings.findings).toHaveLength(2);
+    expect(result.cost?.estimatedUsd).toBeCloseTo(
+      passCost.estimatedUsd * 2,
+      12,
+    );
+  },
+);
 
 test("a sealed child without persisted usage rejects cost-limited Deep Scan resume", async () => {
   const { h, child, resumeOptions } = await interruptedSealedChild();
