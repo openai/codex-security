@@ -63,6 +63,7 @@
 - simplify artifact storage boundaries ([#1206](https://github.com/openai/codex-security/pull/1206))
 - reuse runtime and authentication setup ([#1207](https://github.com/openai/codex-security/pull/1207))
 - share finalizer fixtures and migration moves ([#1216](https://github.com/openai/codex-security/pull/1216))
+- reuse Markdown tool setup ([#1215](https://github.com/openai/codex-security/pull/1215))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
