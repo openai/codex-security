@@ -1280,7 +1280,15 @@ test.each([
           : null;
       expect(result.cost).toEqual(expectedCost);
       if (origin === "completed" || origin === "completed-unpriced")
-        expect(result.turnResult.usage).toEqual(storedUsage);
+        expect(result.turnResult.usage).toEqual({
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          cache_write_input_tokens_reported: false,
+          output_tokens: 10,
+          reasoning_output_tokens: 3,
+          total_tokens: 110,
+        });
       if (origin === "unpriced") {
         expect(result.turnResult.usage).toMatchObject({
           ...usage,
