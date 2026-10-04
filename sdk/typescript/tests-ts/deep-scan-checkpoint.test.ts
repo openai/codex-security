@@ -16,7 +16,7 @@ import {
   type DeepScanCheckpointSummary,
 } from "../src/deep-scan-checkpoint.js";
 
-test.each(["current", "legacy"])(
+test.each(["current", "legacy", "pending-stop"])(
   "round-trips the shared %s checkpoint without rewriting fields",
   async (name) => {
     const document: unknown = JSON.parse(
@@ -50,6 +50,12 @@ test.each(["current", "legacy"])(
           },
         },
       ]);
+    } else if (name === "pending-stop") {
+      expect(checkpoint.pendingStop?.reason).toBe("canceled");
+      expect(
+        checkpoint.pendingStop?.costs[checkpoint.passes[0]!.directory]
+          ?.estimatedUsd,
+      ).toBe(0.01);
     } else {
       expect(
         (checkpoint["legacy"] as Record<string, unknown>)["originThreadId"],
@@ -60,7 +66,7 @@ test.each(["current", "legacy"])(
   },
 );
 
-test.each(["current", "legacy"])(
+test.each(["current", "legacy", "pending-stop"])(
   "reads the %s get-scan summary without claiming its omitted payloads",
   async (name) => {
     const checkpoint = decodeDeepScanCheckpoint(

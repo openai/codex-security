@@ -431,6 +431,9 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
     subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(repository), "commit", "-qm", "Move HEAD"], check=True)
 
+    recovered = run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", launched["scanId"])
+    assert recovered["sealedProducerVersion"]
+    assert recovered["targetRevision"] == revision
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", launched["scanId"])
 
     assert completed["scan"]["progress"]["status"] == "complete"

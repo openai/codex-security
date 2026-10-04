@@ -83,7 +83,7 @@ def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple
     return tmp_path / "state", target
 
 
-@pytest.mark.parametrize("name", ["current", "legacy"])
+@pytest.mark.parametrize("name", ["current", "legacy", "pending-stop"])
 def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan", mode="deep")
@@ -262,6 +262,9 @@ def test_history_hides_composition_children_without_parent_artifacts(
     assert repository["latestScan"]["scanId"] == rerun["scanId"]
     explicit = run_workbench(state, "list-scans", "--scan-root", child["scanDir"])["scans"]
     assert [scan["scanId"] for scan in explicit] == [child["scanId"]]
+    assert explicit[0]["parentScanRole"] == "deep_pass"
+    rerun_rows = run_workbench(state, "list-scans", "--scan-root", rerun["scanDir"])["scans"]
+    assert rerun_rows[0]["parentScanRole"] is None
     assert (
         run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["findingCount"] == 1
     )
@@ -469,7 +472,7 @@ def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
         )
     context = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])
     assert "compositionCheckpoint" not in context
-    assert context["scan"]["continuationThreadId"] == "repeated-follow-up"
+    assert context["scan"]["continuationThreadId"] is None
     assert context["scan"]["progress"]["status"] == "failed"
     assert set(context["scan"]["threadIds"]) == {"failed-follow-up", "repeated-follow-up"}
     assert context["scan"]["executionThreadIds"] == context["scan"]["threadIds"]
@@ -835,6 +838,46 @@ def test_membership_migration_rebuilds_public_finding_projections(
         assert (
             connection.execute("SELECT * FROM finding_locations ORDER BY occurrence_id").fetchall()
             == locations
+        )
+
+
+@pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_repeated_parent_stop_preserves_deferred_child_cleanup(tmp_path, command, deferred):
+    state, target = _scan_workspace(tmp_path)
+    directory = tmp_path / "scan"
+    parent = register(state, target, directory, mode="deep")
+    child = register(
+        state,
+        target,
+        directory / "artifacts/deep-scan/passes/active",
+        parent=parent["scanId"],
+        role="deep_pass",
+    )
+    arguments = ["--message", "Synthetic parent interruption."] if command == "fail-scan" else []
+    if deferred:
+        arguments.append("--defer-publication")
+
+    for _ in range(2):
+        run_workbench(state, command, "--scan-id", parent["scanId"], *arguments)
+        current = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
+        assert current["progress"]["status"] == ("running" if deferred else "failed")
+
+    if deferred:
+        run_workbench(
+            state,
+            "save-scan-artifact",
+            "--scan-id",
+            child["scanId"],
+            "--artifact-path",
+            "artifacts/final-receipt.txt",
+            input_text="Synthetic final child receipt.",
+        )
+        run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"], "--after-stop")
+        current = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
+        assert current["progress"]["status"] == "failed"
+        assert (Path(child["scanDir"]) / "artifacts/final-receipt.txt").read_text() == (
+            "Synthetic final child receipt."
         )
 
 
@@ -1336,6 +1379,149 @@ def test_parent_stop_keeps_child_candidates_separate(
         assert original[candidate_location]["candidateId"] == "shared-candidate"
 
 
+def test_standard_resume_retains_registration_before_and_after_thread_binding(
+    tmp_path: Path,
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    resume = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resume["scanId"] == scan["scanId"]
+    assert resume["threadId"] is None
+    assert resume["recipe"] == recipe(target)
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "execution")
+    resume = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resume["threadId"] == "execution"
+    assert len(run_workbench(state, "list-scans")["scans"]) == 1
+    (target / "app.py").write_text("print('changed')\n")
+    rejected = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False)
+    assert "original checkout revision or contents changed" in rejected["stderr"]
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_resume_distinguishes_empty_artifact_drafts_from_sealed_results(
+    tmp_path: Path, compact: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state, directory = tmp_path / "state", tmp_path / "scan"
+    scan = register(state, target, directory)
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "execution")
+    path = directory / "scan-manifest.json"
+    path.write_text(json.dumps({"scan": {"artifacts": []}}))
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert not (directory / "findings.json").exists()
+
+    write_completed_contract(directory, scan["scanId"], target)
+    manifest = json.loads(path.read_text())
+    manifest["scan"]["artifacts"] = []
+    if compact:
+        del manifest["scan"]["producer"]
+    path.write_text(json.dumps(manifest))
+    draft = path.read_bytes()
+
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert path.read_bytes() == draft
+
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan["scanId"])
+    sealed = path.read_bytes()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resumed["sealedProducerVersion"] == json.loads(sealed)["scan"]["producer"]["version"]
+    assert path.read_bytes() == sealed
+
+
+@pytest.mark.parametrize("scope", ["src/app.py", "src"])
+def test_sealed_scoped_resume_retains_deleted_source(tmp_path: Path, scope: str) -> None:
+    target = tmp_path / "target"
+    (target / "src").mkdir(parents=True)
+    source = target / "src/app.py"
+    source.write_text("\n" * 50)
+    state, directory = tmp_path / "state", tmp_path / "scan"
+    scan = register(state, target, directory, paths=[scope])
+    write_completed_contract(
+        directory,
+        scan["scanId"],
+        target,
+        relative_path="src/app.py",
+        include_paths=[scope],
+        coverage_mode="scoped_path",
+        inventory_strategy="scoped_path",
+    )
+    source.unlink()
+    unavailable = run_workbench(
+        state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False
+    )
+    assert "revision or contents changed" in unavailable["stderr"]
+    source.write_text("\n" * 50)
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan["scanId"])
+    artifacts = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    source.unlink()
+    if scope == "src":
+        (target / "src").rmdir()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resumed["sealedProducerVersion"]
+    assert resumed["recipe"]["target"] == {"kind": "paths", "paths": [scope]}
+    run_workbench(state, "complete-scan", "--scan-id", scan["scanId"])
+    assert {name: (directory / name).read_bytes() for name in artifacts} == artifacts
+
+
+@pytest.mark.parametrize("action", ["fail-scan", "cancel-scan"])
+def test_stopped_standard_cannot_resume_and_preserves_checkpoint(
+    tmp_path: Path, action: str
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    write_completed_contract(Path(scan["scanDir"]), scan["scanId"], target, relative_path="app.py")
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "synthetic interruption") if action == "fail-scan" else ()),
+    )
+    before = (Path(scan["scanDir"]) / "scan-manifest.json").read_bytes()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False)
+    assert "completed, failed, and canceled scans cannot resume" in resumed["stderr"]
+    assert (Path(scan["scanDir"]) / "scan-manifest.json").read_bytes() == before
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findingCount"] == 1
+    )
+
+
+def test_running_pass_retains_paid_receipt_before_resume_and_failure(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "paid-pass")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    receipt = run_workbench(
+        state, "preserve-scan-results", "--scan-id", scan["scanId"], "--cost-json", json.dumps(cost)
+    )["scan"]
+    assert receipt["progress"]["status"] == "running"
+    assert receipt["cost"] == cost
+    assert (
+        run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])["threadId"]
+        == "paid-pass"
+    )
+    assert (
+        run_workbench(state, "list-scans", "--scan-root", scan["scanDir"])["scans"][0]["cost"]
+        == cost
+    )
+    run_workbench(state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Retry exhausted.")
+    assert run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["cost"] == cost
+
+
 @pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
 def test_stopped_parent_rejects_late_pass_registration(tmp_path: Path, action: str) -> None:
     state, target = _scan_workspace(tmp_path)
@@ -1524,3 +1710,32 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
                 "SELECT retained_source_digests_json FROM scans WHERE id = ?", (parent["scanId"],)
             ).fetchone()[0]
         assert json.loads(recorded) == frozen
+
+
+def test_completed_child_rejects_failed_retirement_without_changing_results(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    directory = Path(parent["scanDir"]) / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    before = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    response = run_workbench(
+        state,
+        "fail-scan",
+        "--scan-id",
+        child["scanId"],
+        "--message",
+        "Synthetic parent cancellation.",
+        check=False,
+    )
+    assert response["returncode"] != 0
+    assert "A completed scan cannot be marked failed." in response["stderr"]
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
+        == "complete"
+    )
+    assert {name: (directory / name).read_bytes() for name in before} == before
