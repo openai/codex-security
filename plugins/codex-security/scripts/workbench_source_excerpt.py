@@ -90,9 +90,5 @@ def safe_source_path(target: Path, relative_path: str) -> Path | None:
     return path
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

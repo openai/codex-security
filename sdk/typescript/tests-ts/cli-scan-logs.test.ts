@@ -1,3 +1,4 @@
+import { writeJsonLines } from "./support/json.js";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
 
 async function fixture() {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
@@ -27,19 +29,14 @@ async function fixture() {
       },
     },
   ];
-  await writeFile(
-    join(home, "sessions", "rollout.jsonl"),
-    events.map((event) => JSON.stringify(event)).join("\n"),
-  );
+  await writeJsonLines(join(home, "sessions", "rollout.jsonl"), events);
   const scan = { scanId: "scan-1", continuationThreadId: "thread-1" };
   const logs = await readSavedScanLogs(scan, home);
   const deps = dependencies({
     environment: { CODEX_SECURITY_STATE_DIR: state },
     onWorkbench: () => ({ scan }),
   });
-  deps.createSecurity = () => {
-    throw new Error("Reading logs must not start Codex");
-  };
+  deps.createSecurity = throwing("Reading logs must not start Codex");
   return { state, logs, deps };
 }
 

@@ -1,8 +1,8 @@
+import { temporaryDirectory } from "../temporary-directories.mjs";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import path from "node:path";
 
 function responseEvents(id, item) {
@@ -41,9 +41,7 @@ export async function runControlledCodeMode({
     "bin",
     "codex.js",
   );
-  const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-controlled-ipc-"),
-  );
+  const fixtureRoot = await temporaryDirectory("codex-controlled-ipc-");
   const codexHome = path.join(fixtureRoot, "home");
   const toolOutputs = new Map();
   const serverErrors = [];

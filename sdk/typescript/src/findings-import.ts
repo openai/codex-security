@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Text as sha256 } from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -285,14 +285,12 @@ export function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
-  const findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  const occurrenceId = `occ_${sha256([scanId, fingerprint].join("\0")).slice(
-    0,
-    24,
-  )}`;
   return {
-    findingId,
-    occurrenceId,
+    findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(
+      0,
+      24,
+    )}`,
     ruleId,
     identity: { anchor },
     fingerprints: {
@@ -345,8 +343,7 @@ function requiredCsvText(column: string) {
 
 function validCsvLine(value: string): boolean {
   if (!/^[1-9]\d*$/u.test(value)) return false;
-  const line = Number(value);
-  return Number.isSafeInteger(line);
+  return Number.isSafeInteger(Number(value));
 }
 
 function safeFindingPath(value: string): boolean {
@@ -367,8 +364,4 @@ function safeFindingPath(value: string): boolean {
 
 function csvRowError(rowNumber: number, detail: string): CodexSecurityError {
   return new CodexSecurityError(`Findings CSV row ${rowNumber} ${detail}.`);
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }

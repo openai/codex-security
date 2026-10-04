@@ -1,15 +1,14 @@
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -70,9 +69,7 @@ test.each(["standard", "deep"])(
             prepareRuntime: async () => preparedRuntime(codexHome),
             resolvePluginPython: async () => python,
             runWorkbench,
-            createCodex: () => {
-              throw new Error("Synthetic stop after registration");
-            },
+            createCodex: throwing("Synthetic stop after registration"),
           }),
       },
     );

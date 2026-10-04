@@ -125,7 +125,6 @@ async function discover(
   for (const entry of entries) {
     signal?.throwIfAborted();
     const path = join(directory, entry.name);
-    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);

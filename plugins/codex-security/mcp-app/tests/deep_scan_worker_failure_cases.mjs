@@ -1,18 +1,57 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { readFile } from "node:fs/promises";
 
 export function createDeepScanWorkerFailureCases({
   fixtureRun,
   FakeStore,
   FakeExecutor,
+  createCoordinator,
   DeepScanCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
-  deferred,
   immediateClock,
+  recordingClock,
   workerIdFromPrompt,
   promptContext,
 }) {
+  async function testResumeRequiresHistoricalWorkerPrompt(status) {
+    const fixture = await fixtureRun({
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 2,
+      maxDiscoveryRuns: 2,
+    });
+    const promptPath = path.join(fixture.run.scanDir, "missing-prompt.md");
+    const store = new FakeStore({
+      ...fixture.run,
+      persistedWorkers: [
+        {
+          id: "historical-worker",
+          kind: "discovery",
+          status,
+          attempt: 1,
+          promptPath,
+          artifactDir: fixture.run.scanDir,
+        },
+      ],
+    });
+    const executor = new FakeExecutor();
+    const coordinator = new DeepScanCoordinator({
+      run: store.run,
+      store,
+      executor,
+      pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(terminal?.status, "failed");
+    assert.match(terminal.error, /ENOENT/);
+    assert.ok(terminal.error.includes(promptPath));
+    assert.equal(executor.discoveryCalls, 0);
+  }
+
   async function testRecoverableWorkerErrorsCannotFailScan() {
     const failures = ["config unknown", "authentication required"].map(
       (output) =>
@@ -45,10 +84,10 @@ export function createDeepScanWorkerFailureCases({
       const normalExecutor = new FakeExecutor();
       const attempts = [];
       const events = [];
-      const coordinator = new DeepScanCoordinator({
-        run: fixture.run,
+      const coordinator = createCoordinator(
+        fixture,
         store,
-        executor: {
+        {
           async run(request) {
             if (
               request.kind === "discovery" &&
@@ -64,11 +103,8 @@ export function createDeepScanWorkerFailureCases({
             return normalExecutor.run(request);
           },
         },
-        pluginRoot: fixture.pluginRoot,
-        retryDelaysMs: [1, 3, 9],
-        clock: immediateClock,
-        log: (event) => events.push(event),
-      });
+        { retryDelaysMs: [1, 3, 9], log: (event) => events.push(event) },
+      );
       coordinator.start();
 
       const terminal = await coordinator.wait(undefined, 5_000);
@@ -102,7 +138,7 @@ export function createDeepScanWorkerFailureCases({
           .length,
         1,
       );
-      assert.equal(store.failCalls, 0);
+      assert.equal(store.failureInputs.length, 0);
     }
   }
 
@@ -115,8 +151,8 @@ export function createDeepScanWorkerFailureCases({
       maxDiscoveryRuns: 4,
     });
     const store = new FakeStore(fixture.run);
-    const nextDiscovery = deferred();
-    const siblingDiscovery = deferred();
+    const nextDiscovery = Promise.withResolvers();
+    const siblingDiscovery = Promise.withResolvers();
     const normalExecutor = new FakeExecutor({
       discoveryCandidateId: "candidate-1",
       canonicalCandidateId: "candidate-1",
@@ -128,10 +164,10 @@ export function createDeepScanWorkerFailureCases({
     let committedResultPath;
     let committedContent;
     const failedAttempts = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: {
+      {
         async run(request) {
           if (request.kind === "dedup") {
             const label = (await promptContext(request.promptPath))
@@ -164,10 +200,8 @@ export function createDeepScanWorkerFailureCases({
           return normalExecutor.run(request);
         },
       },
-      pluginRoot: fixture.pluginRoot,
-      retryDelaysMs: [1, 3, 9],
-      clock: immediateClock,
-    });
+      { retryDelaysMs: [1, 3, 9] },
+    );
     coordinator.start();
     await store.dedupCommitted.promise;
     committedResultPath = store.dedupCommits[0].resultManifestPath;
@@ -196,7 +230,7 @@ export function createDeepScanWorkerFailureCases({
       manifest.findings.map((finding) => finding.provenance.candidateId),
       ["candidate-1"],
     );
-    assert.equal(store.failCalls, 0);
+    assert.equal(store.failureInputs.length, 0);
   }
 
   async function testNonRetryableReducerAbortsScanWithoutRetry(
@@ -213,10 +247,10 @@ export function createDeepScanWorkerFailureCases({
     const normalExecutor = new FakeExecutor({ blockDiscoveryAfterCalls: 2 });
     const attempts = [];
     const sleeps = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: {
+      {
         async run(request) {
           if (request.kind === "dedup") {
             attempts.push(request.resumeThreadId);
@@ -225,12 +259,10 @@ export function createDeepScanWorkerFailureCases({
           return normalExecutor.run(request);
         },
       },
-      pluginRoot: fixture.pluginRoot,
-      clock: {
-        now: immediateClock.now,
-        sleep: async (delayMs) => sleeps.push(delayMs),
+      {
+        clock: recordingClock(sleeps),
       },
-    });
+    );
     coordinator.start();
 
     const terminal = await coordinator.wait(undefined, 5_000);
@@ -240,11 +272,12 @@ export function createDeepScanWorkerFailureCases({
     assert.deepEqual(attempts, [undefined]);
     assert.deepEqual(sleeps, []);
     assert.equal(normalExecutor.runningDiscovery, 0);
-    assert.equal(store.failCalls, 1);
+    assert.equal(store.failureInputs.length, 1);
     assert.equal(store.dedupCommits.length, 0);
   }
 
   return {
+    testResumeRequiresHistoricalWorkerPrompt,
     testRecoverableWorkerErrorsCannotFailScan,
     testPolicyRefusedReducerPreservesInputsAndCommittedAggregate,
     testNonRetryableReducerAbortsScanWithoutRetry,

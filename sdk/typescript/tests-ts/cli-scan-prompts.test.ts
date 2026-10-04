@@ -1,21 +1,14 @@
 import { spawnSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 describe("CLI scan prompts", () => {
   test("loads scan, validation, and post-scan prompt files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       await Promise.all([
         writeFile(join(root, "scan.md"), "Review authentication boundaries.\n"),
@@ -58,7 +51,7 @@ describe("CLI scan prompts", () => {
   });
 
   test("rejects linked prompt files without rejecting selected external files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       const repository = join(root, "repository");
       const repositoryAlias = join(root, "repository-alias");
@@ -105,7 +98,7 @@ describe("CLI scan prompts", () => {
             join("linked-directory", "external-prompt.md"),
           ],
         ] as const) {
-          let started = false;
+          const onTurn = mock();
           const stderr = capture();
           expect(
             await main(
@@ -114,15 +107,13 @@ describe("CLI scan prompts", () => {
               stderr.stream,
               dependencies({
                 currentDirectory: directory,
-                onTurn: () => {
-                  started = true;
-                },
+                onTurn,
               }),
             ),
           ).toBe(2);
           expect(stderr.text()).toContain("Input files must");
           expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_PROMPT");
-          expect(started).toBe(false);
+          expect(onTurn).not.toHaveBeenCalled();
         }
 
         for (const [directory, target] of [
@@ -153,7 +144,7 @@ describe("CLI scan prompts", () => {
   });
 
   test("combines shared and repository-specific bulk scan prompts", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+    const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       const repository = join(root, "repository");
       for (const args of [
@@ -228,20 +219,16 @@ describe("CLI scan prompts", () => {
   });
 
   test("does not silently drop custom validation on a saved rerun", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-cli-validation-"),
-    );
+    const root = await temporaryDirectory("codex-security-cli-validation-");
     try {
       await writeFile(
         join(root, "validation.md"),
         "Validate with the fixture.\n",
       );
-      let selected: unknown;
+      const onTurn = mock<(repository: string, options: unknown) => void>();
       const deps = dependencies({
         currentDirectory: root,
-        onTurn: (_repository, value) => {
-          selected = value;
-        },
+        onTurn,
         onWorkbench: () => ({
           recipe: {
             repository: root,
@@ -262,7 +249,7 @@ describe("CLI scan prompts", () => {
         ),
       ).toBe(2);
       expect(error.text()).toContain("--validation-prompt-file");
-      expect(selected).toBeUndefined();
+      expect(onTurn.mock.lastCall?.[1]).toBeUndefined();
       expect(
         await main(
           [
@@ -278,7 +265,7 @@ describe("CLI scan prompts", () => {
           deps,
         ),
       ).toBe(0);
-      expect(selected).toMatchObject({
+      expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         validationPrompt: "Validate with the fixture.\n",
       });
       await writeFile(join(root, "validation.md"), " \n");

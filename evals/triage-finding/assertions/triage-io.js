@@ -1,15 +1,5 @@
-function parseExpected(value) {
-  if (Array.isArray(value)) {
-    return value.map(String);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
+const { parseExpected } = require("./output");
+const { extractTriageResult } = require("../sastbench/scripts/sastbench-result");
 
 function expectedScanbenchMapping(context) {
   const caseId = String(context.vars.case_id || "");
@@ -47,32 +37,11 @@ function expectedScanbenchMapping(context) {
   return mappings;
 }
 
-function extractJson(output) {
-  const text = typeof output === "string" ? output : JSON.stringify(output);
-  const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) =>
-    match[1].trim(),
-  );
-  const candidates = fencedBlocks.length > 0 ? fencedBlocks : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
-
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && parsed.schema_version === "triage-finding/v0") {
-        return parsed;
-      }
-    } catch {
-      // Keep trying other candidates.
-    }
-  }
-
-  throw new Error("Could not find a parseable triage-finding/v0 JSON block.");
-}
-
 module.exports = (output, context) => {
-  const result = extractJson(output);
+  const result = extractTriageResult(
+    output,
+    "Could not find a parseable triage-finding/v0 JSON block.",
+  );
   const expectedIds = parseExpected(context.vars.expected_ids);
   const expectedSourceTypes = parseExpected(context.vars.expected_source_types);
   const expectedVerdicts = parseExpected(context.vars.expected_verdicts);

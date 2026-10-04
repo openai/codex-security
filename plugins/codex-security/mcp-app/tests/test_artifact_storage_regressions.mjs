@@ -5,16 +5,13 @@ import { promises as fs } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { applicationRoot, buildServer } from "./build-server.mjs";
 
-const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
 const exec = promisify(execFile);
@@ -36,19 +33,11 @@ const temporaryDirectories = [];
 
 await fs.mkdir(repository);
 await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
-await build({
-  bundle: true,
+await buildServer(bundle, {
   define: {
     __dirname: JSON.stringify(applicationRoot),
     "import.meta.url": "__filename",
   },
-  entryPoints: [path.join(applicationRoot, "main.ts")],
-  external: ["fsevents"],
-  format: "cjs",
-  loader: { ".md": "text" },
-  logLevel: "silent",
-  outfile: bundle,
-  platform: "node",
 });
 await build({
   bundle: true,
@@ -240,6 +229,49 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       );
     }
   }
+
+  await test("host-produced threat models are readable and standalone legacy documents remain intact", async () => {
+    const modelRoot = path.join(fixture, "model-documents");
+    await fs.mkdir(modelRoot, { mode: 0o700 });
+    const content = "# Model\n\nExact paragraph.  \n";
+    await fs.writeFile(path.join(modelRoot, "threatmodel.md"), content);
+    const context = {
+      root: modelRoot,
+      repoRoot: repository,
+      layout: "scan",
+      scanId: "00000000-0000-4000-8000-000000000001",
+    };
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "persistent", path: "threatmodel.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, content);
+    await assert.rejects(
+      saveCodexSecurityArtifact(
+        context,
+        { storage: "persistent", path: "threatmodel.md", content: "replaced" },
+        workbench,
+      ),
+      /existing scan tools/,
+    );
+    const { scanId: _scanId, ...standalone } = context;
+    const legacyContent = "# Legacy model\n\nRetained original.\n";
+    const legacyPath = path.join(modelRoot, "threat_model.md");
+    await fs.writeFile(legacyPath, legacyContent);
+    const legacy = await readCodexSecurityArtifact(
+      standalone,
+      { storage: "persistent", path: "threat_model.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(legacy.content, legacyContent);
+    await saveCodexSecurityArtifact(
+      standalone,
+      { storage: "persistent", path: "threatmodel.md", content },
+      workbench,
+    );
+    assert.equal(await fs.readFile(legacyPath, "utf8"), legacyContent);
+  });
 
   for (const writer of ["mcp", "workbench"]) {
     await test(`${writer} rejects reserved artifact names and their descendants`, async () => {
@@ -572,7 +604,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         const location = {
           targetPath: repository,
           storage: "persistent",
-          path: "threat_model.md",
+          path: "threatmodel.md",
         };
         const saved = await call("save_codex_security_artifact", {
           ...location,
@@ -630,7 +662,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       const saved = await call("save_codex_security_artifact", {
         targetPath: repository,
         storage: "persistent",
-        path: "threat_model.md",
+        path: "threatmodel.md",
         content: "relative root",
       });
       assert.ok(

@@ -1,11 +1,13 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { fail } from "./support/errors.js";
 
 const DESTINATION_OPTIONS = [
   "--to",
@@ -15,27 +17,13 @@ const DESTINATION_OPTIONS = [
   "--linear-project",
   "project-from-flags",
 ] as const;
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory: publicationDirectory, cleanup } =
+  createApiTestFixtures("codex-security-cli-publication-", false);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
-async function publicationDirectory(): Promise<string> {
-  const directory = await mkdtemp(
-    join(tmpdir(), "codex-security-cli-publication-"),
-  );
-  temporaryDirectories.push(directory);
-  return directory;
-}
+afterEach(cleanup);
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
-  temporaryDirectories.push(root);
+  const root = await publicationDirectory("codex-security-publish-picker-");
   return Promise.all(
     Array.from({ length: count }, async (_, index) => {
       const directory = join(root, `scan-${index}`);
@@ -204,9 +192,7 @@ describe("publish scan to custom", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
-      deps.publishScanToCustom = async () => {
-        throw new Error("must not publish");
-      };
+      deps.publishScanToCustom = async () => fail("must not publish");
       expect(
         await main(
           ["publish", "scan", "completed-scan", ...flags, "--json"],
@@ -287,9 +273,7 @@ describe("publish check", () => {
         CODEX_SECURITY_LINEAR_TEAM: "environment-team",
       },
     });
-    deps.publishScan = async () => {
-      throw new Error("Check must not publish.");
-    };
+    deps.publishScan = async () => fail("Check must not publish.");
     deps.checkScanPublication = async (directory, options) => {
       expect(directory).toBe(resolve(currentDirectory, "completed-scan"));
       expect(options).toEqual({
@@ -330,12 +314,9 @@ describe("publish check", () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
-    deps.checkScanPublication = async () => {
-      throw new Error("The selected project is unavailable.");
-    };
-    deps.publishScan = async () => {
-      throw new Error("Check must not publish.");
-    };
+    deps.checkScanPublication = async () =>
+      fail("The selected project is unavailable.");
+    deps.publishScan = async () => fail("Check must not publish.");
     expect(
       await main(
         [
@@ -371,33 +352,27 @@ describe("publish check", () => {
           environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
         });
         let now = 0;
-        let forced = false;
+        const forceExit = mock();
         deps.now = () => now;
-        deps.forceExit = () => {
-          forced = true;
-        };
-        let started!: () => void;
-        const operationStarted = new Promise<void>((resolve) => {
-          started = resolve;
-        });
-        let finishCleanup!: () => void;
-        const cleanup = new Promise<void>((resolve) => {
-          finishCleanup = resolve;
-        });
+        deps.forceExit = forceExit;
+        const operationStarted = Promise.withResolvers<void>();
+        const cleanup = Promise.withResolvers<void>();
         const operation = async (
           _directory: string,
           options: { signal?: AbortSignal },
         ): Promise<never> => {
           expect(options.signal).toBeInstanceOf(AbortSignal);
-          started();
-          await cleanup;
+          operationStarted.resolve();
+          await cleanup.promise;
           expect(options.signal?.reason).toBe(signal);
           options.signal!.throwIfAborted();
           throw new Error("Expected cancellation.");
         };
         deps.publishScan = operation;
         deps.checkScanPublication = operation;
-        let finished = false;
+        const observeFinished = mock((status: number) => {
+          return status;
+        });
         const running = main(
           [
             "publish",
@@ -410,17 +385,14 @@ describe("publish check", () => {
           stdout.stream,
           stderr.stream,
           deps,
-        ).then((status) => {
-          finished = true;
-          return status;
-        });
-        await operationStarted;
+        ).then(observeFinished);
+        await operationStarted.promise;
         signals.emit(signal);
-        expect(finished).toBe(false);
+        expect(observeFinished).not.toHaveBeenCalled();
         now = 500;
         signals.emit(signal);
-        expect(forced).toBe(false);
-        finishCleanup();
+        expect(forceExit).not.toHaveBeenCalled();
+        cleanup.resolve();
         expect(await running).toBe(expectedCode);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toContain(
@@ -585,13 +557,10 @@ describe("publish scan", () => {
         { scanDirectory: string; options: Record<string, unknown> } | undefined;
       const deps = dependencies({
         currentDirectory,
-        onWorkbench: () => {
-          throw new Error("scan history must not be inspected");
-        },
+        onWorkbench: () => fail("scan history must not be inspected"),
       });
-      deps.createSecurity = () => {
-        throw new Error("a new security scan must not be started");
-      };
+      deps.createSecurity = () =>
+        fail("a new security scan must not be started");
       deps.publishScan = async (scanDirectory, options) => {
         invocation = { scanDirectory, options: { ...options } };
         return publicationResult();
@@ -717,9 +686,7 @@ describe("publish scan", () => {
     const deps = dependencies({
       environment: { CODEX_SECURITY_LINEAR_API_KEY: key },
     });
-    deps.publishScan = async () => {
-      throw new Error(`Linear rejected ${key}.`);
-    };
+    deps.publishScan = async () => fail(`Linear rejected ${key}.`);
 
     expect(
       await main(
@@ -787,14 +754,8 @@ describe("publish scan", () => {
       const signals = new FakeSignals();
       const events: string[] = [];
       let now = 0;
-      let enteredPublication!: () => void;
-      const publicationStarted = new Promise<void>((resolve) => {
-        enteredPublication = resolve;
-      });
-      let finishRecovery!: () => void;
-      const recoveryFinished = new Promise<void>((resolve) => {
-        finishRecovery = resolve;
-      });
+      const publicationStarted = Promise.withResolvers<void>();
+      const recoveryFinished = Promise.withResolvers<void>();
       const deps = dependencies({ signals });
       deps.environment["CODEX_SECURITY_LINEAR_API_KEY"] = "synthetic-key";
       deps.now = () => now;
@@ -806,8 +767,8 @@ describe("publish scan", () => {
         });
         signals.emit(signal);
         expect(events).toEqual([`aborted ${signal}`]);
-        enteredPublication();
-        await recoveryFinished;
+        publicationStarted.resolve();
+        await recoveryFinished.promise;
         events.push("recovered created issues");
         throw new Error(
           "The publication handoff remains at /tmp/synthetic-handoff; recover it before retrying to avoid creating duplicate issues.",
@@ -820,7 +781,7 @@ describe("publish scan", () => {
         stderr.stream,
         deps,
       );
-      await publicationStarted;
+      await publicationStarted.promise;
       expect(signals.listeners.get("SIGINT")?.size).toBe(1);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(1);
       expect(stdout.text()).toBe("");
@@ -831,7 +792,7 @@ describe("publish scan", () => {
       signals.emit(signal);
       expect(events).toEqual([`aborted ${signal}`, `forced ${signal}`]);
       expect(stderr.text()).toContain("reconcile retained Linear");
-      finishRecovery();
+      recoveryFinished.resolve();
 
       expect(await publishing).toBe(expectedCode);
 
@@ -903,7 +864,7 @@ describe("publish scan", () => {
 
   test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
     for (const { json, tty, failed } of [
       { json: false, tty: false, failed: false },
@@ -1049,7 +1010,7 @@ describe("publish scan", () => {
     const created = [
       {
         ...base,
-        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\nsafe\u009F",
         url: "javascript:alert(1)",
       },
       {
@@ -1085,7 +1046,7 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(0);
-    expect(stdout.text()).toContain("  SEC-400\n");
+    expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
     }
@@ -1111,7 +1072,7 @@ describe("publish scan", () => {
       const stdout = capture(scenario.interactive);
       const stderr = capture();
       const deps = dependencies({ environment: scenario.environment });
-      deps.publishScan = async () => publicationResult();
+      deps.publishScan = successfulPublication<[]>;
 
       expect(
         await main(
@@ -1283,7 +1244,7 @@ describe("publish scan", () => {
       [];
     let header: string | undefined;
     let workbenchArguments: readonly string[] | undefined;
-    let publishedDirectory: string | undefined;
+    const publishScan = mock(successfulPublication<[string]>);
     const deps = dependencies({
       onWorkbench: (args) => {
         workbenchArguments = args;
@@ -1347,10 +1308,7 @@ describe("publish scan", () => {
         return options[1]!.value;
       },
     };
-    deps.publishScan = async (scanDirectory) => {
-      publishedDirectory = scanDirectory;
-      return publicationResult();
-    };
+    deps.publishScan = publishScan;
 
     expect(
       await main(
@@ -1384,7 +1342,7 @@ describe("publish scan", () => {
     expect(
       choices.every((choice) => !choice.label.includes("unavailable")),
     ).toBe(true);
-    expect(publishedDirectory).toBe(selectedDirectory);
+    expect(publishScan.mock.lastCall?.[0]).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
     expect(stripVTControlCharacters(stderr.text())).toContain(
@@ -1523,7 +1481,7 @@ describe("publish scan", () => {
           return options[0]!.value;
         },
       };
-      deps.publishScan = async () => publicationResult();
+      deps.publishScan = successfulPublication<[]>;
 
       expect(
         await main(
@@ -1668,7 +1626,7 @@ describe("publish scan", () => {
           return options[0]!.value;
         },
       };
-      deps.publishScan = async () => publicationResult();
+      deps.publishScan = successfulPublication<[]>;
 
       expect(
         await main(
@@ -1899,16 +1857,7 @@ describe("publish scan", () => {
       const stdout = capture();
       const stderr = capture(true);
       const deps = dependencies({ environment });
-      deps.publishScan = async (_scanDirectory, options) => {
-        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
-        options.onProgress?.({
-          type: "completed",
-          created: 1,
-          failed: 0,
-          total: 1,
-        });
-        return publicationResult();
-      };
+      deps.publishScan = publishWithProgress;
 
       expect(
         await main(
@@ -1952,14 +1901,8 @@ describe("publish scan", () => {
         };
         const listeners = new Map<string, () => void>();
         const removed: string[] = [];
-        let enteredPublication!: () => void;
-        const publicationStarted = new Promise<void>((resolve) => {
-          enteredPublication = resolve;
-        });
-        let finishRecovery!: () => void;
-        const recoveryFinished = new Promise<void>((resolve) => {
-          finishRecovery = resolve;
-        });
+        const publicationStarted = Promise.withResolvers<void>();
+        const recoveryFinished = Promise.withResolvers<void>();
         const deps = dependencies();
         deps.addSignalListener = (name, listener) => {
           listeners.set(name, listener);
@@ -1980,15 +1923,17 @@ describe("publish scan", () => {
             total: 1,
           });
           listeners.get(signal)!();
-          enteredPublication();
-          await recoveryFinished;
+          publicationStarted.resolve();
+          await recoveryFinished.promise;
           events.push("recovered created issues");
           throw new Error(
             "The publication handoff remains at /tmp/synthetic-handoff; recover it before retrying to avoid creating duplicate issues.",
           );
         };
 
-        let finished = false;
+        const observeFinished = mock((status: number) => {
+          return status;
+        });
         const publishing = main(
           [
             "publish",
@@ -2000,12 +1945,9 @@ describe("publish scan", () => {
           stdout.stream,
           stderr,
           deps,
-        ).then((status) => {
-          finished = true;
-          return status;
-        });
-        await publicationStarted;
-        expect(finished).toBe(false);
+        ).then(observeFinished);
+        await publicationStarted.promise;
+        expect(observeFinished).not.toHaveBeenCalled();
         expect(listeners.size).toBe(2);
         expect(events).toEqual(
           interactive
@@ -2014,7 +1956,7 @@ describe("publish scan", () => {
         );
         expect(captured.text()).not.toContain(expectedMessage);
         expect(stdout.text()).toBe("");
-        finishRecovery();
+        recoveryFinished.resolve();
 
         expect(await publishing).toBe(expectedCode);
         expect(events).toEqual(
@@ -2057,16 +1999,7 @@ describe("publish scan", () => {
       },
     };
     const deps = dependencies();
-    deps.publishScan = async (_scanDirectory, options) => {
-      options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
-      options.onProgress?.({
-        type: "completed",
-        created: 1,
-        failed: 0,
-        total: 1,
-      });
-      return publicationResult();
-    };
+    deps.publishScan = publishWithProgress;
 
     expect(
       await main(
@@ -2115,7 +2048,7 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture(true);
     let offered: readonly { label: string; value: string }[] = [];
-    let publishedDirectory: string | undefined;
+    const publishScan = mock(successfulPublication<[string]>);
     const deps = dependencies({
       currentDirectory: directory,
       onWorkbench: () => ({
@@ -2139,10 +2072,7 @@ describe("publish scan", () => {
         return choices[1]!.value;
       },
     };
-    deps.publishScan = async (scanDirectory) => {
-      publishedDirectory = scanDirectory;
-      return publicationResult();
-    };
+    deps.publishScan = publishScan;
 
     expect(
       await main(
@@ -2160,7 +2090,7 @@ describe("publish scan", () => {
       expect.stringContaining("first-scan"),
       expect.stringContaining("selected-scan"),
     ]);
-    expect(publishedDirectory).toBe(selectedDirectory);
+    expect(publishScan.mock.lastCall?.[0]).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stripVTControlCharacters(stderr.text())).toContain(
       "CODEX SECURITY  ·  PUBLISH  ·  selected-scan",
@@ -2171,13 +2101,12 @@ describe("publish scan", () => {
   test("requires an interactive terminal when no scan directory is supplied", async () => {
     const stdout = capture();
     const stderr = capture();
-    let listed = false;
-    let published = false;
+    const onWorkbench = mock(() => {
+      return { scans: [] };
+    });
+    const publishScan = mock(successfulPublication<[]>);
     const deps = dependencies({
-      onWorkbench: () => {
-        listed = true;
-        return { scans: [] };
-      },
+      onWorkbench,
     });
     deps.publishPrompt = {
       isInteractive: () => false,
@@ -2186,10 +2115,7 @@ describe("publish scan", () => {
         options: readonly { label: string; value: Value }[],
       ): Promise<Value> => options[0]!.value,
     };
-    deps.publishScan = async () => {
-      published = true;
-      return publicationResult();
-    };
+    deps.publishScan = publishScan;
 
     expect(
       await main(
@@ -2204,15 +2130,15 @@ describe("publish scan", () => {
     );
     expect(stderr.text()).toContain("codex-security publish scan");
     expect(stdout.text()).toBe("");
-    expect(listed).toBe(false);
-    expect(published).toBe(false);
+    expect(onWorkbench).not.toHaveBeenCalled();
+    expect(publishScan).not.toHaveBeenCalled();
   });
 
   test("fails clearly when no completed scans are available", async () => {
     const stdout = capture();
     const stderr = capture(true);
     let prompted = false;
-    let published = false;
+    const publishScan = mock(successfulPublication<[]>);
     const deps = dependencies({ onWorkbench: () => ({ scans: [] }) });
     deps.publishPrompt = {
       isInteractive: () => true,
@@ -2224,10 +2150,7 @@ describe("publish scan", () => {
         return options[0]!.value;
       },
     };
-    deps.publishScan = async () => {
-      published = true;
-      return publicationResult();
-    };
+    deps.publishScan = publishScan;
 
     expect(
       await main(
@@ -2242,7 +2165,7 @@ describe("publish scan", () => {
     );
     expect(stdout.text()).toBe("");
     expect(prompted).toBe(false);
-    expect(published).toBe(false);
+    expect(publishScan).not.toHaveBeenCalled();
   });
 
   test("does not offer completed history when every scan directory is unavailable", async () => {
@@ -2259,7 +2182,7 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture(true);
     let prompted = false;
-    let published = false;
+    const publishScan = mock(successfulPublication<[]>);
     const deps = dependencies({
       onWorkbench: () => ({
         scans: [
@@ -2283,10 +2206,7 @@ describe("publish scan", () => {
         return choices[0]!.value;
       },
     };
-    deps.publishScan = async () => {
-      published = true;
-      return publicationResult();
-    };
+    deps.publishScan = publishScan;
 
     expect(
       await main(
@@ -2301,7 +2221,7 @@ describe("publish scan", () => {
     );
     expect(stdout.text()).toBe("");
     expect(prompted).toBe(false);
-    expect(published).toBe(false);
+    expect(publishScan).not.toHaveBeenCalled();
   });
 
   test("requires an explicit supported destination and team with valid optional flags", async () => {
@@ -2359,17 +2279,14 @@ describe("publish scan", () => {
     for (const [argv, expected] of cases) {
       const stdout = capture();
       const stderr = capture();
-      let published = false;
+      const publishScan = mock(successfulPublication<[]>);
       const deps = dependencies();
-      deps.publishScan = async () => {
-        published = true;
-        return publicationResult();
-      };
+      deps.publishScan = publishScan;
 
       expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
       expect(stdout.text()).toBe("");
-      expect(published).toBe(false);
+      expect(publishScan).not.toHaveBeenCalled();
     }
   });
 
@@ -2449,7 +2366,7 @@ describe("publish scan", () => {
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {
     const warning =
-      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+      "Could not save the publication receipt: token=SYNTHETIC_RECEIPT_VALUE. Linear issues were already created; do not retry publication.";
     const result = { ...publicationResult(), warnings: [warning] };
     const stdout = capture();
     const stderr = capture();
@@ -2491,7 +2408,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
 
-  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+  test("normalizes receipt warning controls while preserving diagnostic text and partial results", async () => {
     const warnings = [
       "Receipt storage failed.\n\u001B[31mDo not retry publication.",
       "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
@@ -2518,10 +2435,9 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
-        "codex-security: [redacted]\n",
+        "codex-security: Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET\n",
     );
     expect(stderr.text()).not.toContain("\u001B");
-    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {
@@ -2549,9 +2465,8 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
-    deps.publishScan = async () => {
-      throw new Error("Linear is not connected to your Codex account.");
-    };
+    deps.publishScan = async () =>
+      fail("Linear is not connected to your Codex account.");
 
     expect(
       await main(
@@ -2567,3 +2482,20 @@ describe("publish scan", () => {
     expect(stdout.text()).toBe("");
   });
 });
+
+const publishWithProgress: ReturnType<
+  typeof dependencies
+>["publishScan"] = async (_scanDirectory, options) => {
+  options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+  options.onProgress?.({
+    type: "completed",
+    created: 1,
+    failed: 0,
+    total: 1,
+  });
+  return publicationResult();
+};
+
+async function successfulPublication<Args extends unknown[]>(..._args: Args) {
+  return publicationResult();
+}

@@ -1,15 +1,13 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { bootstrapPlugin } from "../src/runtime.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 test("repeated bootstrap preserves the plugin directory used by an active worker", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-plugin-worker-")),
-  );
+  const root = await temporaryDirectory("codex-security-plugin-worker-", true);
   try {
     const selected = join(root, "plugin");
     const home = join(root, "home");

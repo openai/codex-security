@@ -1,21 +1,23 @@
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  loader: { ".md": "text" },
-  platform: "node",
-  write: false,
-});
-const { renderDedupPrompt, renderDiscoveryPrompt } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
+  new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
+  { loader: { ".md": "text" } },
 );
 
-const rendered = renderDiscoveryPrompt({
+for (const name of ["discovery", "dedup"]) {
+  const template = await readFile(
+    new URL(`../templates/deep-scan/${name}.md`, import.meta.url),
+    "utf8",
+  );
+  for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? []) {
+    assert.equal(key, `{{${name.toUpperCase()}_CONTEXT_JSON}}`);
+  }
+}
+
+const discoveryInput = {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
   pluginRoot: "/fixture/plugins/codex-security",
   targetPath: "/fixture/repository",
@@ -24,7 +26,9 @@ const rendered = renderDiscoveryPrompt({
     "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
   workerLabel: "discovery-0001",
   subagents: 3,
-});
+};
+
+const rendered = renderDiscoveryPrompt({ ...discoveryInput });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
@@ -54,31 +58,11 @@ for (const field of [
 
 const feedbackPath =
   "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";
-const withFeedback = renderDiscoveryPrompt(
-  {
-    scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
-    pluginRoot: "/fixture/plugins/codex-security",
-    targetPath: "/fixture/repository",
-    scope: ".",
-    userContext:
-      "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
-    workerLabel: "discovery-0001",
-    subagents: 3,
-  },
-  feedbackPath,
-);
+const withFeedback = renderDiscoveryPrompt({ ...discoveryInput }, feedbackPath);
 assert.deepEqual(firstJsonBlock(withFeedback), discoveryContext);
 assert.equal(withFeedback.includes(JSON.stringify(feedbackPath)), true);
 
-const dedup = renderDedupPrompt({
-  reducerLabel: "dedup-0001",
-  discoveries: [
-    {
-      workerId: "worker-001",
-      resultPath: "/fixture/worker/result.json",
-    },
-  ],
-});
+const dedup = renderDedupPrompt("dedup-0001", ["worker-001"]);
 const dedupContext = firstJsonBlock(dedup);
 assert.doesNotMatch(dedup, /\bcoverage\b/i);
 assert.match(
@@ -103,12 +87,7 @@ for (const field of [
   assert.equal(Object.hasOwn(dedupContext, field), false);
 }
 
-const previousReduction = firstJsonBlock(
-  renderDedupPrompt({
-    reducerLabel: "dedup-0002",
-    discoveries: [],
-  }),
-);
+const previousReduction = firstJsonBlock(renderDedupPrompt("dedup-0002", []));
 assert.deepEqual(previousReduction, {
   reducerLabel: "dedup-0002",
   claimedWorkerIds: [],

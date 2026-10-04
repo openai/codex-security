@@ -1,3 +1,4 @@
+import { pythonExecutable } from "./support/python.js";
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
@@ -10,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -25,15 +27,6 @@ function git(directory: string, ...args: string[]): void {
     windowsHide: true,
   });
   expect(result.status, result.stderr).toBe(0);
-}
-
-function pythonExecutable(): string | null {
-  return (
-    process.env["PYTHON"] ??
-    Bun.which("python3") ??
-    Bun.which("python") ??
-    Bun.which("py")
-  );
 }
 
 test("writes nested Git pointers as UTF-8 independently of the locale", () => {
@@ -62,18 +55,10 @@ test("writes nested Git pointers as UTF-8 independently of the locale", () => {
     "pathlib.Path.open = locale_open",
     "target.copy_git_worktree_files(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), ())",
   ].join("\n");
-  const result = spawnSync(
+  const result = runNodePython(
     python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probe,
-      join(PLUGIN_ROOT, "scripts"),
-      repository,
-      checkout,
-    ],
-    { encoding: "utf8", windowsHide: true },
+    ["-c", probe, join(PLUGIN_ROOT, "scripts"), repository, checkout],
+    { windowsHide: true },
   );
 
   expect(result.status, result.stderr).toBe(0);

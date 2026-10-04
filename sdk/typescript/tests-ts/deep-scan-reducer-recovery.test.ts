@@ -46,7 +46,6 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
           modelSettings: {
             artifactContext: {
               pluginRoot: PLUGIN_ROOT,
-              scanRoot,
               repoRoot,
               scanId: "test-scan",
             },

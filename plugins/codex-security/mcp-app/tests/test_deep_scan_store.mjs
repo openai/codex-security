@@ -1,20 +1,21 @@
+import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [new URL("../src/deep-scan/store.ts", import.meta.url).pathname],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { WorkbenchDeepScanStore, parseDeepScan } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
+  new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
 );
+
+const canonical = {
+  inScopeFilesPath:
+    "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
+  candidateLedgerPath:
+    "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
+};
 
 await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();
@@ -53,9 +54,8 @@ async function testBeginProtocolAndParsing() {
     threadId: "thread-fixture",
     scanRoot: "/fixture/scans",
   });
-  assert.equal(result.shouldStart, true);
-  assert.equal(result.run.scanId, scanId);
-  assert.deepEqual(result.run.config, {
+  assert.equal(result.scanId, scanId);
+  assert.deepEqual(result.config, {
     workers: 6,
     subagents: 3,
     stopAfterNoNew: 6,
@@ -98,13 +98,13 @@ async function testBeginProtocolAndParsing() {
     threadId: "thread-fixture",
     scanRoot: "/fixture/scans",
   });
-  assert.equal(joined.shouldStart, false);
+  assert.equal(joined.scanId, scanId);
   assert.equal(flagValue(joinedArgs, "--claim-token"), claimToken);
 }
 
 async function testWriteSerializationAndRecovery() {
   const calls = [];
-  const firstGate = deferred();
+  const firstGate = Promise.withResolvers();
   let first = true;
   const runner = async (args) => {
     calls.push(args);
@@ -126,7 +126,10 @@ async function testWriteSerializationAndRecovery() {
     scanId: randomUUID(),
     reviewItemsCompleted: 1,
   });
-  const cancellation = store.cancel(randomUUID(), "thread-fixture");
+  const finalWrite = store.updateProgress({
+    scanId: randomUUID(),
+    reviewItemsCompleted: 2,
+  });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
     calls.length,
@@ -135,7 +138,7 @@ async function testWriteSerializationAndRecovery() {
   );
   firstGate.resolve();
   await assert.rejects(firstWrite, /first write failed/);
-  await Promise.all([secondWrite, cancellation]);
+  await Promise.all([secondWrite, finalWrite]);
   assert.equal(
     calls.length,
     3,
@@ -144,17 +147,17 @@ async function testWriteSerializationAndRecovery() {
   assert.equal(calls[0][0], "update-progress");
   assert.equal(flagValue(calls[0], "--claim-token"), claimToken);
   assert.equal(calls[1][0], "update-progress");
-  assert.equal(
-    calls[2][0],
-    "cancel-scan",
-    "cancellation must use the same ordered persistence queue",
+  assert.deepEqual(
+    calls.slice(1).map((args) => flagValue(args, "--review-items-completed")),
+    ["1", "2"],
+    "later writes must retain invocation order through the persistence queue",
   );
 }
 
 async function testBeginUsesTheWriteQueue() {
   const scanId = randomUUID();
   const calls = [];
-  const firstGate = deferred();
+  const firstGate = Promise.withResolvers();
   const runner = async (args) => {
     calls.push(args);
     if (args[0] === "update-progress") {
@@ -185,7 +188,7 @@ async function testHeartbeatBypassesBlockedWriteQueue() {
   const scanId = randomUUID();
   const handoffClaimToken = randomUUID();
   const scanDir = await mkdtemp(join(tmpdir(), "deep-scan-heartbeat-"));
-  const blockedWriteGate = deferred();
+  const blockedWriteGate = Promise.withResolvers();
   const calls = [];
   const runner = async (args) => {
     calls.push(args);
@@ -375,20 +378,13 @@ async function testReplaceableDiscoveryFailureProtocol() {
 
 async function testCanonicalCommitProtocol() {
   const scanId = randomUUID();
-  const canonical = {
-    inScopeFilesPath:
-      "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-    candidateLedgerPath:
-      "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-  };
   const reducerId = randomUUID();
   const resultManifestPath =
     "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
-  let command;
-  const store = new WorkbenchDeepScanStore(async (args) => {
-    command = args;
+  const runWorkbench = mock.fn(async (args) => {
     return stateResult(scanId, { deepScan: { canonicalArtifacts: canonical } });
   });
+  const store = new WorkbenchDeepScanStore(runWorkbench);
   const state = await store.commitDedup({
     id: reducerId,
     scanId,
@@ -396,7 +392,7 @@ async function testCanonicalCommitProtocol() {
     resultManifestPath,
   });
   assert.deepEqual(state.canonicalArtifacts, canonical);
-  assert.deepEqual(command, [
+  assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
     "commit-deep-scan-dedup",
     "--scan-id",
     scanId,
@@ -540,12 +536,12 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
     promptPath: "/fixture/reducer/prompt.md",
     artifactDir: "/fixture/reducer/output",
   });
-  const cancellation = store.cancel(scanId, "thread-fixture");
-  await Promise.all([claim, cancellation]);
+  const progress = store.updateProgress({ scanId, phase: "discovery" });
+  await Promise.all([claim, progress]);
 
   assert.deepEqual(
     calls,
-    ["claim-deep-scan-dedup", "claim-deep-scan-dedup", "cancel-scan"],
+    ["claim-deep-scan-dedup", "claim-deep-scan-dedup", "update-progress"],
     "later mutations must not interleave with an idempotent persistence replay",
   );
 }
@@ -662,17 +658,14 @@ async function testDeterministicPersistenceFailuresAreNotRetried() {
     code: "ABORT_ERR",
     name: "AbortError",
   });
-  let attempts = 0;
-  const store = new WorkbenchDeepScanStore(async () => {
-    attempts += 1;
-    throw canceled;
-  });
+  const attempts = mock.fn(Promise.reject.bind(Promise, canceled));
+  const store = new WorkbenchDeepScanStore(attempts);
   await assert.rejects(
     idempotentPersistenceScenarios()[1].invoke(store),
     (error) => error === canceled,
   );
   assert.equal(
-    attempts,
+    attempts.mock.callCount(),
     1,
     "explicit cancellation must never be treated as a transient timeout",
   );
@@ -696,11 +689,8 @@ async function testDeterministicPersistenceFailuresAreNotRetried() {
         name: "AbortError",
       }),
     ]) {
-      let workerAttempts = 0;
-      const workerStore = new WorkbenchDeepScanStore(async () => {
-        workerAttempts += 1;
-        throw failure;
-      });
+      const workerAttempts = mock.fn(Promise.reject.bind(Promise, failure));
+      const workerStore = new WorkbenchDeepScanStore(workerAttempts);
 
       await assert.rejects(
         workerStore.updateWorker({
@@ -715,7 +705,7 @@ async function testDeterministicPersistenceFailuresAreNotRetried() {
         (error) => error === failure,
       );
       assert.equal(
-        workerAttempts,
+        workerAttempts.mock.callCount(),
         1,
         `${status} updates must not replay ${failure.code}`,
       );
@@ -724,30 +714,25 @@ async function testDeterministicPersistenceFailuresAreNotRetried() {
 }
 
 async function testNonIdempotentMutationsAreNotRetried() {
-  for (const operation of ["progress", "cancel", "fail", "begin"]) {
-    let attempts = 0;
+  for (const operation of ["progress", "fail", "begin"]) {
     const expected = new Error("sqlite3.OperationalError: database is locked");
-    const store = new WorkbenchDeepScanStore(async () => {
-      attempts += 1;
-      throw expected;
-    });
+    const attempts = mock.fn(Promise.reject.bind(Promise, expected));
+    const store = new WorkbenchDeepScanStore(attempts);
     const scanId = randomUUID();
     const request =
       operation === "progress"
         ? store.updateProgress({ scanId, phase: "discovery" })
-        : operation === "cancel"
-          ? store.cancel(scanId, "thread-fixture")
-          : operation === "fail"
-            ? store.fail(scanId, "fixture failure")
-            : store.begin({
-                targetPath: "/fixture/repository",
-                threadId: "thread-fixture",
-                scanRoot: "/fixture/scans",
-              });
+        : operation === "fail"
+          ? store.fail(scanId, "fixture failure")
+          : store.begin({
+              targetPath: "/fixture/repository",
+              threadId: "thread-fixture",
+              scanRoot: "/fixture/scans",
+            });
 
     await assert.rejects(request, (error) => error === expected);
     assert.equal(
-      attempts,
+      attempts.mock.callCount(),
       1,
       `${operation} must not gain a new persistence retry policy`,
     );
@@ -758,12 +743,6 @@ function idempotentPersistenceScenarios() {
   const scanId = randomUUID();
   const workerId = randomUUID();
   const reducerId = randomUUID();
-  const canonical = {
-    inScopeFilesPath:
-      "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-    candidateLedgerPath:
-      "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-  };
   const worker = {
     id: workerId,
     kind: "discovery",
@@ -1089,12 +1068,4 @@ function repeatedFlagValues(args, flag) {
   return args.flatMap((value, index) =>
     value === flag ? [args[index + 1]] : [],
   );
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }

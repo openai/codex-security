@@ -297,8 +297,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
