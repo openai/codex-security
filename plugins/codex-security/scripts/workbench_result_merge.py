@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
+    _read_json,
+    _read_scan_local_json,
     _read_scan_local_json_with_metadata,
+    _validate_resolved_deferred,
     _validate_schema_node,
     finding_candidate_id,
     open_scan_local_file_descriptor,
@@ -294,6 +298,47 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return coverage
 
 
+def _children(scan_dir: Path, relative: str) -> list[str]:
+    cursor = scan_dir
+    for part in Path(relative).parts:
+        if part in {"..", "."}:
+            return []
+        cursor = cursor / part
+        try:
+            if not stat.S_ISDIR(cursor.lstat().st_mode):
+                return []
+        except FileNotFoundError:
+            return []
+    return sorted(child.name for child in cursor.iterdir())
+
+
+def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
+    directory = (
+        "checkpoints/pending" if (scan_dir / "checkpoints/pending").exists() else "checkpoints"
+    )
+    for name in _children(scan_dir, directory):
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name):
+            yield f"checkpoints/{name}"
+
+
+def _read_saved_parent_result(
+    scan_dir: Path, scan_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
+    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
+    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+    parent_scan = manifest.get("scan")
+    if not isinstance(parent_scan, dict):
+        raise ContractError("Saved parent manifest has no scan object")
+    if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
+        parent_scan.get("id", scan_id) != scan_id
+        or findings.get("scanId", scan_id) != scan_id
+        or coverage.get("scanId", scan_id) != scan_id
+    ):
+        raise ContractError("Saved parent documents belong to a different scan")
+    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
+
+
 def _reconcile_child_coverage(
     coverage: dict[str, Any], child: dict[str, Any], child_id: str
 ) -> None:
@@ -554,6 +599,47 @@ def _parent_scan_draft(
     return parent
 
 
+def _legacy_source_digests(value: Any, error: str) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(
+        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
+    ):
+        raise ContractError(error)
+    return value
+
+
+def _legacy_latest_successful_reducer(workers: list[Any]) -> Any | None:
+    return max(
+        (
+            worker
+            for worker in workers
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=lambda worker: (worker["completed_at"] or "", worker["id"]),
+        default=None,
+    )
+
+
+def _legacy_worker_candidate_key(
+    worker_id: str, candidate_id: str, finding: dict[str, Any]
+) -> tuple[str, str, Any, Any, Any]:
+    """Identify one worker-local candidate without merging unrelated locations."""
+    provenance = finding.get("provenance")
+    identity = (
+        provenance.get("preservedIdentity", finding.get("identity"))
+        if isinstance(provenance, dict)
+        else finding.get("identity")
+    )
+    if not isinstance(identity, dict):
+        normalized = dict(finding)
+        _ensure_finding_identity(normalized)
+        identity = normalized.get("identity")
+    anchor = identity.get("anchor") if isinstance(identity, dict) else None
+    instance = identity.get("instance") if isinstance(identity, dict) else None
+    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
+
+
 def _legacy_retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Yield canonical and historical findings without trusting candidate IDs."""
     pending = [finding]
@@ -578,6 +664,81 @@ def _legacy_retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
             )
+
+
+def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
+    rows = coverage.get("deferred", [])
+    return rows if isinstance(rows, list) else []
+
+
+def _resolved_deferred_rows(
+    draft: dict[str, Any], schema: dict[str, Any], *, accepted: bool = False
+) -> list[dict[str, Any]]:
+    # Accepted progress can retain closures inherited from a terminal draft.
+    if draft.get("complete") is False and not accepted:
+        return []
+    coverage = draft["coverage"]
+    rows = coverage.get("resolvedDeferred", [])
+    try:
+        # Invalid closure metadata cannot discard the evidence it names.
+        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
+        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
+    except ContractError:
+        return []
+    return rows
+
+
+def _merge_tied_parent_observations(
+    current: dict[str, Any], previous: dict[str, Any]
+) -> dict[str, Any]:
+    merged = copy.deepcopy(current)
+    for finding in previous["findings"]:
+        if finding not in merged["findings"]:
+            merged["findings"].append(copy.deepcopy(finding))
+    coverage = merged["coverage"]
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        rows = previous["coverage"].get(field, [])
+        output = coverage.setdefault(field, [])
+        if isinstance(rows, list) and isinstance(output, list):
+            for row in rows:
+                if row not in output:
+                    output.append(copy.deepcopy(row))
+            # Frozen retries can read equal-time heads in a different order.
+            output.sort(key=_encoded)
+    pending_ids = {
+        identity
+        for row in _deferred_rows(coverage)
+        if isinstance(row, dict)
+        for identity in (row.get("id"), row.get("candidateId"))
+        if isinstance(identity, str)
+    }
+    closure_schema = _read_json(
+        Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+    )["properties"]["resolvedDeferred"]
+    closures = {}
+    for observed in (current, previous):
+        for row in _resolved_deferred_rows(observed, closure_schema, accepted=True):
+            if row["id"] not in pending_ids:
+                closures.setdefault(row["id"], copy.deepcopy(row))
+    coverage.pop("resolvedDeferred", None)
+    if closures:
+        coverage["resolvedDeferred"] = list(closures.values())
+    if current.get("complete") is False or previous.get("complete") is False:
+        merged["complete"] = False
+    if (
+        coverage.get("deferred")
+        or merged.get("complete") is False
+        or (
+            isinstance(coverage.get("surfaces"), list)
+            and any(
+                isinstance(row, dict) and row.get("disposition") == "needs_follow_up"
+                for row in coverage["surfaces"]
+            )
+        )
+        or previous["coverage"].get("completeness") == "partial"
+    ):
+        coverage["completeness"] = "partial"
+    return merged
 
 
 if __name__ == "__main__":

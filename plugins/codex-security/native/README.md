@@ -1,8 +1,8 @@
 # Native OS primitives
 
-These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
+These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows. Saved scan execution uses native file locks to serialize workers across processes.
 
-The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
+The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `fileLock` acquires or releases an exclusive lock on an open descriptor and returns the operating system error number on failure. Closing the descriptor also releases the lock.
 
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
@@ -44,6 +44,8 @@ node plugins/codex-security/native/build.mjs
 node plugins/codex-security/native/check.mjs
 node --expose-gc plugins/codex-security/native/proof-windows.mjs
 ```
+
+`WindowsHandle.lock` acquires an exclusive file lock, optionally without waiting. Closing the handle releases the lock.
 
 The `native-windows` workflow builds x64 and arm64 with MSVC and a static CRT. It checks PE architecture and private paths, then runs the same artifact on Node 22.13.0 and 20.0.0 with an empty `PATH`. The proof covers handle lifetime and garbage collection, ancestor replacement, junctions, exact-handle operations, raw UTF-16 and long paths, and numeric errors.
 
