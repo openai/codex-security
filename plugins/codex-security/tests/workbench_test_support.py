@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -43,6 +44,9 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
+    if checkpoint_dir.name == "checkpoints":
+        (checkpoint_dir / "pending").mkdir(exist_ok=True)
+        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     return checkpoint_path
 
@@ -464,7 +468,7 @@ def write_completed_contract(
 
 
 def windows_file_backend() -> mock.Mock:
-    backend = mock.Mock()
+    backend = mock.Mock(_MISSING_ERRORS={errno.ENOENT, errno.ENOTDIR})
 
     def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
         return os.open(scan_dir / relative_path, os.O_RDONLY)
@@ -480,7 +484,12 @@ def windows_file_backend() -> mock.Mock:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+    def unlink_if_exists(
+        scan_dir: Path,
+        relative_path: str,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
 
     backend.open_read_fd.side_effect = open_read_fd
@@ -508,3 +517,62 @@ class ScanFixtureTestCase(TestCase):
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
+
+
+def recipe(target: Path, mode: str = "standard") -> dict:
+    return {
+        "repository": str(target),
+        "target": {"kind": "repository", "paths": []},
+        "mode": mode,
+        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
+        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
+    }
+
+
+def register(
+    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
+) -> dict:
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        path.mkdir(mode=0o700)
+    saved_recipe = recipe(target, mode)
+    if paths:
+        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
+    return run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(directory),
+        "--registration-json-stdin",
+        *(("--parent-scan-id", parent) if parent else ()),
+        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
+    )
+
+
+def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
+    value = {
+        "version": 2,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "passes": list(passes),
+        "mergedScanIds": list(merged),
+        "aggregate": None,
+        "noNewStreak": 0,
+        "consecutiveErrors": 0,
+        **({"terminalReason": terminal} if terminal else {}),
+    }
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan["scanId"],
+        "--artifact-path",
+        "artifacts/deep-scan/checkpoint.json",
+        input_text=json.dumps(value),
+    )
+    return value
