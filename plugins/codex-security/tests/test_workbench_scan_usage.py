@@ -118,7 +118,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     else:
         target.mkdir()
         (target / "app.py").write_text("print('fixture')\n", encoding="utf-8")
-        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent")
+        workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent", mode=mode)
         workspace_id = str(workspace["id"])
 
     started = start_delivered_scan(
@@ -725,6 +725,79 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed
+
+
+def test_completed_accounting_and_sidecar_sessions_survive_migration(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    run_workbench(
+        fixture.state_dir,
+        "begin-deep-scan",
+        "--scan-id",
+        fixture.scan_id,
+        "--thread-id",
+        "scan-parent",
+        environment=fixture.environment,
+    )
+    counted = fixture.started_at + timedelta(microseconds=1)
+    for thread in ("prior-merge", "scan-parent"):
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            fixture.scan_id,
+            "--thread-id",
+            thread,
+            environment=fixture.environment,
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "prior-merge": _rollout(tmp_path, "prior-merge", [_token_event(counted, 20, 5)]),
+        },
+        [],
+    )
+    completed = _complete_scan(fixture)["scan"]
+    assert completed["usage"]["coverage"] == "complete"
+    assert completed["usage"]["totalTokens"] == 38
+    sidecar = fixture.scan_dir / "artifacts/deep-scan/execution-threads.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps(["prior-merge", "follow-up"]).encode()
+    sidecar.write_bytes(original)
+    database = fixture.state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+        connection.execute("DROP TABLE scan_execution_threads")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 45")
+    migrated = run_workbench(
+        fixture.state_dir,
+        "get-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert migrated["usage"] == completed["usage"]
+    assert {"prior-merge", "follow-up"} <= set(migrated["executionThreadIds"])
+    assert sidecar.read_bytes() == original
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+            ).fetchone()[0]
+            == receipt
+        )
+    sidecar.write_text('["not-imported-on-reopen"]')
+    reopened = run_workbench(
+        fixture.state_dir,
+        "get-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert reopened["executionThreadIds"] == migrated["executionThreadIds"]
+    assert reopened["usage"] == completed["usage"]
 
 
 @pytest.mark.parametrize("include_current_cost", [False, True])

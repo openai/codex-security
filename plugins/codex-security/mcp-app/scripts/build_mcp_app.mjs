@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "./bundle_options.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const sdkRequire = createRequire(
+  join(root, "../../../sdk/typescript/package.json"),
+);
 const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output, native = "universal" }) {
@@ -66,17 +71,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     try {
       await build({
-        bundle: true,
-        define: { "import.meta.url": "__filename" },
+        ...mcpBundleOptions,
         entryPoints: [join(root, entryPoint)],
-        external: ["fsevents"],
-        format: "cjs",
-        loader: { ".md": "text" },
+        inject:
+          name === "server"
+            ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
+            : [],
         logLevel: "info",
-        logOverride: { "empty-import-meta": "silent" },
         outfile: bundle,
-        platform: "node",
-        target: "node20",
       });
       const runtime = brotliCompressSync(await readFile(bundle), {
         params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
