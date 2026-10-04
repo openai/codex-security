@@ -492,6 +492,81 @@ test.each([
   },
 );
 
+test.each(["sources", "aggregate", "accepted-checkpoint"] as const)(
+  "a discovery deadline keeps %s persistence recoverable",
+  async (phase) => {
+    const h = await fixture({ workers: 1, maxDiscoveryRuns: 2 });
+    const writer = h.input.writer;
+    const disconnected = new ScanTransportClosedError(
+      "Synthetic disconnect before merging the completed child",
+    );
+    h.input.writer = {
+      ...writer,
+      async restoreMany() {
+        throw disconnected;
+      },
+    };
+    await expect(runDeepScans(h.input)).rejects.toBe(disconnected);
+    const checkpoint = JSON.parse(
+      await readFile(join(h.input.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+    );
+    checkpoint.startedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    await h.write(DEEP_SCAN_CHECKPOINT, JSON.stringify(checkpoint));
+    expect(h.calls).toHaveLength(1);
+    expect([...h.records.values()][0]!.progress.status).toBe("complete");
+
+    const failure = new Error(
+      "Synthetic one-shot persistence failure after deadline",
+    );
+    let injected = false;
+    h.input.writer = {
+      ...writer,
+      async restoreMany(artifacts) {
+        if (phase === "sources" && !injected) {
+          injected = true;
+          throw failure;
+        }
+        return writer.restoreMany(artifacts);
+      },
+    };
+    const workbench = h.input.workbench;
+    h.input.workbench = async (args, contents) => {
+      if (!injected && args[0] === "save-scan-artifact") {
+        const selected =
+          phase === "aggregate"
+            ? args[4]!.startsWith("artifacts/deep-scan/aggregates/")
+            : phase === "accepted-checkpoint" &&
+              args[4] === DEEP_SCAN_CHECKPOINT &&
+              JSON.parse(contents!).mergedScanIds.length > 0;
+        if (selected) {
+          injected = true;
+          throw failure;
+        }
+      }
+      return workbench(args, contents);
+    };
+    const caught = await runDeepScans(h.input).catch((error: unknown) => error);
+    expect(injected).toBe(true);
+    expect(caught).toBeInstanceOf(DeepScanRecoveryError);
+    expect((caught as Error).cause).toBe(failure);
+    expect(h.input.signal.aborted).toBe(false);
+    const saved = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(saved.terminalReason).toBeUndefined();
+    expect(saved.pendingStop).toBeUndefined();
+    expect(saved.mergeFailures ?? 0).toBe(0);
+    expect(h.operations).not.toContain("fail-scan");
+    expect(h.publications).toHaveLength(0);
+
+    const resumed = await runDeepScans(h.input);
+    expect(resumed.terminalReason).toBe("capped");
+    expect(resumed.mergedScanIds).toEqual([...h.records.keys()]);
+    expect(h.calls).toHaveLength(1);
+    expect(h.metrics().merges).toBe(0);
+    expect(h.publications.at(-1)!.findings).toHaveLength(1);
+    expect([...h.records.values()][0]!.progress.status).toBe("complete");
+  },
+);
+
 test("a single first child needs no model merge", async () => {
   const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
   await runDeepScans(h.input);

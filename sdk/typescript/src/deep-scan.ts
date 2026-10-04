@@ -169,7 +169,7 @@ export async function runDeepScans(
       await write();
     } catch (cause) {
       if (
-        discoverySignal.aborted ||
+        executionSignal.aborted ||
         cause instanceof DeepScanRecoveryError ||
         cause instanceof ScanTransportClosedError ||
         cause instanceof ScanCostTrackingError ||

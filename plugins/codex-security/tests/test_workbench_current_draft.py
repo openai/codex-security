@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -694,6 +695,130 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     assert "New deferred review." in report
     assert "Which control governs the new surface?" in report
     assert ("Candidate needs validation." in report) is unresolved
+
+
+@pytest.mark.parametrize(
+    ("canonical_time", "pending_time", "expected", "retry"),
+    [
+        (300, None, "canonical", None),
+        (100, None, "committed", None),
+        (300, 400, "pending", None),
+        (300, 100, "canonical", None),
+        (300, None, "canonical", "publication"),
+        (300, 400, "pending", "publication"),
+        (300, None, "committed", "frozen-model"),
+    ],
+)
+def test_stopped_scan_preserves_newest_model_and_frozen_retry_selection(
+    tmp_path, workbench_api, monkeypatch, canonical_time, pending_time, expected, retry
+):
+    target, state = tmp_path / "target", tmp_path / "state"
+    target.mkdir()
+    (target / "app.py").write_text("pass\n" * 50)
+    scan = register(state, target, tmp_path / "scan")
+    directory = Path(scan["scanDir"])
+    write_completed_contract(directory, scan["scanId"], target, relative_path="app.py")
+    filenames = {
+        "manifest": "scan-manifest.json",
+        "findings": "findings.json",
+        "coverage": "coverage.json",
+    }
+    documents = {
+        key: json.loads((directory / filename).read_text()) for key, filename in filenames.items()
+    }
+    models = {
+        name: {"summary": f"The {name} threat model."}
+        for name in ("committed", "canonical", "pending")
+    }
+    documents["manifest"]["scan"].update(threatModel=models["committed"], complete=False)
+    run_workbench(
+        state,
+        "write-scan-draft",
+        "--scan-id",
+        scan["scanId"],
+        input_text=json.dumps({"documents": documents}),
+    )
+    committed = directory / "artifacts/scan-draft.json"
+    committed_bytes = committed.read_bytes()
+    os.utime(committed, ns=(200, 200))
+    for filename in filenames.values():
+        os.utime(directory / filename, ns=(100, 100))
+    manifest_path = directory / "scan-manifest.json"
+    canonical = json.loads(manifest_path.read_text())
+    canonical["scan"]["threatModel"] = models["canonical"]
+    manifest_path.write_text(json.dumps(canonical))
+    os.utime(manifest_path, ns=(canonical_time, canonical_time))
+    if pending_time is not None:
+        pending = write_checkpoint(
+            directory / "checkpoints/pending",
+            {
+                "scanId": scan["scanId"],
+                "complete": False,
+                "findings": [],
+                "coverage": documents["coverage"],
+                "threatModel": models["pending"],
+            },
+        )
+        os.utime(pending, ns=(pending_time, pending_time))
+
+    if retry is None:
+        run_workbench(
+            state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic interruption"
+        )
+    else:
+        monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+        saved = workbench_api["saved_results"]
+
+        def fail_publication(*args, **kwargs):
+            raise OSError("Synthetic publication interruption")
+
+        with monkeypatch.context() as patch, workbench_api["connect"]() as connection:
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+            workbench_api["fail_scan"](
+                connection,
+                argparse.Namespace(
+                    scan_id=scan["scanId"],
+                    claim_token=None,
+                    cost_json=None,
+                    message="Synthetic interruption",
+                ),
+            )
+            row = workbench_api["require_scan"](connection, scan["scanId"])
+            assert row["seal_manifest_digest"] is None
+            sources = json.loads(row["retained_source_digests_json"])
+            if retry == "frozen-model":
+                selected = next(
+                    relative
+                    for relative in sources
+                    if json.loads((directory / relative).read_text()).get("threatModel")
+                    == models["committed"]
+                )
+                with connection:
+                    connection.execute(
+                        "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
+                        (
+                            json.dumps({"sources": sources, "threatModelSource": selected}),
+                            scan["scanId"],
+                        ),
+                    )
+        # Retries use the captured order even if later writes reverse file timestamps.
+        for relative in sources:
+            path = directory / relative
+            model = json.loads(path.read_text()).get("threatModel")
+            modified = 900 if model == models["committed"] else 1
+            os.utime(path, ns=(modified, modified))
+        canonical["scan"]["threatModel"] = {"summary": "Unaccepted later model."}
+        manifest_path.write_text(json.dumps(canonical))
+        run_workbench(state, "preserve-scan-results", "--scan-id", scan["scanId"])
+
+    published = json.loads(manifest_path.read_text())["scan"]
+    assert published["sealedAt"]
+    assert published["threatModel"] == models[expected]
+    assert models[expected]["summary"] in (directory / "threatmodel.md").read_text()
+    assert committed.read_bytes() == committed_bytes
+    sealed = manifest_path.read_bytes()
+    run_workbench(state, "preserve-scan-results", "--scan-id", scan["scanId"])
+    assert manifest_path.read_bytes() == sealed
 
 
 @pytest.mark.parametrize("command", ["fail-scan", "cancel-scan"])

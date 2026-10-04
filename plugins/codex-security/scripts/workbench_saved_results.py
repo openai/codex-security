@@ -664,8 +664,14 @@ def merge_saved_results(
             ):
                 payload = _encoded(current)
                 current_checkpoint = f"checkpoints/{_digest(current)}.json"
+                current_observed = max(
+                    (scan_dir / filename).stat().st_mtime_ns
+                    for filename in ("scan-manifest.json", "findings.json", "coverage.json")
+                )
+                source_times[current_checkpoint] = current_observed
                 if write_snapshots:
                     write_scan_local_bytes(scan_dir, current_checkpoint, payload)
+                    os.utime(scan_dir / current_checkpoint, ns=(current_observed, current_observed))
                 current_coverage = copy.deepcopy(current["coverage"])
                 _recover_unsealed_coverage(
                     current_coverage,
@@ -1120,6 +1126,7 @@ def merge_saved_results(
                 surface_rows[item["id"]] = current_surface
                 resolved_surfaces.add(item["id"])
 
+    model_observed = parent_observed
     for relative, draft in all_sources:
         superseded = (
             parent is not None
@@ -1144,9 +1151,18 @@ def merge_saved_results(
         if relative in pending_paths:
             pending_work.update(_encoded(item) for item in draft["coverage"].get("deferred", []))
         if isinstance(draft.get("threatModel"), dict) and (
-            relative == frozen_model_source or "threatModel" not in manifest["scan"]
+            relative == frozen_model_source
+            or "threatModel" not in manifest["scan"]
+            or (
+                frozen_model_source is None
+                and stopped
+                and not superseded
+                and source_times.get(relative, 0) > model_observed
+            )
         ):
+            # Retain later model observations without replacing the reconciliation head.
             manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
+            model_observed = source_times.get(relative, 0)
         for value in draft["findings"]:
             if (
                 relative == "parent"
