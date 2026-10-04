@@ -1,5 +1,6 @@
+import { gitText } from "./support/shell.js";
+import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import {
   appendFile,
   cp,
@@ -16,14 +17,12 @@ import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { fail } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -53,9 +52,7 @@ async function interruptedScan(
   const input = join(root, "repositories.csv");
   if (bulk) {
     const git = (...args: string[]) =>
-      execFileSync("git", ["-C", repository, ...args], {
-        encoding: "utf8",
-      }).trim();
+      gitText(["-C", repository, ...args]).trim();
     git("init", "-q");
     git("add", ".");
     git(
@@ -352,9 +349,7 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
           resolvePluginPython: async () => f.python,
           runWorkbench,
           createCodex: (options) => ({
-            startThread() {
-              throw new Error("Resume must not create a new thread.");
-            },
+            startThread: () => fail("Resume must not create a new thread."),
             resumeThread(threadId, threadOptions) {
               resumedThread = threadId;
               expect(threadOptions.workingDirectory).toBe(f.scanDir);
@@ -488,9 +483,7 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     f.scanId,
   ]);
   expect(expired.exitCode, new TextDecoder().decode(expired.stderr)).toBe(0);
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), f.scanDir, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(f.scanDir);
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     const path = join(f.scanDir, name);
     const doc = JSON.parse(await readFile(path, "utf8"));
@@ -562,9 +555,7 @@ test.each([
         }),
         runWorkbench: f.command,
         createSecurity: resumeClient(f, () => ({
-          startThread() {
-            throw new Error("Unexpected new session");
-          },
+          startThread: () => fail("Unexpected new session"),
           resumeThread(threadId) {
             expect(threadId).toBe(f.threadId);
             return {
@@ -583,10 +574,7 @@ test.each([
     const result = JSON.parse(stdout.text());
     if (bulk) {
       expect(result, stderr.text()).toMatchObject({ incomplete: 1, failed: 0 });
-      const receipts = (await readFile(result.resultsPath, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const receipts = await readJsonLines(result.resultsPath);
       expect(receipts).toHaveLength(2);
       expect(receipts[1]).toMatchObject({
         attempt: 1,
@@ -604,9 +592,7 @@ test.each([
           stderr.stream,
           {
             ...dependencies({
-              onRun() {
-                throw new Error("A sealed scan needs no Codex invocation");
-              },
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
             }),
             runWorkbench: f.command,
           },
@@ -616,10 +602,7 @@ test.each([
         incomplete: 1,
         failed: 0,
       });
-      const reconciled = (await readFile(result.resultsPath, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+      const reconciled = await readJsonLines(result.resultsPath);
       expect(reconciled[1]).toMatchObject({
         attempt: 1,
         cost: { inputTokens: 10000, outputTokens: 2000 },
@@ -728,9 +711,7 @@ test.each([
         }),
         runWorkbench: f.command,
         createSecurity: resumeClient(f, () => ({
-          startThread() {
-            throw new Error("Unexpected new session");
-          },
+          startThread: () => fail("Unexpected new session"),
           resumeThread(threadId) {
             expect(threadId).toBe(f.threadId);
             return {
@@ -765,10 +746,7 @@ test.each([
           incomplete: 1,
           failed: 0,
         });
-        const receipts = (await readFile(join(f.root, "results.jsonl"), "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
+        const receipts = await readJsonLines(join(f.root, "results.jsonl"));
         expect(receipts).toHaveLength(2);
         expect(receipts[1]).toMatchObject({
           attempt: 1,
@@ -841,9 +819,7 @@ test.each(["chatgpt", "api-key"] as const)(
             prepareRuntime: async () => preparedRuntime(codexHome),
             resolvePluginPython: async () => python,
             runWorkbench,
-            createCodex: () => {
-              throw new Error("Synthetic stop after registration");
-            },
+            createCodex: () => fail("Synthetic stop after registration"),
           }),
       },
     );
@@ -929,9 +905,7 @@ test.each([
             api_key_cyber_access_programs: true,
           });
           return {
-            startThread() {
-              throw new Error("Resume must use the original session.");
-            },
+            startThread: () => fail("Resume must use the original session."),
             resumeThread(threadId) {
               expect(threadId).toBe(f.threadId);
               return {
@@ -1011,9 +985,9 @@ test("missing session logs do not create another session or fail the original sc
     {
       ...dependencies({ environment: f.environment, currentDirectory: f.root }),
       runWorkbench: f.command,
-      createSecurity: resumeClient(f, () => {
-        throw new Error("Must not invoke Codex without the original session");
-      }),
+      createSecurity: resumeClient(f, () =>
+        fail("Must not invoke Codex without the original session"),
+      ),
     },
   );
   expect(code).not.toBe(0);
@@ -1103,9 +1077,7 @@ test("resume requires an explicit scan ID", async () => {
   const stderr = capture();
   const code = await main(["scans", "resume"], stdout.stream, stderr.stream, {
     ...dependencies(),
-    runWorkbench: async () => {
-      throw new Error("Must select a scan explicitly");
-    },
+    runWorkbench: async () => fail("Must select a scan explicitly"),
   });
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");

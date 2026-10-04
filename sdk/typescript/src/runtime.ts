@@ -3156,3 +3156,15 @@ function nullIfMissingFileError(error: unknown): null {
   if (nodeErrorCode(error) === "ENOENT") return null;
   throw error;
 }
+
+/** @internal */
+export function workbenchEnvironment(environment: ProcessEnvironment) {
+  return {
+    ...environment,
+    CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
+  };
+}
+
+/** @internal */
+export const resolveWorkbenchRuntime = (options: PluginPythonOptions) =>
+  Promise.all([resolvePluginPython(options), bundledPluginRoot()]);

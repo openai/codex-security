@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 
 type Finding = Record<string, unknown> & {
@@ -78,9 +78,11 @@ type ScanFixture = {
   registration: Record<string, unknown>;
 };
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-scan-recovery-",
+);
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);
@@ -109,9 +111,7 @@ async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   recipeFromStdin = false,
 ): Promise<ScanFixture> {
-  const root = await temporaryDirectories.create(
-    "codex-security-scan-recovery-",
-  );
+  const root = await temporaryDirectory();
   const python =
     process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
@@ -190,9 +190,7 @@ async function startDraftScan(
   fixture.scanId = String(registration["scanId"]);
   fixture.registration = registration;
 
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDir);
   const manifestPath = join(scanDir, "scan-manifest.json");
   const manifest = await readJson<{
     scan: {

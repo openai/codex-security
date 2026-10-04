@@ -186,10 +186,7 @@ export async function runMultiscan(
   const requestedOutput = resolve(options.outputDir);
   if (options.recoverScan !== undefined) {
     const manifest = await lstat(join(requestedOutput, "manifest.json")).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
@@ -316,9 +313,8 @@ async function runCampaign(
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
         for (const name of await readdir(artifactRoot)) {
-          const match = /^attempt-([1-9][0-9]*)$/u.exec(name);
-          if (match && Number.isSafeInteger(Number(match[1])))
-            attempt = Math.max(attempt, Number(match[1]));
+          const prior = Number(/^attempt-([1-9][0-9]*)$/u.exec(name)?.[1]);
+          if (Number.isSafeInteger(prior)) attempt = Math.max(attempt, prior);
         }
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
@@ -343,12 +339,7 @@ async function runCampaign(
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
-            const existing = await lstat(scanDir).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code !== "ENOENT") throw error;
-                return undefined;
-              },
-            );
+            const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
               const retainedCheckout = join(
@@ -577,10 +568,7 @@ function notifyProgress(
 
 async function ensureOutputDirectory(path: string): Promise<string> {
   const metadata = await lstat(path, { bigint: true }).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return undefined;
-    },
+    undefinedIfMissingFile,
   );
   if (metadata?.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
@@ -673,10 +661,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
   } catch (error) {
     const currentLock = await lstat(path, { bigint: true }).catch(
-      (cleanup: NodeJS.ErrnoException) => {
-        if (cleanup.code !== "ENOENT") throw cleanup;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (
       currentLock?.dev === createdLock.dev &&
@@ -711,10 +696,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     clearInterval(timer);
     await heartbeat;
     const current = await readFile(ownerPath, "utf8").catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (current === owner) await rm(path, { recursive: true });
   };
@@ -1140,4 +1122,9 @@ export function buildGitHubCredentialArgs(host: string | undefined): string[] {
   }
   const key = `credential.${url.origin}.helper`;
   return ["-c", `${key}=`, "-c", `${key}=!gh auth git-credential`];
+}
+
+function undefinedIfMissingFile(error: NodeJS.ErrnoException): undefined {
+  if (error.code !== "ENOENT") throw error;
+  return undefined;
 }
