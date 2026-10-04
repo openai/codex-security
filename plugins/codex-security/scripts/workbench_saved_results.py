@@ -740,6 +740,17 @@ def merge_saved_results(
     if parent is None and not sources:
         if not stopped or frozen_source_digests is not None:
             return None
+        if (scan_dir / "scan-manifest.json").exists():
+            try:
+                manifest = _read_scan_local_json(
+                    scan_dir, "scan-manifest.json", "Saved scan manifest"
+                )
+            except (ContractError, OSError, ValueError):
+                return None
+            if not isinstance(manifest.get("scan"), dict):
+                # Loose coverage cannot replace an unreadable draft. Keep it
+                # intact until a valid committed draft or checkpoint is available.
+                return None
         try:
             coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved scan coverage")
         except (ContractError, OSError, ValueError):
@@ -2134,7 +2145,6 @@ def stop_composition_children(db: Any, connection: Any, composition: Composition
                         claim_token=current["handoff_claim_token"],
                         cost_json=None,
                         message="Parent Deep Scan stopped.",
-                        defer_publication=True,
                     ),
                 )
 
