@@ -56,12 +56,6 @@ export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
   "reviewItemsInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
 
-export const reviewItemsWorkerReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsWorkerInput",
-) as z.ZodType<ArtifactPage>;
-
 export const reviewItemsReaderOutputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
@@ -78,7 +72,7 @@ const reviewItemSchema = loadArtifactZodSchema(
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
 ): Promise<PreparedReviewItems> {
-  if (context.layout !== "scan") {
+  if (!context.scanId) {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );
