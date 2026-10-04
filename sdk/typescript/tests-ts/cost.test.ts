@@ -1,6 +1,6 @@
 import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -21,6 +21,9 @@ import {
   lowerUuid7Turn,
   ownedPythonUsage,
   ownedSdkUsage,
+  parentFields,
+  parentMetadata,
+  writeSession,
   ownershipRollout,
   readPythonRolloutUsage,
   scanThreadId,
@@ -31,19 +34,6 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
   "codex-security-cost-",
 );
-const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
-type SessionParentField = (typeof parentFields)[number];
-
-function parentMetadata(parentThreadId: string, field: SessionParentField) {
-  return field === "source"
-    ? {
-        source: {
-          subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
-        },
-      }
-    : { [field]: parentThreadId };
-}
-
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (check()) return;
@@ -54,43 +44,17 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 afterEach(cleanup);
 
-async function writeSession(
-  home: string,
-  threadId: string,
-  usage: Record<string, number>,
-  parentThreadId?: string,
-  workingDirectory?: string,
-  timestamp?: string,
-  parentField: SessionParentField = "source",
-): Promise<string> {
-  const directory = join(home, "sessions", "2026", "07", "26");
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, `rollout-${threadId}.jsonl`);
-  await writeFile(
-    path,
-    [
-      JSON.stringify({
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(timestamp === undefined ? {} : { timestamp }),
-          ...(parentThreadId === undefined
-            ? {}
-            : parentMetadata(parentThreadId, parentField)),
-        },
-      }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
-      "",
-    ].join("\n"),
+async function workerSessionFixture() {
+  const home = await codexHome();
+  const usage = { input_tokens: 100, output_tokens: 10 };
+  const parent = await writeSession(home, "scan-thread", usage);
+  const worker = await writeSession(
+    home,
+    "worker-thread",
+    usage,
+    "scan-thread",
   );
-  return path;
+  return { home, usage, parent, worker };
 }
 
 async function appendSessionItem(
@@ -1280,15 +1244,12 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parentPath = await writeSession(home, "scan-thread", usage);
-    const workerPath = await writeSession(
+    const {
       home,
-      "worker-thread",
       usage,
-      "scan-thread",
-    );
+      parent: parentPath,
+      worker: workerPath,
+    } = await workerSessionFixture();
     const unrelatedPath = await writeSession(home, "unrelated-thread", usage);
     const command =
       'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
@@ -1351,15 +1312,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards genuine worker reasoning and transcript text", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const path = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker: path } = await workerSessionFixture();
     await appendSessionItem(path, {
       id: "thinking-1",
       type: "reasoning",
@@ -1404,15 +1357,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("streams worker reasoning and commentary from live session events once", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendFile(
       worker,
       [
@@ -1491,15 +1436,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("expands streamed worker reasoning without duplicating summaries or exposing encrypted content", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const details = `${"The query reaches a privileged tenant boundary. ".repeat(30)}Final authorization check.`;
     const raw = `**The route builds SQL from request parameters.** ${details}`;
     await appendFile(
@@ -1611,15 +1548,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("keeps distinct streamed worker reasoning summaries separate", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const summaries = [
       "**Planning discovery worker tasks**",
       "**Preparing thorough file batch reading**",
@@ -1672,15 +1601,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("splits worker reasoning summaries without streamed events", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendSessionItem(worker, {
       id: "reasoning-1",
       type: "reasoning",
@@ -1726,15 +1647,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards reviewed-file progress from descendant workers only", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parent = await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, usage, parent, worker } = await workerSessionFixture();
     const descendant = await writeSession(
       home,
       "nested-worker-thread",
@@ -1767,15 +1680,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parent = await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, usage, parent, worker } = await workerSessionFixture();
     const otherWorker = await writeSession(
       home,
       "other-worker-thread",
@@ -1875,15 +1780,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("counts only explicit successful worker review receipts", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const marker = (filesCompleted: number) =>
       `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
         phase: "discovery",
@@ -1967,15 +1864,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("polls worker file progress without another observer", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendSessionItem(worker, progressMessage(3));
 
     const { promise: reportedProgress, resolve: reportProgress } =
@@ -2000,15 +1889,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("reports newly completed worker batches once per progress update", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
