@@ -9,7 +9,12 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
-import { deepMerge, inlineToml, type JsonObject } from "./config.js";
+import {
+  deepMerge,
+  inlineToml,
+  codexConfigOverrides,
+  type JsonObject,
+} from "./config.js";
 import { ScanPermissionError } from "./scan-execution.js";
 import { VERSION } from "./version.js";
 
@@ -21,9 +26,7 @@ export function createPermissionCheckedCodex({
 }: CodexOptions) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
-    ...Object.entries((config ?? {}) as JsonObject).map(
-      ([name, value]) => `${name}=${inlineToml(value)}`,
-    ),
+    ...codexConfigOverrides((config ?? {}) as JsonObject),
     ...(configOverrides ?? []),
   ];
   const environment = { ...options.env };
