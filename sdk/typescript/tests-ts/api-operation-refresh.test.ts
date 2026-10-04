@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -11,7 +14,10 @@ import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import {
+  createApiTestFixtures,
+  copyPluginVariant,
+} from "./support/api-events.js";
 import { prepareAmbientRuntime } from "../src/execution-preparation.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -146,4 +152,147 @@ test("a reused client refreshes edited local plugin files before execution", asy
       await readFile(join(installed.installedPath, reference), "utf8"),
     ).toBe(contents);
   }
+});
+
+test("reused clients preserve another active scan's installed plugin", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const state = join(root, "state");
+  await mkdir(repository);
+  const ready = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const stop = new Error("Synthetic scan stopped after plugin observation");
+  const observed: string[] = [];
+  let activeObservation: unknown;
+  const makeClient = async (marker: string) => {
+    const pluginPath = await copyPluginVariant(root, marker);
+    let operations = 0;
+    return new TestClient(
+      { pluginPath },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: state,
+          OPENAI_API_KEY: "synthetic-fixture-key",
+        },
+        resolvePluginPython: async () => "/synthetic/python",
+        prepareOutputDir: async (requested) => {
+          await mkdir(requested!, { mode: 0o700 });
+          return requested!;
+        },
+        repositoryRevision: async () => "deadbeef",
+        createCodex(options) {
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                const operation = ++operations;
+                async function* events() {
+                  yield { type: "thread.started", thread_id: randomUUID() };
+                  const marketplace = Object.values(
+                    options.config!["marketplaces"] as Record<
+                      string,
+                      { source: string }
+                    >,
+                  )[0]!;
+                  const installed = JSON.parse(
+                    await readFile(
+                      join(marketplace.source, "installed-plugin.json"),
+                      "utf8",
+                    ),
+                  );
+                  const selected = JSON.parse(
+                    await readFile(
+                      join(installed.installedPath, ".mcp.json"),
+                      "utf8",
+                    ),
+                  );
+                  observed.push(
+                    selected.mcpServers["synthetic-plugin"].args[0],
+                  );
+                  if (marker === "selected-a" && operation === 2) {
+                    const worker = spawn(
+                      process.execPath,
+                      [
+                        "--eval",
+                        `
+                    process.once("message", () => {
+                      try {
+                        const plugin = JSON.parse(require("node:fs").readFileSync(".mcp.json", "utf8"));
+                        process.send(plugin.mcpServers["synthetic-plugin"].args[0]);
+                      } catch (error) {
+                        process.send({ error: String(error) });
+                      } finally {
+                        process.disconnect();
+                      }
+                    });
+                    process.send("ready");
+                  `,
+                      ],
+                      {
+                        cwd: installed.installedPath,
+                        stdio: ["ignore", "ignore", "ignore", "ipc"],
+                      },
+                    );
+                    const exited = once(worker, "exit");
+                    try {
+                      const [started] = await Promise.race([
+                        once(worker, "message"),
+                        exited,
+                      ]);
+                      expect(started).toBe("ready");
+                      ready.resolve();
+                      await release.promise;
+                      const response = once(worker, "message");
+                      worker.send("read");
+                      [activeObservation] = await Promise.race([
+                        response,
+                        exited,
+                      ]);
+                    } finally {
+                      if (
+                        worker.exitCode === null &&
+                        worker.signalCode === null
+                      )
+                        worker.kill();
+                      await exited;
+                    }
+                  }
+                  throw stop;
+                }
+                return { events: events() };
+              },
+            }),
+          };
+        },
+      },
+    );
+  };
+  await using first = await makeClient("selected-a");
+  await using second = await makeClient("selected-b");
+  const run = (client: TestClient, name: string) =>
+    client.run(repository, {
+      mode: "standard",
+      outputDir: join(root, name),
+    });
+  await expect(run(first, "first-initial")).rejects.toBe(stop);
+  const active = run(first, "first-reused").catch((error: unknown) => error);
+  try {
+    await Promise.race([
+      ready.promise,
+      active.then((error) => Promise.reject(error)),
+    ]);
+    await expect(run(second, "second-initial")).rejects.toBe(stop);
+    await expect(run(second, "second-reused")).rejects.toBe(stop);
+  } finally {
+    release.resolve();
+    await active;
+  }
+  expect(await active).toBe(stop);
+  expect(observed).toEqual([
+    "selected-a",
+    "selected-a",
+    "selected-b",
+    "selected-b",
+  ]);
+  expect(activeObservation).toBe("selected-a");
 });

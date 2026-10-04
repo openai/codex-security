@@ -3520,6 +3520,7 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
+        isolateSelection: true,
         codexCommand: source.command,
         environment: withoutCodexHome(source.environment),
         signal,
