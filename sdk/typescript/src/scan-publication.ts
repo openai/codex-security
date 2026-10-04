@@ -15,6 +15,7 @@ import {
 import { IncompleteScanError, OutputDirectoryError } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
+import { tokenUsage } from "./cost-model.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
 import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import type { SavedScanRecord } from "./workbench-types.js";
@@ -98,8 +99,21 @@ export async function readSealedScanTurn(
     record.progress.status === "complete"
       ? (record.cost ?? null)
       : (context.checkpoint?.finalCost ?? null);
+  const savedUsage = record["usage"];
   let usage: unknown =
-    record.progress.status === "complete" ? (record["usage"] ?? null) : null;
+    record.progress.status === "complete" &&
+    isRecord(savedUsage) &&
+    savedUsage["coverage"] === "complete"
+      ? tokenUsage({
+          input_tokens: savedUsage["inputTokens"],
+          cached_input_tokens: savedUsage["cachedInputTokens"],
+          cache_write_input_tokens: savedUsage["cacheWriteInputTokens"],
+          cache_write_input_tokens_reported:
+            cost === null ? false : cost.cacheWriteInputTokensReported,
+          output_tokens: savedUsage["outputTokens"],
+          reasoning_output_tokens: savedUsage["reasoningOutputTokens"],
+        })
+      : null;
   if (
     record.progress.status !== "complete" &&
     context.expectation.mode !== "deep" &&

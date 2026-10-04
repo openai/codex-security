@@ -1393,6 +1393,62 @@ for (const mode of ["standard", "diff"]) {
   });
 }
 
+for (const mode of ["standard", "diff"]) {
+  for (const outcome of ["reported", "rejected", "not_applicable"]) {
+    test(`${mode} final ${outcome} candidate accepts a redundant deferred closure and retains evidence`, async (t) => {
+      const f = await fixture(t, mode);
+      const candidate = { explanation: "Saved candidate evidence." };
+      const surface = {
+        id: "candidate-surface",
+        label: "Request handler",
+        candidateId: "candidate",
+      };
+      await f.save(
+        draft({
+          complete: false,
+          coverage: semanticCoverage({
+            completeness: "partial",
+            surfaces: [{ ...surface, disposition: "needs_follow_up" }],
+            deferred: [
+              {
+                id: "candidate-task",
+                candidateId: "candidate",
+                candidate,
+                surfaceIds: [surface.id],
+                reason: "Validate candidate.",
+              },
+            ],
+          }),
+        }),
+      );
+      await f.save(
+        draft({
+          findings: outcome === "reported" ? [finding("candidate")] : [],
+          coverage: semanticCoverage({
+            surfaces: [{ ...surface, disposition: outcome }],
+            resolvedDeferred: [
+              { id: "candidate-task", reason: "Candidate reviewed." },
+            ],
+          }),
+        }),
+      );
+      assert.deepEqual(f.documents.coverage.deferred, []);
+      assert.equal(f.documents.coverage.completeness, "complete");
+      assert.equal(f.documents.coverage.surfaces[0].disposition, outcome);
+      if (outcome === "reported") {
+        assert.equal(f.documents.findings.findings.length, 1);
+        assert.deepEqual(
+          f.documents.findings.findings[0].provenance.originalCandidates,
+          [candidate],
+        );
+      } else {
+        assert.deepEqual(f.documents.findings.findings, []);
+        assert.deepEqual(f.documents.coverage.surfaces[0].candidate, candidate);
+      }
+    });
+  }
+}
+
 test("generic closure cannot discard candidate work, unknown work, or still-active work", async (t) => {
   const f = await fixture(t);
   await f.save(

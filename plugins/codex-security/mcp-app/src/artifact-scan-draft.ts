@@ -246,6 +246,18 @@ function validateDeferredClosures(
 ): void {
   const requested = new Set<string>();
   const saved = previous.flatMap((draft) => draft.coverage.deferred);
+  const resolvedCandidates = new Set(
+    [
+      ...input.findings.map(findingCandidateId),
+      ...input.coverage.surfaces
+        .filter(
+          (surface) =>
+            surface.disposition === "rejected" ||
+            surface.disposition === "not_applicable",
+        )
+        .map((surface) => surface.candidateId),
+    ].filter((id) => id !== undefined),
+  );
   const alreadyClosed = new Set(
     previous.flatMap((draft) =>
       (draft.coverage.resolvedDeferred ?? []).map((row) => row.id),
@@ -260,9 +272,11 @@ function validateDeferredClosures(
     if (
       rows.some(
         (row) =>
-          row.candidateId !== undefined ||
-          row.candidate !== undefined ||
-          row.finding !== undefined,
+          (row.candidateId !== undefined ||
+            row.candidate !== undefined ||
+            row.finding !== undefined) &&
+          (row.candidateId === undefined ||
+            !resolvedCandidates.has(row.candidateId)),
       )
     )
       throw new Error(
@@ -375,13 +389,13 @@ function preserveDraft(
       .map((row) => [row.candidateId, row]),
   );
   for (const row of previous.coverage.deferred) {
-    if (closures.has(row.id!)) continue;
     const current =
       resolvedCandidates.get(row.candidateId) ?? deferred.get(row.id);
     if (current) {
       preserveCandidateEvidence(current, row);
       continue;
     }
+    if (closures.has(row.id!)) continue;
     if (
       row.candidateId === undefined &&
       row.candidate === undefined &&

@@ -19,6 +19,7 @@ import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import { formatTokenUsage } from "../src/cost-model.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
@@ -1770,8 +1771,11 @@ test.each([
                   ? {
                       progress: { status: "complete" },
                       usage: {
-                        input_tokens: cost.inputTokens,
-                        output_tokens: cost.outputTokens,
+                        coverage: "complete",
+                        inputTokens: cost.inputTokens,
+                        cachedInputTokens: cost.cachedInputTokens,
+                        cacheWriteInputTokens: cost.cacheWriteInputTokens,
+                        outputTokens: cost.outputTokens,
                       },
                     }
                   : {}),
@@ -1790,6 +1794,9 @@ test.each([
       expect(recovered.turnResult.usage).toMatchObject({
         input_tokens: cost.inputTokens,
       });
+      expect(formatTokenUsage(recovered.turnResult.usage)).toContain(
+        "110 total",
+      );
     } else if (mode === "standard" && location === "scan" && !beforeScan) {
       expect(recovered.cost?.inputTokens).toBe(tokens);
       expect(recovered.turnResult.usage).toMatchObject({
@@ -1802,5 +1809,67 @@ test.each([
         readSealedScanTurn({ ...context, maxCostUsd: 1 }),
       ).rejects.toThrow("no verified cost receipt");
     }
+  },
+);
+
+test.each([
+  { coverage: "complete", priced: true },
+  { coverage: "complete", priced: false },
+  { coverage: "partial", priced: true },
+])(
+  "sealed token summary normalizes saved receipts (%p)",
+  async ({ coverage, priced }) => {
+    const cost = priced
+      ? estimateScanCost("gpt-6-astra", {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          cache_write_input_tokens: 10,
+          output_tokens: 30,
+        })!
+      : null;
+    const recovered = await readSealedScanTurn({
+      scanId: "synthetic-scan",
+      scanDir: "/synthetic/scan",
+      codexHome: "/synthetic/home",
+      model: "gpt-6-astra",
+      startedAt: "2026-10-01T01:00:00Z",
+      checkpoint: null,
+      expectation: {
+        repository: "/synthetic/repository",
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "deep",
+        pluginVersion: "0.1.0",
+      },
+      signal: new AbortController().signal,
+      workbench: async () => ({
+        scan: {
+          progress: { status: "complete" },
+          cost: JSON.parse(JSON.stringify(cost)),
+          usage: {
+            coverage,
+            inputTokens: coverage === "complete" ? 100 : 1,
+            cachedInputTokens: coverage === "complete" ? 20 : 0,
+            cacheWriteInputTokens: coverage === "complete" ? 10 : 0,
+            outputTokens: coverage === "complete" ? 30 : 1,
+          },
+        },
+      }),
+      onTrackingError: (error) => {
+        throw error;
+      },
+      onCost() {},
+    });
+    expect(recovered.turnResult.usage).toMatchObject({
+      input_tokens: 100,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 10,
+      output_tokens: 30,
+    });
+    expect(formatTokenUsage(recovered.turnResult.usage)).toBe(
+      priced
+        ? "70 uncached input, 20 cache reads, 10 cache writes, 30 output, 130 total"
+        : "unavailable uncached input, 20 cache reads, unavailable cache writes, 30 output, 130 total",
+    );
   },
 );

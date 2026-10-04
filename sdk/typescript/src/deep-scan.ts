@@ -519,7 +519,7 @@ export async function runDeepScans(
       executionSignal.throwIfAborted();
       if (cause instanceof ScanTransportClosedError) throw cause;
       throw new DeepScanPublicationError(
-        "Could not publish accepted Deep Scan results; resume to retry publication.",
+        `Could not publish accepted Deep Scan results; resume to retry publication: ${errorMessage(cause)}`,
         scanDir,
         { cause },
       );

@@ -467,12 +467,18 @@ test("accepted matches replay publication without repeating matching or losing e
     }
     return response;
   };
+  const publicationCause = new Error("ENOSPC: synthetic publication failure");
   h.input.publish = async () => {
-    throw new Error("synthetic publication failure");
+    throw publicationCause;
   };
-  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
-    DeepScanPublicationError,
+  const publicationFailure = await runDeepScans(h.input).catch(
+    (error: unknown) => error,
   );
+  expect(publicationFailure).toBeInstanceOf(DeepScanPublicationError);
+  expect((publicationFailure as Error).message).toContain(
+    publicationCause.message,
+  );
+  expect((publicationFailure as Error).cause).toBe(publicationCause);
   const checkpoint = await loadDeepScanCheckpoint(h.input.scanDir);
   expect(checkpoint!.mergedScanIds).toHaveLength(2);
   expect(checkpoint!.aggregate!.findings).toHaveLength(1);

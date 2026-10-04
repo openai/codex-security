@@ -1966,7 +1966,11 @@ export class CodexSecurity {
           // Completed inputs precede merging. Missing optional session
           // metadata does not establish zero prior cost.
           passCosts.set("previous-work", null);
-          if (options.maxCostUsd !== undefined)
+          // Retry durable child retirement before rejecting saved accounting.
+          if (
+            options.maxCostUsd !== undefined &&
+            checkpoint?.pendingStop === undefined
+          )
             throw new ScanCostTrackingError(
               "A prior scan session is unavailable; its cost limit cannot be verified.",
               scanDir,

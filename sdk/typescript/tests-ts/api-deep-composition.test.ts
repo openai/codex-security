@@ -91,6 +91,8 @@ async function fixture(
   let stopAfterSealing: "deep" | "standard" | undefined;
   let stopCommand = "complete-scan";
   let publicationFails = false;
+  let stopAfterChildRegistration = false;
+  let childRetirementFails = false;
   let finalPublicationFailure:
     "prepare-scan-completion" | "complete-scan" | undefined;
   let childProjectionFails = false;
@@ -196,6 +198,12 @@ async function fixture(
         runWorkbench: async (options, args, input) => {
           commands.push(args[0]!);
           if (
+            childRetirementFails &&
+            args[0] === "fail-scan" &&
+            records.get(args[2]!)?.mode === "standard"
+          )
+            throw new Error("Synthetic transient child retirement failure");
+          if (
             args[0] === finalPublicationFailure &&
             records.get(args[2]!)?.mode === "deep"
           ) {
@@ -284,6 +292,19 @@ async function fixture(
               await writeFile(knowledgePath, "Changed after registration");
               environment.SYNTHETIC_SETTING = "later value";
             }
+          }
+          if (
+            stopAfterChildRegistration &&
+            args[0] === "register-cli-scan" &&
+            records.get(result["scanId"] as string)?.mode === "standard"
+          ) {
+            stopAfterChildRegistration = false;
+            controller.abort(
+              new ScanTransportClosedError(
+                "Synthetic process stop after child registration",
+              ),
+            );
+            throw controller.signal.reason;
           }
           return result;
         },
@@ -555,6 +576,12 @@ async function fixture(
     parentPhases,
     makeClient,
     preparations: () => preparations,
+    stopAfterChildRegistration() {
+      stopAfterChildRegistration = true;
+    },
+    failChildRetirement(value: boolean) {
+      childRetirementFails = value;
+    },
     stopAfterSealing(mode: "deep" | "standard" = "deep") {
       stopAfterSealing = mode;
     },
@@ -2025,3 +2052,85 @@ test.each(["budget", "execution"])(
     });
   },
 );
+
+test("budgeted resume retries pending child retirement before rejecting unavailable cost", async () => {
+  const h = await fixture();
+  const options = {
+    ...h.options,
+    knowledgeBasePaths: undefined,
+    workers: 1,
+    maxCostUsd: 1,
+  };
+  h.stopAfterChildRegistration();
+  await using first = h.makeClient();
+  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const [childId, child] = [...h.records].find(
+    ([, record]) => record.mode === "standard",
+  )!;
+  const readScan = async (id: string, record: typeof parent) =>
+    (
+      await runWorkbench({ ...record.options, signal: undefined }, [
+        "get-scan",
+        "--scan-id",
+        id,
+      ])
+    )["scan"] as JsonObject;
+  expect(await readScan(childId, child)).toMatchObject({
+    progress: { status: "running" },
+    continuationThreadId: null,
+  });
+  expect(h.launches).toHaveLength(0);
+  h.failChildRetirement(true);
+  await using interrupted = h.makeClient();
+  const resumeOptions = {
+    ...options,
+    signal: undefined,
+    resumeScanId: parentId,
+  };
+  await expect(
+    interrupted.run(h.repository, resumeOptions),
+  ).rejects.toBeInstanceOf(DeepScanRecoveryError);
+  const checkpointPath = join(
+    h.outputDir,
+    "artifacts/deep-scan/checkpoint.json",
+  );
+  expect(JSON.parse(await readFile(checkpointPath, "utf8"))).toMatchObject({
+    costUnavailable: true,
+    pendingStop: { reason: "failed" },
+  });
+  for (const [id, record] of [
+    [parentId, parent],
+    [childId, child],
+  ] as const)
+    expect(await readScan(id, record)).toMatchObject({
+      progress: { status: "running" },
+    });
+
+  h.failChildRetirement(false);
+  await using resumed = h.makeClient();
+  await expect(resumed.run(h.repository, resumeOptions)).rejects.toBeInstanceOf(
+    ScanInterruptedError,
+  );
+  for (const [id, record] of [
+    [parentId, parent],
+    [childId, child],
+  ] as const)
+    expect(await readScan(id, record)).toMatchObject({
+      progress: { status: "failed" },
+    });
+  const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+  expect(checkpoint).toMatchObject({
+    costUnavailable: true,
+    terminalReason: "failed",
+  });
+  expect(checkpoint.pendingStop).toBeUndefined();
+  expect(checkpoint.finalCost).toBeUndefined();
+  expect(h.launches).toHaveLength(0);
+  expect(h.records.size).toBe(2);
+  expect(h.commands).not.toContain("complete-budget-exhausted-scan");
+});
