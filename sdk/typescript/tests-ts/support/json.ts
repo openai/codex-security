@@ -21,6 +21,9 @@ export function jsonLines(values: readonly unknown[]): string {
   return values.map((value) => JSON.stringify(value)).join("\n");
 }
 
+export const writeJsonLines = (path: string, values: readonly unknown[]) =>
+  writeFile(path, jsonLines(values));
+
 export const readJsonLines = async <T = ReturnType<typeof JSON.parse>>(
   path: string,
 ) => parseJsonLines<T>(await readFile(path, "utf8"));

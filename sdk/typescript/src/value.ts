@@ -9,6 +9,15 @@ export function isNonEmptyString(value: unknown): value is string {
 }
 
 /** @internal */
+export function parseJson(read: () => string): unknown {
+  try {
+    return JSON.parse(read());
+  } catch {
+    return null;
+  }
+}
+
+/** @internal */
 export const findingEntry = <T extends { findingId: string }>(
   finding: T,
 ): [string, T] => [finding.findingId, finding];

@@ -70,6 +70,7 @@
 - simplify Deep Scan coordinator ownership ([#1213](https://github.com/openai/codex-security/pull/1213))
 - simplify Deep Scan worker launch ([#1212](https://github.com/openai/codex-security/pull/1212))
 - support long inventory output filenames ([#1214](https://github.com/openai/codex-security/pull/1214))
+- share progress and event parsing ([#1209](https://github.com/openai/codex-security/pull/1209))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
