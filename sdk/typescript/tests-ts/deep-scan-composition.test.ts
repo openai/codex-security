@@ -567,6 +567,121 @@ test.each(["sources", "aggregate", "accepted-checkpoint"] as const)(
   },
 );
 
+test.each([
+  { phase: "projection", requireCost: true },
+  { phase: "completed-checkpoint", requireCost: false },
+  { phase: "registration-checkpoint", requireCost: false },
+  { phase: "registration-checkpoint", requireCost: true },
+])(
+  "a deadline during child recovery preserves the failure: %j",
+  async ({ phase, requireCost }) => {
+    const h = await fixture({ workers: 1, stopAfterConsecutiveErrors: 3 });
+    h.input.scanOptions.requireCost = requireCost;
+    if (phase === "completed-checkpoint")
+      h.setExecute(async () => {
+        if (h.calls.length === 1)
+          throw new Error("Synthetic first child failure");
+      });
+    const failure = new Error("Synthetic one-shot child recovery failure");
+    const now = Date.parse(h.input.startedAt);
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    const schedule = globalThis.setTimeout;
+    let expire: (() => void) | undefined;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      ...args: Parameters<typeof schedule>
+    ) => {
+      const [callback, milliseconds, ...parameters] = args;
+      if (milliseconds === 3_600_000) expire = () => callback(...parameters);
+      return schedule(...args);
+    }) as typeof schedule);
+    let injected = false;
+    const interrupt = () => {
+      injected = true;
+      clock.mockReturnValue(now + 3_600_000);
+      expect(expire).toBeDefined();
+      expire!();
+      expect(h.calls.at(-1)!.signal!.aborted).toBe(true);
+      expect(h.input.signal.aborted).toBe(false);
+      throw failure;
+    };
+    const projectChild = h.input.projectChild;
+    h.input.projectChild = async (...args) => {
+      if (!injected && phase === "projection") interrupt();
+      return projectChild(...args);
+    };
+    const workbench = h.input.workbench;
+    h.input.workbench = async (args, contents) => {
+      if (
+        !injected &&
+        args[0] === "save-scan-artifact" &&
+        args[4] === DEEP_SCAN_CHECKPOINT
+      ) {
+        const saved = JSON.parse(contents!);
+        if (
+          phase === "registration-checkpoint" &&
+          saved.passes.some(
+            (pass: { scanId?: string }) => pass.scanId !== undefined,
+          )
+        )
+          interrupt();
+        if (
+          phase === "completed-checkpoint" &&
+          saved.consecutiveErrors === 0 &&
+          [...h.records.values()].some(
+            (record) => record.progress.status === "complete",
+          )
+        )
+          interrupt();
+      }
+      return workbench(args, contents);
+    };
+    try {
+      const caught = await runDeepScans(h.input).catch(
+        (error: unknown) => error,
+      );
+      expect(injected).toBe(true);
+      expect(h.publications).toHaveLength(0);
+      const launches = phase === "completed-checkpoint" ? 2 : 1;
+      expect(h.calls).toHaveLength(launches);
+      const saved = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+      if (phase === "registration-checkpoint" && requireCost) {
+        expect(caught).toBeInstanceOf(ScanCostTrackingError);
+        expect(saved.terminalReason).toBe("failed");
+        expect([...h.records.values()][0]!.progress.status).toBe("failed");
+        await expect(runDeepScans(h.input)).rejects.toThrow(
+          "saved Deep Scan is failed",
+        );
+      } else {
+        expect(caught).toBeInstanceOf(DeepScanRecoveryError);
+        expect((caught as Error).cause).toBe(failure);
+        expect(saved.terminalReason).toBeUndefined();
+        const registering = phase === "registration-checkpoint";
+        expect(saved.pendingStop?.reason).toBe(
+          registering ? "capped" : undefined,
+        );
+        expect([...h.records.values()].at(-1)!.progress.status).toBe(
+          registering ? "failed" : "complete",
+        );
+        const resumed = await runDeepScans(h.input);
+        expect(resumed.terminalReason).toBe("capped");
+        expect(resumed.mergedScanIds).toHaveLength(registering ? 0 : 1);
+        expect(h.publications.at(-1)!.findings).toHaveLength(
+          registering ? 0 : 1,
+        );
+        expect(resumed.pendingStop).toBeUndefined();
+      }
+      expect(h.calls).toHaveLength(launches);
+      expect(h.metrics().merges).toBe(0);
+      expect(
+        h.operations.filter((operation) => operation === "fail-scan"),
+      ).toHaveLength(phase === "projection" ? 0 : 1);
+    } finally {
+      clock.mockRestore();
+      timer.mockRestore();
+    }
+  },
+);
+
 test("a single first child needs no model merge", async () => {
   const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
   await runDeepScans(h.input);

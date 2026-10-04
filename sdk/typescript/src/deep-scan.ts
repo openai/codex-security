@@ -796,6 +796,7 @@ export async function runDeepScans(
           }
         }
       }
+      if (error instanceof DeepScanRecoveryError) throw error;
       if (deadlineController.signal.aborted && !executionSignal.aborted)
         throw deadlineController.signal.reason;
       throw error;
