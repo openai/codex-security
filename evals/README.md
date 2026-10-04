@@ -12,6 +12,9 @@ being embedded in its source tree or shipped npm runtime.
   core audit finds synthetic credentials in source and keeps them in its final
   findings, with deterministic grading and harness checks.
 
+- [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
+  synthetic grouping quality checks and negative controls.
+
 Model runs are opt-in. CI runs the deterministic triage and secret-discovery
 helper checks and the real-IPC reducer regression through the normal MCP test
 suite.

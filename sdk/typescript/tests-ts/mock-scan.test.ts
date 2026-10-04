@@ -25,7 +25,7 @@ import { rejecting, throwing } from "./support/errors.js";
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(workbench: typeof runWorkbench = runWorkbench) {
   const root = await mkdtemp(join(await realpath(tmpdir()), "mock-scan-test-"));
   roots.track(root);
   const repository = join(root, "repository");
@@ -46,7 +46,7 @@ async function fixture() {
     { pythonPath: python! },
     {
       environment,
-      runWorkbench,
+      runWorkbench: workbench,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
     },
@@ -183,6 +183,54 @@ test("mock scans preserve output protection and archive existing completed resul
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
     expect(first.coverage.mode).toBe("scoped_path");
     expect(first.coverage.includePaths).toEqual(["example.ts"]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("mock scans leave running descendants in place when archival is rejected", async () => {
+  let checked = false;
+  const { root, repository, client } = await fixture(async (_options, args) => {
+    expect(args).toEqual([
+      "list-scans",
+      "--scan-root",
+      join(root, "results"),
+      "--status",
+      "running",
+      "--limit",
+      "1",
+    ]);
+    checked = true;
+    return {
+      scans: [{ scanId: "running-child", progress: { status: "running" } }],
+    };
+  });
+  const outputDir = join(root, "results");
+  const childOutput = join(
+    outputDir,
+    "artifacts",
+    "deep-scan",
+    "passes",
+    "pass-1",
+  );
+  await mkdir(childOutput, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(childOutput, "evidence.json"),
+    "synthetic running evidence",
+  );
+  try {
+    await expect(
+      client.run(repository, { mock: true, outputDir, archiveExisting: true }),
+    ).rejects.toThrow("Cannot archive output");
+    expect(checked).toBe(true);
+    expect(await readFile(join(childOutput, "evidence.json"), "utf8")).toBe(
+      "synthetic running evidence",
+    );
+    expect(
+      (await readdir(root)).some((name) =>
+        name.startsWith("results.previous-"),
+      ),
+    ).toBe(false);
   } finally {
     await client.close();
   }

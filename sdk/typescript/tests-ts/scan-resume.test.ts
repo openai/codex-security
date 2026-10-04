@@ -1,5 +1,10 @@
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
+import {
+  readSealedScanTurn,
+  publishScan,
+  loadPublishedScanResult,
+} from "../src/scan-publication.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -32,7 +37,11 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth" | "cyberAccessProgram"
+    | "safetyIdentifier"
+    | "postScanPrompt"
+    | "auth"
+    | "cyberAccessProgram"
+    | "maxCostUsd"
   > = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -254,19 +263,28 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
-test.each([
-  "failed",
-  "canceled",
-  "standard",
-  "changed",
-  "replaced",
-  "wrong-owner",
-])(
+test("workbench resumes an interrupted Standard scan with its saved registration", async () => {
+  const f = await interruptedScan("standard");
+  const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+  const resumed = await f.command([
+    "get-cli-scan-resume",
+    "--scan-id",
+    f.scanId,
+  ]);
+  expect(resumed).toMatchObject({
+    ...f.registration,
+    recipe: f.recipe,
+    threadId: f.threadId,
+    claimToken: null,
+  });
+  expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(before);
+  expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+});
+
+test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
   "resume refuses %s scans without altering their saved state",
   async (scenario) => {
-    const f = await interruptedScan(
-      scenario === "standard" ? "standard" : "deep",
-    );
+    const f = await interruptedScan();
     if (scenario === "failed")
       await f.command([
         "fail-scan",
@@ -310,9 +328,7 @@ test.each([
           ? "checkout is missing or was replaced"
           : scenario === "wrong-owner"
             ? "original owning CLI session"
-            : scenario === "standard"
-              ? "Deep Scan with a saved CLI launch recipe"
-              : "running scan; completed, failed, and canceled",
+            : "running scan; completed, failed, and canceled",
     );
     expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
       before,
@@ -441,6 +457,60 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   );
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
+});
+
+test("resuming Deep Scan includes archived spending before starting another turn", async () => {
+  const f = await interruptedScan("deep", false, { maxCostUsd: 0.000001 });
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
+        },
+      },
+    }) + "\n",
+  );
+  const archived = join(f.codexHome, "archived_sessions");
+  await mkdir(archived);
+  await rename(f.sessionPath, join(archived, "root.jsonl"));
+  const stdout = capture();
+  const stderr = capture();
+  let turns = 0;
+  const code = await main(
+    ["scans", "resume", f.scanId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({
+        environment: f.environment,
+        currentDirectory: f.root,
+      }),
+      runWorkbench: f.command,
+      createSecurity: resumeClient(f, () => ({
+        startThread() {
+          throw new Error("Resume must preserve the owning thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              turns++;
+              throw new Error(
+                "Synthetic turn started despite archived spending.",
+              );
+            },
+          };
+        },
+      })),
+    },
+  );
+  expect(code).not.toBe(0);
+  expect(turns).toBe(0);
+  expect(stderr.text()).toContain("exceeded the $0.000001 limit");
 });
 
 function resumeClient(
@@ -1082,3 +1152,307 @@ test("resume requires an explicit scan ID", async () => {
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
 });
+
+test("sealed publication keeps its authoritative receipt after the target changes", async () => {
+  const f = await interruptedScan("standard");
+  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), f.scanDir, {
+    recursive: true,
+  });
+  for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
+    const path = join(f.scanDir, name);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    if (name === "scan-manifest.json") {
+      document.scan.id = f.scanId;
+      const contract = f.registration["contract"] as {
+        target: { allowedKinds: string[] };
+      };
+      document.scan.target = { kind: contract.target.allowedKinds[0] };
+      delete document.scan.sealedAt;
+      delete document.scan.artifacts;
+    } else {
+      document.scanId = f.scanId;
+      if (name === "findings.json") document.findings = [];
+      else {
+        document.mode = "repository";
+        document.completeness = "complete";
+        document.surfaces = [];
+        document.deferred = [];
+      }
+    }
+    await writeFile(path, JSON.stringify(document));
+  }
+  await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+  const manifest = JSON.parse(
+    await readFile(join(f.scanDir, "scan-manifest.json"), "utf8"),
+  );
+  await writeFile(join(f.repository, "source.py"), "# changed after sealing\n");
+  expect(
+    (await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]))[
+      "sealedProducerVersion"
+    ],
+  ).toBe(manifest.scan.producer.version);
+  const cost = {
+    model: "gpt-5.6-sol",
+    inputTokens: 100,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 10,
+    estimatedUsd: 0.125,
+  };
+  const { result } = await publishScan(
+    {
+      scanId: f.scanId,
+      scanDir: f.scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: f.repository,
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: manifest.scan.producer.version,
+      },
+      signal: new AbortController().signal,
+      workbench: f.command,
+    },
+    {
+      threadId: f.threadId,
+      turnResult: {
+        status: "completed",
+        model: cost.model,
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    },
+    cost,
+    true,
+  );
+  expect(result.cost).toEqual(cost);
+  const completion = await f.command(["get-scan", "--scan-id", f.scanId]);
+  expect(completion["scan"]).toMatchObject({ cost });
+  const loaded = await loadPublishedScanResult(
+    {
+      scanDir: f.scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: f.repository,
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: manifest.scan.producer.version,
+      },
+      signal: new AbortController().signal,
+    },
+    {
+      threadId: f.threadId,
+      turnResult: {
+        status: "completed",
+        model: cost.model,
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    },
+    completion,
+  );
+  expect(loaded.result.cost).toEqual(cost);
+});
+
+test.each(["standard", "deep"] as const)(
+  "sealed %s recovery requires a verified receipt when a cost limit is set",
+  async (mode) => {
+    const f = await interruptedScan(mode);
+    await rm(f.sessionPath);
+    const context = {
+      scanId: f.scanId,
+      scanDir: f.scanDir,
+      codexHome: f.codexHome,
+      model: f.recipe.config.model,
+      startedAt: null,
+      checkpoint:
+        mode === "deep"
+          ? {
+              version: 2 as const,
+              startedAt: "2026-10-01T00:00:00Z",
+              passes: [],
+              mergedScanIds: [],
+              noNewStreak: 0,
+              consecutiveErrors: 0,
+              mergeStarted: true,
+            }
+          : null,
+      expectation: {
+        repository: f.repository,
+        repositoryRevision: null,
+        target: { kind: "repository" as const, paths: [] },
+        mode,
+        pluginVersion: "0.1.0",
+      },
+      signal: new AbortController().signal,
+      workbench: f.command,
+      onTrackingError: () => {},
+      onCost: () => {},
+    };
+    expect((await readSealedScanTurn(context)).cost).toBeNull();
+    await expect(
+      readSealedScanTurn({ ...context, maxCostUsd: 1 }),
+    ).rejects.toThrow("no verified cost receipt");
+    const cost = {
+      model: f.recipe.config.model,
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      estimatedUsd: 0.125,
+    };
+    expect(
+      (
+        await readSealedScanTurn({
+          ...context,
+          maxCostUsd: 1,
+          workbench: async (args) =>
+            args[0] === "get-scan"
+              ? {
+                  scan: {
+                    continuationThreadId: f.threadId,
+                    progress: { status: "complete" },
+                    cost,
+                  },
+                }
+              : f.command(args),
+        })
+      ).cost,
+    ).toEqual(cost);
+  },
+);
+
+test.each([
+  {
+    mode: "deep",
+    location: "scan",
+    beforeScan: false,
+    receipt: true,
+    tokens: 10,
+  },
+  {
+    mode: "standard",
+    location: "repository",
+    beforeScan: false,
+    receipt: true,
+    tokens: 1_000_000,
+  },
+  {
+    mode: "standard",
+    location: "scan",
+    beforeScan: true,
+    receipt: true,
+    tokens: 1_000_000,
+  },
+  {
+    mode: "standard",
+    location: "repository",
+    beforeScan: false,
+    receipt: false,
+    tokens: 1_000_000,
+  },
+  {
+    mode: "standard",
+    location: "scan",
+    beforeScan: true,
+    receipt: false,
+    tokens: 1_000_000,
+  },
+  {
+    mode: "standard",
+    location: "scan",
+    beforeScan: false,
+    receipt: false,
+    tokens: 100,
+  },
+  {
+    mode: "deep",
+    location: "scan",
+    beforeScan: false,
+    receipt: false,
+    tokens: 100,
+  },
+] as const)(
+  "sealed recovery uses scan-owned accounting: %p",
+  async ({ mode, location, beforeScan, receipt, tokens }) => {
+    const f = await interruptedScan(mode);
+    const cost = {
+      model: f.recipe.config.model,
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      estimatedUsd: 0.125,
+    };
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const scan = saved["scan"] as import("../src/config.js").JsonObject;
+    await writeFile(
+      f.sessionPath,
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: f.threadId,
+            cwd: location === "scan" ? f.scanDir : f.repository,
+            timestamp: beforeScan
+              ? "2026-10-01T00:00:00Z"
+              : "2026-10-01T02:00:00Z",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { input_tokens: tokens, output_tokens: 1 },
+            },
+          },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+    const context = {
+      scanId: f.scanId,
+      scanDir: f.scanDir,
+      codexHome: f.codexHome,
+      model: f.recipe.config.model,
+      startedAt: "2026-10-01T01:00:00Z",
+      checkpoint: null,
+      expectation: {
+        repository: f.repository,
+        repositoryRevision: null,
+        target: { kind: "repository" as const, paths: [] },
+        mode,
+        pluginVersion: "0.1.0",
+      },
+      signal: new AbortController().signal,
+      workbench: async (args: readonly string[]) =>
+        args[0] === "get-scan"
+          ? { ...saved, scan: { ...scan, cost: receipt ? cost : null } }
+          : f.command(args),
+      onTrackingError: (error: unknown) => {
+        throw error;
+      },
+      onCost: () => {},
+    };
+    const recovered = await readSealedScanTurn(context);
+    if (receipt) {
+      expect(recovered.cost).toEqual(cost);
+      expect(recovered.turnResult.usage).toMatchObject({
+        input_tokens: cost.inputTokens,
+      });
+    } else if (location === "scan" && !beforeScan) {
+      expect(recovered.cost?.inputTokens).toBe(tokens);
+      expect(recovered.turnResult.usage).toMatchObject({
+        input_tokens: tokens,
+      });
+    } else {
+      expect(recovered.cost).toBeNull();
+      expect(recovered.turnResult.usage).toBeNull();
+      await expect(
+        readSealedScanTurn({ ...context, maxCostUsd: 1 }),
+      ).rejects.toThrow("no verified cost receipt");
+    }
+  },
+);
