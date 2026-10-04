@@ -1,5 +1,4 @@
-import { semanticFinding } from "./helpers/semantic-scan.js";
-import { prepareScanFindings } from "../src/scan-semantics.js";
+import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -90,7 +89,11 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  prepareScanFindings,
+  prepareSemanticScanDraft,
+} from "../src/scan-semantics.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -322,42 +325,9 @@ describe("plugin runtime preparation", () => {
     ).toEqual(["candidate-a", "candidate-b"]);
   });
 
-  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-
-    type Surface = {
-      id?: string;
-      label: string;
-      disposition: string;
-      receiptRefs?: string[];
-    };
-    type Deferred = { id: string; reason: string; surfaceIds: string[] };
-    const buildCoverage = new Function(
-      "semanticIdentifier",
-      "coverageMode",
-      "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
-    )(
-      (label: string) => label.toLowerCase(),
-      () => "deep_repository",
-      () => "repository",
-    ) as (
-      context: Record<string, unknown>,
-      contract: Record<string, unknown>,
-      coverage: { surfaces: Surface[]; deferred: Deferred[] },
-      scope: { includePaths: string[]; excludePaths: string[] },
-      target: Record<string, unknown>,
-    ) => {
-      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
-      deferred: Deferred[];
-    };
-
-    const coverage = {
+  test("disambiguates duplicate coverage surface identities without losing evidence", () => {
+    const coverage = semanticCoverage({
+      completeness: "partial",
       surfaces: [
         {
           id: "surface-web",
@@ -387,15 +357,26 @@ describe("plugin runtime preparation", () => {
           surfaceIds: ["surface-web", "surface_uploads"],
         },
       ],
-    };
+    });
     const original = structuredClone(coverage);
-    const canonical = buildCoverage(
-      { mode: "deep" },
-      {},
-      coverage,
-      { includePaths: ["."], excludePaths: [] },
-      {},
-    );
+    const canonical = prepareSemanticScanDraft(
+      {
+        mode: "deep",
+        targetContract: {
+          target: {
+            allowedKinds: ["directory_snapshot"],
+            targetId: "target_example",
+            displayName: "example",
+          },
+          scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+        },
+      },
+      {
+        scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
+        findings: [],
+        coverage,
+      },
+    ).coverage;
 
     expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
       "surface-web",
@@ -413,7 +394,7 @@ describe("plugin runtime preparation", () => {
       "artifacts/primary.json",
     ]);
     expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect(canonical.deferred).toEqual(coverage.deferred);
+    expect<unknown>(canonical.deferred).toEqual(coverage.deferred);
     expect(coverage).toEqual(original);
   });
 
@@ -2309,16 +2290,35 @@ describe("plugin runtime preparation", () => {
       });
       await writeFile(join(scanDir, artifact), expected);
       const python = await resolvePluginPython({ environment });
+      const restorationSignal = new AbortController();
       const restorer = await prepareScanArtifactRestorer(
         {
           python,
           pluginRoot: upgraded.installedRoot,
           environment,
+          signal: restorationSignal.signal,
         },
         scanDir,
       );
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      restorationSignal.abort();
       await restorer.restore(artifact, expected);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      await restorer.restoreMany([
+        { path: artifact, contents: Buffer.from([9, 0, 8]) },
+        { path: "artifacts/second.bin", contents: expected },
+        { path: artifact, contents: expected },
+      ]);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      expect(await readFile(join(scanDir, "artifacts/second.bin"))).toEqual(
+        expected,
+      );
+      await expect(
+        restorer.restoreMany([
+          { path: "../outside.bin", contents: expected },
+          { path: artifact, contents: Buffer.from([7]) },
+        ]),
+      ).rejects.toThrow("safely restore");
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
       const rolloutPath = join(root, "cached-rollout.jsonl");
@@ -2336,6 +2336,55 @@ describe("plugin runtime preparation", () => {
       });
     },
   );
+
+  test("keeps scan artifact directories, staging and cleanup inside the checked root", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const sibling = join(root, "sibling");
+    await Promise.all([
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(sibling, { mode: 0o700 }),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const writer = await prepareScanArtifactRestorer(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment: {} },
+      scanDir,
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    await writer.restore(
+      "artifacts/deep-scan/merge/retained.json",
+      Buffer.from("{}"),
+    );
+    await writer.prepareDirectory("artifacts/deep-scan/merge");
+    expect(
+      await readFile(
+        join(scanDir, "artifacts/deep-scan/merge/retained.json"),
+        "utf8",
+      ),
+    ).toBe("{}");
+    await writer.restore("drafts/staged.json", Buffer.from("{}"));
+    await writer.remove("drafts/staged.json");
+    expect(await readdir(join(scanDir, "drafts"))).toEqual([]);
+
+    await writeFile(join(sibling, "retained.json"), "preserved");
+    await symlink(
+      sibling,
+      join(scanDir, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const operation of [
+      () => writer.prepareDirectory("linked/merge"),
+      () => writer.restore("linked/staged.json", Buffer.from("{}")),
+      () => writer.remove("linked/retained.json"),
+    ]) {
+      await expect(operation()).rejects.toThrow("Could not safely");
+      expect(await readdir(sibling)).toEqual(["retained.json"]);
+      expect(await readFile(join(sibling, "retained.json"), "utf8")).toBe(
+        "preserved",
+      );
+    }
+  });
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();

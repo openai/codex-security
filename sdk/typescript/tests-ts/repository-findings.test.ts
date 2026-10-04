@@ -1,3 +1,4 @@
+import { workbenchFixture } from "./support/workbench-fixture.js";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
@@ -9,41 +10,33 @@ test("combines repository findings without reviving dismissed aliases", async ()
   const probe = `
 import argparse, json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 import workbench_native_indexes as indexes
 
-connection = sqlite3.connect(":memory:")
-connection.row_factory = sqlite3.Row
-connection.executescript("""
-CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT, parent_scan_role TEXT);
-CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
-CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);
-CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
-CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
-INSERT INTO security_targets VALUES('first', '/first', 'First'), ('second', '/second', 'Second');
-""")
+connection = migrated_connection()
+seed_many(connection, 'security_targets', ('id', 'current_path', 'display_name'), [('first', '/first', 'First'), ('second', '/second', 'Second')])
 def add_scan(scan_id, target, day):
     timestamp = f"2026-01-{day:02d}T00:00:00Z"
-    connection.execute("INSERT INTO scans (id, target_id, scope, updated_at, status, started_at) VALUES (?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp))
+    seed(connection, 'scans', ('id', 'target_id', 'scope', 'updated_at', 'status', 'started_at'), (scan_id, target, "repository", timestamp, "complete", timestamp))
 
 def add_finding(occurrence, finding, scan):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]
-    connection.execute("INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)", (occurrence, finding, "high", started, scan, finding, "Summary"))
-    connection.execute("INSERT INTO finding_locations VALUES (?, ?, ?, ?)", (occurrence, "src/auth.py", "root_control", 0))
+    seed(connection, 'finding_occurrences', ('id', 'finding_id', 'severity', 'created_at', 'scan_id', 'title', 'summary'), (occurrence, finding, "high", started, scan, finding, "Summary"))
+    seed(connection, 'finding_locations', ('occurrence_id', 'relative_path', 'role', 'sort_order'), (occurrence, "src/auth.py", "root_control", 0))
 
 for scan_id, target, day in [("old", "first", 1), ("same", "first", 2), ("renamed", "first", 3), ("latest", "first", 4), ("other", "second", 4)]:
     add_scan(scan_id, target, day)
 for occurrence, finding, scan in [("old-occurrence", "dismissed", "old"), ("same-occurrence", "dismissed", "same"), ("renamed-occurrence", "renamed", "renamed"), ("latest-occurrence", "renamed-again", "latest"), ("historical-occurrence", "historical", "old"), ("other-occurrence", "dismissed", "other")]:
     add_finding(occurrence, finding, scan)
-connection.executemany("INSERT INTO scan_comparison_matches VALUES (?, ?)", [("same-occurrence", "renamed-occurrence"), ("renamed-occurrence", "latest-occurrence"), ("latest-occurrence", "other-occurrence")])
-connection.execute("INSERT INTO finding_triage VALUES (?, ?, ?, ?)", ("old-occurrence", "closed", "2026-01-01T12:00:00Z", "false_positive"))
+seed_many(connection, 'scan_comparison_matches', ('before_occurrence_id', 'after_occurrence_id'), [("same-occurrence", "renamed-occurrence"), ("renamed-occurrence", "latest-occurrence"), ("latest-occurrence", "other-occurrence")])
+seed(connection, 'finding_triage', ('occurrence_id', 'status', 'updated_at', 'close_reason'), ("old-occurrence", "closed", "2026-01-01T12:00:00Z", "false_positive"))
 
 def findings(target, status="open"):
     arguments = argparse.Namespace(limit=20, offset=0, query=None, severity=None, status=status, target_id=target)
     return indexes.list_global_findings(connection, arguments)["findings"]
 
 result = {"dismissed": findings("first"), "other": findings("second"), "closed": findings("first", None)}
-connection.execute("INSERT INTO finding_triage VALUES (?, ?, ?, ?)", ("latest-occurrence", "open", "2026-01-06T00:00:00Z", None))
+seed(connection, 'finding_triage', ('occurrence_id', 'status', 'updated_at', 'close_reason'), ("latest-occurrence", "open", "2026-01-06T00:00:00Z", None))
 result["reopened"] = findings("first")
 add_scan("clean", "first", 7)
 result["not_revalidated"] = findings("first")

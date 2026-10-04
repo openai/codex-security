@@ -22,7 +22,11 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
-import { combineScanCoverage, validateScanMerge } from "../src/scan-merge.js";
+import {
+  combineScanCoverage,
+  createScanMerger,
+  materializeScanAggregate,
+} from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -234,18 +238,21 @@ with connect() as connection:
       (index) => legacy.findings[index]!,
     ),
   );
-  const result = validateScanMerge(
-    {
-      scanId: fixture.parentScanId,
-      groups: projected.draft.findings.map((finding) => ({
-        sourceFindingIds: finding.provenance.sourceFindingIds!,
-        canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
-      })),
-    },
+  const merge = await createScanMerger(PLUGIN_ROOT);
+  const result = await merge(
+    fixture.parentScanId,
     [projected],
     null,
+    new AbortController().signal,
+    async () => {
+      throw new Error("One projected child needs no model call");
+    },
+    { contextPath: join(h.parent, "merge-context.json") },
   );
-  expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
+  expect(
+    materializeScanAggregate(result.aggregate).findings[0]!.provenance
+      .sourceFindings,
+  ).toEqual([
     { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
   ]);
   expect(await readFile(findingsPath, "utf8")).toBe(sourceBytes);

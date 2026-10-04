@@ -57,18 +57,6 @@ def _project_candidate_id(source_scan_id: str, candidate_id: str) -> str:
     return f"{source_scan_id}:{hashlib.sha256(candidate_id.encode()).hexdigest()}"
 
 
-def merge_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
-    """Retain distinct coverage rows in their original order."""
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = target.setdefault(field, [])
-        seen = {json.dumps(row, sort_keys=True) for row in rows}
-        for row in source.get(field, []):
-            key = json.dumps(row, sort_keys=True)
-            if key not in seen:
-                rows.append(row)
-                seen.add(key)
-
-
 def project_scan_artifacts(
     parent_scan_id: str,
     source_scan_id: str,

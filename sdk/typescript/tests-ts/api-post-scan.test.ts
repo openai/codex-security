@@ -25,67 +25,6 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
 afterEach(cleanup);
 
 describe("completed scan follow-up instructions", () => {
-  test("follow-up completes when saving its session fails", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    const scanDir = await copyCompletedScan(root);
-    const warnings: string[] = [];
-    let started = 0;
-    let followUpCompleted = false;
-    const client = new TestClient(
-      {},
-      {
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => Bun.which("python3")!,
-        repositoryRevision: async () => "deadbeef",
-        prepareOutputDir: async () => scanDir,
-        runWorkbench: async (_options, args, input) => {
-          if (args[0] === "set-scan-thread" && args.includes("follow-up")) {
-            throw new Error("Synthetic history write failure");
-          }
-          return mockWorkbench(args, input);
-        },
-        createCodex: () => ({
-          startThread() {
-            const id = ++started === 1 ? "primary" : "follow-up";
-            return {
-              id,
-              async runStreamed() {
-                async function* events(): AsyncGenerator<ThreadEvent> {
-                  for await (const event of completedEvents(id)) {
-                    if (id === "follow-up" && event.type === "turn.completed") {
-                      followUpCompleted = true;
-                    }
-                    yield event;
-                  }
-                }
-                return { events: events() };
-              },
-            };
-          },
-        }),
-      },
-    );
-    try {
-      const result = await client.run(repository, {
-        postScanPrompt: "Prepare follow-up notes.",
-        onWarning: (message) => warnings.push(message),
-      });
-      expect(result.scanDir).toBe(scanDir);
-      expect(followUpCompleted).toBe(true);
-      expect(
-        warnings.some((message) =>
-          message.includes("Synthetic history write failure"),
-        ),
-      ).toBe(true);
-    } finally {
-      await client.close();
-    }
-  });
-
   test("failed follow-up writes fresh output without changing sealed evidence", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

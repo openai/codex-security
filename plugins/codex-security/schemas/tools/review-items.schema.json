@@ -48,9 +48,6 @@
       "required": ["scanId"],
       "additionalProperties": false
     },
-    "reviewItemsWorkerInput": {
-      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/page"
-    },
     "reviewItem": {
       "type": "object",
       "properties": {

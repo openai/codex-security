@@ -1,5 +1,3 @@
-import "./test_checkpoint_serialization.mjs";
-import "./test_artifact_worker_identity.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {

@@ -8,14 +8,44 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
-    create_saved_workspace,
-    mark_deep_coordinator_succeeded,
+    begin_legacy_scan,
+    checkpoint,
     register,
     run_workbench,
-    start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
 )
+
+
+def test_retired_execution_rejected_without_mutating_artifacts(
+    tmp_path, workbench_api, monkeypatch
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    created = begin_legacy_scan(
+        state, tmp_path / "home", target, tmp_path / "scans", thread_id="owner"
+    )
+    scan = created["deepScan"]
+    directory = Path(scan["scanDir"])
+    sentinel = directory / "saved-evidence.txt"
+    sentinel.write_text("Historical evidence")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, scan["scanId"])
+        with pytest.raises(SystemExit, match="original version"):
+            workbench_api["saved_results"].require_current_deep_scan(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, row
+            )
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = 'historical-seal' WHERE id = ?",
+            (scan["scanId"],),
+        )
+        row = workbench_api["require_scan"](connection, scan["scanId"])
+        workbench_api["saved_results"].require_current_deep_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, row
+        )
+    assert sentinel.read_text() == "Historical evidence"
 
 
 def test_committed_draft_survives_partial_export_and_blocks_stale_writer(
@@ -85,26 +115,6 @@ def test_committed_draft_survives_partial_export_and_blocks_stale_writer(
     assert "typed scan tools" in blocked["stderr"]
 
 
-def _register_draft_scan(state, target, directory, mode):
-    if mode != "deep":
-        return register(state, target, directory, mode=mode)
-    workspace = create_saved_workspace(state, target, thread_id="draft-owner", mode="deep")
-    scan = start_delivered_scan(
-        state, "--workspace-id", str(workspace["id"]), "--scan-root", str(directory)
-    )["results"]
-    run_workbench(
-        state,
-        "begin-deep-scan",
-        "--scan-id",
-        scan["scanId"],
-        "--thread-id",
-        "draft-owner",
-        environment={"CODEX_HOME": str(directory.parent / "codex-home")},
-    )
-    mark_deep_coordinator_succeeded(state, scan["scanId"], Path(scan["scanDir"]))
-    return scan
-
-
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 @pytest.mark.parametrize("complete", [False, True])
 @pytest.mark.parametrize("existing_exports", [False, True])
@@ -115,8 +125,10 @@ def test_completion_uses_committed_documents_after_interrupted_export(
     target.mkdir()
     (target / "app.py").write_text("pass\n" * 50)
     state = tmp_path / "state"
-    scan = _register_draft_scan(state, target, tmp_path / "scan", mode)
+    scan = register(state, target, tmp_path / "scan", mode=mode)
     directory = Path(scan["scanDir"])
+    if mode == "deep":
+        checkpoint(state, scan, terminal="saturated")
     write_completed_contract(
         directory,
         scan["scanId"],
@@ -215,8 +227,9 @@ def test_deep_completion_keeps_strict_validation_for_committed_findings(tmp_path
     target.mkdir()
     (target / "app.py").write_text("pass\n" * 50)
     state = tmp_path / "state"
-    scan = _register_draft_scan(state, target, tmp_path / "scan", "deep")
+    scan = register(state, target, tmp_path / "scan", mode="deep")
     directory = Path(scan["scanDir"])
+    checkpoint(state, scan, terminal="saturated")
     write_completed_contract(
         directory,
         scan["scanId"],
@@ -247,6 +260,29 @@ def test_deep_completion_keeps_strict_validation_for_committed_findings(tmp_path
     assert scan["progress"]["status"] == "failed"
     manifest = json.loads((directory / "scan-manifest.json").read_text())["scan"]
     assert manifest["status"] == "failed"
+
+
+def test_flat_source_materialization_retains_originals_and_accepted_revisions(workbench_api):
+    original = {"identity": {"anchor": "first"}, "remediation": "First repair"}
+    revision = {"identity": {"anchor": "accepted"}, "remediation": "Second repair"}
+    draft = {
+        "findings": [{"provenance": {"sourceFindingIds": ["source"], "revisionIds": ["revision"]}}],
+        "sourceFindings": {"source": original},
+        "revisions": {"revision": revision},
+    }
+    materialized = workbench_api["saved_results"].materialize_sources(draft)
+    assert materialized == {
+        "findings": [
+            {
+                "provenance": {
+                    "sourceFindingIds": ["source"],
+                    "sourceFindings": [{"id": "source", "finding": original}],
+                    "previousFindings": [revision],
+                }
+            }
+        ]
+    }
+    assert "sourceFindings" in draft
 
 
 @pytest.mark.parametrize(
@@ -679,3 +715,192 @@ def test_checkpoint_recovery_retains_refinement_and_distinct_instances(
         assert {finding["identity"]["instance"] for finding in actual} == {"first", "second"}
     else:
         assert actual[0]["provenance"]["previousFindings"] == [original]
+
+
+def test_current_aggregate_hydrates_immutable_sources_only_when_requested(
+    tmp_path, workbench_api, monkeypatch
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan", mode="deep")
+    directory = Path(scan["scanDir"])
+    source = {"identity": {"anchor": "original"}, "remediation": "Original repair"}
+    source_id = "synthetic-child:0"
+    revision = {"identity": {"anchor": "accepted"}}
+    revision_id = hashlib.sha256(json.dumps(revision).encode()).hexdigest()
+    documents = {
+        f"sources/{hashlib.sha256(source_id.encode()).hexdigest()}": source,
+        f"revisions/{revision_id}": revision,
+        "aggregates/current": {
+            "findings": [],
+            "sourceFindingIds": [source_id],
+            "revisionIds": [revision_id],
+        },
+        "checkpoint": {
+            "version": 3,
+            "aggregatePath": "artifacts/deep-scan/aggregates/current.json",
+        },
+    }
+    for relative, document in documents.items():
+        path = directory / f"artifacts/deep-scan/{relative}.json"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(json.dumps(document))
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    row = {"id": scan["scanId"], "scan_dir": str(directory)}
+    read = workbench_api["load_composition"].__globals__["read_composition_checkpoint"]
+    assert read(row)["aggregate"] == {
+        "findings": [],
+        "sourceFindings": {source_id: source},
+        "revisions": {revision_id: revision},
+    }
+    assert "aggregate" not in read(row, load_aggregate=False)
+
+
+def test_old_live_checkpoint_is_readable_but_cannot_resume(tmp_path, workbench_api, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan", mode="deep")
+    checkpoint = Path(scan["scanDir"]) / "artifacts/deep-scan/checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, mode=0o700)
+    contents = json.dumps({"version": 2, "passes": [], "mergedScanIds": [], "aggregate": None})
+    checkpoint.write_text(contents)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    read = workbench_api["load_composition"].__globals__["read_composition_checkpoint"]
+    assert (
+        read({"id": scan["scanId"], "scan_dir": scan["scanDir"]}, load_aggregate=False)["version"]
+        == 2
+    )
+    assert "compositionCheckpoint" not in run_workbench(
+        state, "get-scan", "--scan-id", scan["scanId"]
+    )
+    result = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False)
+    assert result["returncode"] != 0
+    assert "original version" in result["stderr"]
+    assert checkpoint.read_text() == contents
+
+
+@pytest.mark.parametrize("sealed", [False, True])
+def test_old_checkpoint_completion_requires_sealed_results(
+    tmp_path, workbench_api, monkeypatch, sealed
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("pass\n" * 50)
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan", mode="deep")
+    directory = Path(scan["scanDir"])
+    write_completed_contract(
+        directory, scan["scanId"], target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    manifest_path = directory / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["artifacts"] = []
+    manifest_path.write_text(json.dumps(manifest))
+    checkpoint = directory / "artifacts/deep-scan/checkpoint.json"
+    checkpoint.parent.mkdir(parents=True, mode=0o700)
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "passes": [],
+                "mergedScanIds": [],
+                "terminalReason": "capped",
+                "aggregate": None,
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, scan["scanId"])
+        connection.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = 'native-owner' WHERE id = ?",
+            (scan["scanId"],),
+        )
+        original_recipe = json.loads(row["recipe_json"])
+        if sealed:
+            # Recreate the old publisher stopping after sealing, before SQLite completion.
+            binding = workbench_api["workbench_completion_binding"](row, row["started_at"])
+            binding["producer"]["version"] = "historical-fixture"
+            workbench_api["finalize_scan"](directory, completion_binding=binding)
+        else:
+            saved_recipe = {**json.loads(row["recipe_json"]), "maxCostUsd": 0.001}
+            connection.execute(
+                "UPDATE scans SET recipe_json = ? WHERE id = ?",
+                (json.dumps(saved_recipe), scan["scanId"]),
+            )
+    protected = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    checkpoint_bytes = checkpoint.read_bytes()
+    for arguments, payload in (
+        (
+            ("begin-deep-scan", "--scan-id", scan["scanId"], "--thread-id", "native-owner"),
+            None,
+        ),
+        (
+            (
+                "register-cli-scan",
+                "--repository",
+                str(target),
+                "--scan-dir",
+                str(directory),
+                "--registration-json-stdin",
+            ),
+            json.dumps(
+                {"scanId": scan["scanId"], "threadId": "native-owner", "recipe": original_recipe}
+            ),
+        ),
+    ):
+        if sealed:
+            coverage_path = directory / "coverage.json"
+            coverage_path.write_bytes(protected["coverage.json"] + b"\n")
+            rejected = run_workbench(state, *arguments, input_text=payload, check=False)
+            assert rejected["returncode"] != 0
+            assert "Cannot resume sealed scan" in rejected["stderr"]
+            coverage_path.write_bytes(protected["coverage.json"])
+        result = run_workbench(state, *arguments, input_text=payload, check=False)
+        if sealed:
+            assert result["returncode"] == 0, result["stderr"]
+        else:
+            assert result["returncode"] != 0
+            assert "original version" in result["stderr"]
+    if sealed:
+        resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+        assert resumed["sealedProducerVersion"] == "historical-fixture"
+        result = run_workbench(state, "complete-scan", "--scan-id", scan["scanId"], check=False)
+        assert result["returncode"] == 0, result["stderr"]
+        completed = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
+        assert completed["progress"]["status"] == "complete"
+        assert completed["findingCount"] == 1
+    else:
+        cost = {
+            "model": "synthetic-model",
+            "inputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 5,
+            "estimatedUsd": 0.002,
+        }
+        for command in ("complete-scan", "complete-budget-exhausted-scan"):
+            rejected = run_workbench(
+                state,
+                command,
+                "--scan-id",
+                scan["scanId"],
+                "--cost-json",
+                json.dumps(cost),
+                check=False,
+            )
+            assert rejected["returncode"] != 0
+            assert "original version" in rejected["stderr"]
+        assert (
+            run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["progress"][
+                "status"
+            ]
+            == "running"
+        )
+    assert checkpoint.read_bytes() == checkpoint_bytes
+    assert all((directory / name).read_bytes() == contents for name, contents in protected.items())

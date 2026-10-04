@@ -15,48 +15,42 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, sep } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { loadSourceModule, privateDirectory } from "./helpers/source.mjs";
 import { parse as parseToml } from "smol-toml";
 
-const bundle = await build({
-  bundle: true,
-  stdin: {
-    contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+const module = await loadSourceModule(
+  new URL("../src/native-scan.ts", import.meta.url),
+  {
+    entryPoints: undefined,
+    stdin: {
+      contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
       export { prepareAmbientRuntime } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
-    resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
-  },
-  define: {
-    "import.meta.url": JSON.stringify(
-      new URL("../src/native-scan.ts", import.meta.url).href,
-    ),
-  },
-  format: "cjs",
-  platform: "node",
-  write: false,
-  plugins: [
-    {
-      name: "capture-ordinary-client",
-      setup(build) {
-        build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
-          path: "client",
-          namespace: "fixture",
-        }));
-        build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
-          resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
-          contents: `export { selectedScanEnvironment } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};
-             export class CodexSecurity { constructor(config, dependencies) { this.config = config; this.dependencies = dependencies; } }`,
-        }));
-      },
+      resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
     },
-  ],
-});
-const module = { exports: {} };
-new Function("require", "module", "exports", bundle.outputFiles[0].text)(
-  createRequire(import.meta.url),
-  module,
-  module.exports,
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL("../src/native-scan.ts", import.meta.url).href,
+      ),
+    },
+    plugins: [
+      {
+        name: "capture-ordinary-client",
+        setup(build) {
+          build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
+            path: "client",
+            namespace: "fixture",
+          }));
+          build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
+            resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
+            contents: `export { selectedScanEnvironment } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};
+             export class CodexSecurity { constructor(config, dependencies) { this.config = config; this.dependencies = dependencies; } }`,
+          }));
+        },
+      },
+    ],
+  },
 );
 const {
   NativeScanHost,
@@ -65,11 +59,9 @@ const {
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
   prepareAmbientRuntime,
-} = module.exports;
+} = module;
 
-const fixtureRepository = await realpath(
-  await mkdtemp(join(tmpdir(), "native-scan-repository-")),
-);
+const fixtureRepository = await privateDirectory("native-scan-repository-");
 after(() => rm(fixtureRepository, { recursive: true, force: true }));
 
 async function collectNativeEvents(thread, prompt, options) {
@@ -77,6 +69,15 @@ async function collectNativeEvents(thread, prompt, options) {
   const collected = [];
   for await (const event of events) collected.push(event);
   return collected;
+}
+
+function launchConfiguration(argv) {
+  const config = {};
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] === "--config" || argv[index] === "-c")
+      Object.assign(config, parseToml(argv[++index]));
+  }
+  return config;
 }
 
 function syntheticPermissionAppServer() {
@@ -112,6 +113,7 @@ function syntheticPermissionAppServer() {
   };
   capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
     const request = JSON.parse(line);
@@ -259,65 +261,6 @@ test("native preparation protects enclosing repositories for fresh and resumed c
       );
       assert.equal(environment.PATH, await realpath(dirname(process.execPath)));
       assert.equal(process.env.PATH, originalPath);
-    }
-  } finally {
-    restoreEnvironment();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("native preparation excludes scan output and knowledge sources from executable selection", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "native-inputs-")));
-  const repository = join(root, "repository");
-  const scanDir = join(root, "scan");
-  const knowledgeRoot = join(root, "knowledge");
-  const documents = join(knowledgeRoot, "docs");
-  const external = join(root, "external");
-  const name = process.platform === "win32" ? "codex.exe" : "codex";
-  const restoreEnvironment = captureEnvironment([
-    "CODEX_HOME",
-    "CODEX_CLI_PATH",
-    "PATH",
-    "CODEX_SECURITY_KNOWLEDGE_BASE",
-    "CODEX_SECURITY_CONFIG_PATH",
-    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-  ]);
-  try {
-    for (const directory of [repository, scanDir, documents, external]) {
-      await mkdir(directory, { recursive: true });
-    }
-    await mkdir(join(knowledgeRoot, ".git"));
-    for (const directory of [scanDir, knowledgeRoot, external]) {
-      await writeFile(join(directory, name), "inert executable fixture");
-      await chmod(join(directory, name), 0o700);
-    }
-    process.env.CODEX_HOME = root;
-    delete process.env.CODEX_SECURITY_CONFIG_PATH;
-    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const saved of [false, true]) {
-      if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
-      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
-      const request = {
-        ...input(),
-        scan: { ...input().scan, targetPath: repository, scanDir },
-        recipe: {
-          auth: "api-key",
-          ...(saved ? { knowledgeBasePaths: [documents], config: {} } : {}),
-        },
-      };
-      for (const directory of [scanDir, knowledgeRoot]) {
-        process.env.CODEX_CLI_PATH = join(directory, name);
-        await assert.rejects(
-          prepareNativeScan(request),
-          /outside the scan target/,
-        );
-      }
-      delete process.env.CODEX_CLI_PATH;
-      process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
-      const prepared = await prepareNativeScan(request);
-      const environment = prepared.client.dependencies.environment;
-      assert.equal(environment.CODEX_CLI_PATH, join(external, name));
-      assert.equal(environment.PATH, external);
     }
   } finally {
     restoreEnvironment();
@@ -567,6 +510,68 @@ test("native shutdown prevents an in-flight request from starting a new scan", a
   assert.equal(preparations, 0);
 });
 
+test("native preparation excludes scan output and knowledge sources from executable selection", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "native-inputs-")));
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const knowledgeRoot = join(root, "knowledge");
+  const documents = join(knowledgeRoot, "docs");
+  const external = join(root, "external");
+  const name = process.platform === "win32" ? "codex.exe" : "codex";
+  const restoreEnvironment = captureEnvironment([
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_HOME",
+    "CODEX_CLI_PATH",
+    "PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ]);
+  try {
+    for (const directory of [repository, scanDir, documents, external]) {
+      await mkdir(directory, { recursive: true });
+    }
+    await mkdir(join(knowledgeRoot, ".git"));
+    for (const directory of [scanDir, knowledgeRoot, external]) {
+      await writeFile(join(directory, name), "inert executable fixture");
+      await chmod(join(directory, name), 0o700);
+    }
+    process.env.CODEX_HOME = root;
+    process.env.CODEX_API_KEY = "synthetic-native-key";
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    for (const saved of [false, true]) {
+      if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+      const request = {
+        ...input(),
+        scan: { ...input().scan, targetPath: repository, scanDir },
+        recipe: saved
+          ? { auth: "api-key", knowledgeBasePaths: [documents], config: {} }
+          : undefined,
+      };
+      for (const directory of [scanDir, knowledgeRoot]) {
+        process.env.CODEX_CLI_PATH = join(directory, name);
+        await assert.rejects(
+          prepareNativeScan(request),
+          /outside the scan target/,
+        );
+      }
+      delete process.env.CODEX_CLI_PATH;
+      process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
+      const prepared = await prepareNativeScan(request);
+      const environment = prepared.client.dependencies.environment;
+      assert.equal(environment.CODEX_CLI_PATH, join(external, name));
+      assert.equal(environment.PATH, external);
+    }
+  } finally {
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("native scans preserve selected Codex homes and saved settings", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-codex-home-")),
@@ -805,16 +810,14 @@ if (process.argv.includes("app-server")) {
             const observed = JSON.parse(await readFile(capture, "utf8"));
             assert.equal(observed.home, await realpath(home));
             assert.equal(observed.argv.includes("resume"), resumed);
+            const config = launchConfiguration(observed.argv);
             assert.equal(
-              parseToml(
-                observed.argv.find((arg) => arg.startsWith("features=")),
-              ).features.multi_agent_v2.max_concurrent_threads_per_session,
+              config.features.multi_agent_v2.max_concurrent_threads_per_session,
               (resumed ? 4 : subagents) + 1,
             );
-            assert.ok(
-              observed.argv.includes(
-                `model=${JSON.stringify(resumed ? "synthetic-saved" : "synthetic-current")}`,
-              ),
+            assert.equal(
+              config.model,
+              resumed ? "synthetic-saved" : "synthetic-current",
             );
             assert.equal(process.env.CODEX_HOME, " \t\n");
             assert.equal(
@@ -938,15 +941,14 @@ test(
       "USERPROFILE",
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
       "PATH",
       "CODEX_HOME",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     ];
-    const before = Object.fromEntries(
-      keys.map((key) => [key, process.env[key]]),
-    );
+    const restoreEnvironment = captureEnvironment(keys);
     const observations = async () =>
       (await readFile(capture, "utf8"))
         .trim()
@@ -976,6 +978,7 @@ test(
         HOME: root,
         USERPROFILE: root,
         PATH: [repositoryBin, root, selectedTools].join(delimiter),
+        CODEX_SECURITY_KNOWLEDGE_BASE: selectedTools,
       });
       delete process.env.CODEX_CLI_PATH;
       delete process.env.CODEX_SECURITY_CONFIG_PATH;
@@ -991,6 +994,7 @@ if (process.argv.includes("app-server")) {
   const capture = (value) => fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   capture({ kind: "exec", executable: process.argv[1], argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-worker-thread" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
@@ -1076,6 +1080,8 @@ if (process.argv.includes("app-server")) {
           );
           const executed = observed.find((entry) => entry.kind === "exec");
           assert.equal(executed.executable, executable);
+          assert.equal(preflight.knowledgeBase, undefined);
+          assert.equal(executed.knowledgeBase, undefined);
           assert.equal(preflight.cwd, cwd);
           assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
           assert.equal(executed.argv.includes("resume"), resumed);
@@ -1093,10 +1099,7 @@ if (process.argv.includes("app-server")) {
         }
       }
     } finally {
-      for (const key of keys) {
-        if (before[key] === undefined) delete process.env[key];
-        else process.env[key] = before[key];
-      }
+      restoreEnvironment();
       await rm(root, { recursive: true, force: true });
     }
   },
@@ -1204,24 +1207,19 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         };
         await writeFile(
           join(root, "config.toml"),
-          selected
+          (selected
             ? 'approval_policy = "on-request"\n' +
-                (modelProvider === undefined
-                  ? ""
-                  : `model_provider = "${modelProvider}"\n`) +
-                `[model_providers.${providerName}]\n` +
-                (provider.auth
-                  ? `[model_providers.${providerName}.auth]\ntype = "command"\ncommand = "synthetic-auth-provider"\n`
-                  : provider.requires_openai_auth
-                    ? "requires_openai_auth = true\n"
-                    : 'env_key = "OPENAI_API_KEY"\n')
-            : "",
+              (modelProvider === undefined
+                ? ""
+                : `model_provider = "${modelProvider}"\n`) +
+              `[model_providers.${providerName}]\n` +
+              (provider.auth
+                ? `[model_providers.${providerName}.auth]\ntype = "command"\ncommand = "synthetic-auth-provider"\n`
+                : provider.requires_openai_auth
+                  ? "requires_openai_auth = true\n"
+                  : 'env_key = "OPENAI_API_KEY"\n')
+            : "") + (forcedLogin ? 'forced_login_method = "api"\n' : ""),
         );
-        if (forcedLogin)
-          await writeFile(
-            join(root, "config.toml"),
-            'forced_login_method = "api"\n',
-          );
         for (const recipe of [
           undefined,
           { auth: forcedLogin ? "auto" : "api-key", config },
@@ -1267,29 +1265,19 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
             "Synthetic credential launch only.",
           );
           const observed = JSON.parse(await readFile(capture, "utf8"));
-          assert.ok(observed.argv.includes('approval_policy="never"'));
+          const config = launchConfiguration(observed.argv);
+          assert.equal(config.approval_policy, "never");
           assert.equal(
             observed.codex,
             forcedLogin ? undefined : "synthetic-native-selected",
           );
-          assert.equal(
-            observed.argv.includes('forced_login_method="api"'),
-            Boolean(forcedLogin),
-          );
+          assert.equal(config.forced_login_method, forcedLogin);
           assert.equal(
             observed.openai,
             configured || forcedLogin ? "synthetic-competing-key" : undefined,
           );
-          assert.ok(
-            observed.argv.includes(
-              `model=${JSON.stringify(recipe ? "saved-model" : "current-model")}`,
-            ),
-          );
-          assert.ok(
-            observed.argv.includes(
-              `model_reasoning_effort=${JSON.stringify(recipe ? "ultra" : "low")}`,
-            ),
-          );
+          assert.equal(config.model, recipe ? "saved-model" : "current-model");
+          assert.equal(config.model_reasoning_effort, recipe ? "ultra" : "low");
           assert.equal(observed.executable, process.execPath);
           assert.equal(
             process.env.CODEX_API_KEY,
@@ -1308,13 +1296,12 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
             assert.equal(resumed.codex, observed.codex);
             assert.equal(resumed.openai, observed.openai);
             assert.equal(
-              resumed.argv.includes('forced_login_method="api"'),
-              Boolean(forcedLogin),
+              launchConfiguration(resumed.argv).forced_login_method,
+              forcedLogin,
             );
-            assert.ok(resumed.argv.includes('approval_policy="never"'));
             assert.equal(
-              resumed.argv.includes('approval_policy="on-request"'),
-              false,
+              launchConfiguration(resumed.argv).approval_policy,
+              "never",
             );
           }
         }
@@ -1351,28 +1338,17 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         "Synthetic config launch only.",
       );
       const configArguments = JSON.parse(await readFile(capture, "utf8")).argv;
+      const launchedConfig = JSON.parse(
+        JSON.stringify(launchConfiguration(configArguments)),
+      );
       for (const name of [
         "mcp_servers",
         "shell_environment_policy",
         "features",
       ]) {
-        assert.deepEqual(
-          JSON.parse(
-            JSON.stringify(
-              parseToml(
-                configArguments.find((argument) =>
-                  argument.startsWith(`${name}=`),
-                ),
-              ),
-            ),
-          )[name],
-          executionConfig[name],
-        );
+        assert.deepEqual(launchedConfig[name], executionConfig[name]);
       }
-      assert.ok(
-        configArguments.indexOf('model="explicit-model"') >
-          configArguments.indexOf('model="native-config-model"'),
-      );
+      assert.equal(launchedConfig.model, "explicit-model");
       const accountConfig = {
         cli_auth_credentials_store: "file",
         forced_chatgpt_workspace_id: "synthetic-workspace",
@@ -1396,11 +1372,13 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
           );
           assert.equal(login.codex, undefined);
           assert.equal(login.openai, undefined);
-          assert.ok(login.argv.includes('cli_auth_credentials_store="file"'));
-          assert.ok(
-            login.argv.includes(
-              'forced_chatgpt_workspace_id="synthetic-workspace"',
-            ),
+          assert.equal(
+            launchConfiguration(login.argv).cli_auth_credentials_store,
+            "file",
+          );
+          assert.equal(
+            launchConfiguration(login.argv).forced_chatgpt_workspace_id,
+            "synthetic-workspace",
           );
           assert.equal(
             prepared.options.auth,
@@ -1461,11 +1439,13 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
             const login = JSON.parse(
               await readFile(join(root, "login.json"), "utf8"),
             );
-            assert.ok(login.argv.includes('cli_auth_credentials_store="file"'));
-            assert.ok(
-              login.argv.includes(
-                'forced_chatgpt_workspace_id="synthetic-workspace"',
-              ),
+            assert.equal(
+              launchConfiguration(login.argv).cli_auth_credentials_store,
+              "file",
+            );
+            assert.equal(
+              launchConfiguration(login.argv).forced_chatgpt_workspace_id,
+              "synthetic-workspace",
             );
             assert.equal(login.openai, undefined);
             assert.equal(login.codex, undefined);
@@ -1646,6 +1626,24 @@ test("native saved scans retain settings, auth environment, permissions and iden
     assert.equal(options.auth, "api-key");
     assert.equal(options.maxCostUsd, 10);
     assert.equal(options.postScanPrompt, "Publish once.");
+    const documents = join(root, "ambient-documents");
+    await mkdir(documents);
+    process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+    const savedWithoutDocuments = await prepareNativeScan(request);
+    assert.equal(savedWithoutDocuments.options.knowledgeBasePaths, undefined);
+    assert.equal(
+      savedWithoutDocuments.client.dependencies.environment
+        .CODEX_SECURITY_KNOWLEDGE_BASE,
+      undefined,
+    );
+    const freshWithDocuments = await prepareNativeScan({
+      ...request,
+      recipe: undefined,
+    });
+    assert.deepEqual(freshWithDocuments.options.knowledgeBasePaths, [
+      documents,
+    ]);
+    delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
     const withoutContext = await prepareNativeScan({
       ...request,
       scan: { ...request.scan, userContext: null },
@@ -1718,25 +1716,17 @@ test("native saved scans retain settings, auth environment, permissions and iden
       process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
       "[invalid",
     );
-    for (const recipe of [
-      undefined,
-      { deepScan: { workers: 3, subagents: 2 } },
-    ]) {
-      const restored = await prepareNativeScan({
-        ...request,
-        recipe,
-        savedDeepScanSettings,
-      });
-      const expected = { ...savedDeepScanSettings, ...recipe?.deepScan };
-      for (const [key, value] of Object.entries(expected)) {
-        assert.equal(restored.options[key], value);
-      }
-      assert.equal(
-        restored.client.config.codexOverrides.features.multi_agent_v2
-          .max_concurrent_threads_per_session,
-        expected.subagents + 1,
-      );
-    }
+    const restored = await prepareNativeScan({
+      ...request,
+      recipe: { ...request.recipe, deepScan: savedDeepScanSettings },
+    });
+    for (const [key, value] of Object.entries(savedDeepScanSettings))
+      assert.equal(restored.options[key], value);
+    assert.equal(
+      restored.client.config.codexOverrides.features.multi_agent_v2
+        .max_concurrent_threads_per_session,
+      savedDeepScanSettings.subagents + 1,
+    );
   } finally {
     restoreEnvironment();
     await rm(root, { recursive: true, force: true });

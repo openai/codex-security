@@ -14,7 +14,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     source_plugin_version,
     stable_target_id,
@@ -67,7 +67,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
 
@@ -572,19 +572,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            coordinator_manifest = scan_dir / "coordinator-manifest.json"
-            coordinator_manifest.write_text("{}\n")
-            with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-                connection.execute(
-                    """
-                    UPDATE deep_scan_runs
-                    SET status = 'succeeded', phase = 'terminal',
-                        terminal_reason = 'capped', manifest_path = ?,
-                        completed_at = updated_at
-                    WHERE scan_id = ?
-                    """,
-                    (str(coordinator_manifest), scan_id),
-                )
+            mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
         write_completed_contract(
             scan_dir,
             scan_id,
@@ -781,7 +769,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
 ) -> None:
     for index, inventory in enumerate((None, "", "invalid_strategy")):
         case_dir = tmp_path / f"case-{index}"
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(case_dir)
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
@@ -875,10 +863,8 @@ def test_deep_completion_preserves_running_scan_after_transient_report_failure(
     assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
     preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert preserved["progress"]["status"] == "running"
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-        ).fetchone() == ("succeeded",)
+    checkpoint = json.loads((scan_dir / "artifacts/deep-scan/checkpoint.json").read_text())
+    assert checkpoint["terminalReason"] == "saturated"
     assert {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
@@ -1076,7 +1062,7 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
     )
     for case, candidates, expected in cases:
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
@@ -1189,8 +1175,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
         "findings": copy.deepcopy(findings["findings"]),
         "coverage": json.loads((scan_dir / "coverage.json").read_text()),
     }
-    (scan_dir / "checkpoints").mkdir()
-    (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
@@ -1411,7 +1396,7 @@ def test_completion_recovers_malformed_hardening_portfolios(tmp_path: Path) -> N
         ("symlink", {"portfolioPath": "hardening/hardening.md"}),
     ):
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         manifest_path = scan_dir / "scan-manifest.json"
         manifest = json.loads(manifest_path.read_text())
