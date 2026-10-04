@@ -19,6 +19,7 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    worker_paths,
     write_checkpoint,
     write_completed_contract,
 )
@@ -1237,14 +1238,6 @@ def deep_scan_fixture(
     return state_dir, codex_home, target, scan_dir, scan_id
 
 
-def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
-    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
-    artifact_dir.mkdir(parents=True)
-    prompt_path = artifact_dir / "prompt.md"
-    prompt_path.write_text(f"Prompt for {name}\n")
-    return prompt_path, artifact_dir, artifact_dir / "result.json"
-
-
 def accepted_standard_worker(
     state_dir: Path,
     codex_home: Path,
@@ -1365,6 +1358,29 @@ def committed_standard_reducer(
         environment=environment,
     )["deepScan"]
     return reducer_id, result_path, committed
+
+
+def standard_parent_results_fixture(
+    tmp_path: Path, *, budget: bool = False
+) -> tuple[Path, Path, Path, Path, str]:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, budget=budget)
+    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    committed_standard_reducer(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        worker_id,
+        worker_result,
+    )
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="app.py",
+        coverage_mode="deep_repository",
+    )
+    return state_dir, codex_home, target, scan_dir, scan_id
 
 
 def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path: Path) -> None:
@@ -2161,23 +2177,7 @@ def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
 def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
     tmp_path: Path,
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    committed_standard_reducer(
-        state_dir,
-        codex_home,
-        scan_dir,
-        scan_id,
-        worker_id,
-        worker_result,
-    )
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
+    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     manifest_path = scan_dir / "scan-manifest.json"
 
     finished = run_workbench(
@@ -2319,23 +2319,7 @@ def test_standard_worker_deadline_can_finish_without_any_completed_worker(
 def test_standard_worker_finish_preserves_running_state_when_parent_draft_is_incomplete(
     tmp_path: Path,
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    committed_standard_reducer(
-        state_dir,
-        codex_home,
-        scan_dir,
-        scan_id,
-        worker_id,
-        worker_result,
-    )
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
+    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     (scan_dir / "findings.json").unlink()
 
     rejected = run_workbench(
@@ -2361,22 +2345,8 @@ def test_standard_worker_finish_preserves_running_state_when_parent_draft_is_inc
 def test_budget_exhaustion_preserves_validated_standard_results_without_candidate_ledgers(
     tmp_path: Path,
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, budget=True)
-    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    committed_standard_reducer(
-        state_dir,
-        codex_home,
-        scan_dir,
-        scan_id,
-        worker_id,
-        worker_result,
-    )
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
+    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(
+        tmp_path, budget=True
     )
     manifest_path = scan_dir / "scan-manifest.json"
     run_workbench(
@@ -2430,22 +2400,8 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
 
 
 def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Path) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, budget=True)
-    worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    committed_standard_reducer(
-        state_dir,
-        codex_home,
-        scan_dir,
-        scan_id,
-        worker_id,
-        worker_result,
-    )
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
+    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(
+        tmp_path, budget=True
     )
     run_workbench(
         state_dir,
