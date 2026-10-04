@@ -7,12 +7,12 @@ import {
   writeDeepScanConfig,
 } from "../src/deep-config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories = createTemporaryDirectories();
-afterEach(directories.cleanup);
+const { temporaryDirectory, cleanup } = createApiTestFixtures("deep-config-");
+afterEach(cleanup);
 async function fixture(contents?: string) {
-  const root = await directories.create("deep-config-");
+  const root = await temporaryDirectory();
   const ambient = join(root, "ambient");
   await mkdir(join(ambient, "codex-security"), { recursive: true });
   const source = join(ambient, "codex-security", "config.toml");
