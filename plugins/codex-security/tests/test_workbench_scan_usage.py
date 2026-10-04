@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import runpy
 import sqlite3
 import sys
@@ -642,6 +643,95 @@ def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
     )["scan"]
     assert completed["cost"] == cost
     assert "usage" not in completed
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["malformed", "directory", "symlink"])
+@pytest.mark.parametrize("supplied_cost", [False, True])
+def test_optional_usage_checkpoint_failure_does_not_block_completion(
+    tmp_path: Path, workbench_api, monkeypatch, checkpoint_kind: str, supplied_cost: bool
+) -> None:
+    if checkpoint_kind == "symlink" and os.name == "nt":
+        pytest.skip("Creating symbolic links requires separate Windows privileges.")
+    state, target = tmp_path / "state", tmp_path / "target"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    environment = {"CODEX_HOME": str(tmp_path / "codex-home"), "CODEX_STATE_DB": ""}
+    workspace = create_saved_workspace(state, target, thread_id="scan-parent", mode="deep")
+    scan = start_delivered_scan(
+        state, "--workspace-id", workspace["id"], "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    scan_id, scan_dir = scan["scanId"], Path(scan["scanDir"])
+    run_workbench(
+        state,
+        "begin-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "scan-parent",
+        environment=environment,
+    )
+    mark_deep_coordinator_succeeded(state, scan_id, scan_dir)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    checkpoint = scan_dir / "artifacts/deep-scan/checkpoint.json"
+    checkpoint.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"synthetic":"outside checkpoint"}')
+    if checkpoint_kind == "malformed":
+        checkpoint.write_text("{")
+    elif checkpoint_kind == "directory":
+        checkpoint.mkdir()
+    else:
+        checkpoint.symlink_to(outside)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        stored = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        with pytest.raises(workbench_api["ContractError"]) as rejected:
+            workbench_api["load_composition"](connection, stored)
+    diagnostic = str(rejected.value)
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 15,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    arguments = ["--cost-json", json.dumps(cost)] if supplied_cost else []
+    result = run_workbench(
+        state,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        *arguments,
+        environment=environment,
+        check=False,
+    )
+    assert result["returncode"] == 0, result["stderr"]
+    completed = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert completed["reportAvailable"] is True
+    if supplied_cost:
+        assert completed["cost"] == cost
+        assert "usage" not in completed
+    else:
+        assert completed["usage"] == {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["composition_checkpoint_unavailable"],
+        }
+        assert diagnostic in result["stderr"]
+    assert outside.read_text() == '{"synthetic":"outside checkpoint"}'
+    if checkpoint_kind == "malformed":
+        assert checkpoint.read_text() == "{"
+    elif checkpoint_kind == "directory":
+        assert checkpoint.is_dir()
+    else:
+        assert checkpoint.is_symlink()
 
 
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:

@@ -406,7 +406,7 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (43,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -951,7 +951,11 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
             (42, "preserve severity assessments per scan"),
+            (43, "persist composition child membership"),
+            (45, "persist scan execution sessions"),
             (46, "recover unindexed severity assessments"),
+            (48, "repair stored composition membership"),
+            (49, "repair archived composition paths"),
         ]
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
@@ -1054,7 +1058,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (46,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (49,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1712,6 +1716,9 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     database = state_dir / "workbench.sqlite3"
 
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX scans_by_composition_parent")
+        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         connection.execute(
@@ -2082,7 +2089,11 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
             (42, "preserve severity assessments per scan"),
+            (43, "persist composition child membership"),
+            (45, "persist scan execution sessions"),
             (46, "recover unindexed severity assessments"),
+            (48, "repair stored composition membership"),
+            (49, "repair archived composition paths"),
         ]
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
@@ -2167,7 +2178,11 @@ def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path)
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
             (42, "preserve severity assessments per scan"),
+            (43, "persist composition child membership"),
+            (45, "persist scan execution sessions"),
             (46, "recover unindexed severity assessments"),
+            (48, "repair stored composition membership"),
+            (49, "repair archived composition paths"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
@@ -2260,7 +2275,11 @@ def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: P
             (40, "index finding identity and comparison history"),
             (41, "checkpoint finding severity assessments"),
             (42, "preserve severity assessments per scan"),
+            (43, "persist composition child membership"),
+            (45, "persist scan execution sessions"),
             (46, "recover unindexed severity assessments"),
+            (48, "repair stored composition membership"),
+            (49, "repair archived composition paths"),
         ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")

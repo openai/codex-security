@@ -36,6 +36,24 @@ try {
     },
   });
   client = await connect();
+  for (const path of [
+    "artifacts/deep-scan/checkpoint.json",
+    "artifacts/DEEP-SCAN/review.md",
+  ]) {
+    const content = "Standalone phase output.\n";
+    const standalone = await save({
+      targetPath: repository,
+      storage: "persistent",
+      path,
+      content,
+    });
+    assert.equal(await readFile(standalone.path, "utf8"), content);
+    assert.equal(
+      (await read({ targetPath: repository, storage: "persistent", path }))
+        .content,
+      content,
+    );
+  }
   const started = await call("start_codex_security_standard_scan", {
     targetPath: repository,
   });
@@ -147,6 +165,8 @@ try {
     "threatmodel.md",
     "drafts/checkpoint.json",
     "artifacts/deep_discovery/result.json",
+    "artifacts/deep-scan/checkpoint.json",
+    "artifacts/DEEP-SCAN/review.md",
     "artifacts/02_discovery/candidate_ledger.jsonl",
     "artifacts/02_discovery/CANDIDATE_LEDGER.JSONL",
     "artifacts/02_discovery/in_scope_files.txt",
