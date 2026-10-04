@@ -164,6 +164,10 @@ Map detailed ledger closure into completed surface summaries in this order:
 
 Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
 
+Draft updates must reuse finding `identity`, surface `id`, and deferred-work `id` values. The host assigns unique missing IDs once per draft operation and reuses them across publication retries; use the persisted IDs for subsequent updates. A finding without an `identity` or a surface without an `id` introduces a new row, even when its title, label, or candidate ID matches saved evidence. Deferred work with neither an `id` nor a `candidateId` also introduces a new row, even when its reason and paths match saved work. A deferred update with only a `candidateId` reuses a saved row’s ID when that candidate uniquely identifies one pending work unit; an ambiguous candidate-only update creates a new work unit, so use explicit IDs when several units share a candidate. Resolve deferred work explicitly through its `candidateId` or `surfaceIds`. Omitting a finding or deferred row does not remove accepted evidence, and changing a title or label does not establish a new identity.
+
+For stable finding matching across scans and reuse of severity or history, supply and reuse an explicit finding `identity.anchor` and optional `identity.instance`. Host-generated identities belong to one draft operation; findings without explicit identities do not match across separate scans merely because their titles agree.
+
 Detailed ledgers remain under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.
 `coverage.json` is the structured summary for adapters and comparison.

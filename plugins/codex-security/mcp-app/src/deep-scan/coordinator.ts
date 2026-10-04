@@ -312,7 +312,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.phase = "terminal";
       const draft = schedulerResult.result
-        ? {
+        ? scanDraftInputSchema.parse({
             ...structuredClone(schedulerResult.result),
             // Readers require coverage.json. The coordinator has accepted this
             // result, so mark it complete and leave review notes empty.
@@ -322,7 +322,7 @@ export class DeepScanCoordinator {
               explicitExclusions: [],
               deferred: [],
             },
-          }
+          })
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],

@@ -58,14 +58,16 @@ async function testRecoveredPublicationRejectsLateFailure() {
     CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
   };
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = async (args) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  const runWorkbench = async (args, input) => {
+    const execution = execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
       env: environment,
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
     });
-    return JSON.parse(stdout);
+    execution.child.stdin.on("error", () => {});
+    execution.child.stdin.end(input);
+    return JSON.parse((await execution).stdout);
   };
   try {
     await mkdir(targetPath, { recursive: true });
@@ -215,26 +217,28 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
     CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
   };
   const python = process.env.PYTHON?.trim() || "python3";
-  const rawRunWorkbench = async (args) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  const rawRunWorkbench = async (args, input) => {
+    const execution = execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
       env: environment,
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
     });
-    return JSON.parse(stdout);
+    execution.child.stdin.on("error", () => {});
+    execution.child.stdin.end(input);
+    return JSON.parse((await execution).stdout);
   };
   let stagedWrites = 0;
   let releaseInitialWrites;
   const initialWritesReady = new Promise((resolve) => {
     releaseInitialWrites = resolve;
   });
-  const runWorkbench = async (args) => {
+  const runWorkbench = async (args, input) => {
     if (args[0] === "write-scan-draft" && ++stagedWrites <= 2) {
       if (stagedWrites === 2) releaseInitialWrites();
       await initialWritesReady;
     }
-    return rawRunWorkbench(args);
+    return rawRunWorkbench(args, input);
   };
   try {
     await mkdir(targetPath, { recursive: true });
@@ -308,14 +312,16 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
   };
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = async (args) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  const runWorkbench = async (args, input) => {
+    const execution = execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
       env: environment,
       timeout: 30_000,
       maxBuffer: 4 * 1024 * 1024,
     });
-    return JSON.parse(stdout);
+    execution.child.stdin.on("error", () => {});
+    execution.child.stdin.end(input);
+    return JSON.parse((await execution).stdout);
   };
   try {
     await mkdir(targetPath, { recursive: true });
