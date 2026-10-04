@@ -52,7 +52,7 @@ export function isExternalModelProvider(
   );
 }
 
-export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
+export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   approval_policy: "on-request",
   approvals_reviewer: "auto_review",
   cli_auth_credentials_store: "auto",
@@ -60,21 +60,19 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   model_reasoning_effort: "xhigh",
   model_reasoning_summary: "detailed",
   show_raw_agent_reasoning: true,
-  features: {
+  features: Object.freeze({
     plugins: true,
     goals: true,
-    multi_agent_v2: {
+    multi_agent_v2: Object.freeze({
       enabled: true,
       max_concurrent_threads_per_session: 9,
-    },
-  },
+    }),
+  }),
   // Named filesystem profiles need an active Windows sandbox backend.
-  windows: {
+  windows: Object.freeze({
     sandbox: "unelevated",
-  },
-};
-
-deepFreezeJson(DEFAULT_CODEX_CONFIG);
+  }),
+});
 
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
@@ -449,16 +447,6 @@ export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
         : structuredClone(value);
   }
   return base;
-}
-
-function deepFreezeJson(value: JsonValue): void {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) {
-    return;
-  }
-  for (const item of Array.isArray(value) ? value : Object.values(value)) {
-    deepFreezeJson(item);
-  }
-  Object.freeze(value);
 }
 
 function isObject(value: unknown): value is Record<string, JsonValue> {

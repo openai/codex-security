@@ -16,6 +16,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
   deepMerge,
@@ -1160,12 +1161,7 @@ export async function comparisonEnvironment(
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {
-    for (const key of Object.keys(environment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete environment[key];
-      }
-    }
-    return environment;
+    return withoutOpenAiApiKeys(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
@@ -1183,13 +1179,9 @@ export async function comparisonEnvironment(
   if (existsSync(credentialHome)) {
     const canonicalCredentialHome = await prepareCredentialHome(source);
     signal?.throwIfAborted();
-    const storedEnvironment: Record<string, string> = { ...environment };
+    const storedEnvironment = withoutOpenAiApiKeys(environment);
     for (const key of Object.keys(storedEnvironment)) {
-      if (
-        ["CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"].includes(
-          key.toUpperCase(),
-        )
-      ) {
+      if (key.toUpperCase() === "CODEX_HOME") {
         delete storedEnvironment[key];
       }
     }
@@ -1206,11 +1198,7 @@ export async function comparisonEnvironment(
     ? expandHome(configuredHome, environment)
     : join(homedir(), ".codex");
   if (existsSync(join(codexHome, "auth.json"))) {
-    for (const key of Object.keys(environment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete environment[key];
-      }
-    }
+    return withoutOpenAiApiKeys(environment);
   }
   return environment;
 }

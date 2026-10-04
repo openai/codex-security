@@ -1,4 +1,5 @@
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -97,9 +98,13 @@ import {
   ownershipRollout,
   readPythonRolloutUsage,
 } from "./support/usage-rollout.js";
+import { rejecting, throwing } from "./support/errors.js";
+import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const temporaryDirectories = createTemporaryDirectories();
 const testPosix = process.platform === "win32" ? test.skip : test;
+const restoreSpawn = (spawn: typeof childProcess.spawn) =>
+  mock.module("node:child_process", () => ({ ...childProcess, spawn }));
 
 afterEach(temporaryDirectories.cleanup);
 
@@ -193,14 +198,9 @@ async function inspectMcpServer(): Promise<McpServerResponse[]> {
     [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
     { encoding: "utf8", timeout: 10_000, windowsHide: true },
   );
-  execution.child.stdin?.end(
-    `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-  );
+  execution.child.stdin?.end(`${jsonLines(messages)}\n`);
   const { stdout } = await execution;
-  return stdout
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as McpServerResponse);
+  return parseJsonLines<McpServerResponse>(stdout);
 }
 
 describe("plugin runtime preparation", () => {
@@ -862,8 +862,7 @@ describe("plugin runtime preparation", () => {
     const controller = new AbortController();
     const originalLstat = fsPromises.lstat;
     let discovered = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
+    mockFs(() => ({
       lstat: async (...args: Parameters<typeof originalLstat>) => {
         const metadata = await originalLstat(...args);
         if (dirname(String(args[0])) === cancellationDirectory) {
@@ -895,10 +894,7 @@ describe("plugin runtime preparation", () => {
         ),
       ).toBe(false);
     } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
+      restoreFs({ lstat: originalLstat });
     }
   });
 
@@ -989,8 +985,7 @@ describe("plugin runtime preparation", () => {
       await writeFile(join(outsideScripts, "helper.py"), "OUTSIDE_SECRET");
       const originalLstat = fsPromises.lstat;
       let swapped = false;
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
+      mockFs(() => ({
         lstat: async (...args: Parameters<typeof originalLstat>) => {
           if (!swapped && String(args[0]) === helper) {
             swapped = true;
@@ -1011,10 +1006,7 @@ describe("plugin runtime preparation", () => {
           "OUTSIDE_SECRET",
         );
       } finally {
-        mock.module("node:fs/promises", () => ({
-          ...fsPromises,
-          lstat: originalLstat,
-        }));
+        restoreFs({ lstat: originalLstat });
       }
     },
   );
@@ -1070,20 +1062,17 @@ describe("plugin runtime preparation", () => {
     const home = join(root, "home");
     await mkdir(home);
     const controller = new AbortController();
-    let registrationCalls = 0;
+    const runCodex = mock((Promise.resolve<string>).bind(Promise, ""));
     controller.abort(new DOMException("canceled", "AbortError"));
 
     await expect(
       bootstrapPlugin(home, selected, {
         codexCommand: { command: "/codex" },
         signal: controller.signal,
-        runCodex: async () => {
-          registrationCalls += 1;
-          return "";
-        },
+        runCodex,
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
-    expect(registrationCalls).toBe(0);
+    expect(runCodex).toHaveBeenCalledTimes(0);
     expect(
       existsSync(join(home, "sdk-marketplace", "plugins", "codex-security")),
     ).toBe(false);
@@ -1401,8 +1390,7 @@ describe("plugin runtime preparation", () => {
     await mkdir(ambient);
     await writeFile(join(ambient, "auth.json"), '{"token":"portable"}\n');
     const originalLink = fsPromises.link;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
+    mockFs(() => ({
       link: async () => {
         const error = new Error(
           "hard links are unsupported",
@@ -1417,10 +1405,7 @@ describe("plugin runtime preparation", () => {
         '{"token":"portable"}\n',
       );
     } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        link: originalLink,
-      }));
+      restoreFs({ link: originalLink });
     }
   });
 
@@ -2134,9 +2119,7 @@ describe("plugin runtime preparation", () => {
       const rolloutPath = join(root, "cached-rollout.jsonl");
       await writeFile(
         rolloutPath,
-        ownershipRollout([lowerUuid7Turn])
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
+        jsonLines(ownershipRollout([lowerUuid7Turn])) + "\n",
       );
       expect(
         readPythonRolloutUsage(upgraded.installedRoot, rolloutPath),
@@ -2578,19 +2561,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const releaseFirst = await acquireCodexSecurityCredentialHomeLock(home);
     const database = join(home, ".codex-security-scan.sqlite3");
     const original = await stat(database);
-    let secondAcquired = false;
+    const observeSecondAcquired = mock((release: () => Promise<void>) => {
+      return release;
+    });
     const second = acquireCodexSecurityCredentialHomeLock(home).then(
-      (release) => {
-        secondAcquired = true;
-        return release;
-      },
+      observeSecondAcquired,
     );
 
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(secondAcquired).toBe(false);
+    expect(observeSecondAcquired).not.toHaveBeenCalled();
     await releaseFirst();
     const releaseSecond = await second;
-    expect(secondAcquired).toBe(true);
+    expect(observeSecondAcquired).toHaveBeenCalled();
     await releaseSecond();
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
     // Removing this file would let waiters lock different inodes.
@@ -2618,19 +2600,16 @@ describe("runtime directories and plugin Python boundary", () => {
       let separateDatabaseCreates = 0;
       let observedMode: number | undefined;
       let paused = false;
-      const { promise: creatorPaused, resolve: reportPaused } =
-        Promise.withResolvers<void>();
-      const { promise: creatorResumed, resolve: resumeCreator } =
-        Promise.withResolvers<void>();
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
+      const creatorPaused = Promise.withResolvers<void>();
+      const creatorResumed = Promise.withResolvers<void>();
+      mockFs(() => ({
         lstat: async (...args: Parameters<typeof originalLstat>) => {
           const metadata = await originalLstat(...args);
           if (args[0] === database && !paused) {
             paused = true;
             observedMode = Number(metadata.mode) & 0o777;
-            reportPaused();
-            await creatorResumed;
+            creatorPaused.resolve();
+            await creatorResumed.promise;
           }
           return metadata;
         },
@@ -2645,10 +2624,8 @@ describe("runtime directories and plugin Python boundary", () => {
       try {
         first = acquireCredentialHomeLockWithTimeout(home);
         await Promise.race([
-          creatorPaused,
-          first.then(() => {
-            throw new Error("Credential-lock initialization did not pause");
-          }),
+          creatorPaused.promise,
+          first.then(throwing("Credential-lock initialization did not pause")),
         ]);
 
         // Pause the creator at its first post-open inspection. A contender must
@@ -2656,20 +2633,16 @@ describe("runtime directories and plugin Python boundary", () => {
         releaseSecond = await acquireCredentialHomeLockWithTimeout(home);
         await releaseSecond();
         releaseSecond = undefined;
-        resumeCreator();
+        creatorResumed.resolve();
         const releaseFirst = await first;
         await releaseFirst();
         first = undefined;
       } finally {
-        resumeCreator();
+        creatorResumed.resolve();
         await releaseSecond?.();
         const pendingRelease = await first?.catch(() => undefined);
         await pendingRelease?.();
-        mock.module("node:fs/promises", () => ({
-          ...fsPromises,
-          lstat: originalLstat,
-          writeFile: originalWriteFile,
-        }));
+        restoreFs({ lstat: originalLstat, writeFile: originalWriteFile });
       }
 
       // Closing another descriptor for this inode can release SQLite's
@@ -2927,7 +2900,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const home = join(root, "home");
     await mkdir(home);
     const metadata = await lstat(home);
-    const secured: string[] = [];
+    const secured = mock(async (_path: string) => {});
 
     for (const [description, secure] of [
       [
@@ -2943,20 +2916,16 @@ describe("runtime directories and plugin Python boundary", () => {
     ] as const) {
       await secure({
         platform: "win32",
-        secureWindowsHome: async (path) => {
-          secured.push(path);
-        },
+        secureWindowsHome: secured,
       });
       await expect(
         secure({
           platform: "win32",
-          secureWindowsHome: async () => {
-            throw new Error("ACL could not be secured");
-          },
+          secureWindowsHome: rejecting("ACL could not be secured"),
         }),
       ).rejects.toThrow(`private Windows ${description}`);
     }
-    expect(secured).toEqual([home, home]);
+    expect(secured.mock.calls.map(([value]) => value)).toEqual([home, home]);
   });
 
   test.each(["created", "removed"] as const)(
@@ -3127,10 +3096,7 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      mock.module("node:child_process", () => ({
-        ...childProcess,
-        spawn: originalSpawn,
-      }));
+      restoreSpawn(originalSpawn);
     }
   });
 
@@ -3235,10 +3201,8 @@ describe("runtime directories and plugin Python boundary", () => {
           kill: () => true,
         });
       const first = makeChild();
-      const { promise: callbackEntered, resolve: enterCallback } =
-        Promise.withResolvers<void>();
-      const { promise: callbackReleased, resolve: releaseCallback } =
-        Promise.withResolvers<void>();
+      const callbackEntered = Promise.withResolvers<void>();
+      const callbackReleased = Promise.withResolvers<void>();
       let paused = false;
       let callbackFinished = false;
       let attempts = 0;
@@ -3267,8 +3231,8 @@ describe("runtime directories and plugin Python boundary", () => {
         resolveDescriptorAliases: async () => {
           if (paused) return;
           paused = true;
-          enterCallback();
-          await callbackReleased;
+          callbackEntered.resolve();
+          await callbackReleased.promise;
           callbackFinished = true;
         },
       }).then(
@@ -3284,12 +3248,10 @@ describe("runtime directories and plugin Python boundary", () => {
       try {
         first.stdout.write(`${firstDescriptors.join("\n")}\n`);
         await Promise.race([
-          callbackEntered,
-          outcome.then(() => {
-            throw new Error(
-              "Credential inspection settled before its callback",
-            );
-          }),
+          callbackEntered.promise,
+          outcome.then(
+            throwing("Credential inspection settled before its callback"),
+          ),
         ]);
         first.stdout.end();
         first.stderr.end();
@@ -3298,7 +3260,7 @@ describe("runtime directories and plugin Python boundary", () => {
         await nextTurn();
         expect(settled).toBe(false);
         expect(attempts).toBe(1);
-        releaseCallback();
+        callbackReleased.resolve();
         const result = await outcome;
         if (kind === "unsafe") {
           expect(result.error).toMatchObject({
@@ -3315,13 +3277,10 @@ describe("runtime directories and plugin Python boundary", () => {
           expect(attempts).toBe(2);
         }
       } finally {
-        releaseCallback();
+        callbackReleased.resolve();
         first.stdout.destroy();
         first.stderr.destroy();
-        mock.module("node:child_process", () => ({
-          ...childProcess,
-          spawn: originalSpawn,
-        }));
+        restoreSpawn(originalSpawn);
       }
     },
   );
@@ -3444,7 +3403,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const expected = Math.ceil((1024 * 1024) / (descriptor.length + 1)) + 1;
     let observed = 0;
 
-    const count = await streamWindowsCredentialAclDescriptors(
+    await streamWindowsCredentialAclDescriptors(
       process.execPath,
       [
         "--eval",
@@ -3458,7 +3417,6 @@ describe("runtime directories and plugin Python boundary", () => {
       },
     );
 
-    expect(count).toBe(expected);
     expect(observed).toBe(expected);
   });
 
@@ -3528,16 +3486,13 @@ describe("runtime directories and plugin Python boundary", () => {
         await nextTurn();
         expect(observed).toEqual([expected[0]!]);
         release.resolve();
-        expect(await outcome).toBe(expected.length);
+        await outcome;
         expect(observed).toEqual(expected);
       } finally {
         release.resolve();
         child.stdout.destroy();
         child.stderr.destroy();
-        mock.module("node:child_process", () => ({
-          ...childProcess,
-          spawn: originalSpawn,
-        }));
+        restoreSpawn(originalSpawn);
       }
     },
   );
@@ -3979,9 +3934,7 @@ describe("runtime directories and plugin Python boundary", () => {
     try {
       await requirePrivateCredentialHome(metadata, home, {
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw underlying;
-        },
+        secureWindowsHome: (Promise.reject<never>).bind(Promise, underlying),
       });
       throw new Error("expected the Windows ACL operation to fail");
     } catch (error) {
@@ -4039,22 +3992,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
-    const validations: string[] = [];
+    const validations = mock(async (_path: string) => {});
 
     await requireSecureCredentialHome(home, {
       platform: "win32",
-      secureWindowsHome: async (path) => {
-        validations.push(path);
-      },
+      secureWindowsHome: validations,
     });
 
-    expect(validations).toEqual([home]);
+    expect(validations.mock.calls.map(([value]) => value)).toEqual([home]);
     await expect(
       requireSecureCredentialHome(home, {
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw new Error("ACL changed after preparation");
-        },
+        secureWindowsHome: rejecting("ACL changed after preparation"),
       }),
     ).rejects.toThrow("private Windows credential home");
   });
@@ -5829,7 +5778,7 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     await expect(stat(preview!)).rejects.toThrow();
 
-    let archived: string | undefined;
+    const onOutputArchived = mock((_archiveDir: string) => {});
     expect(
       await prepareOutputDir(
         output,
@@ -5837,11 +5786,10 @@ describe("runtime directories and plugin Python boundary", () => {
         undefined,
         undefined,
         true,
-        (archiveDir) => {
-          archived = archiveDir;
-        },
+        onOutputArchived,
       ),
     ).toBe(output);
+    const archived = onOutputArchived.mock.lastCall?.[0];
     expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
     expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",

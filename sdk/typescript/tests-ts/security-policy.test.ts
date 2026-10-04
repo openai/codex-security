@@ -1,3 +1,4 @@
+import { nodeCommand, gitText } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
   cp,
@@ -12,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import * as artifactExport from "../src/artifact-export.js";
 import {
   inspectSecurityPolicySources,
@@ -30,20 +31,13 @@ import {
   POLICY,
   PYTHON,
   addPolicySubmodule,
-  policyFixture,
+  createPolicyTestFixtures,
   policyGit,
   stageResult,
 } from "./support/security-policy.js";
 
-const fixtures: Awaited<ReturnType<typeof policyFixture>>[] = [];
-async function fixture() {
-  const value = await policyFixture();
-  fixtures.push(value);
-  return value;
-}
-afterEach(async () => {
-  await Promise.all(fixtures.splice(0).map((value) => value.cleanup()));
-});
+const { fixture, cleanup } = createPolicyTestFixtures();
+afterEach(cleanup);
 
 describe("security policy generation", () => {
   test("stores policy drafts separately from scans and rejects linked state children", async () => {
@@ -483,11 +477,7 @@ describe("security policy generation", () => {
       join(f.repository, ".git", "objects", "info", "alternates"),
       `${quoted}\n`,
     );
-    const listed = execFileSync(
-      "git",
-      ["-C", f.repository, "count-objects", "--verbose"],
-      { encoding: "utf8" },
-    );
+    const listed = gitText(["-C", f.repository, "count-objects", "--verbose"]);
     expect(
       listed.split("\n").filter((line) => line.startsWith("alternate: ")),
     ).toHaveLength(1);
@@ -963,10 +953,7 @@ describe("security policy generation", () => {
       const f = await fixture();
       await expect(
         f.generate({
-          run: async (stage) => ({
-            ...stageResult(stage),
-            ...(stage === "policy" ? { markdown } : {}),
-          }),
+          run: async (stage) => stageResult(stage, markdown),
         }),
       ).rejects.toThrow();
       expect(await readdir(f.repository)).toEqual([]);
@@ -996,21 +983,20 @@ describe("security policy generation", () => {
     "rejects malformed Unicode in %s evidence before saving it",
     async (invalidStage) => {
       const f = await fixture();
-      const stages: SecurityPolicyStage[] = [];
+      const stages = mock(async (stage: SecurityPolicyStage) => {
+        return {
+          ...stageResult(stage),
+          ...(stage === invalidStage ? { markdown: "# Evidence\n\ud800" } : {}),
+        };
+      });
       await expect(
         f.generate({
-          run: async (stage) => {
-            stages.push(stage);
-            return {
-              ...stageResult(stage),
-              ...(stage === invalidStage
-                ? { markdown: "# Evidence\n\ud800" }
-                : {}),
-            };
-          },
+          run: stages,
         }),
       ).rejects.toThrow("valid Unicode");
-      expect(stages.at(-1)).toBe(invalidStage);
+      expect(stages.mock.calls.map(([value]) => value).at(-1)).toBe(
+        invalidStage,
+      );
       expect((await readdir(f.outputDir)).sort()).toEqual(
         invalidStage === "architecture"
           ? ["previous-SECURITY.md"]
@@ -1049,10 +1035,7 @@ describe("security policy preview", () => {
     ]) {
       const f = await fixture();
       const draft = await f.generate({
-        run: async (stage) => ({
-          ...stageResult(stage),
-          ...(stage === "policy" ? { markdown: content } : {}),
-        }),
+        run: async (stage) => stageResult(stage, content),
       });
       expect(draft.content).toBe(content);
       expect(await readFile(draft.draftPath, "utf8")).toBe(content);
@@ -1093,10 +1076,7 @@ describe("security policy preview", () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), "# Old policy");
     const draft = await f.generate({
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy" ? { markdown: "# New policy" } : {}),
-      }),
+      run: async (stage) => stageResult(stage, "# New policy"),
     });
     const diff = await securityPolicyDiff(draft, PYTHON);
     expect(diff).toContain("-# Old policy\n\\ No newline at end of file\n");
@@ -1109,10 +1089,7 @@ describe("security policy preview", () => {
     const after = "New\rpolicy\u0085with\u2028separators\u2029";
     await writeFile(join(f.repository, "SECURITY.md"), before);
     const draft = await f.generate({
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy" ? { markdown: after } : {}),
-      }),
+      run: async (stage) => stageResult(stage, after),
     });
     const diff = await securityPolicyDiff(draft, PYTHON);
     expect(diff).toContain("@@ -1 +1 @@\n");
@@ -1127,9 +1104,7 @@ describe("security policy preview", () => {
     if (runTestInSubprocess(import.meta.path, name)) return;
     const f = await fixture();
     const draft = await f.generate();
-    const node = execFileSync("node", ["-p", "process.execPath"], {
-      encoding: "utf8",
-    }).trim();
+    const node = nodeCommand().command;
     await expect(
       securityPolicyDiff(
         { ...draft, content: `# Policy\n${"x".repeat(900_000)}` },
@@ -1146,12 +1121,7 @@ describe("security policy preview", () => {
       "# Policy\r\n\r\nOld naïve 🔒\r\n",
     );
     const draft = await f.generate({
-      run: async (stage) => ({
-        ...stageResult(stage),
-        ...(stage === "policy"
-          ? { markdown: "# Policy\r\n\r\nNew π 🛡️\r\n" }
-          : {}),
-      }),
+      run: async (stage) => stageResult(stage, "# Policy\r\n\r\nNew π 🛡️\r\n"),
     });
     const diff = await securityPolicyDiff(draft, PYTHON);
     expect(diff).toContain("--- a/SECURITY.md\n+++ b/SECURITY.md\n");

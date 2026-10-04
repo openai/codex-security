@@ -1,20 +1,19 @@
+import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -88,9 +87,7 @@ describe("CodexSecurity orchestration", () => {
             return {
               startThread: () => ({
                 id: null,
-                async runStreamed() {
-                  throw new Error("synthetic command-auth scan started");
-                },
+                runStreamed: rejecting("synthetic command-auth scan started"),
               }),
             };
           },
@@ -395,8 +392,7 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
-    const { promise: concurrentScans, resolve: releaseScans } =
-      Promise.withResolvers<void>();
+    const concurrentScans = Promise.withResolvers<void>();
 
     const clients = await Promise.all(
       [0, 1].map(async (index) => {
@@ -436,7 +432,7 @@ describe("CodexSecurity orchestration", () => {
                           join(credentialHome, ".codex-security-scan.lock"),
                         ),
                       ).toBe(false);
-                      releaseScans();
+                      concurrentScans.resolve();
                     }
                     const credentialConfig = parseToml(
                       await readFile(
@@ -451,7 +447,7 @@ describe("CodexSecurity orchestration", () => {
                     expect(before["deep_scan"]).toMatchObject({
                       workers: index + 2,
                     });
-                    await concurrentScans;
+                    await concurrentScans.promise;
                     const after = parseToml(
                       await readFile(deepScanConfigPath!, "utf8"),
                     );
@@ -473,7 +469,7 @@ describe("CodexSecurity orchestration", () => {
         clients.map((client, index) =>
           client
             .run(repository, { mode: "deep", workers: index + 2 })
-            .finally(releaseScans),
+            .finally(concurrentScans.resolve),
         ),
       );
       for (const result of results) {
@@ -496,7 +492,7 @@ describe("CodexSecurity orchestration", () => {
         ),
       ).toBe(true);
     } finally {
-      releaseScans();
+      concurrentScans.resolve();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
@@ -572,15 +568,12 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(credentialHome, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), '{"token":"ambient"}\n');
     await setCodexSecurityCredentialLogout(credentialHome, true);
-    let imported = false;
+    const imported = mock((Promise.resolve<boolean>).bind(Promise, true));
 
     await expect(
-      initialCredentialsAvailable({}, ambientHome, credentialHome, async () => {
-        imported = true;
-        return true;
-      }),
+      initialCredentialsAvailable({}, ambientHome, credentialHome, imported),
     ).resolves.toBe(false);
-    expect(imported).toBe(false);
+    expect(imported).not.toHaveBeenCalled();
 
     await setCodexSecurityCredentialLogout(credentialHome, false);
     await expect(
@@ -633,11 +626,7 @@ process.exit(process.exitCode ?? 0);
           CODEX_HOME: ambientHome,
           CODEX_SECURITY_STATE_DIR: stateDir,
         },
-        resolveCodexCommand: () => ({
-          command: execFileSync("node", ["-p", "process.execPath"], {
-            encoding: "utf8",
-          }).trim(),
-        }),
+        resolveCodexCommand: nodeCommand,
       },
     );
     try {

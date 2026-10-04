@@ -17,10 +17,11 @@ import {
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
-
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-preflight-",
+);
 const EXTERNAL_PROVIDER_CASES = [
   [
     "OpenRouter",
@@ -38,20 +39,14 @@ const EXTERNAL_PROVIDER_CASES = [
   ],
 ] as const;
 
-afterEach(temporaryDirectories.cleanup);
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await temporaryDirectories.create("codex-security-preflight-");
-  return path;
-}
+afterEach(cleanup);
 
 function runPreflight(
   config: string,
   profile: string,
   options: readonly string[] = [],
 ): { status: number | null; payload: Record<string, unknown> } {
-  const interpreter =
-    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  const interpreter = pythonExecutable(false);
   expect(interpreter).not.toBeNull();
   const result = spawnSync(
     interpreter!,
@@ -674,8 +669,7 @@ describe("CodexSecurity preflight configuration", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const interpreter = pythonExecutable(false);
     expect(interpreter).not.toBeNull();
     const output = execFileSync(
       interpreter!,

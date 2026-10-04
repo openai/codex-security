@@ -1273,3 +1273,8 @@ function nodeErrorCode(error: unknown): string | undefined {
     ? String(error.code)
     : undefined;
 }
+
+/** @internal */
+export function sha256Text(value: string): string {
+  return hash("sha256", value);
+}

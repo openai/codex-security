@@ -1,6 +1,6 @@
 export { gitText } from "../../../../plugins/codex-security/mcp-app/scripts/git.mjs";
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export function bashCommand(): string {
@@ -37,4 +37,24 @@ export function runCommand(
     child.stdin?.on("error", reject);
     child.stdin?.end(input);
   });
+}
+
+export { pythonExecutable } from "./python.js";
+
+export function writeSource(
+  repository: string,
+  path: string,
+  content: string | Buffer,
+): void {
+  const destination = join(repository, path);
+  mkdirSync(dirname(destination), { recursive: true });
+  writeFileSync(destination, content);
+}
+
+export function nodeCommand() {
+  return {
+    command: execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim(),
+  };
 }
