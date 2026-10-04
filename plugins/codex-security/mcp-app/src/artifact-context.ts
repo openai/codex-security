@@ -22,13 +22,6 @@ export interface ScanArtifactContextOptions {
   pythonCommand?: string;
 }
 
-export interface WorkerArtifactContextInput extends Omit<
-  ArtifactContext,
-  "layout"
-> {
-  layout?: "worker" | "reducer";
-}
-
 /**
  * Resolve parent artifacts from their authoritative, persisted workbench scan.
  */
@@ -108,45 +101,6 @@ export async function createScanArtifactContext(
   };
 }
 
-/**
- * Bind a lightweight worker to host-supplied state, never model-supplied paths.
- */
-export async function createWorkerArtifactContext(
-  input: WorkerArtifactContextInput,
-): Promise<ArtifactContext> {
-  const layout = input.layout ?? "worker";
-  if (layout !== "worker" && layout !== "reducer") {
-    throw new Error("Codex Security worker artifact layout is invalid.");
-  }
-  const context: ArtifactContext = {
-    root: await canonicalDirectory(
-      input.root,
-      "Codex Security worker artifact root",
-    ),
-    repoRoot: await canonicalDirectory(
-      input.repoRoot,
-      "Codex Security worker target root",
-    ),
-    layout,
-    ...defined("scanId", input.scanId),
-    ...defined("scope", input.scope),
-    ...defined("pluginRoot", input.pluginRoot),
-    ...defined("pythonCommand", input.pythonCommand),
-    ...defined("targetContract", input.targetContract),
-    ...defined("targetRevision", input.targetRevision),
-    ...defined("handoffClaimToken", input.handoffClaimToken),
-    ...defined("status", input.status),
-    ...defined("mode", input.mode),
-    ...defined("deepReducer", input.deepReducer),
-  };
-  if (context.deepReducer && layout !== "reducer") {
-    throw new Error(
-      "Codex Security reducer state requires a reducer-bound context.",
-    );
-  }
-  return context;
-}
-
 function scanRecord(
   result: Record<string, unknown>,
   scanId: string,
@@ -162,7 +116,7 @@ function scanRecord(
   return scan;
 }
 
-async function canonicalDirectory(
+export async function canonicalDirectory(
   value: string,
   label: string,
 ): Promise<string> {
@@ -170,8 +124,7 @@ async function canonicalDirectory(
     throw new Error(label + " must be an absolute directory.");
   }
   const requested = resolve(value);
-  const metadata = await fs.lstat(requested).catch(() => undefined);
-  if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+  if (!(await fs.lstat(requested).catch(() => undefined))?.isDirectory()) {
     throw new Error(label + " is not a safe regular directory.");
   }
   try {
@@ -191,7 +144,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function defined<Key extends string, Value>(
+export function defined<Key extends string, Value>(
   key: Key,
   value: Value | undefined,
 ): Partial<Record<Key, Value>> {

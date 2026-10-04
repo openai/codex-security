@@ -139,11 +139,7 @@ import {
   formatScanCostTokens,
   formatTokenUsage,
 } from "./cost-model.js";
-import {
-  isOutsidePath,
-  readRegularInputFile,
-  resolveScanPrompts,
-} from "./prompt-files.js";
+import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
   CodexSecurityError,
   AuthenticationRequiredError,
@@ -243,6 +239,7 @@ import {
   DiffTarget,
   enclosingGitWorktreeRoots,
   type ScanTarget,
+  relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {

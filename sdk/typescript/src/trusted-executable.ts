@@ -142,7 +142,8 @@ export async function inspectTrustedExecutable(
   return { executable, environment: sanitizedEnvironment };
 }
 
-function isWithin(root: string, candidate: string): boolean {
+/** @internal */
+export function isWithin(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return (
     path === "" ||

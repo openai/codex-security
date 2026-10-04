@@ -3,33 +3,28 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createSyncTestDirectories } from "./support/temporary-directories.js";
+import { writeSource as write } from "./support/shell.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createSyncTestDirectories(
+  "security-policy-helper-",
+);
 
 function fixture(name = "repository") {
-  const directory = mkdtempSync(join(tmpdir(), "security-policy-helper-"));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectory();
   const root = join(directory, name);
   const output = join(directory, "output");
   mkdirSync(root);
   return { root, output };
-}
-
-function write(root: string, path: string, content: string | Buffer): void {
-  const target = join(root, path);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, content);
 }
 
 function run(args: string[], env = process.env, cwd?: string) {
@@ -67,11 +62,7 @@ function expectGuidance(text: string, policies: [string, string][]): void {
   );
 }
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(cleanup);
 
 describe("built SECURITY.md helper", () => {
   test("accepts dash-prefixed paths with equals syntax", () => {

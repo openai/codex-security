@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { cp, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 
@@ -25,3 +25,8 @@ export function loadBundledRuntime(): Promise<string> {
     brotliDecompressSync(Buffer.concat(parts)).toString("utf8"),
   ));
 }
+
+export const copyCompletedScanFixture = (destination: string) =>
+  cp(new URL("examples/completed-scan/", bundledPlugin), destination, {
+    recursive: true,
+  });

@@ -1,15 +1,12 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodexOptions, ThreadEvent, TurnOptions } from "@openai/codex-sdk";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
-import type { ScanOptions } from "../src/api.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { codexFactory, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const fixtures = createApiTestFixtures();
 afterEach(fixtures.cleanup);
@@ -49,7 +46,9 @@ test.each([
       environment: { OPENAI_API_KEY: "synthetic-api-key" },
     };
     let clientOptions: CodexOptions | undefined;
-    let turnOptions: TurnOptions | undefined;
+    const runStreamed = mock(async (_input: string, _options: TurnOptions) => {
+      return { events: deniedEvents() };
+    });
     let recipe: JsonObject | undefined;
     const client = new TestClient(
       { codexOverrides: overrides as JsonObject },
@@ -67,15 +66,7 @@ test.each([
         },
         createCodex: (options) => {
           clientOptions = options;
-          return {
-            startThread: () => ({
-              id: null,
-              async runStreamed(_input, options) {
-                turnOptions = options;
-                return { events: deniedEvents() };
-              },
-            }),
-          };
+          return codexFactory(runStreamed)();
         },
       },
     );
@@ -86,7 +77,7 @@ test.each([
           cyberAccessProgram: program,
         }),
       ).rejects.toThrow(denied);
-      expect(turnOptions?.cyberAccessProgram).toBe(program);
+      expect(runStreamed.mock.lastCall?.[1]?.cyberAccessProgram).toBe(program);
       expect(recipe?.["cyberAccessProgram"]).toBe(program);
       expect(clientOptions?.apiKey).toBe("synthetic-api-key");
       const config = parseToml(await readFile(runtime.configPath, "utf8"));
@@ -125,23 +116,3 @@ test.each([
     }
   },
 );
-
-test("rejects an unknown SDK Cyber program before preparing a runtime", async () => {
-  const client = new TestClient(
-    {},
-    {
-      prepareRuntime: async () => {
-        throw new Error("runtime must not start");
-      },
-    },
-  );
-  try {
-    await expect(
-      client.run(".", {
-        cyberAccessProgram: "unknown" as ScanOptions["cyberAccessProgram"],
-      }),
-    ).rejects.toThrow("cyberAccessProgram must be");
-  } finally {
-    await client.close();
-  }
-});

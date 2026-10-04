@@ -60,6 +60,8 @@
 - share repository Git adapters ([#1203](https://github.com/openai/codex-security/pull/1203))
 - consolidate build and tool setup ([#1204](https://github.com/openai/codex-security/pull/1204))
 - simplify workbench owner calls ([#1205](https://github.com/openai/codex-security/pull/1205))
+- simplify artifact storage boundaries ([#1206](https://github.com/openai/codex-security/pull/1206))
+- reuse runtime and authentication setup ([#1207](https://github.com/openai/codex-security/pull/1207))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
