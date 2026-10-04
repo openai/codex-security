@@ -54,7 +54,7 @@ export class ScanCostTrackingError extends ScanInterruptedError {}
 export class DeepScanPublicationError extends ScanInterruptedError {}
 
 /** Completed work remains accepted when projection or publication needs a retry. */
-class DeepScanRecoveryError extends ScanInterruptedError {}
+export class DeepScanRecoveryError extends ScanInterruptedError {}
 
 export interface DeepScanComposition {
   scanId: string;

@@ -122,7 +122,8 @@ def collect_scan_usage(
                 and (
                     checkpoint.get("mergeStarted") is True
                     or (
-                        checkpoint.get("mergeStarted") is not False
+                        checkpoint.get("version") != 3
+                        and checkpoint.get("mergeStarted") is not False
                         and checkpoint.get("mergedScanIds")
                     )
                     or _merge_was_prepared(scan["scan_dir"])

@@ -67,6 +67,7 @@ import {
   runDeepScans,
   ScanCostTrackingError,
   DeepScanPublicationError,
+  DeepScanRecoveryError,
   terminalDeepScanError,
   isCodexCybersecurityPolicyRefusal,
 } from "./deep-scan.js";
@@ -278,6 +279,7 @@ import {
   gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
+  relativePathIsOutside,
   type NormalizedTarget,
   type ScanMode,
   validatedGitEnvironment,
@@ -1423,7 +1425,7 @@ export class CodexSecurity {
         // Reading a sealed result needs the workbench and saved session logs, not Codex authentication.
         const savedRuntime = this.#preparedExecution?.runtime ?? this.#runtime;
         let pluginRoot =
-          savedRuntime?.plugin.pluginRoot ??
+          savedRuntime?.plugin.installedRoot ??
           this.#dependencies.ambientExecution?.pluginRoot;
         if (pluginRoot === undefined) {
           reportWorkspace = await mkdtemp(
@@ -2104,7 +2106,7 @@ export class CodexSecurity {
       targetPathsFile =
         normalized.kind === "paths"
           ? join(
-              dirname(runtime.codexHome),
+              runtime.bootstrapWorkspace ?? dirname(runtime.codexHome),
               `codex-security-target-paths-${randomUUID()}.json`,
             )
           : null;
@@ -2220,9 +2222,15 @@ export class CodexSecurity {
           const config = structuredClone(session.sessionConfig);
           const profiles = config["permissions"] as JsonObject;
           const profile = profiles[SCAN_PERMISSION_PROFILE] as JsonObject;
-          const filesystem = readOnlyFilesystem(
-            profile["filesystem"] as JsonObject,
-          );
+          const filesystem = profile["filesystem"] as JsonObject;
+          for (const [path, access] of Object.entries(filesystem)) {
+            if (
+              isAbsolute(path) &&
+              !relativePathIsOutside(relative(scanDir, path))
+            ) {
+              filesystem[path] = readOnlyFilesystem({ [path]: access })[path]!;
+            }
+          }
           const scanAccess = filesystem[scanDir];
           profile["filesystem"] = {
             ...filesystem,
@@ -2878,6 +2886,9 @@ export class CodexSecurity {
         (!costAbortController.signal.aborted ||
           failure !== costAbortController.signal.reason) &&
         isCancellationDerivedFailure(failure, interruptionSignal);
+      const resumableFailure =
+        error instanceof DeepScanPublicationError ||
+        error instanceof DeepScanRecoveryError;
 
       const preservedCost =
         options.mode === "deep"
@@ -2894,7 +2905,7 @@ export class CodexSecurity {
         (options.deepScanPass ||
           transportClosed ||
           canceled ||
-          error instanceof DeepScanPublicationError)
+          resumableFailure)
       ) {
         await workbench({ ...activeScan.options, signal: undefined }, [
           "preserve-scan-results",
@@ -2910,7 +2921,7 @@ export class CodexSecurity {
         activeScan !== null &&
         !options.deepScanPass &&
         !transportClosed &&
-        !(error instanceof DeepScanPublicationError)
+        !resumableFailure
       ) {
         if (
           options.validationPrompt !== undefined &&
@@ -2941,7 +2952,7 @@ export class CodexSecurity {
       }
       if (
         !transportClosed &&
-        !(error instanceof DeepScanPublicationError) &&
+        !resumableFailure &&
         runPostScan !== null &&
         !signal.aborted
       ) {
@@ -4154,13 +4165,39 @@ function prepareSavedScanRecipe({
   deepScan?: Required<DeepScanOptions>;
 }): JsonObject {
   const { runtime, preflightConfig, approvalPolicy } = session;
+  const config: JsonObject = {
+    ...preflightConfig,
+    approval_policy: approvalPolicy,
+  };
+  if (!session.source.preserveProviderEnvironment) {
+    const resolved = resolveCodexProfile(session.effectiveConfig);
+    const modelProvider = scanModelProvider(resolved);
+    const providers = resolved["model_providers"];
+    const provider =
+      typeof modelProvider === "string" && isRecord(providers)
+        ? providers[modelProvider]
+        : undefined;
+    if (
+      typeof modelProvider === "string" &&
+      !isExternalModelProvider(modelProvider) &&
+      modelProvider !== "amazon-bedrock" &&
+      isRecord(provider)
+    ) {
+      // Private replay needs transport settings and command authentication, while
+      // literal credentials remain in the protected credential home or environment.
+      const savedProvider = structuredClone(provider);
+      for (const key of ["experimental_bearer_token", "http_headers"])
+        delete savedProvider[key];
+      config["model_providers"] = { [modelProvider]: savedProvider };
+    }
+  }
   const recipe = scanRecipe({
     repository: expectation.repository,
     target: expectation.target,
     mode: expectation.mode,
     repositoryRevision: expectation.repositoryRevision,
     pluginVersion: runtime.plugin.version,
-    config: { ...preflightConfig, approval_policy: approvalPolicy },
+    config,
     failOnSeverity: options.failureSeverity,
     knowledgeBasePaths,
     maxCostUsd: options.maxCostUsd,

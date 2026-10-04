@@ -23,7 +23,10 @@ import {
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
 } from "../src/deep-scan.js";
-import type { SemanticScan } from "../src/scan-semantics.js";
+import {
+  prepareSemanticScanDraft,
+  type SemanticScan,
+} from "../src/scan-semantics.js";
 import {
   publishScan,
   writeSemanticScanDraft,
@@ -342,32 +345,55 @@ async function writeDraft(
 
 test.each([
   "interrupted-export",
+  "interrupted-missing-findings",
+  "interrupted-complete-export",
   "first-export",
   "partial-first-export",
   "invalid-manifest",
   "file-authored-result",
+  "file-authored-new-timestamp",
+  "file-authored-omitted-timestamp",
+  "file-authored-complete-checkpoint",
+  "file-authored-unchanged-manifest",
 ] as const)(
   "SDK completion preserves the latest committed or authored draft (%s)",
   async (scenario) => {
     const f = await interruptedScan("standard");
+    const authored = scenario.startsWith("file-authored-");
+    const previouslyComplete = [
+      "file-authored-complete-checkpoint",
+      "file-authored-unchanged-manifest",
+      "interrupted-complete-export",
+    ].includes(scenario);
     const provisional: SemanticScan = {
       scanId: f.scanId,
-      complete: false,
+      complete: previouslyComplete,
       findings: [],
       coverage: {
-        completeness: "partial",
+        completeness: previouslyComplete ? "complete" : "partial",
         surfaces: [],
         explicitExclusions: [],
-        deferred: [{ id: "unfinished", reason: "Synthetic unfinished work" }],
+        deferred: previouslyComplete
+          ? []
+          : [{ id: "unfinished", reason: "Synthetic unfinished work" }],
       },
     };
     await writeDraft(f.command, f.registration, "standard", provisional);
     const oldManifest = await readFile(join(f.scanDir, "scan-manifest.json"));
     const oldCoverage = await readFile(join(f.scanDir, "coverage.json"));
-    if (scenario !== "file-authored-result") {
+    if (!authored) {
       await writeDraft(f.command, f.registration, "standard", {
         ...provisional,
         complete: true,
+        findings:
+          scenario === "interrupted-complete-export"
+            ? [
+                semanticFinding({
+                  title: "Synthetic final authored finding",
+                  locations: [{ path: "source.py", startLine: 1 }],
+                }),
+              ]
+            : [],
         coverage: {
           ...provisional.coverage,
           completeness: "complete",
@@ -377,7 +403,12 @@ test.each([
       // Reproduce failure after findings export but before coverage and manifest.
       await writeFile(join(f.scanDir, "coverage.json"), oldCoverage);
       await writeFile(join(f.scanDir, "scan-manifest.json"), oldManifest);
-      if (scenario === "first-export" || scenario === "partial-first-export") {
+      if (scenario === "interrupted-missing-findings") {
+        await rm(join(f.scanDir, "findings.json"));
+      } else if (
+        scenario === "first-export" ||
+        scenario === "partial-first-export"
+      ) {
         for (const name of [
           "scan-manifest.json",
           "coverage.json",
@@ -389,7 +420,38 @@ test.each([
       }
     } else {
       const manifest = JSON.parse(oldManifest.toString());
-      manifest.scan.complete = true;
+      if (scenario !== "file-authored-unchanged-manifest")
+        delete manifest.scan.complete;
+      if (
+        [
+          "file-authored-new-timestamp",
+          "file-authored-complete-checkpoint",
+        ].includes(scenario)
+      )
+        manifest.scan.completedAt = "2030-01-01T00:00:00Z";
+      if (scenario === "file-authored-omitted-timestamp")
+        delete manifest.scan.completedAt;
+      const final = prepareSemanticScanDraft(
+        {
+          targetContract: f.registration["contract"] as JsonObject,
+          mode: "standard",
+          targetRevision: f.registration["targetRevision"] as string,
+        },
+        {
+          ...provisional,
+          complete: true,
+          findings: [
+            semanticFinding({
+              title: "Synthetic final authored finding",
+              locations: [{ path: "source.py", startLine: 1 }],
+            }),
+          ],
+        },
+      );
+      await writeFile(
+        join(f.scanDir, "findings.json"),
+        JSON.stringify(final.findings),
+      );
       const coverage = JSON.parse(oldCoverage.toString());
       coverage.completeness = "complete";
       coverage.deferred = [];
@@ -397,10 +459,11 @@ test.each([
         join(f.scanDir, "coverage.json"),
         JSON.stringify(coverage),
       );
-      await writeFile(
-        join(f.scanDir, "scan-manifest.json"),
-        JSON.stringify(manifest),
-      );
+      if (scenario !== "file-authored-unchanged-manifest")
+        await writeFile(
+          join(f.scanDir, "scan-manifest.json"),
+          JSON.stringify(manifest),
+        );
     }
     const draft = JSON.parse(
       await readFile(join(f.scanDir, "artifacts/scan-draft.json"), "utf8"),
@@ -431,6 +494,13 @@ test.each([
     const published = await publication;
     expect(published.result.coverage.completeness).toBe("complete");
     expect(published.result.coverage.deferred).toEqual([]);
+    expect(
+      published.result.findings.findings.map((finding) => finding.title),
+    ).toEqual(
+      authored || scenario === "interrupted-complete-export"
+        ? ["Synthetic final authored finding"]
+        : [],
+    );
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({

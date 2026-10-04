@@ -38,7 +38,7 @@ test.each([
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     await mkdir(repository);
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     const runtime = {
       ...preparedRuntime(codexHome),

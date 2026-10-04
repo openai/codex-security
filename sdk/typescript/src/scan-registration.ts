@@ -114,6 +114,10 @@ export async function registerScan(options: {
     (scanOptions.resumeScanId !== undefined ||
       scanOptions.registeredScan !== undefined) &&
     isRecord(savedRecipe) &&
+    !(
+      typeof registration["sealedProducerVersion"] === "string" &&
+      savedRecipe["knowledgeBaseSha256"] === undefined
+    ) &&
     savedRecipe["knowledgeBaseSha256"] !== recipe["knowledgeBaseSha256"]
   )
     throw new CodexSecurityError(

@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -17,6 +24,7 @@ import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import {
   DeepScanPublicationError,
+  DeepScanRecoveryError,
   ScanCostTrackingError,
 } from "../src/deep-scan.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
@@ -79,6 +87,7 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
   let stopAfterSealing: "deep" | "standard" | undefined;
   let stopCommand = "complete-scan";
   let publicationFails = false;
+  let childProjectionFails = false;
   let runMustNotStart = false;
   let repositoryFindings: JsonObject[] | undefined;
   let budgetCrashPlugin: string | undefined;
@@ -109,10 +118,13 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
   let firstChildEmpty = false;
   let firstChildCompleted:
     ReturnType<typeof Promise.withResolvers<void>> | undefined;
-  const makeClient = () =>
+  const makeClient = (
+    overrides: JsonObject = {},
+    sourcePluginRoot = pluginRoot,
+  ) =>
     new CodexSecurity(
       {
-        pluginPath: pluginRoot,
+        pluginPath: sourcePluginRoot,
         codexOverrides: {
           model: "gpt-6-astra",
           model_reasoning_effort: "high",
@@ -120,6 +132,7 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
             "codex-security": { command: "synthetic-workbench", enabled: true },
             "synthetic.server": { command: "synthetic-command" },
           },
+          ...overrides,
         },
       },
       {
@@ -138,7 +151,7 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
             credentialsAvailable: true,
             environment,
             plugin: {
-              pluginRoot,
+              pluginRoot: sourcePluginRoot,
               installedRoot: pluginRoot,
               marketplaceRoot: pluginRoot,
               marketplaceName: "codex-security-sdk",
@@ -152,6 +165,13 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
           const writer = await prepareScanArtifactRestorer(options, directory);
           return {
             ...writer,
+            async projectChild(
+              ...args: Parameters<typeof writer.projectChild>
+            ) {
+              if (childProjectionFails)
+                throw new Error("Synthetic child projection unavailable");
+              return await writer.projectChild(...args);
+            },
             async restore(path, contents) {
               if (
                 interruptedPublication === "receipt" &&
@@ -502,6 +522,9 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
     failPublication(value: boolean) {
       publicationFails = value;
     },
+    failChildProjection(value: boolean) {
+      childProjectionFails = value;
+    },
     cancellation,
     publicationFailure: () => publicationFailure,
     async interruptPublication(stage: typeof interruptedPublication) {
@@ -725,6 +748,108 @@ test("shared matching reads evidence through the prepared parent session", async
   expect(result.cost).not.toBeNull();
 });
 
+test("custom provider recipes preserve fresh and resumed discovery and reducer settings", async () => {
+  const h = await fixture();
+  const provider = {
+    name: "Synthetic custom provider",
+    base_url: "https://provider.example.test/v1",
+    wire_api: "responses",
+    env_http_headers: { "X-Synthetic": "SYNTHETIC_SETTING" },
+    request_max_retries: 7,
+    auth: {
+      command: "synthetic-auth",
+      args: ["session"],
+      refresh_interval_ms: 1000,
+    },
+  };
+  h.stopBeforeSealing();
+  await using first = h.makeClient({
+    profile: "selected",
+    profiles: { selected: { model_provider: "synthetic" } },
+    model_providers: {
+      synthetic: {
+        ...provider,
+        experimental_bearer_token: "synthetic-private-bearer",
+        http_headers: { Authorization: "Bearer synthetic-private-header" },
+      },
+    },
+  });
+  const options = {
+    ...h.options,
+    workers: 1,
+    knowledgeBasePaths: undefined,
+  };
+  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+    "get-scan-recipe",
+    "--scan-id",
+    parentId,
+  ]);
+  const config = (saved["recipe"] as JsonObject)["config"] as JsonObject;
+  const replayProvider = {
+    ...provider,
+    auth: { ...provider.auth, cwd: h.home },
+  };
+  expect(config["model_providers"]).toEqual({ synthetic: replayProvider });
+  expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
+  await using resumed = h.makeClient(config);
+  const result = await resumed.run(h.repository, {
+    ...options,
+    signal: undefined,
+    resumeScanId: parentId,
+  });
+  expect(result.findings.findings).toHaveLength(2);
+  expect(h.launches[0]!.options.env!["CODEX_SECURITY_SCAN_ID"]).toBe(
+    h.launches[1]!.options.env!["CODEX_SECURITY_SCAN_ID"],
+  );
+  expect(
+    h.launches.some(
+      (launch) =>
+        h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode ===
+        "deep",
+    ),
+  ).toBe(true);
+  for (const launch of h.launches) {
+    expect(launch.options.config).toMatchObject({
+      model_provider: "synthetic",
+      model_providers: { synthetic: replayProvider },
+    });
+    expect(launch.preflightConfig).not.toHaveProperty("model_providers");
+  }
+});
+
+test("a reused client's sealed read uses its installed plugin after the source is removed", async () => {
+  const h = await fixture();
+  const source = join(h.root, "plugin-source");
+  await cp(pluginRoot, source, { recursive: true });
+  await using client = h.makeClient({}, source);
+  const options = { ...h.options, knowledgeBasePaths: undefined };
+  h.stopAfterSealing();
+  await expect(client.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const findings = JSON.parse(
+    await readFile(join(h.outputDir, "findings.json"), "utf8"),
+  );
+  const parentId = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )![0];
+  await rm(source, { recursive: true });
+  h.forbidCodex();
+  const restored = await client.run(h.repository, {
+    ...options,
+    signal: undefined,
+    resumeScanId: parentId,
+  });
+  expect(restored.findings).toEqual(findings);
+  expect(h.launches).toHaveLength(3);
+});
+
 test("a sealed resume does not construct a model client or launch new work", async () => {
   const h = await fixture();
   h.stopAfterSealing();
@@ -933,6 +1058,57 @@ test("accepted publication failure remains resumable without repeating child wor
   });
   expect(result.findings.findings).toHaveLength(2);
   expect(h.launches).toHaveLength(3);
+});
+
+test("a resumed child projection failure keeps accepted work resumable", async () => {
+  const h = await fixture();
+  const options = { ...h.options, knowledgeBasePaths: undefined };
+  h.failPublication(true);
+  await using first = h.makeClient();
+  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+    DeepScanPublicationError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const accepted = await loadDeepScanCheckpoint(h.outputDir);
+  expect(accepted!.mergedScanIds).toHaveLength(2);
+  expect(h.launches).toHaveLength(3);
+
+  h.failPublication(false);
+  h.failChildProjection(true);
+  await using interrupted = h.makeClient();
+  await expect(
+    interrupted.run(h.repository, { ...options, resumeScanId: parentId }),
+  ).rejects.toBeInstanceOf(DeepScanRecoveryError);
+  const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+    "get-scan",
+    "--scan-id",
+    parentId,
+  ]);
+  expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+    status: "running",
+  });
+  expect(h.commands).not.toContain("fail-scan");
+  expect((await loadDeepScanCheckpoint(h.outputDir))!.mergedScanIds).toEqual(
+    accepted!.mergedScanIds,
+  );
+
+  h.failChildProjection(false);
+  await using resumed = h.makeClient();
+  const result = await resumed.run(h.repository, {
+    ...options,
+    resumeScanId: parentId,
+  });
+  expect(result.findings.findings).toHaveLength(2);
+  expect(h.launches).toHaveLength(3);
+  const completed = await runWorkbench(
+    { ...parent.options, signal: undefined },
+    ["get-scan", "--scan-id", parentId],
+  );
+  expect((completed["scan"] as JsonObject)["progress"]).toMatchObject({
+    status: "complete",
+  });
 });
 
 test("publication recovery keeps verified cost when one child is empty", async () => {
@@ -1568,7 +1744,11 @@ test.each(["budget", "execution"])(
       childId,
     ]);
     expect(failed["scan"]).toMatchObject({
-      cost: passCost,
+      cost: estimateScanCost("gpt-6-astra", {
+        input_tokens: usage.input_tokens * 2,
+        cached_input_tokens: usage.cached_input_tokens * 2,
+        output_tokens: usage.output_tokens * 2,
+      }),
       progress: { status: "failed" },
     });
     const parentSaved = await runWorkbench(

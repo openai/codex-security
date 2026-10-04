@@ -3,6 +3,7 @@ import {
   type SemanticScan,
 } from "./scan-semantics.js";
 import { relative, sep } from "node:path";
+import { createHash } from "node:crypto";
 import { readThreatModelPath } from "./artifact-export.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import {
@@ -182,10 +183,12 @@ export async function publishScan(
       // Ordinary SDK turns author canonical files after their last MCP checkpoint.
       // Commit those final documents before completion reads the saved draft.
       if (expectation.mode !== "deep") {
-        const read = async (name: string) =>
-          JSON.parse(
-            (await readScanFile(scanDir, name, name, signal)).toString("utf8"),
-          );
+        const contents = new Map<string, Buffer>();
+        const read = async (name: string) => {
+          const bytes = await readScanFile(scanDir, name, name, signal);
+          contents.set(name, bytes);
+          return JSON.parse(bytes.toString("utf8"));
+        };
         const committed = await read("artifacts/scan-draft.json").catch(
           (error: unknown) => {
             if (
@@ -209,20 +212,59 @@ export async function publishScan(
             throw error;
           },
         );
-        // The workbench exports the manifest last. A different envelope means
-        // the root files can still be a mixture from an interrupted export.
-        if (
-          manifest !== null &&
-          manifest.scan?.sealedAt == null &&
-          (committed === null ||
-            manifest.scan?.completedAt ===
-              committed.manifest?.scan?.completedAt)
-        ) {
-          await writePreparedScanDraft(workbench, scanId, {
-            manifest,
-            findings: await read("findings.json"),
-            coverage: await read("coverage.json"),
-          });
+        if (manifest !== null && manifest.scan?.sealedAt == null) {
+          for (const name of ["findings.json", "coverage.json"]) {
+            try {
+              contents.set(
+                name,
+                await readScanFile(scanDir, name, name, signal),
+              );
+            } catch (error) {
+              if (
+                committed !== null &&
+                error instanceof Error &&
+                isRecord(error.cause) &&
+                error.cause["code"] === "ENOENT"
+              )
+                continue;
+              throw error;
+            }
+          }
+          const exportState = committed?.canonicalExport;
+          // Every old/new document mixture is an interrupted export. Any other
+          // bytes are a later authored result, including a changed timestamp or
+          // findings/coverage written without changing the manifest.
+          const unchangedExport = exportState
+            ? ["scan-manifest.json", "findings.json", "coverage.json"].every(
+                (name) => {
+                  const bytes = contents.get(name);
+                  if (bytes === undefined) return true;
+                  const digest = createHash("sha256")
+                    .update(bytes)
+                    .digest("hex");
+                  return (
+                    digest === exportState.current?.[name] ||
+                    digest === exportState.previous?.[name]
+                  );
+                },
+              )
+            : committed !== null &&
+              manifest.scan?.completedAt !==
+                committed.manifest?.scan?.completedAt;
+          if (
+            !unchangedExport &&
+            contents.has("findings.json") &&
+            contents.has("coverage.json")
+          )
+            await writePreparedScanDraft(workbench, scanId, {
+              manifest,
+              findings: JSON.parse(
+                contents.get("findings.json")!.toString("utf8"),
+              ),
+              coverage: JSON.parse(
+                contents.get("coverage.json")!.toString("utf8"),
+              ),
+            });
         }
       }
       preparation = await workbench([

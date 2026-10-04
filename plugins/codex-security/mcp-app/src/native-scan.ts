@@ -167,6 +167,7 @@ export async function prepareNativeScan(
   const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
   const inheritedPermissions = {
     filesystem: Object.fromEntries([
+      [":workspace_roots", "write"],
       ...Object.entries(savedPermissions?.filesystem ?? {}),
       ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
       ...(input.parentSandbox.globScanMaxDepth === undefined

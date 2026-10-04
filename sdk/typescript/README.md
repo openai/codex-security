@@ -876,9 +876,10 @@ and `scanOptions.auth` to select credentials.
 
 ### Configure deep scans
 
-Native scans resolve Codex from `CODEX_CLI_PATH` or the process `PATH`. A managed
-installation whose executable is not on `PATH` must set `CODEX_CLI_PATH`; installer
-and package-cache directory layouts are no longer searched.
+Native scans use `CODEX_CLI_PATH` when supplied, or discover a real executable
+from `PATH`. Windows also supports managed-package installations, npm package
+binaries beside `PATH` entries, and desktop package caches; WindowsApps aliases
+are skipped. Set `CODEX_CLI_PATH` to select an installed executable explicitly.
 
 For `scan --mode deep`, `--workers` sets the number of independent Standard scans
 in each batch, and `--subagents` sets subagents per scan. Each batch finishes and
@@ -1097,7 +1098,7 @@ restrictions.
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
 | `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
-| `CODEX_CLI_PATH`                                                            | Explicit Codex executable; native scans otherwise use normal PATH lookup.                                 |
+| `CODEX_CLI_PATH`                                                            | Explicit Codex executable; native scans otherwise discover a trusted installed executable.                |
 | `PYTHON`                                                                    | Python interpreter when `--python` or SDK `pythonPath` is unset.                                          |
 | `GH_HOST`                                                                   | GitHub Enterprise host for interactive `bulk-scan` discovery.                                             |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Either variable disables interactive update notices.                                                      |

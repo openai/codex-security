@@ -252,7 +252,28 @@ else {
         );
         if (externalProvider !== undefined)
           await writeFile(join(root, "selected.toml"), stringifyToml(saved));
-        for (const recipe of [undefined, { auth: "auto", config: saved }]) {
+        for (const recipe of [
+          undefined,
+          {
+            auth: "auto",
+            config: saved,
+            inheritedPermissions: {
+              filesystem: { "/saved/private": "deny" },
+              network: { enabled: false },
+            },
+          },
+          {
+            auth: "auto",
+            config: saved,
+            inheritedPermissions: {
+              filesystem: {
+                ":workspace_roots": "read",
+                "/saved/private": "deny",
+              },
+              network: { enabled: false },
+            },
+          },
+        ]) {
           if (externalProvider !== undefined) {
             if (recipe) delete process.env.CODEX_SECURITY_CONFIG_PATH;
             else
@@ -265,6 +286,7 @@ else {
           const prepared = await prepareNativeScan({
             ...input(),
             recipe,
+            parentSandbox: { filesystemDenies: ["/current/private"] },
             model: "synthetic-current-model",
           });
           const ambient = prepared.client.dependencies.ambientExecution;
@@ -367,6 +389,16 @@ else {
               assert.equal(effective.features.goals, false);
               assert.equal(effective.features.api_key_model_discovery, false);
             }
+            const filesystem =
+              effective.permissions[effective.default_permissions].filesystem;
+            assert.equal(
+              filesystem[":workspace_roots"],
+              recipe?.inheritedPermissions?.filesystem[":workspace_roots"] ??
+                "write",
+            );
+            assert.equal(filesystem[":root"], "read");
+            assert.equal(filesystem["/current/private"], "deny");
+            if (recipe) assert.equal(filesystem["/saved/private"], "deny");
             assert.equal(effective.approval_policy, "never");
           }
           assert.deepEqual(
@@ -384,7 +416,7 @@ else {
 }
 
 test(
-  "combined native deny globs still deny deeply nested files in the Codex sandbox",
+  "native workers can write their output while inherited deny globs and outside writes stay restricted",
   {
     skip:
       process.platform !== "linux"
@@ -396,6 +428,8 @@ test(
       await mkdtemp(join(tmpdir(), "native-deny-glob-")),
     );
     const target = join(root, "target");
+    const home = join(root, "home");
+    const output = join(root, "output");
     const denied = join(target, "a", "b", "c", "d", "private.txt");
     const sdkRequire = createRequire(
       new URL("../../../../sdk/typescript/package.json", import.meta.url),
@@ -424,10 +458,12 @@ test(
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     ]);
     try {
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(output, { mode: 0o700 });
       await mkdir(dirname(denied), { recursive: true });
       await writeFile(denied, "synthetic denied content");
       Object.assign(process.env, {
-        CODEX_HOME: root,
+        CODEX_HOME: home,
         CODEX_CLI_PATH: executable,
       });
       delete process.env.CODEX_SECURITY_CONFIG_PATH;
@@ -440,7 +476,7 @@ test(
       ]) {
         const prepared = await prepareNativeScan({
           ...input(),
-          scan: { ...input().scan, targetPath: target },
+          scan: { ...input().scan, targetPath: target, scanDir: output },
           parentSandbox: {
             filesystemDenies: [join(target, "**", "private.txt")],
             globScanMaxDepth: currentDepth,
@@ -460,10 +496,10 @@ test(
         });
         const config = scanRuntimeCodexConfig(
           {},
-          root,
+          home,
           prepared.options.inheritedPermissions,
         );
-        await writeFile(join(root, "config.toml"), stringifyToml(config));
+        await writeFile(join(home, "config.toml"), stringifyToml(config));
         const child = spawnSync(
           executable,
           [
@@ -480,13 +516,42 @@ test(
           ],
           {
             cwd: target,
-            env: { PATH: process.env.PATH, CODEX_HOME: root },
+            env: { PATH: process.env.PATH, CODEX_HOME: home },
             encoding: "utf8",
           },
         );
         assert.equal(child.status, 1, child.stderr);
         assert.match(child.stderr, /Permission denied/);
         assert.equal(child.stdout, "");
+        const write = spawnSync(
+          executable,
+          [
+            "sandbox",
+            "-P",
+            config.default_permissions,
+            "--config",
+            `permissions.${config.default_permissions}.network.enabled=true`,
+            "-C",
+            output,
+            "--",
+            process.execPath,
+            "-e",
+            `const fs = require("node:fs");
+           fs.writeFileSync(${JSON.stringify(join(output, "findings.json"))}, "{}");
+           try { fs.writeFileSync(${JSON.stringify(join(target, "outside.txt"))}, "blocked"); process.exit(2); }
+           catch (error) { if (error.code !== "EACCES" && error.code !== "EPERM" && error.code !== "EROFS") throw error; }`,
+          ],
+          {
+            cwd: output,
+            env: { PATH: process.env.PATH, CODEX_HOME: home },
+            encoding: "utf8",
+          },
+        );
+        assert.equal(write.status, 0, write.stderr);
+        assert.equal(
+          await readFile(join(output, "findings.json"), "utf8"),
+          "{}",
+        );
       }
     } finally {
       restore();
@@ -2139,7 +2204,11 @@ test("native saved scans retain settings, auth environment, permissions and iden
       request.stateDirectory,
     );
     assert.deepEqual(client.dependencies.inheritedPermissions, {
-      filesystem: { "/fixture/.env": "deny", glob_scan_max_depth: 3 },
+      filesystem: {
+        ":workspace_roots": "write",
+        "/fixture/.env": "deny",
+        glob_scan_max_depth: 3,
+      },
       network: { enabled: false },
     });
     assert.equal(options.workers, 4);
@@ -2195,6 +2264,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       });
       assert.deepEqual(savedPermissions.options.inheritedPermissions, {
         filesystem: {
+          ":workspace_roots": "write",
           "/saved/.env": "deny",
           "/fixture/.env": "deny",
           glob_scan_max_depth: expectedDepth,
@@ -2206,6 +2276,24 @@ test("native saved scans retain settings, auth environment, permissions and iden
         savedPermissions.options.inheritedPermissions,
       );
     }
+    const restricted = await prepareNativeScan({
+      ...request,
+      recipe: {
+        ...request.recipe,
+        inheritedPermissions: {
+          filesystem: { ":workspace_roots": "read" },
+          network: { enabled: false },
+        },
+      },
+    });
+    assert.equal(
+      restricted.options.inheritedPermissions.filesystem[":workspace_roots"],
+      "read",
+    );
+    assert.equal(
+      restricted.options.inheritedPermissions.filesystem["/fixture/.env"],
+      "deny",
+    );
     assert.deepEqual(options.target, ["src/auth", "src/data"]);
     assert.deepEqual(options.registeredScan, {
       scanId: "parent",

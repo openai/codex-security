@@ -87,6 +87,11 @@ test("context validation observes schema changes without changing existing valid
     sourceFindings: {},
     revisions: {},
     threatModel: context,
+    scope: {
+      sourceScans: [
+        { scanId: "source", scope: undefined, threatModel: context },
+      ],
+    },
   };
   expect((await merge(first, context)).aggregate).toEqual(expected);
 
@@ -137,6 +142,11 @@ test("concurrent scans retain their own context schemas", async () => {
       sourceFindings: {},
       revisions: {},
       threatModel: context,
+      scope: {
+        sourceScans: [
+          { scanId: "source", scope: undefined, threatModel: context },
+        ],
+      },
     };
     expect((await merge(run, context)).aggregate).toEqual(expected);
     await expect(merge(run, { summary: "" })).rejects.toThrow(

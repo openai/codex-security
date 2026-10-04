@@ -32,6 +32,7 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
+    _sha256_scan_local_file,
     _validate_completion_binding,
     _validate_schema_node,
     _write_prepared_scan_finalization,
@@ -2292,19 +2293,36 @@ def write_draft_documents(db: Any, scan: Any, scan_dir: Path, draft: dict[str, A
     draft["reconciledCheckpointIds"] = sorted(
         remaining | set(_checkpoint_ids(draft.get("reconciledCheckpointIds", [])))
     )
+    canonical = {
+        filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
+        for filename, document in (
+            ("findings.json", findings),
+            ("coverage.json", coverage),
+            ("scan-manifest.json", manifest),
+        )
+    }
+    previous = {}
+    for filename in canonical:
+        try:
+            previous[filename] = _sha256_scan_local_file(scan_dir, filename, "Previous scan export")
+        except (ContractError, OSError):
+            previous[filename] = None
+    # Recognize an interrupted export without assigning meaning to an authored
+    # completion timestamp. These digests stay inside the committed snapshot.
+    draft["canonicalExport"] = {
+        "previous": previous,
+        "current": {
+            filename: hashlib.sha256(contents).hexdigest()
+            for filename, contents in canonical.items()
+        },
+    }
     write_scan_local_bytes(scan_dir, "artifacts/scan-draft.json", _encoded(draft))
     try:
         _retire_checkpoints(scan_dir, draft["reconciledCheckpointIds"])
     except (ContractError, OSError):
         pass  # The committed acknowledgment already excludes these pending markers.
-    for filename, document in (
-        ("findings.json", findings),
-        ("coverage.json", coverage),
-        ("scan-manifest.json", manifest),
-    ):
-        write_scan_local_bytes(
-            scan_dir, filename, (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
-        )
+    for filename, contents in canonical.items():
+        write_scan_local_bytes(scan_dir, filename, contents)
 
 
 def advance_scan_phase(db: Any, connection: Any, scan_id: str, phase: str) -> None:

@@ -1,13 +1,69 @@
-import { cp, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  cp,
+  mkdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/api-events.js";
+import { prepareAmbientRuntime } from "../src/execution-preparation.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test("scoped ambient scans use the isolated bootstrap workspace for target metadata", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const home = join(root, "existing-home", "codex-home");
+  const scanDir = join(root, "scan");
+  await mkdir(repository);
+  await mkdir(home, { recursive: true });
+  await mkdir(scanDir, { mode: 0o700 });
+  await writeFile(join(repository, "app.py"), "print(1)\n");
+  const runtime = await prepareAmbientRuntime({
+    command: { command: process.execPath },
+    configuration: {},
+    environment: { CODEX_HOME: home },
+    preserveProviderEnvironment: false,
+    pluginRoot: PLUGIN_ROOT,
+  });
+  let metadata: string | undefined;
+  await using client = new TestClient(
+    {},
+    {
+      environment: { OPENAI_API_KEY: "synthetic-test-key" },
+      prepareRuntime: async () => runtime,
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: (options) => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed() {
+            metadata = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+            expect(metadata).toBeDefined();
+            expect(dirname(metadata!)).toBe(runtime.bootstrapWorkspace!);
+            expect(JSON.parse(await readFile(metadata!, "utf8"))).toEqual([
+              "app.py",
+            ]);
+            throw new Error("Synthetic scoped scan started");
+          },
+        }),
+      }),
+    },
+  );
+  await expect(
+    client.run(repository, { target: ["app.py"], mode: "standard" }),
+  ).rejects.toThrow("Synthetic scoped scan started");
+  expect(metadata).toBeDefined();
+  await expect(stat(metadata!)).rejects.toHaveProperty("code", "ENOENT");
+});
 
 test("a reused client applies changed model settings to the next operation", async () => {
   const root = await temporaryDirectory();

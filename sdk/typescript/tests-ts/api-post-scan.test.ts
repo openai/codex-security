@@ -86,7 +86,13 @@ describe("completed scan follow-up instructions", () => {
                 permissions: {
                   codex_security_scan: {
                     filesystem: {
+                      [repository]: "write",
+                      [join(root, "notes")]: "write",
                       [scanDir]: { ".": "read" },
+                      [join(scanDir, "artifacts")]: {
+                        ".": "read",
+                        private: "deny",
+                      },
                       [followUpDirectory]: { ".": "write" },
                     },
                   },
@@ -112,6 +118,15 @@ describe("completed scan follow-up instructions", () => {
     try {
       const result = await client.run(repository, {
         postScanPrompt: "Prepare follow-up notes.",
+        inheritedPermissions: {
+          filesystem: {
+            [repository]: "write",
+            [join(root, "notes")]: "write",
+            [scanDir]: { ".": "write" },
+            [join(scanDir, "artifacts")]: { ".": "write", private: "deny" },
+          },
+          network: { enabled: false },
+        },
         onWarning: (message) => warnings.push(message),
       });
       expect(result.scanDir).toBe(scanDir);

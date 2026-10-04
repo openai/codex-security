@@ -538,6 +538,7 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
         (False, False, "recorded"),
         (False, True, "missing"),
         (False, True, "deterministic"),
+        (False, True, "deterministic-implicit"),
     ],
 )
 def test_completion_counts_ordinary_child_scans_and_descendants(
@@ -599,7 +600,10 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
     checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     document = json.loads(checkpoint.read_text())
     document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
-    document["mergeStarted"] = merge_kind != "deterministic"
+    if merge_kind == "deterministic-implicit":
+        document.pop("mergeStarted", None)
+    else:
+        document["mergeStarted"] = merge_kind != "deterministic"
     if merge_kind == "recorded":
         run_workbench(
             fixture.state_dir,

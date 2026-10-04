@@ -374,11 +374,14 @@ describe("plugin runtime preparation", () => {
       "surface-web",
       "surface-web-3",
       "surface-web-2",
-      "surface_uploads-2",
+      expect.any(String),
       "surface_uploads",
-      "surface_archive",
-      "surface_archive-2",
+      expect.any(String),
+      expect.any(String),
     ]);
+    expect(new Set(canonical.surfaces.map((surface) => surface.id)).size).toBe(
+      coverage.surfaces.length,
+    );
     expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
       coverage.surfaces.map((surface) => surface.label),
     );

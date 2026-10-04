@@ -119,6 +119,7 @@ async function fixture(
         JSON.stringify(createRequire(import.meta.url).resolve("smol-toml")) +
         ");",
       "const args = process.argv.slice(2);",
+      'const overrides = args.flatMap((arg, index) => ["-c", "--config"].includes(arg) ? ["-c", args[index + 1]] : []);',
       ...(replaceSelectedPlugin
         ? [
             'if (args.includes("plugin")) {',
@@ -147,7 +148,7 @@ async function fixture(
               JSON.stringify(
                 executablePathForSpawn(pluginOptions.codexCommand.command),
               ) +
-              ', ["mcp", "list", "--json", "-c", "features.plugins=true"], { encoding: "utf8" }));',
+              ', ["mcp", "list", "--json", ...overrides, "-c", "features.plugins=true"], { encoding: "utf8" }));',
             'record({ kind: "plugin-selection", marker: servers.find(({ name }) => name === "synthetic-plugin")?.transport.args[0] });',
           ]
         : []),
@@ -156,7 +157,7 @@ async function fixture(
         JSON.stringify(
           executablePathForSpawn(resolveCodexCommand({}).command),
         ) +
-        ', ["mcp", "list", "--json"], { encoding: "utf8" });',
+        ', ["mcp", "list", "--json", ...overrides], { encoding: "utf8" });',
       '  record({ kind: "profile-validation", exitCode: result.status, stderr: result.stderr });',
       '  process.stderr.write(result.stderr ?? "");',
       "  process.exit(result.status ?? 1);",
@@ -217,7 +218,7 @@ async function fixture(
       ...(role === "comparison" || role === "followup"
         ? [
             role === "followup"
-              ? `if (config.permissions.codex_security_scan.filesystem[${JSON.stringify(scanDir)}]?.["."] !== "read") {`
+              ? `if (config.permissions[config.default_permissions].filesystem[${JSON.stringify(scanDir)}]?.["."] !== "read") {`
               : "if (config.features.plugins !== false) {",
             "  fs.cpSync(" +
               JSON.stringify(join(PLUGIN_ROOT, "examples/completed-scan")) +
@@ -237,12 +238,11 @@ async function fixture(
       ...(role === "followup" && process.platform === "linux"
         ? [
             'const output = args[args.indexOf("--cd") + 1];',
-            'const overrides = args.flatMap((arg, index) => ["-c", "--config"].includes(arg) ? ["-c", args[index + 1]] : []);',
             'const checked = require("node:child_process").spawnSync(' +
               JSON.stringify(
                 executablePathForSpawn(resolveCodexCommand({}).command),
               ) +
-              ', ["sandbox", "-P", "codex_security_scan", "-C", output, ...overrides, "--", process.execPath, "-e", ' +
+              ', ["sandbox", "-P", config.default_permissions, "-C", output, ...overrides, "--", process.execPath, "-e", ' +
               JSON.stringify(
                 [
                   'const fs = require("node:fs");',
@@ -260,22 +260,12 @@ async function fixture(
         ? []
         : [
             "  console.log(JSON.stringify(" +
-              JSON.stringify(
-                role === "standard"
-                  ? {
-                      type: "turn.failed",
-                      error: { message: "synthetic standard execution" },
-                    }
-                  : {
-                      type: "error",
-                      message:
-                        "Configured value for `permission_profile` is disallowed by requirements; falling back from `" +
-                        (role === "comparison"
-                          ? "codex_security_comparison"
-                          : "codex_security_scan") +
-                        "` to required value `:read-only`.",
-                    },
-              ) +
+              (role === "standard"
+                ? JSON.stringify({
+                    type: "turn.failed",
+                    error: { message: "synthetic standard execution" },
+                  })
+                : '{ type: "error", message: "Configured value for `permission_profile` is disallowed by requirements; falling back from `" + config.default_permissions + "` to required value `:read-only`." }') +
               "));",
           ]),
       '  process.on("SIGTERM", () => process.exit(0));',
@@ -540,6 +530,7 @@ async function fixture(
                       `artifacts/deep-scan/passes/pass-${index}`,
                     ),
                     parentScanId: scanId,
+                    parentScanRole: "deep_pass",
                     targetPath: repository,
                     progress: { status: "complete" },
                   }))
@@ -549,6 +540,7 @@ async function fixture(
                         scanId: childId,
                         scanDir: childDir,
                         parentScanId: scanId,
+                        parentScanRole: "deep_pass",
                         targetPath: repository,
                         continuationThreadId: threadId,
                         progress: { status: "running" },
@@ -795,13 +787,13 @@ test.each(["sdk", "cli"] as const)(
               ({ kind }) => kind === "preflight" || kind === "exec",
             )) {
               expect(
-                launch.permissions.codex_security_scan.filesystem,
+                launch.permissions[launch.profile].filesystem,
               ).toMatchObject({
                 ":root": "read",
                 ...h.inheritedPermissions.filesystem,
               });
               expect(
-                launch.permissions.codex_security_scan.filesystem,
+                launch.permissions[launch.profile].filesystem,
               ).not.toHaveProperty(":workspace_roots");
               expect(launch.context).toBe("selected-scan");
               expect(launch.apiKey).toBe("synthetic-fixture-key");
@@ -1082,9 +1074,8 @@ test.each([
         observations.find(({ kind }) => kind === "permission-validation"),
       ).toMatchObject({ exitCode: 0 });
       const followup = observations.filter(
-        ({ permissions }) =>
-          permissions?.codex_security_scan?.filesystem?.[h.scanDir]?.["."] ===
-          "read",
+        ({ permissions, profile }) =>
+          permissions?.[profile]?.filesystem?.[h.scanDir]?.["."] === "read",
       );
       const output = followup.find(({ kind }) => kind === "preflight").cwd;
       expect(dirname(output)).toBe(join(h.scanDir, "artifacts/follow-up"));
@@ -1096,7 +1087,7 @@ test.each([
         ).toBe(output);
         expect(launch).toMatchObject({
           permissions: {
-            codex_security_scan: {
+            [launch.profile]: {
               filesystem: {
                 ...h.inheritedPermissions.filesystem,
                 [h.scanDir]: { ".": "read", private: "deny" },
