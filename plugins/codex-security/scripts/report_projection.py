@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import re
 from collections import Counter
-from collections.abc import Iterator
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -435,10 +434,11 @@ def _root_cause_code_evidence(
         return evidence
     if any(item["code"] == legacy_code for item in evidence):
         return evidence
+    locations = finding.get("locations")
     root_location = next(
         (
             location
-            for location in finding.get("locations", [])
+            for location in (locations if isinstance(locations, list) else [])
             if isinstance(location, dict) and location.get("role") == "root_control"
         ),
         {},
@@ -514,13 +514,12 @@ def _confidence_mix(findings: list[dict[str, Any]]) -> str:
 
 
 def _locations(finding: dict[str, Any]) -> str:
-    rendered = []
-    for location in finding["locations"]:
-        start = location["startLine"]
-        end = location.get("endLine", start)
-        suffix = f":{start}" if end == start else f":{start}-{end}"
-        rendered.append(f"{location['path']}{suffix}")
-    return ", ".join(rendered)
+    locations = finding.get("locations")
+    return ", ".join(
+        text
+        for location in (locations if isinstance(locations, list) else [])
+        if isinstance(location, dict) and (text := _code_evidence_location({"location": location}))
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -562,8 +561,8 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     return _cell(f"{notes} Evidence: {evidence}")
 
 
-def retained_findings(finding: dict[str, Any]) -> Iterator[tuple[Any, dict[str, Any]]]:
-    """Yield canonical and retained findings in source order, visiting shared objects once."""
+def retained_findings(finding: dict[str, Any]):
+    """Walk current and historical public evidence in stable source order."""
     pending = [("finding", finding)]
     seen_findings: set[int] = set()
     while pending:
@@ -583,22 +582,26 @@ def retained_findings(finding: dict[str, Any]) -> Iterator[tuple[Any, dict[str, 
         sources = provenance.get("sourceFindings")
         if isinstance(sources, list):
             pending.extend(
-                (source.get("id"), source["finding"])
+                (_text(source.get("id"), "finding"), source["finding"])
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
             )
 
 
 def _remediation_section(finding: dict[str, Any]) -> list[str]:
-    remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
-    lines = ["", "#### Remediation", "", remediation]
-    seen = {remediation}
+    lines = ["", "#### Remediation"]
+    seen: set[str] = set()
     originals = list(retained_findings(finding))
-    for source_id, original in originals[1:]:
-        text = _text(original.get("remediation"), "")
-        if text and text not in seen:
+    for source_id, original in originals:
+        remediation = original.get("remediation")
+        paragraphs = _strings(remediation.split("\n\n")) if isinstance(remediation, str) else []
+        if original is finding and not paragraphs:
+            paragraphs = ["No canonical remediation was recorded."]
+        for text in paragraphs:
+            if text in seen:
+                continue
             seen.add(text)
-            lines.extend(["", f"Source {_text(source_id, 'finding')}: {text}"])
+            lines.extend(["", text if original is finding else f"Source {source_id}: {text}"])
     for field, label in (
         ("remediationTests", "Tests"),
         ("preventiveControls", "Preventive controls"),
@@ -613,26 +616,7 @@ def _remediation_section(finding: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
-    cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
-    title = _text(finding["title"], "Untitled finding")
-    return [
-        f'<a id="finding-{number}"></a>',
-        "",
-        f"### [{number}] {title}",
-        "",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Severity | {_cell(finding['severity']['level'])} |",
-        f"| Confidence | {_cell(finding['confidence']['level'])} |",
-        f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
-        f"| Category | {_cell(finding['taxonomy']['category'])} |",
-        f"| CWE | {_cell(cwes)} |",
-        f"| Affected lines | {_cell(_locations(finding))} |",
-    ]
-
-
-def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
+def _finding_detail_sections(finding: dict[str, Any]) -> dict[str, list[str]]:
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
     _, raw_root_cause = merged_root_cause(finding)
     root_cause = raw_root_cause if isinstance(raw_root_cause, dict) else {}
@@ -679,6 +663,10 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         else {}
     )
     severity = finding["severity"]
+    severity_level = _text(severity.get("level"), "unknown")
+    confidence_rationale = finding["confidence"].get("rationale")
+    if not isinstance(confidence_rationale, str):
+        confidence_rationale = ""
     validation_outcomes = [
         (label, text)
         for label, key in (
@@ -692,7 +680,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         validation.get("summary"),
         "Validation outcomes are recorded below."
         if validation_outcomes
-        else f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
+        else f"{confidence_rationale} Validation details were not recorded separately.",
     )
     root_cause_summary = _text(
         raw_root_cause if isinstance(raw_root_cause, str) else root_cause.get("summary"),
@@ -715,26 +703,22 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     severity_rationale = _text(
         severity.get("rationale"),
-        f"The scan assigned {severity['level']} severity; no separate canonical severity rationale was recorded.",
+        f"The scan assigned {severity_level} severity; no separate canonical severity rationale was recorded.",
     )
     severity_change = _text(
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
     attack_steps = _strings(attack_path.get("steps"))
-    lines = [
-        *_finding_header(number, finding),
-        "",
-        "#### Summary",
-        "",
-        _text(finding["summary"], "No canonical finding summary was recorded."),
-    ]
+    sections = {
+        "Summary": [_text(finding.get("summary"), "No canonical finding summary was recorded.")]
+    }
     if root_cause_summary or root_cause_code_evidence:
-        lines.extend(["", "#### Root Cause", ""])
+        lines = sections["Root Cause"] = []
         if root_cause_summary:
             lines.append(root_cause_summary)
         lines.extend(_code_evidence_lines(root_cause_code_evidence))
-    lines.extend(["", "#### Validation", "", validation_summary])
+    lines = sections["Validation"] = [validation_summary]
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
     if validation_outcomes:
@@ -749,7 +733,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         values = _strings(validation.get(key))
         if values:
             lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
-    lines.extend(["", "#### Dataflow", "", dataflow_summary])
+    lines = sections["Dataflow"] = [dataflow_summary]
     if attack_steps:
         lines.extend(["", "Attack steps:", *_bullets(attack_steps, "None recorded.")])
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
@@ -759,7 +743,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     if transformations:
         lines.extend(["", "Transformations:", *_bullets(transformations, "None recorded.")])
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
-    lines.extend(["", "#### Reachability", "", reachability_summary])
+    lines = sections["Reachability"] = [reachability_summary]
     for label, key in (
         ("Attacker", "attacker"),
         ("Entry point", "entrypoint"),
@@ -789,16 +773,11 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         if values:
             lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
     lines.extend(_code_evidence_lines(reachability_code_evidence))
-    lines.extend(
-        [
-            "",
-            "#### Severity",
-            "",
-            f"**{severity['level'].capitalize()}** — {severity_rationale}",
-            "",
-            severity_change,
-        ]
-    )
+    lines = sections["Severity"] = [
+        f"**{severity_level.capitalize()}** — {severity_rationale}",
+        "",
+        severity_change,
+    ]
     for label, key in (("Impact", "impact"), ("Likelihood", "likelihood")):
         assessment = attack_path.get(key)
         if isinstance(assessment, str):
@@ -820,6 +799,58 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         if details:
             lines.extend(
                 ["", f"{label} assessment:", *(f"- **{name}:** {value}" for name, value in details)]
+            )
+    return sections
+
+
+def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
+    cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
+    title = _text(finding["title"], "Untitled finding")
+    return [
+        f'<a id="finding-{number}"></a>',
+        "",
+        f"### [{number}] {title}",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Severity | {_cell(finding['severity']['level'])} |",
+        f"| Confidence | {_cell(finding['confidence']['level'])} |",
+        f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
+        f"| Category | {_cell(finding['taxonomy']['category'])} |",
+        f"| CWE | {_cell(cwes)} |",
+        f"| Affected lines | {_cell(_locations(finding))} |",
+    ]
+
+
+def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
+    lines = _finding_header(number, finding)
+    sections = _finding_detail_sections(finding)
+    seen = {(heading, tuple(details)) for heading, details in sections.items()}
+    for heading, details in sections.items():
+        lines.extend(["", f"#### {heading}", "", *details])
+    source_fields = {
+        "Summary": ("summary",),
+        "Root Cause": ("rootCause", "root_cause"),
+        "Validation": ("validation",),
+        "Dataflow": ("attackPath",),
+        "Reachability": ("attackPath",),
+        "Severity": ("severity", "attackPath"),
+    }
+    for source_id, original in retained_findings(finding):
+        if original is finding:
+            continue
+        # Older retained payloads may contain only the details they contributed.
+        context = {"locations": finding["locations"], **original}
+        for field in ("severity", "confidence"):
+            retained = original.get(field)
+            context[field] = retained if isinstance(retained, dict) else {}
+        for heading, details in _finding_detail_sections(context).items():
+            key = (heading, tuple(details))
+            if key in seen or not any(field in original for field in source_fields[heading]):
+                continue
+            seen.add(key)
+            lines.extend(
+                ["", f"#### {heading}", "", f"Source {_text(source_id, 'finding')}:", "", *details]
             )
     lines.extend(_remediation_section(finding))
     return lines
@@ -1007,7 +1038,10 @@ def build_report_markdown(
             zip(findings, writeup_paths, strict=True), 1
         ):
             # Composed details can go beyond any one retained source write-up.
-            if report_path is not None and not finding.get("provenance", {}).get("sourceFindings"):
+            if report_path is not None and not any(
+                finding.get("provenance", {}).get(field)
+                for field in ("sourceFindings", "previousFindings")
+            ):
                 lines.extend(["", *_linked_finding_section(number, finding, report_path)])
             else:
                 lines.extend(["", *_finding_section(number, finding)])

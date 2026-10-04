@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
     register,
@@ -36,7 +37,7 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
         draft["coverage"]["inventoryStrategy"] = "repository"
         draft["coverage"]["openQuestions"] = [copy.deepcopy(question)]
         original = write_checkpoint(directory / "checkpoints", draft)
-        (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": original.name}))
+        select_checkpoint(directory, original)
         run_workbench(
             state, "fail-scan", "--scan-id", child["scanId"], "--message", "Synthetic interruption"
         )
@@ -70,7 +71,7 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
     child, directory, draft = children[0]
     draft["coverage"]["openQuestions"] = []
     latest = write_checkpoint(directory / "checkpoints", draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": latest.name}))
+    select_checkpoint(directory, latest)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
     unchanged = {
         path: path.read_bytes()

@@ -1,24 +1,53 @@
+import type { NormalizedTarget } from "./targets.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanExpectation } from "./contract.js";
+import type { DeepScanOptions } from "./scan-settings.js";
+import type { ScanPermissions } from "./execution-preparation.js";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
+import { join } from "node:path";
+
+/** Validated saved execution options shared by SDK and native resume. */
+export interface SavedScanRecipe {
+  repository: string;
+  target: Pick<
+    NormalizedTarget,
+    "kind" | "paths" | "base" | "head" | "baseRef" | "headRef"
+  >;
+  mode: ScanOptions["mode"];
+  pluginVersion: string;
+  repositoryRevision?: string;
+  auth?: ScanOptions["auth"];
+  cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
+  knowledgeBasePaths?: string[];
+  knowledgeBaseSha256?: string;
+  maxCostUsd?: number;
+  postScanPrompt?: string;
+  failOnSeverity?: ScanOptions["failureSeverity"];
+  deepScan?: Required<DeepScanOptions>;
+  safetyIdentifier?: string;
+  inheritedPermissions?: ScanPermissions;
+  preserveProviderEnvironment?: boolean;
+  config: JsonObject;
+}
 
 /** Bind registration and resume metadata to this prepared execution. */
 export async function registerScan(options: {
   scan: Pick<
     ScanOptions,
     | "resumeScanId"
+    | "registeredScan"
     | "archiveExisting"
     | "parentScanId"
     | "scanPrompt"
     | "workflowId"
   >;
+  parentScanRole?: "deep_pass";
   recipe: JsonObject;
   expectation: ScanExpectation;
   scanDir: string;
   archivedScanDir: string | null;
-  codexHome: string;
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }) {
   const {
@@ -27,12 +56,12 @@ export async function registerScan(options: {
     expectation,
     scanDir,
     archivedScanDir,
-    codexHome,
     workbench,
   } = options;
   const repo = expectation.repository;
   const registration =
-    scanOptions.resumeScanId !== undefined
+    scanOptions.resumeScanId !== undefined &&
+    scanOptions.registeredScan === undefined
       ? await workbench([
           "get-cli-scan-resume",
           "--scan-id",
@@ -58,7 +87,17 @@ export async function registerScan(options: {
           ],
           JSON.stringify({
             recipe,
+            ...(options.parentScanRole === undefined
+              ? {}
+              : { parentScanRole: options.parentScanRole }),
             userContext: scanOptions.scanPrompt,
+            ...(scanOptions.registeredScan === undefined
+              ? {}
+              : {
+                  scanId: scanOptions.registeredScan.scanId,
+                  threadId: scanOptions.registeredScan.threadId,
+                  claimToken: scanOptions.registeredScan.handoffClaimToken,
+                }),
             ...(scanOptions.workflowId === undefined
               ? {}
               : { workflowId: scanOptions.workflowId }),
@@ -66,32 +105,35 @@ export async function registerScan(options: {
         );
   const scanId = registration["scanId"];
   const resumeThreadId =
-    scanOptions.resumeScanId === undefined
+    scanOptions.resumeScanId === undefined &&
+    scanOptions.registeredScan === undefined
       ? undefined
       : registration["threadId"];
+  const savedRecipe = registration["recipe"];
+  if (
+    (scanOptions.resumeScanId !== undefined ||
+      scanOptions.registeredScan !== undefined) &&
+    isRecord(savedRecipe) &&
+    savedRecipe["knowledgeBaseSha256"] !== recipe["knowledgeBaseSha256"]
+  )
+    throw new CodexSecurityError(
+      "The knowledge base changed since this scan started. Restore the original documents before resuming.",
+    );
   if (scanOptions.resumeScanId !== undefined) {
-    const savedRecipe = registration["recipe"];
     if (
       scanId !== scanOptions.resumeScanId ||
       !isRecord(savedRecipe) ||
       savedRecipe["repository"] !== repo ||
-      typeof resumeThreadId !== "string" ||
-      !resumeThreadId ||
+      (resumeThreadId !== null && typeof resumeThreadId !== "string") ||
       JSON.stringify(savedRecipe["target"]) !== JSON.stringify(recipe["target"])
     ) {
       throw new CodexSecurityError(
         "The workbench returned mismatched scan resume context.",
       );
     }
-    const savedSession = await findScanSession(codexHome, resumeThreadId);
-    if (savedSession === null || savedSession.workingDirectory !== scanDir) {
-      throw new CodexSecurityError(
-        `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-      );
-    }
-    if (typeof registration["sealedProducerVersion"] === "string") {
-      expectation.pluginVersion = registration["sealedProducerVersion"];
-    }
+  }
+  if (typeof registration["sealedProducerVersion"] === "string") {
+    expectation.pluginVersion = registration["sealedProducerVersion"];
   }
   const targetId = registration["targetId"];
   const contract = registration["contract"];
@@ -112,6 +154,7 @@ export async function registerScan(options: {
         : undefined;
   const registeredRevision = registration["targetRevision"];
   if (
+    !isRecord(contract) ||
     typeof scanId !== "string" ||
     typeof targetId !== "string" ||
     registration["scanDir"] !== scanDir ||
@@ -133,7 +176,6 @@ export async function registerScan(options: {
   }
   const targetRevision =
     registeredRevision === "unversioned" ? null : registeredRevision;
-
   const registeredFileCount = registration["scopeFileCount"];
   const scopeFileCount =
     typeof registeredFileCount === "number" &&
@@ -152,7 +194,39 @@ export async function registerScan(options: {
     registeredRevision,
     targetRevision,
     scopeFileCount,
+    sealed: typeof registration["sealedProducerVersion"] === "string",
   };
+}
+
+/** Require continuation logs only after terminal-state rejection and accounting. */
+export async function requireScanResumeSession(options: {
+  registration: Pick<
+    Awaited<ReturnType<typeof registerScan>>,
+    "scanId" | "resumeThreadId" | "sealed"
+  >;
+  codexHome: string;
+  scanDir: string;
+  mode: ScanExpectation["mode"];
+}): Promise<void> {
+  const {
+    registration: { scanId, resumeThreadId, sealed },
+    codexHome,
+    scanDir,
+    mode,
+  } = options;
+  if (sealed || typeof resumeThreadId !== "string") return;
+  const savedSession = await findScanSession(codexHome, resumeThreadId);
+  if (
+    savedSession === null ||
+    savedSession.workingDirectory !==
+      (mode === "deep"
+        ? join(scanDir, "artifacts", "deep-scan", "merge")
+        : scanDir)
+  ) {
+    throw new CodexSecurityError(
+      `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+    );
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

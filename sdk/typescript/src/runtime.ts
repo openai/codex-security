@@ -2,7 +2,7 @@ import { isNonEmptyString } from "./value.js";
 import { expandHome, environmentValue } from "./codex-home.js";
 export { expandHome } from "./codex-home.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   constants,
@@ -61,7 +61,7 @@ import {
   errorMessage,
   abortReason,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import { writeCodexConfig, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import type { ScanMergeInput } from "./scan-merge.js";
 import {
@@ -116,10 +116,21 @@ print(json.dumps({
 const RESTORE_SCAN_ARTIFACT_PROGRAM = `
 from pathlib import Path
 from runpy import run_path
+import json
 import sys
 
 module = run_path(sys.argv[1])
 try:
+    if sys.argv[6] == "restoreMany":
+        for relative, length in json.loads(sys.stdin.buffer.readline()):
+            contents = sys.stdin.buffer.read(length)
+            if len(contents) != length:
+                raise module["ContractError"]("Incomplete artifact batch payload.")
+            module["write_scan_local_bytes"](
+                Path(sys.argv[2]), relative, contents,
+                expected_root_identity=(int(sys.argv[4]), int(sys.argv[5]))
+            )
+        sys.exit(0)
     operation = {
         "restore": "write_scan_local_bytes",
         "prepareDirectory": "prepare_scan_local_directory",
@@ -141,7 +152,7 @@ export interface PluginInstall {
   pluginRoot: string;
   marketplaceRoot: string;
   installedRoot: string;
-  marketplaceName: typeof MARKETPLACE_NAME;
+  marketplaceName: string;
   name: typeof PLUGIN_NAME;
   version: string;
 }
@@ -178,6 +189,10 @@ export interface WorkbenchCommandOptions {
 
 export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
+  /** Ordered writes through the same checked writer in one local process. */
+  restoreMany(
+    artifacts: readonly { path: string; contents: Uint8Array }[],
+  ): Promise<void>;
 }
 
 export function codexSecurityStateDirectory(
@@ -1631,6 +1646,8 @@ export function bundledPluginCandidates(moduleDirectory: string): string[] {
   return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
+    // The standalone MCP bundle lives directly inside its own plugin payload.
+    resolve(moduleDirectory, ".."),
   ];
 }
 
@@ -1777,7 +1794,7 @@ export async function prepareScanArtifactRestorer(
   }
 
   const update = async (
-    operation: "restore" | "prepareDirectory" | "remove",
+    operation: "restore" | "restoreMany" | "prepareDirectory" | "remove",
     relativePath: string,
     contents?: Uint8Array,
   ): Promise<void> => {
@@ -1800,7 +1817,9 @@ export async function prepareScanArtifactRestorer(
         ],
         pluginHelperEnvironment(options.environment),
         contents,
-        operation === "restore" ? undefined : options.signal,
+        operation === "restore" || operation === "restoreMany"
+          ? undefined
+          : options.signal,
       );
       if (!result.success) {
         throw new Error(
@@ -1811,7 +1830,7 @@ export async function prepareScanArtifactRestorer(
       }
     } catch (error) {
       throw new OutputDirectoryError(
-        operation === "restore"
+        operation === "restore" || operation === "restoreMany"
           ? "Could not safely restore a completed scan artifact."
           : "Could not safely update a scan artifact.",
         { cause: error },
@@ -1820,6 +1839,19 @@ export async function prepareScanArtifactRestorer(
   };
   return {
     restore: (path, contents) => update("restore", path, contents),
+    async restoreMany(artifacts) {
+      if (!artifacts.length) return;
+      const header = Buffer.from(
+        JSON.stringify(
+          artifacts.map(({ path, contents }) => [path, contents.byteLength]),
+        ) + "\n",
+      );
+      await update(
+        "restoreMany",
+        "",
+        Buffer.concat([header, ...artifacts.map(({ contents }) => contents)]),
+      );
+    },
     prepareDirectory: (path) => update("prepareDirectory", path),
     remove: (path) => update("remove", path),
     async projectChild(
@@ -2392,15 +2424,16 @@ export async function createMarketplace(
   codexHome: string,
   pluginRoot: string,
   signal?: AbortSignal,
+  marketplaceName = MARKETPLACE_NAME,
 ): Promise<string> {
   throwIfSignalAborted(signal);
   const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
+  const marketplace = pluginMarketplaceDirectory(codexHome, marketplaceName);
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
   throwIfSignalAborted(signal);
   const manifest = {
-    name: MARKETPLACE_NAME,
+    name: marketplaceName,
     interface: { displayName: "Codex Security SDK" },
     plugins: [
       {
@@ -2488,6 +2521,7 @@ export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
   options: {
+    isolateSelection?: boolean;
     codexCommand?: CodexCommand;
     runCodex?: (
       command: CodexCommand,
@@ -2501,7 +2535,12 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const marketplace = join(codexHome, "sdk-marketplace");
+  // Codex keys installed trees by marketplace and version. Keep different
+  // contents in different namespaces so active workers retain their files.
+  const marketplaceName = options.isolateSelection
+    ? `${MARKETPLACE_NAME}-${await pluginSelectionDigest(root, options.signal)}`
+    : MARKETPLACE_NAME;
+  const marketplace = pluginMarketplaceDirectory(codexHome, marketplaceName);
   throwIfSignalAborted(options.signal);
   const command =
     options.codexCommand ?? resolveCodexCommand(options.environment);
@@ -2531,7 +2570,7 @@ export async function bootstrapPlugin(
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }
-    await createMarketplace(codexHome, root, options.signal);
+    await createMarketplace(codexHome, root, options.signal, marketplaceName);
   }
 
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
@@ -2543,7 +2582,7 @@ export async function bootstrapPlugin(
   const configuration = parse(config);
   const marketplaces = configuration["marketplaces"];
   const registration = isRecord(marketplaces)
-    ? marketplaces[MARKETPLACE_NAME]
+    ? marketplaces[marketplaceName]
     : undefined;
   const registered =
     isRecord(registration) &&
@@ -2571,13 +2610,21 @@ export async function bootstrapPlugin(
     });
   const plugins = configuration["plugins"];
   const plugin = isRecord(plugins)
-    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
+    ? plugins[`${PLUGIN_NAME}@${marketplaceName}`]
     : undefined;
+  if (options.isolateSelection) {
+    await writeCodexConfig(join(codexHome, "config.toml"), {
+      ...(configuration as JsonObject),
+      ...codexSecurityPluginRegistration({
+        marketplaceRoot: marketplace,
+        marketplaceName,
+      }),
+    });
+  }
   if (
     stagedMatches &&
-    registered &&
-    isRecord(plugin) &&
-    plugin["enabled"] === true &&
+    (options.isolateSelection ||
+      (registered && isRecord(plugin) && plugin["enabled"] === true)) &&
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
@@ -2588,18 +2635,24 @@ export async function bootstrapPlugin(
       true,
     ))
   ) {
+    if (previous["pluginRoot"] !== root)
+      await writeFile(
+        installRecord,
+        JSON.stringify({ ...previous, pluginRoot: root }),
+        { mode: 0o600, signal: options.signal },
+      );
     return {
       pluginRoot: root,
       marketplaceRoot: marketplace,
       installedRoot: previous["installedPath"],
-      marketplaceName: MARKETPLACE_NAME,
+      marketplaceName,
       name,
       version,
     };
   }
   const output = await run(
     command,
-    ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+    ["plugin", "add", "--json", `${PLUGIN_NAME}@${marketplaceName}`],
     environment,
     options.signal,
   );
@@ -2625,17 +2678,74 @@ export async function bootstrapPlugin(
   }
   await writeFile(
     installRecord,
-    JSON.stringify({ installedPath: installed["installedPath"], version }),
+    JSON.stringify({
+      installedPath: installed["installedPath"],
+      version,
+      pluginRoot: root,
+    }),
     { mode: 0o600, signal: options.signal },
   );
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
     installedRoot: installed["installedPath"],
-    marketplaceName: MARKETPLACE_NAME,
+    marketplaceName,
     name,
     version,
   };
+}
+
+/** Select one stable plugin tree without changing the shared authentication home. */
+export function codexSecurityPluginRegistration(
+  plugin: Pick<PluginInstall, "marketplaceRoot" | "marketplaceName">,
+): JsonObject {
+  return {
+    marketplaces: {
+      [plugin.marketplaceName]: {
+        source_type: "local",
+        source: plugin.marketplaceRoot,
+      },
+    },
+    plugins: {
+      [`${PLUGIN_NAME}@${plugin.marketplaceName}`]: { enabled: true },
+    },
+  };
+}
+
+function pluginMarketplaceDirectory(codexHome: string, name: string): string {
+  return join(codexHome, name === MARKETPLACE_NAME ? "sdk-marketplace" : name);
+}
+
+async function pluginSelectionDigest(
+  root: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const visit = async (path: string): Promise<void> => {
+    throwIfSignalAborted(signal);
+    const metadata = await lstat(path);
+    if (metadata.isDirectory()) {
+      hash.update(JSON.stringify([relative(root, path), "directory"]));
+      for (const entry of (await readdir(path)).sort())
+        await visit(join(path, entry));
+    } else if (metadata.isFile()) {
+      hash.update(
+        JSON.stringify([
+          relative(root, path),
+          metadata.mode & 0o111,
+          createHash("sha256")
+            .update(await readFile(path, { signal }))
+            .digest("hex"),
+        ]),
+      );
+    } else {
+      throw new PluginBootstrapError(
+        `Plugin contains an unsafe source path: ${path}`,
+      );
+    }
+  };
+  await visit(root);
+  return hash.digest("hex");
 }
 
 async function pluginContentsMatch(

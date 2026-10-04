@@ -152,6 +152,38 @@ def test_windows_completion_lock_retries_and_unlocks(tmp_path: Path) -> None:
     assert lock_path.stat().st_size == 1
 
 
+def test_completion_lock_reentry_is_scoped_to_the_state_directory(
+    tmp_path: Path, workbench_api
+) -> None:
+    completion_lock = workbench_api["scan_completion_lock"]
+    lock_globals = completion_lock.__wrapped__.__globals__
+    scan_id = str(uuid.uuid4())
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "first")}),
+        mock.patch.dict(
+            lock_globals,
+            acquire_completion_file_lock=mock.Mock(),
+            release_completion_file_lock=mock.Mock(),
+        ),
+    ):
+        acquire = lock_globals["acquire_completion_file_lock"]
+        release = lock_globals["release_completion_file_lock"]
+        with completion_lock(scan_id):
+            with pytest.raises(RuntimeError, match="nested failure"), completion_lock(scan_id):
+                raise RuntimeError("nested failure")
+            assert acquire.call_count == 1
+            release.assert_not_called()
+            with (
+                mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(tmp_path / "second")}),
+                completion_lock(scan_id),
+            ):
+                assert acquire.call_count == 2
+            assert release.call_count == 1
+        with completion_lock(scan_id):
+            assert acquire.call_count == 3
+        assert release.call_count == 3
+
+
 def test_workbench_does_not_run_textconv_during_diff_setup(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -523,7 +555,7 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-@pytest.mark.parametrize("previous_version", [41, 42, 46])
+@pytest.mark.parametrize("previous_version", [41, 45, 46])
 def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
     previous_version: int,
@@ -586,13 +618,26 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             namespace["now"],
             namespace["backfill_security_targets"],
         )
-        updated = previous_version == 46 or (previous_version == 42 and indexed)
+        updated = previous_version == 46 or (previous_version == 45 and indexed)
         if updated:
             connection.execute(
                 "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
             )
+        if previous_version >= 44:
+            assert (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
+                ).fetchone()
+                is not None
+            )
         namespace["apply_migrations"](connection)
         namespace["apply_migrations"](connection)
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
+            ).fetchone()
+            is not None
+        )
 
         migrated = connection.execute(
             "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
@@ -2659,70 +2704,3 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
     assert {"execution_model", "reasoning_effort"}.issubset(scan_columns)
     assert "legacy_execution_model" not in scan_columns
-
-
-@pytest.mark.parametrize("indexed", [False, True])
-def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
-    indexed: bool,
-) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    previous = tuple(item for item in namespace["MIGRATIONS"] if item[0] < 42)
-    timestamp = "2026-09-01T00:00:00Z"
-    with sqlite3.connect(":memory:") as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        namespace["apply_schema_migrations"](
-            connection, previous, namespace["now"], namespace["backfill_security_targets"]
-        )
-        connection.execute(
-            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-            ("workspace", timestamp, timestamp),
-        )
-        for scan_id in ("first-scan", "second-scan"):
-            connection.execute(
-                """INSERT INTO scans (
-                    id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-                    status, phase, started_at, created_at, updated_at
-                ) VALUES (?, 'workspace', '/target', 'revision', '.', 'standard', ?,
-                    'complete', 'reporting', ?, ?, ?)""",
-                (scan_id, f"/scans/{scan_id}", timestamp, timestamp, timestamp),
-            )
-            connection.execute(
-                """INSERT INTO scan_severity_classifications
-                    (scan_id, finding_ids_json, assessed_at) VALUES (?, '["finding"]', ?)""",
-                (scan_id, timestamp),
-            )
-        connection.execute(
-            """INSERT INTO findings
-                (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
-                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
-            (timestamp, timestamp),
-        )
-        connection.execute(
-            """INSERT INTO finding_severity_assessments
-                (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
-                    level, rationale)
-                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
-                    'assessed', 'high', 'Saved severity')""",
-            (timestamp,),
-        )
-        if indexed:
-            connection.execute(
-                """INSERT INTO finding_occurrences
-                    (id, finding_id, scan_id, title, summary, severity, confidence,
-                        remediation, created_at)
-                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
-                        'high', 'high', 'Remediation', ?)""",
-                (timestamp,),
-            )
-
-        namespace["apply_migrations"](connection)
-        namespace["apply_migrations"](connection)
-
-        migrated = connection.execute(
-            "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
-        ).fetchall()
-        assert [tuple(row) for row in migrated] == (
-            [("second-scan", "second-occurrence")] if indexed else []
-        )
-        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

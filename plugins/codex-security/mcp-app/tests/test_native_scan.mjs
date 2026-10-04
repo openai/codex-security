@@ -25,7 +25,7 @@ const bundle = await build({
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
       export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
-      export { resolveDeepScanConfig, writeDeepScanConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url)))};
+      export { resolveDeepScanConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
@@ -74,7 +74,6 @@ const {
   prepareAmbientRuntime,
   prepareExecutionSource,
   resolveDeepScanConfig,
-  writeDeepScanConfig,
 } = module.exports;
 
 const fixtureRepository = await realpath(
@@ -652,10 +651,15 @@ test("native preparation excludes scan output and knowledge sources from executa
       const request = {
         ...input(),
         scan: { ...input().scan, targetPath: repository, scanDir },
-        recipe: {
-          auth: "api-key",
-          ...(saved ? { knowledgeBasePaths: [documents], config: {} } : {}),
-        },
+        ...(saved
+          ? {
+              recipe: {
+                auth: "api-key",
+                knowledgeBasePaths: [documents],
+                config: {},
+              },
+            }
+          : {}),
       };
       for (const directory of [scanDir, knowledgeRoot]) {
         process.env.CODEX_CLI_PATH = join(directory, name);
@@ -1147,7 +1151,7 @@ ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) {
   servePermissionProfiles();
 } else {
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ home: process.env.CODEX_HOME, argv: process.argv.slice(2), deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, deepConfig: fs.readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") }));
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ home: process.env.CODEX_HOME, argv: process.argv.slice(2), deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, deepConfig: fs.readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() || require("node:path").join(process.env.CODEX_HOME, "codex-security/config.toml"), "utf8") }));
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-home-thread" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
@@ -1193,10 +1197,12 @@ if (process.argv.includes("app-server")) {
             prepared.client.dependencies.ambientExecution,
           );
           try {
-            await writeDeepScanConfig(
-              runtime.deepScanConfigPath,
-              await resolveDeepScanConfig(prepared.options, deepConfig),
+            const perScan = await resolveDeepScanConfig(
+              prepared.options,
+              deepConfig,
             );
+            assert.equal(perScan.settings.workers, resumed ? 6 : workers);
+            assert.equal(perScan.settings.subagents, resumed ? 4 : subagents);
             for (const role of ["discovery", "merge"]) {
               const sdk = createPermissionCheckedCodex({
                 codexPathOverride: executable,
@@ -1205,11 +1211,7 @@ if (process.argv.includes("app-server")) {
                   repository,
                   prepared.client.dependencies.inheritedPermissions,
                 ),
-                env: {
-                  ...runtime.environment,
-                  CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH:
-                    runtime.deepScanConfigPath,
-                },
+                env: runtime.environment,
               });
               const workerDirectory = join(root, role);
               await mkdir(workerDirectory, { recursive: true });
@@ -1233,14 +1235,14 @@ if (process.argv.includes("app-server")) {
                 observed.argv[observed.argv.indexOf("--cd") + 1],
                 workerDirectory,
               );
-              assert.equal(observed.deepConfigPath, runtime.deepScanConfigPath);
+              assert.equal(observed.deepConfigPath, override);
               assert.equal(
                 parseToml(observed.deepConfig).deep_scan.workers,
-                resumed ? 6 : workers,
+                workers,
               );
               assert.equal(
                 parseToml(observed.deepConfig).deep_scan.subagents,
-                resumed ? 4 : subagents,
+                subagents,
               );
               assert.equal(
                 await readFile(deepConfig, "utf8"),
@@ -2144,6 +2146,25 @@ test("native saved scans retain settings, auth environment, permissions and iden
     assert.equal(options.subagents, 3);
     assert.equal(options.auth, "api-key");
     assert.equal(options.maxCostUsd, 10);
+    const documents = join(root, "ambient-documents");
+    await mkdir(documents);
+    process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+    const savedWithoutDocuments = await prepareNativeScan(request);
+    assert.equal(savedWithoutDocuments.options.knowledgeBasePaths, undefined);
+    assert.equal(
+      savedWithoutDocuments.client.dependencies.environment
+        .CODEX_SECURITY_KNOWLEDGE_BASE,
+      undefined,
+    );
+    const freshWithDocuments = await prepareNativeScan({
+      ...request,
+      recipe: undefined,
+    });
+    assert.deepEqual(freshWithDocuments.options.knowledgeBasePaths, [
+      documents,
+    ]);
+    delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+
     assert.equal(options.postScanPrompt, "Publish once.");
     const withoutContext = await prepareNativeScan({
       ...request,

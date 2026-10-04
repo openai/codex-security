@@ -329,7 +329,7 @@ test("aborting mock generation leaves a terminal scan record", async () => {
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toMatchObject([
-      { progress: { status: "failed" } },
+      { progress: { status: "canceled" } },
     ]);
   } finally {
     await client.close();

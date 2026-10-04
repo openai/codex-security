@@ -22,7 +22,11 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
-import { combineScanCoverage, validateScanMerge } from "../src/scan-merge.js";
+import {
+  combineScanCoverage,
+  createScanMerger,
+  materializeScanAggregate,
+} from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -289,7 +293,7 @@ test("completed projection follows the shared canonical child fixture", async ()
   expect(
     JSON.parse(await readFile(join(h.source, "findings.json"), "utf8")),
   ).toEqual(h.original);
-  // Supporting evidence is read again on the next projection; there is no cross-call cache.
+  // Parent references continue to point at the child evidence; projection makes no copy.
   const evidence = Object.entries(fixture.expected.fileProjections).find(
     ([, path]) => path.endsWith("trace.txt"),
   )!;
@@ -369,18 +373,21 @@ with connect() as connection:
       (index) => legacy.findings[index]!,
     ),
   );
-  const result = validateScanMerge(
-    {
-      scanId: fixture.parentScanId,
-      groups: projected.draft.findings.map((finding) => ({
-        sourceFindingIds: finding.provenance.sourceFindingIds!,
-        canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
-      })),
-    },
+  const merge = await createScanMerger(PLUGIN_ROOT);
+  const result = await merge(
+    fixture.parentScanId,
     [projected],
     null,
+    new AbortController().signal,
+    async () => {
+      throw new Error("One projected child needs no model call");
+    },
+    { contextPath: join(h.parent, "merge-context.json") },
   );
-  expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
+  expect(
+    materializeScanAggregate(result.aggregate).findings[0]!.provenance
+      .sourceFindings,
+  ).toEqual([
     { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
   ]);
   expect(await readFile(findingsPath, "utf8")).toBe(sourceBytes);
@@ -469,7 +476,7 @@ os.execv(${JSON.stringify(python)}, [${JSON.stringify(python)}, *sys.argv[1:]])
 }
 
 test.skipIf(process.platform === "win32")(
-  "projects many evidence files with one selected Python process",
+  "references many evidence files with one selected Python process",
   async () => {
     const h = await canonicalChild();
     const { fixture } = h;
@@ -506,7 +513,8 @@ test.skipIf(process.platform === "win32")(
         await readFile(
           join(
             h.parent,
-            `${fixture.relativeDirectory}/findings/check/many`,
+            fixture.relativeDirectory,
+            "findings/check/many",
             name,
           ),
         ),
@@ -553,29 +561,3 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
-
-test("preserves report and evidence basenames under the child namespace", async () => {
-  const h = await canonicalChild();
-  const { fixture } = h;
-  const evidence = `${fixture.sourceScanId}-check-3.md`;
-  await writeFile(
-    join(h.source, "findings/check-3", evidence),
-    "Supporting evidence",
-  );
-  const writer = await prepareScanArtifactRestorer(h.options, h.parent);
-  const projected = await writer.projectChild(
-    fixture.parentScanId,
-    fixture.sourceScanId,
-    h.source,
-  );
-  const directory = `${fixture.relativeDirectory}/findings/check-3`;
-  expect(
-    projected.draft.findings.some(
-      (finding) => finding.writeup?.reportPath === `${directory}/check-3.md`,
-    ),
-  ).toBe(true);
-  for (const name of ["check-3.md", evidence])
-    expect(await readFile(join(h.parent, directory, name))).toEqual(
-      await readFile(join(h.source, "findings/check-3", name)),
-    );
-});

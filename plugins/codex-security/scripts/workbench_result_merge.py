@@ -152,6 +152,9 @@ def _freeze_source_times(
     sources: dict[str, str],
     times: dict[str, int],
     terminal_assessments: dict[str, str] | None = None,
+    selected_parent_checkpoint: str | None = None,
+    committed_draft_digest: str | None = None,
+    selected_parent_observed_at: int | None = None,
 ) -> None:
     # Identical result rewrites must not change the order of frozen review evidence.
     observations = {
@@ -161,6 +164,27 @@ def _freeze_source_times(
     }
     if not observations:
         return
+    if selected_parent_checkpoint is None or committed_draft_digest is None:
+        for relative in sources:
+            if _is_source_order_snapshot(relative):
+                retained, digest, _ = _legacy_read_saved_result(scan_dir, relative, scan_id)
+                if digest != sources[relative]:
+                    raise ContractError("saved source ordering changed after the scan stopped")
+                selected = retained.get("selectedParentCheckpoint")
+                if (
+                    selected_parent_checkpoint is None
+                    and isinstance(selected, str)
+                    and selected in sources
+                ):
+                    selected_parent_checkpoint = selected
+                if selected == selected_parent_checkpoint and selected_parent_observed_at is None:
+                    observed = retained.get("selectedParentObservedAtNs")
+                    if isinstance(observed, str) and re.fullmatch(r"-?[0-9]+", observed):
+                        selected_parent_observed_at = int(observed)
+                if committed_draft_digest is None and isinstance(
+                    retained.get("committedDraftDigest"), str
+                ):
+                    committed_draft_digest = retained["committedDraftDigest"]
     if terminal_assessments is None:
         for relative in sources:
             if not _is_source_order_snapshot(relative):
@@ -168,17 +192,36 @@ def _freeze_source_times(
             retained, digest, _ = _legacy_read_saved_result(scan_dir, relative, scan_id)
             if digest != sources[relative]:
                 raise ContractError("saved source ordering changed after the scan stopped")
-            if retained.get("sources") == observations:
+            if (
+                retained.get("sources") == observations
+                and retained.get("selectedParentCheckpoint") == selected_parent_checkpoint
+                and retained.get("committedDraftDigest") == committed_draft_digest
+                and retained.get("selectedParentObservedAtNs")
+                == (
+                    str(selected_parent_observed_at)
+                    if selected_parent_observed_at is not None
+                    else None
+                )
+            ):
                 return
     record = {"scanId": scan_id, "sources": observations}
     if terminal_assessments is not None:
         record["terminalAssessments"] = terminal_assessments
+    if selected_parent_checkpoint is not None:
+        record["selectedParentCheckpoint"] = selected_parent_checkpoint
+    if committed_draft_digest is not None:
+        record["committedDraftDigest"] = committed_draft_digest
+    if selected_parent_observed_at is not None:
+        record["selectedParentObservedAtNs"] = str(selected_parent_observed_at)
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():
         write_scan_local_bytes(scan_dir, path, _encoded(record))
     if _legacy_read_saved_result(scan_dir, path, scan_id)[1] != digest:
         raise ContractError("saved source ordering does not match its digest")
+    for relative in list(sources):
+        if _is_source_order_snapshot(relative):
+            del sources[relative]
     sources[path] = digest
 
 

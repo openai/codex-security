@@ -9,7 +9,38 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import register, run_workbench, write_completed_contract
+from workbench_test_support import (
+    composition_payload,
+    register,
+    run_workbench,
+    write_completed_contract,
+)
+
+
+def select_checkpoint(directory: Path, checkpoint: Path) -> None:
+    """Publish a proposed semantic snapshot without altering a stopped scan's seal."""
+    draft = json.loads(checkpoint.read_text())
+    manifest_path = directory / "scan-manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text())
+        if manifest_path.exists()
+        else {"scan": {"id": draft["scanId"]}}
+    )
+    scan = manifest["scan"]
+    for key in ("sealedAt", "artifacts", "preservedSources"):
+        scan.pop(key, None)
+    for key in ("complete", "threatModel", "scope"):
+        if key in draft:
+            scan[key] = copy.deepcopy(draft[key])
+    document = {
+        "manifest": manifest,
+        "findings": {"scanId": draft["scanId"], "findings": draft["findings"]},
+        "coverage": draft["coverage"],
+        "reconciledCheckpointIds": [checkpoint.name],
+    }
+    committed = directory / "artifacts/scan-draft.json"
+    committed.parent.mkdir(parents=True, exist_ok=True)
+    committed.write_text(json.dumps(document))
 
 
 @pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
@@ -112,7 +143,7 @@ def test_stopped_parent_preserves_work_with_malformed_child_manifest(
         assert path.read_bytes() == contents
 
 
-def test_draft_without_raw_checkpoint_survives_head_publication_failure(
+def test_draft_without_raw_checkpoint_survives_projection_publication_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -148,7 +179,7 @@ def test_draft_without_raw_checkpoint_survives_head_publication_failure(
     original_write = results.write_scan_local_bytes
 
     def interrupt_head(directory, relative, contents):
-        if relative == "checkpoint-head.json":
+        if relative == "findings.json":
             raise OSError("Synthetic head publication failure")
         return original_write(directory, relative, contents)
 
@@ -157,7 +188,7 @@ def test_draft_without_raw_checkpoint_survives_head_publication_failure(
         patch.setattr(results, "write_scan_local_bytes", interrupt_head)
         with pytest.raises(OSError, match="Synthetic head publication failure"):
             results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-    assert list((scan_dir / "checkpoints").glob("*.json"))
+    assert (scan_dir / "artifacts/scan-draft.json").exists()
     run_workbench(state, "cancel-scan", "--scan-id", scan["scanId"])
     recovered = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert [row["title"] for row in recovered] == [
@@ -199,7 +230,7 @@ def test_stopped_parent_recovers_child_model_without_replacing_accepted_model(
             parent["scanId"],
             "--artifact-path",
             "artifacts/deep-scan/checkpoint.json",
-            input_text=json.dumps(saved),
+            input_text=composition_payload(parent_dir, saved),
         )
     run_workbench(
         state,
@@ -331,7 +362,9 @@ def test_explicit_recovery_reads_child_evidence_saved_after_parent_publication(
     original.update({path: path.read_bytes() for path in child_dir.glob("*.json")})
     saved["mergedScanIds"] = [child["scanId"]]
     saved["aggregate"] = {"findings": [], "coverage": {}}
-    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(json.dumps(saved))
+    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(
+        composition_payload(parent_dir, saved)
+    )
     files = {
         path: (path.read_bytes(), path.stat().st_mtime_ns) for path in parent_dir.rglob("*.json")
     }
@@ -405,7 +438,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
         draft["coverage"]["inventoryStrategy"] = "repository"
         draft["coverage"]["openQuestions"] = [f"Synthetic child {index} question."]
         original = write_checkpoint(directory / "checkpoints", draft)
-        (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": original.name}))
+        select_checkpoint(directory, original)
         run_workbench(
             state, "fail-scan", "--scan-id", child["scanId"], "--message", "Synthetic interruption"
         )
@@ -413,7 +446,9 @@ def test_parent_recovery_reconciles_updated_child_coverage(
     saved = checkpoint(state, parent)
     saved["aggregate"] = saved_draft(parent["scanId"], surfaces=[surface], deferred=[task])
     saved["aggregate"]["coverage"]["openQuestions"] = questions
-    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(json.dumps(saved))
+    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(
+        composition_payload(parent_dir, saved)
+    )
     stopped = run_workbench(
         state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic interruption"
     )["scan"]
@@ -442,7 +477,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
             {"id": task["id"], "reason": "Synthetic review finished."}
         ]
     latest = write_checkpoint(directory / "checkpoints", draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": latest.name}))
+    select_checkpoint(directory, latest)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
     child_coverage = json.loads((directory / "coverage.json").read_text())
     assert child_coverage["openQuestions"] == [{"question": "Synthetic child 1 question."}]
@@ -535,7 +570,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
     draft["coverage"].pop("resolvedDeferred", None)
     draft["coverage"]["surfaces"][0]["disposition"] = "rejected"
     reopened = write_checkpoint(directory / "checkpoints", draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": reopened.name}))
+    select_checkpoint(directory, reopened)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
     for _ in range(2):
         recovered = run_workbench(state, "recover-scan-results", "--scan-id", parent["scanId"])[
@@ -578,7 +613,7 @@ def test_parent_recovery_reselects_earlier_child_coverage(tmp_path: Path) -> Non
         )
         draft["coverage"]["inventoryStrategy"] = "repository"
         checkpoint = write_checkpoint(child_dir / "checkpoints", draft)
-        (child_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        select_checkpoint(child_dir, checkpoint)
         if index == 0:
             for scan in (child, parent):
                 run_workbench(
@@ -691,7 +726,7 @@ def test_parent_recovery_reconciles_withdrawn_child_findings(
     }
     rejected = write_checkpoint(directory / "checkpoints", rejected_draft)
     original[rejected] = rejected.read_bytes()
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": rejected.name}))
+    select_checkpoint(directory, rejected)
     recovered_child = run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])[
         "scan"
     ]
@@ -744,7 +779,7 @@ def test_parent_recovery_reconciles_withdrawn_child_findings(
     reported_draft["findings"] = [finding, *([survivor] if surviving_finding else [])]
     reported = write_checkpoint(directory / "checkpoints", reported_draft)
     original[reported] = reported.read_bytes()
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": reported.name}))
+    select_checkpoint(directory, reported)
     rereported_child = run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])[
         "scan"
     ]
@@ -795,7 +830,7 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
             }
         ]
         original = write_checkpoint(directory / "checkpoints", draft)
-        (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": original.name}))
+        select_checkpoint(directory, original)
         run_workbench(
             state, "fail-scan", "--scan-id", child["scanId"], "--message", "Synthetic interruption"
         )
@@ -803,7 +838,9 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
     saved = checkpoint(state, parent)
     saved["aggregate"] = saved_draft(parent["scanId"])
     saved["aggregate"]["coverage"]["openQuestions"] = [parent_question]
-    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(json.dumps(saved))
+    (parent_dir / "artifacts/deep-scan/checkpoint.json").write_text(
+        composition_payload(parent_dir, saved)
+    )
     stopped = run_workbench(
         state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic interruption"
     )["scan"]
@@ -828,7 +865,7 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
     )
     draft["coverage"]["openQuestions"] = updated_questions
     latest = write_checkpoint(directory / "checkpoints", draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": latest.name}))
+    select_checkpoint(directory, latest)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
     assert (
         json.loads((directory / "coverage.json").read_text())["openQuestions"] == updated_questions
@@ -975,7 +1012,7 @@ def test_parent_readers_recover_checkpoint_after_history_write_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, consumer: str
 ) -> None:
     from test_workbench_standard_deep_results import deep_scan_fixture
-    from workbench_test_support import fail_deep_scan, saved_draft
+    from workbench_test_support import saved_draft
 
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import workbench_db as db
@@ -1034,48 +1071,36 @@ def test_parent_readers_recover_checkpoint_after_history_write_failure(
                 ),
             )
     assert not (scan_dir / "checkpoints" / name).exists()
-    assert (scan_dir / "checkpoints/pending" / name).read_text() == checkpoint.relative_to(
-        scan_dir
-    ).as_posix()
+    assert (scan_dir / "checkpoints/pending" / name).read_bytes() == payload
     assert checkpoint.read_bytes() == payload
-    unavailable_stage = consumer in {"standard-missing-stage", "standard-changed-stage"}
     if consumer == "standard-missing-stage":
         checkpoint.unlink()
-    elif consumer == "standard-changed-stage":
+    elif consumer in {"standard-changed-stage", "legacy-recover"}:
         checkpoint.write_bytes(payload + b"\n")
     if consumer.startswith("standard-"):
         run_workbench(state, "complete-scan", "--scan-id", scan_id)
-        if unavailable_stage:
-            stopped = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-            assert any(
-                f"Preserved unreadable checkpoint checkpoints/{name}:" in warning
-                for warning in stopped["warnings"]
-            )
-            retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
-            assert len(retained) == 1
-            assert retained[0]["title"] == documents["findings"]["findings"][0]["title"]
-            assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
-            if consumer == "standard-missing-stage":
-                assert not checkpoint.exists()
-            else:
-                assert checkpoint.read_bytes() == payload + b"\n"
-            return
     else:
-        if consumer == "legacy-recover":
-            checkpoint.write_bytes(b"{incomplete")
-        fail_deep_scan(state, codex_home, scan_id)
-        if consumer == "legacy-recover":
-            assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-            checkpoint.write_bytes(payload)
-            stopped = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-            assert stopped["resultsRecoveryNeeded"] is True
-            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        run_workbench(
+            state,
+            "fail-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Synthetic interruption",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    # The published marker owns its immutable bytes even if the staging file changes.
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert len(retained) == 2
     assert {row["title"] for row in retained} == {
         row["title"] for row in incoming["findings"]["findings"]
     }
-    assert checkpoint.read_bytes() == payload
+    if consumer == "standard-missing-stage":
+        assert not checkpoint.exists()
+    else:
+        assert checkpoint.read_bytes() == (
+            payload + b"\n" if consumer in {"standard-changed-stage", "legacy-recover"} else payload
+        )
 
 
 @pytest.mark.parametrize("change", ["frozen-bytes", "new-checkpoint", "selected-head"])
@@ -1105,8 +1130,7 @@ def test_parent_recovery_honors_unsealed_child_frozen_sources(
     draft["threatModel"] = model
     draft["coverage"] = json.loads((child_dir / "coverage.json").read_text())
     original = write_checkpoint(child_dir / "checkpoints", draft)
-    head = child_dir / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": original.name}))
+    select_checkpoint(child_dir, original)
 
     def fail_publication(*args, **kwargs):
         raise OSError("Synthetic child publication interruption")
@@ -1148,7 +1172,7 @@ def test_parent_recovery_honors_unsealed_child_frozen_sources(
     else:
         later = write_checkpoint(child_dir / "checkpoints", changed)
         if change == "selected-head":
-            head.write_text(json.dumps({"checkpoint": later.name}))
+            select_checkpoint(child_dir, later)
 
     run_workbench(
         state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic parent stop"
@@ -1297,7 +1321,7 @@ def test_acknowledging_staged_checkpoint_retains_surface_history(
                 "const bundle=await build({entryPoints:[process.argv[2]],nodePaths:[process.argv[3]],"
                 "bundle:true,format:'esm',platform:'node',write:false}); "
                 "const api=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].contents).toString('base64')); "
-                "const result=await api.recordCodexSecurityScanDraft(JSON.parse(process.argv[4]),JSON.parse(process.argv[5])); "
+                "const result=await api.recordCodexSecurityScanDraft(JSON.parse(process.argv[4]),JSON.parse(process.argv[5]),async()=>{}); "
                 "console.log(JSON.stringify(result.coverage));"
             ),
             str(sdk / "package.json"),

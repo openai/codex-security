@@ -20,9 +20,9 @@ import {
 } from "./auth.js";
 import {
   deepMerge,
+  codexConfigOverrides,
   hasCommandAuth,
   mergedCodexConfig,
-  modelProviderConfigOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCyberAccessConfig,
@@ -109,40 +109,13 @@ export interface ScanComparisonResult {
 export function unionFindingGroups(
   groups: readonly (readonly string[])[],
 ): string[][] {
-  const parents = new Map<string, string>();
-  const representative = (identity: string): string => {
-    let root = identity;
-    while (parents.get(root) !== root) root = parents.get(root)!;
-    let current = identity;
-    while (parents.get(current) !== current) {
-      const previous = parents.get(current)!;
-      parents.set(current, root);
-      current = previous;
-    }
-    return root;
-  };
-
-  for (const group of groups) {
-    const [first, ...rest] = group.filter(
-      (identity) => identity.trim().length > 0,
-    );
-    if (first === undefined) continue;
-    if (!parents.has(first)) parents.set(first, first);
-    const firstRoot = representative(first);
-    for (const identity of rest) {
-      if (!parents.has(identity)) parents.set(identity, identity);
-      parents.set(representative(identity), firstRoot);
-    }
-  }
-
-  const united = new Map<string, string[]>();
-  for (const identity of parents.keys()) {
-    const root = representative(identity);
-    const group = united.get(root);
-    if (group === undefined) united.set(root, [identity]);
-    else group.push(identity);
-  }
-  return [...united.values()];
+  // Treat each stable ID as one occurrence, keeping the first-seen order.
+  const findings = [...new Set(groups.flat())]
+    .filter((identity) => identity.trim().length > 0)
+    .map((identity) => ({ occurrenceId: identity, findingId: identity }));
+  return groupFindings(findings, groups).map((group) =>
+    group.map(({ occurrenceId }) => occurrenceId),
+  );
 }
 
 /** @internal */
@@ -294,7 +267,14 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    /** Deep Scan grouping reads complete evidence before accepting a match. */
+    requireFullEvidence?: boolean;
+    /** Let the owning scan account for invalid responses and bound retries. */
+    onInvalidResponse?: (error: unknown) => Promise<boolean>;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -376,218 +356,270 @@ export async function matchScanFindingsInternal(
   progress("catalogue", 1);
   for (;;) {
     options.signal?.throwIfAborted();
-    const turn = await thread.run(prompt, turnOptions);
-    let response: unknown;
+    let responseReceived = false;
     try {
-      response = JSON.parse(turn.finalResponse);
-    } catch (error) {
-      throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-        cause: error,
-      });
-    }
-    const parsed = matchingTurnSchema.safeParse(response);
-    if (!parsed.success) {
-      throw new CodexSecurityError(
-        "Scan comparison returned an invalid match result.",
-      );
-    }
-    const { request: modelRequest, ...result } = parsed.data;
-    let request = modelRequest;
-    if (request == null) {
-      const unseenPage = remainingPages.values().next().value;
-      if (unseenPage !== undefined) {
-        request = { kind: "catalogue", page: unseenPage };
-      } else {
-        validateComparison(
-          initialCatalogue,
-          result,
-          options.allowHistoricalUncertainty ?? false,
-        );
-        // Omitted descriptions need evidence even for a no-match decision.
-        request = requiredEvidenceRequest(
-          result.matches,
-          omittedEvidence,
-          requestedEvidence,
+      const turn = await thread.run(prompt, turnOptions);
+      responseReceived = true;
+      let response: unknown;
+      try {
+        response = JSON.parse(turn.finalResponse);
+      } catch (error) {
+        throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+          cause: error,
+        });
+      }
+      const parsed = matchingTurnSchema.safeParse(response);
+      if (!parsed.success) {
+        throw new CodexSecurityError(
+          "Scan comparison returned an invalid match result.",
         );
       }
-    } else if (
-      result.matches.length > 0 ||
-      result.uncertain.length > 0 ||
-      (result.related?.length ?? 0) > 0
-    ) {
-      throw new CodexSecurityError(
-        "Scan comparison cannot request evidence and finish at the same time.",
-      );
-    }
-    if (request != null) {
-      if (runtimeOptions.singleTurn) {
-        throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
+      const { request: modelRequest, ...result } = parsed.data;
+      let request = modelRequest;
+      if (request == null) {
+        const unseenPage = remainingPages.values().next().value;
+        if (unseenPage !== undefined) {
+          request = { kind: "catalogue", page: unseenPage };
+        } else {
+          validateComparison(
+            initialCatalogue,
+            result,
+            options.allowHistoricalUncertainty ?? false,
+          );
+          // Omitted descriptions need evidence even for a no-match decision.
+          request = requiredEvidenceRequest(
+            result.matches,
+            omittedEvidence,
+            requestedEvidence,
+            runtimeOptions.requireFullEvidence,
+          );
+        }
+      } else if (
+        result.matches.length > 0 ||
+        result.uncertain.length > 0 ||
+        (result.related?.length ?? 0) > 0
+      ) {
+        throw new CodexSecurityError(
+          "Scan comparison cannot request evidence and finish at the same time.",
+        );
       }
-      if (request.kind === "catalogue") {
-        const page = pages[request.page];
-        if (page === undefined) {
-          throw new CodexSecurityError(
-            "Scan comparison requested an unknown catalogue page.",
-          );
+      if (request != null) {
+        if (runtimeOptions.singleTurn) {
+          throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
         }
-        if (!remainingPages.delete(request.page)) {
-          throw new CodexSecurityError(
-            "Scan comparison repeated a request without making progress.",
-          );
-        }
-        prompt = comparisonPrompt(page, request.page, pages.length);
-        progress("catalogue", request.page + 1);
-      } else {
-        request.beforeOccurrenceIds = [
-          ...new Set(request.beforeOccurrenceIds),
-        ].sort();
-        request.afterOccurrenceIds = [
-          ...new Set(request.afterOccurrenceIds),
-        ].sort();
-        if (
-          (request.beforeOccurrenceIds.length === 0 &&
-            request.afterOccurrenceIds.length === 0) ||
-          request.beforeOccurrenceIds.some((id) => !catalogue.has(id)) ||
-          request.afterOccurrenceIds.some((id) => !after.has(id))
-        ) {
-          throw new CodexSecurityError(
-            "Scan comparison requested evidence outside its findings.",
-          );
-        }
-        const requestKey = JSON.stringify([
-          request.beforeOccurrenceIds,
-          request.afterOccurrenceIds,
-        ]);
-        const previous = evidenceCursors.get(requestKey);
-        const expectedOffset = previous === undefined ? 0 : previous.nextOffset;
-        if (request.offset !== expectedOffset) {
-          throw new CodexSecurityError(
-            "Scan comparison requested an invalid evidence offset; start at 0 and follow nextOffset.",
-          );
-        }
-        let cursor = previous;
-        if (cursor === undefined) {
-          const beforeOccurrenceIds = request.beforeOccurrenceIds.filter(
-            (id) => !requestedEvidence.before.has(id),
-          );
-          const afterOccurrenceIds = request.afterOccurrenceIds.filter(
-            (id) => !requestedEvidence.after.has(id),
-          );
-          if (
-            beforeOccurrenceIds.length === 0 &&
-            afterOccurrenceIds.length === 0
-          ) {
+        if (request.kind === "catalogue") {
+          const page = pages[request.page];
+          if (page === undefined) {
             throw new CodexSecurityError(
-              "Scan comparison repeated evidence without making progress. Continue an unfinished selection with its returned IDs and nextOffset.",
+              "Scan comparison requested an unknown catalogue page.",
             );
           }
-          cursor = {
-            beforeOccurrenceIds,
-            afterOccurrenceIds,
-            text: JSON.stringify({
-              before: beforeOccurrenceIds.flatMap(
-                (id) => catalogue.get(id)!.occurrences,
-              ),
-              after: afterOccurrenceIds.map((id) => after.get(id)!),
-            }),
-            utf16Offset: 0,
-            nextOffset: 0,
-          };
+          if (!remainingPages.delete(request.page)) {
+            throw new CodexSecurityError(
+              "Scan comparison repeated a request without making progress.",
+            );
+          }
+          prompt = comparisonPrompt(page, request.page, pages.length);
+          progress("catalogue", request.page + 1);
+        } else {
+          request.beforeOccurrenceIds = [
+            ...new Set(request.beforeOccurrenceIds),
+          ].sort();
+          request.afterOccurrenceIds = [
+            ...new Set(request.afterOccurrenceIds),
+          ].sort();
+          if (
+            (request.beforeOccurrenceIds.length === 0 &&
+              request.afterOccurrenceIds.length === 0) ||
+            request.beforeOccurrenceIds.some((id) => !catalogue.has(id)) ||
+            request.afterOccurrenceIds.some((id) => !after.has(id))
+          ) {
+            throw new CodexSecurityError(
+              "Scan comparison requested evidence outside its findings.",
+            );
+          }
+          const requestKey = JSON.stringify([
+            request.beforeOccurrenceIds,
+            request.afterOccurrenceIds,
+          ]);
+          const previous = evidenceCursors.get(requestKey);
+          const expectedOffset =
+            previous === undefined ? 0 : previous.nextOffset;
+          if (request.offset !== expectedOffset) {
+            throw new CodexSecurityError(
+              "Scan comparison requested an invalid evidence offset; start at 0 and follow nextOffset.",
+            );
+          }
+          let cursor = previous;
+          if (cursor === undefined) {
+            const beforeOccurrenceIds = request.beforeOccurrenceIds.filter(
+              (id) => !requestedEvidence.before.has(id),
+            );
+            const afterOccurrenceIds = request.afterOccurrenceIds.filter(
+              (id) => !requestedEvidence.after.has(id),
+            );
+            if (
+              beforeOccurrenceIds.length === 0 &&
+              afterOccurrenceIds.length === 0
+            ) {
+              throw new CodexSecurityError(
+                "Scan comparison repeated evidence without making progress. Continue an unfinished selection with its returned IDs and nextOffset.",
+              );
+            }
+            cursor = {
+              beforeOccurrenceIds,
+              afterOccurrenceIds,
+              text: JSON.stringify({
+                before: beforeOccurrenceIds.flatMap(
+                  (id) => catalogue.get(id)!.occurrences,
+                ),
+                after: afterOccurrenceIds.map((id) => after.get(id)!),
+              }),
+              utf16Offset: 0,
+              nextOffset: 0,
+            };
+          }
+          const page = evidencePage(cursor, request.offset);
+          cursor.nextOffset = page.nextOffset;
+          cursor.utf16Offset = page.nextUtf16Offset;
+          // Keep completed cursors to reject repeats, but release their evidence.
+          if (page.nextOffset === null) cursor.text = "";
+          // Either the original selection or the returned fresh IDs can resume it.
+          evidenceCursors.set(requestKey, cursor);
+          evidenceCursors.set(
+            JSON.stringify([
+              cursor.beforeOccurrenceIds,
+              cursor.afterOccurrenceIds,
+            ]),
+            cursor,
+          );
+          for (const id of cursor.beforeOccurrenceIds)
+            requestedEvidence.before.set(id, cursor);
+          for (const id of cursor.afterOccurrenceIds)
+            requestedEvidence.after.set(id, cursor);
+          prompt = page.prompt;
+          progress("evidence");
         }
-        const page = evidencePage(cursor, request.offset);
-        cursor.nextOffset = page.nextOffset;
-        cursor.utf16Offset = page.nextUtf16Offset;
-        // Keep completed cursors to reject repeats, but release their evidence.
-        if (page.nextOffset === null) cursor.text = "";
-        // Either the original selection or the returned fresh IDs can resume it.
-        evidenceCursors.set(requestKey, cursor);
-        evidenceCursors.set(
-          JSON.stringify([
-            cursor.beforeOccurrenceIds,
-            cursor.afterOccurrenceIds,
-          ]),
-          cursor,
-        );
-        for (const id of cursor.beforeOccurrenceIds)
-          requestedEvidence.before.set(id, cursor);
-        for (const id of cursor.afterOccurrenceIds)
-          requestedEvidence.after.set(id, cursor);
-        prompt = page.prompt;
-        progress("evidence");
+        continue;
       }
-      continue;
-    }
 
-    const expandBefore = (id: string) =>
-      catalogue.get(id)!.occurrences.map(({ occurrenceId }) => occurrenceId);
-    const expandPairs = (pairs: ScanComparisonResult["uncertain"]) =>
-      pairs.flatMap((pair) =>
-        expandBefore(pair.beforeOccurrenceId).map((beforeOccurrenceId) => ({
-          ...pair,
-          beforeOccurrenceId,
-        })),
+      const expandBefore = (id: string) =>
+        catalogue.get(id)!.occurrences.map(({ occurrenceId }) => occurrenceId);
+      const expandPairs = (pairs: ScanComparisonResult["uncertain"]) =>
+        pairs.flatMap((pair) =>
+          expandBefore(pair.beforeOccurrenceId).map((beforeOccurrenceId) => ({
+            ...pair,
+            beforeOccurrenceId,
+          })),
+        );
+      const expanded = reconcileComparison(
+        input,
+        {
+          matches: result.matches.map((match) => ({
+            ...match,
+            beforeOccurrenceIds:
+              match.beforeOccurrenceIds.flatMap(expandBefore),
+          })),
+          uncertain: expandPairs(result.uncertain),
+          ...(result.related === undefined
+            ? {}
+            : { related: expandPairs(result.related) }),
+        },
+        options.allowHistoricalUncertainty ?? false,
       );
-    const expanded = reconcileComparison(
-      input,
-      {
-        matches: result.matches.map((match) => ({
-          ...match,
-          beforeOccurrenceIds: match.beforeOccurrenceIds.flatMap(expandBefore),
-        })),
-        uncertain: expandPairs(result.uncertain),
-        ...(result.related === undefined
-          ? {}
-          : { related: expandPairs(result.related) }),
-      },
-      options.allowHistoricalUncertainty ?? false,
-    );
-    progress("complete");
-    return expanded.comparison;
+      progress("complete");
+      return expanded.comparison;
+    } catch (error) {
+      if (
+        options.signal?.aborted ||
+        !(
+          error instanceof SyntaxError ||
+          (responseReceived && error instanceof CodexSecurityError)
+        ) ||
+        !(await runtimeOptions.onInvalidResponse?.(error))
+      )
+        throw error;
+      const reason =
+        error instanceof SyntaxError
+          ? "Scan comparison returned invalid JSON."
+          : error.message;
+      prompt = `${reason} Correct your response using the same output schema and the catalogue and evidence already supplied. Do not repeat requests for context you have already received.`;
+    }
   }
 }
 
-interface PreparedReadOnlyClient {
-  model: ReturnType<typeof scanModelConfiguration> | undefined;
-  config: JsonObject;
-  create: NonNullable<ReadOnlyCodexOptions["createCodex"]>;
-  configOverrides: string[];
-}
-
-/** Standalone callers resolve credentials once; scan helpers arrive with a prepared factory. */
-async function prepareReadOnlyClient(
+async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-): Promise<PreparedReadOnlyClient> {
-  const requestedConfig = options.createCodex
-    ? options.config?.codexOverrides
-    : options.config
-      ? await mergedCodexConfig(options.config)
-      : undefined;
-  const config =
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    threadSource: ReadOnlyCodexThreadSource;
+  },
+): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
+  const preparedFactory =
+    options.codex === undefined ? options.createCodex : () => options.codex!;
+  const requestedConfig =
+    options.createCodex !== undefined
+      ? options.config?.codexOverrides
+      : options.config === undefined
+        ? undefined
+        : await mergedCodexConfig(options.config);
+  let config =
     requestedConfig === undefined
       ? undefined
       : resolveCodexProfile(requestedConfig);
-  const model =
-    config === undefined ? undefined : scanModelConfiguration(config);
-  if (options.codex || options.createCodex)
-    return {
-      model,
-      config: { ...config, mcp_servers: disabledMcpConfiguration(config, []) },
-      create: options.codex ? () => options.codex! : options.createCodex!,
-      configOverrides: [],
-    };
   const source = options.environment ?? process.env;
-  const mergedConfig = deepMerge(
-    await readCodexHomeConfig(source, options.signal),
-    requestedConfig ?? {},
-  );
-  const requestedSettings = resolveCodexProfile({
-    ...options.config?.codexOverrides,
-    profiles: mergedConfig["profiles"] ?? {},
-  });
-  const providerConfig = resolveCommandAuthConfig(
-    deepMerge(resolveCodexProfile(mergedConfig), requestedSettings),
-    configuredCodexHome(source),
-  );
+  let providerConfig: JsonObject = {};
+  if (preparedFactory === undefined) {
+    const mergedConfig = deepMerge(
+      await readCodexHomeConfig(source, options.signal),
+      requestedConfig ?? {},
+    );
+    const requestedSettings = resolveCodexProfile({
+      ...options.config?.codexOverrides,
+      profiles: mergedConfig["profiles"] ?? {},
+    });
+    providerConfig = resolveCommandAuthConfig(
+      deepMerge(resolveCodexProfile(mergedConfig), requestedSettings),
+      configuredCodexHome(source),
+    );
+    config = deepMerge(
+      resolveCodexProfile({
+        ...requestedConfig,
+        ...(mergedConfig["profile"] === undefined
+          ? {}
+          : {
+              profile: mergedConfig["profile"],
+              profiles: mergedConfig["profiles"] ?? {},
+            }),
+      }),
+      requestedSettings,
+    );
+    const selectedProvider = scanModelProvider(config);
+    const providers = providerConfig["model_providers"] as
+      JsonObject | undefined;
+    if (
+      typeof selectedProvider === "string" &&
+      providers?.[selectedProvider] !== undefined
+    ) {
+      config["model_providers"] = {
+        ...(config["model_providers"] as JsonObject | undefined),
+        [selectedProvider]: providers[selectedProvider],
+      };
+    }
+  }
+  const configuredModel =
+    requestedConfig === undefined ? undefined : scanModelConfiguration(config!);
+  const model = options.model ?? configuredModel?.model;
+  const reasoningEffort =
+    options.reasoningEffort ??
+    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
+    "medium";
+  const effectiveFeatures = resolveCodexProfile(
+    scanCyberAccessConfig(
+      deepMerge(providerConfig, config ?? {}),
+      options.cyberAccessProgram,
+    ),
+  )["features"] as JsonObject | undefined;
   const commandAuth = hasCommandAuth(providerConfig);
   if (
     commandAuth &&
@@ -601,97 +633,57 @@ async function prepareReadOnlyClient(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const environment = await comparisonEnvironment(
-    options.environment,
-    accountStatus,
-    options.signal,
-    undefined,
-    providerConfig,
-    options.preserveProviderEnvironment,
-  );
-  const command = resolveCodexCommand(environment);
-  const sdkConfig = deepMerge(
-    resolveCodexProfile({
-      ...requestedConfig,
-      ...(mergedConfig["profile"] === undefined
-        ? {}
-        : {
-            profile: mergedConfig["profile"],
-            profiles: mergedConfig["profiles"] ?? {},
-          }),
-    }),
-    requestedSettings,
-  );
-  const selectedProvider = scanModelProvider(sdkConfig);
-  const providers = providerConfig["model_providers"] as JsonObject | undefined;
-  if (
-    typeof selectedProvider === "string" &&
-    providers?.[selectedProvider] !== undefined
-  ) {
-    sdkConfig["model_providers"] = {
-      ...(sdkConfig["model_providers"] as JsonObject | undefined),
-      [selectedProvider]: providers[selectedProvider],
-    };
-  }
-  const mcpServers = await disabledMcpServers(
-    command,
-    sdkConfig,
-    environment,
-    options,
-  );
-  const configOverrides = modelProviderConfigOverride(
-    commandAuth ? providerConfig : sdkConfig,
-  );
-  delete sdkConfig["model_providers"];
-  return {
-    model:
-      requestedConfig === undefined
-        ? undefined
-        : scanModelConfiguration(sdkConfig),
-    config: {
-      ...sdkConfig,
-      mcp_servers: mcpServers,
-      features: resolveCodexProfile(providerConfig)["features"] ?? {},
-    },
-    configOverrides,
-    create: (settings) =>
-      new Codex({
-        ...settings,
-        codexPathOverride: executablePathForSpawn(command.command),
-        env: environment,
-        apiKey: options.preserveProviderEnvironment
-          ? undefined
-          : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-            environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-            undefined,
-      }),
-  };
-}
-
-async function startReadOnlyCodexThread(
-  options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
-): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
-  const client = await prepareReadOnlyClient(options);
-  const config = client.config;
-  const effectiveFeatures = resolveCodexProfile(
-    scanCyberAccessConfig(config, options.cyberAccessProgram),
-  )["features"] as JsonObject | undefined;
-  const configuredModel = client.model;
-  const model = options.model ?? configuredModel?.model;
-  const reasoningEffort =
-    options.reasoningEffort ??
-    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
   const prepared = prepareReadOnlyExecution(
-    config,
+    config ?? {},
     options.inheritedPermissions,
   );
-  const configOverrides = [...client.configOverrides, ...prepared.overrides];
-  const codex = await client.create({
-    ...(configOverrides.length ? { configOverrides } : {}),
+  const sdkConfig = prepared.config;
+  if (commandAuth)
+    sdkConfig["model_providers"] = providerConfig["model_providers"]!;
+  const configOverrides = prepared.overrides;
+  const environment =
+    preparedFactory === undefined
+      ? await comparisonEnvironment(
+          options.environment,
+          accountStatus,
+          options.signal,
+          undefined,
+          providerConfig,
+          options.preserveProviderEnvironment,
+        )
+      : undefined;
+  const command =
+    environment === undefined ? undefined : resolveCodexCommand(environment);
+  const createCodex =
+    preparedFactory ??
+    (({ config, configOverrides, ...settings }: CodexOptions) =>
+      new Codex({
+        ...settings,
+        configOverrides: [
+          ...codexConfigOverrides((config ?? {}) as JsonObject),
+          ...(configOverrides ?? []),
+        ],
+      }));
+  const codex = await createCodex({
+    ...(command === undefined
+      ? {}
+      : {
+          codexPathOverride: executablePathForSpawn(command.command),
+          // Helpers retain the provider credentials selected by comparisonEnvironment.
+          env: environment,
+          // The SDK forwards apiKey as CODEX_API_KEY for Codex exec.
+          apiKey: options.preserveProviderEnvironment
+            ? undefined
+            : environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
+              environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+              undefined,
+        }),
+    ...(configOverrides.length === 0 ? {} : { configOverrides }),
     config: {
-      ...prepared.config,
+      ...sdkConfig,
+      mcp_servers: preparedFactory
+        ? disabledMcpConfiguration(config, [])
+        : await disabledMcpServers(command!, config, environment!, options),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       responses_api_metadata: {
@@ -766,6 +758,7 @@ export async function disabledMcpServers(
   config: JsonObject | undefined,
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
+  configOverrides: readonly string[] = [],
 ): Promise<JsonObject> {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
   const { success, stdout, stderr } = await runCodexCommand(
@@ -773,6 +766,9 @@ export async function disabledMcpServers(
     [
       "-C",
       workingDirectory,
+      ...[...codexConfigOverrides(config ?? {}), ...configOverrides].flatMap(
+        (value) => ["--config", value],
+      ),
       "-c",
       "features.plugins=false",
       "mcp",
@@ -967,7 +963,7 @@ function reconcileComparison(
           related: response.related.filter(isSeparateGroup),
         }),
   };
-  validateComparison(input, comparison, allowHistoricalUncertainty, true);
+  validateComparison(input, comparison, allowHistoricalUncertainty);
   return { comparison, complete: matches.length === groups.length };
 }
 
@@ -1106,12 +1102,16 @@ function requiredEvidenceRequest(
   matches: ScanComparisonResult["matches"],
   omitted: Record<"before" | "after", ReadonlySet<string>>,
   requested: Record<"before" | "after", ReadonlyMap<string, EvidenceCursor>>,
+  requireFullEvidence = false,
 ): EvidenceRequest | undefined {
+  const required = {
+    before: new Set(omitted.before),
+    after: new Set(omitted.after),
+  };
   for (const side of ["before", "after"] as const) {
-    const required = new Set(omitted[side]);
     for (const match of matches)
-      for (const id of match[`${side}OccurrenceIds`]) required.add(id);
-    for (const id of required) {
+      for (const id of match[`${side}OccurrenceIds`]) required[side].add(id);
+    for (const id of required[side]) {
       const cursor = requested[side].get(id);
       if (cursor !== undefined && cursor.nextOffset !== null) {
         return {
@@ -1143,8 +1143,12 @@ function requiredEvidenceRequest(
     ].join("\n"),
   );
   for (const side of ["before", "after"] as const) {
-    for (const id of omitted[side]) {
-      if (requested[side].has(id)) continue;
+    for (const id of required[side]) {
+      if (
+        requested[side].has(id) ||
+        (!requireFullEvidence && !omitted[side].has(id))
+      )
+        continue;
       const identities = missing[`${side}OccurrenceIds`];
       const length = characterCount(JSON.stringify(id));
       const separator = identities.length === 0 ? 0 : 1;
@@ -1309,15 +1313,11 @@ function validateComparison(
   input: ScanComparisonInput,
   response: ScanComparisonResult,
   allowHistoricalUncertainty: boolean,
-  enforceConfirmedIdentities = false,
 ): void {
   const beforeIds = new Set(
     input.before.map(({ occurrenceId }) => occurrenceId),
   );
   const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
-  const findingIds = new Map(
-    [...input.before, ...input.after].flatMap(findingIdEntry),
-  );
   const matchedBefore = new Map<string, number>();
   const matchedAfter = new Map<string, number>();
   const uncertainPairs = new Set<string>();
@@ -1343,55 +1343,11 @@ function validateComparison(
     }
   }
 
-  const confirmedGroups = unionFindingGroups([
-    ...(input.knownFindingGroups ?? []),
-    ...[...new Set(findingIds.values())].map((findingId) => [findingId]),
-  ]);
-  if (enforceConfirmedIdentities) {
-    const occurrencesByFinding = Map.groupBy(
-      findingIds.keys(),
-      (occurrenceId) => findingIds.get(occurrenceId)!,
-    );
-    for (const knownGroup of confirmedGroups) {
-      const knownOccurrences = knownGroup.flatMap(
-        (findingId) => occurrencesByFinding.get(findingId) ?? [],
-      );
-      const matchedGroups = new Set(
-        knownOccurrences.flatMap((occurrenceId) => {
-          const group =
-            matchedBefore.get(occurrenceId) ?? matchedAfter.get(occurrenceId);
-          return group === undefined ? [] : [group];
-        }),
-      );
-      if (
-        matchedGroups.size > 1 ||
-        (matchedGroups.size === 1 &&
-          knownOccurrences.some(
-            (occurrenceId) =>
-              !matchedBefore.has(occurrenceId) &&
-              !matchedAfter.has(occurrenceId),
-          )) ||
-        (knownOccurrences.some((occurrenceId) => beforeIds.has(occurrenceId)) &&
-          knownOccurrences.some((occurrenceId) => afterIds.has(occurrenceId)) &&
-          matchedGroups.size === 0)
-      ) {
-        throw new CodexSecurityError(
-          "Scan comparison contradicts previously confirmed finding groups.",
-        );
-      }
-    }
-  }
-
   for (const candidate of response.uncertain) {
-    const beforeFindingId = findingIds.get(candidate.beforeOccurrenceId);
-    const afterFindingId = findingIds.get(candidate.afterOccurrenceId);
     if (
       !beforeIds.has(candidate.beforeOccurrenceId) ||
       matchedBefore.has(candidate.beforeOccurrenceId) ||
       !afterIds.has(candidate.afterOccurrenceId) ||
-      (enforceConfirmedIdentities &&
-        beforeFindingId !== undefined &&
-        beforeFindingId === afterFindingId) ||
       (!allowHistoricalUncertainty &&
         matchedAfter.has(candidate.afterOccurrenceId))
     ) {
@@ -1411,24 +1367,9 @@ function validateComparison(
     uncertainPairs.add(pair);
   }
 
-  const knownGroupByFindingId = new Map(
-    confirmedGroups.flatMap((group, index) =>
-      group.map((findingId) => [findingId, index] as const),
-    ),
-  );
   const relatedPairs = new Set<string>();
   for (const candidate of response.related ?? []) {
     const beforeGroup = matchedBefore.get(candidate.beforeOccurrenceId);
-    const beforeFindingId = findingIds.get(candidate.beforeOccurrenceId);
-    const afterFindingId = findingIds.get(candidate.afterOccurrenceId);
-    const knownBeforeGroup =
-      beforeFindingId === undefined
-        ? undefined
-        : knownGroupByFindingId.get(beforeFindingId);
-    const knownAfterGroup =
-      afterFindingId === undefined
-        ? undefined
-        : knownGroupByFindingId.get(afterFindingId);
     const pair = JSON.stringify([
       candidate.beforeOccurrenceId,
       candidate.afterOccurrenceId,
@@ -1438,9 +1379,6 @@ function validateComparison(
       !afterIds.has(candidate.afterOccurrenceId) ||
       (beforeGroup !== undefined &&
         beforeGroup === matchedAfter.get(candidate.afterOccurrenceId)) ||
-      (enforceConfirmedIdentities &&
-        knownBeforeGroup !== undefined &&
-        knownBeforeGroup === knownAfterGroup) ||
       uncertainPairs.has(pair) ||
       relatedPairs.has(pair)
     ) {

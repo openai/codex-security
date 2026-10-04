@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -12,6 +13,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
+import { gitMarkerRoot } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -24,16 +26,25 @@ const DOCUMENT_EXTENSIONS = new Set([
 export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
+  snapshot: KnowledgeBaseSnapshot;
+  sha256: string;
   cleanup(): Promise<void>;
 }
 
-export async function prepareKnowledgeBase(
+export interface KnowledgeBaseSnapshot {
+  readonly sources: readonly string[];
+  readonly documents: Readonly<Record<string, string>>;
+  readonly protectedRoots: readonly string[];
+}
+
+/** @internal Extract once so campaign identity and workers use identical inputs. */
+export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
-  directory?: string,
-): Promise<PreparedKnowledgeBase> {
+): Promise<KnowledgeBaseSnapshot> {
   const sources = new Set<string>();
   const documents = new Set<string>();
+  const protectedRoots = new Set<string>();
 
   for (const requested of paths) {
     signal?.throwIfAborted();
@@ -51,8 +62,11 @@ export async function prepareKnowledgeBase(
     }
 
     const source = await realpath(path);
+    protectedRoots.add(
+      (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+    );
     const selected = metadata.isDirectory()
-      ? await discover(source, signal)
+      ? (await discover(source, signal)).sort()
       : [source];
     if (selected.length === 0) {
       throw new Error(
@@ -65,53 +79,104 @@ export async function prepareKnowledgeBase(
     sources.add(source);
   }
 
+  const extracted: Record<string, string> = {};
+  let index = 0;
+  for (const document of documents) {
+    signal?.throwIfAborted();
+    const metadata = await lstat(document);
+    if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
+      throw new Error(`Knowledge base document is not readable: ${document}`);
+    }
+    const bytes = await readFile(document, {
+      flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      signal,
+    });
+    const extension = extname(document).toLowerCase();
+    const text =
+      extension === ".pdf"
+        ? await extractPdf(document, bytes, signal)
+        : extension === ".docx"
+          ? extractDocx(document, bytes)
+          : decodeText(document, bytes);
+    if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
+      throw new Error(
+        `Knowledge base document contains no extractable text: ${document}`,
+      );
+    }
+    const name = `${index}-${basename(document)}.txt`;
+    // The prefix and suffix can exceed the filesystem's 255-byte name limit.
+    const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
+    extracted[filename] = text;
+    index++;
+  }
+  return Object.freeze({
+    sources: Object.freeze([...sources]),
+    documents: Object.freeze(extracted),
+    protectedRoots: Object.freeze([...protectedRoots]),
+  });
+}
+
+export async function prepareKnowledgeBase(
+  input: readonly string[] | KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+  directory?: string,
+): Promise<PreparedKnowledgeBase> {
+  const snapshot =
+    "documents" in input
+      ? input
+      : await readKnowledgeBaseSnapshot(input, signal);
   const path = await mkdtemp(
     join(directory ?? tmpdir(), "codex-security-knowledge-"),
   );
   try {
-    let index = 0;
-    for (const document of documents) {
+    for (const [filename, text] of Object.entries(snapshot.documents)) {
       signal?.throwIfAborted();
-      const metadata = await lstat(document);
-      if (process.platform !== "win32" && (metadata.mode & 0o444) === 0) {
-        throw new Error(`Knowledge base document is not readable: ${document}`);
-      }
-      const bytes = await readFile(document, {
-        flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-        signal,
-      });
-      const extension = extname(document).toLowerCase();
-      const text =
-        extension === ".pdf"
-          ? await extractPdf(document, bytes)
-          : extension === ".docx"
-            ? extractDocx(document, bytes)
-            : decodeText(document, bytes);
-      if ((extension === ".pdf" || extension === ".docx") && !text.trim()) {
-        throw new Error(
-          `Knowledge base document contains no extractable text: ${document}`,
-        );
-      }
-      const name = `${index}-${basename(document)}.txt`;
-      // The prefix and suffix can exceed the filesystem's 255-byte name limit.
-      const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
       await writeFile(join(path, filename), text, {
         encoding: "utf8",
         mode: 0o600,
         signal,
       });
-      index++;
     }
   } catch (error) {
     await rm(path, { recursive: true, force: true });
     throw error;
   }
-
   return {
     path,
-    sources: [...sources],
+    sources: [...snapshot.sources],
+    snapshot,
+    // Keep the persisted document identity independent of execution metadata.
+    sha256: snapshotDigest(snapshot),
     cleanup: () => rm(path, { recursive: true, force: true }),
   };
+}
+
+// Preserve the saved JSON identity without joining every document into one string.
+function snapshotDigest(snapshot: KnowledgeBaseSnapshot): string {
+  const hash = createHash("sha256");
+  hash.update('{"sources":');
+  hash.update(JSON.stringify(snapshot.sources));
+  hash.update(',"documents":{');
+  let separator = "";
+  for (const [filename, text] of Object.entries(snapshot.documents)) {
+    hash.update(separator);
+    hash.update(JSON.stringify(filename));
+    hash.update(":");
+    hash.update(JSON.stringify(text));
+    separator = ",";
+  }
+  return hash.update("}}").digest("hex");
+}
+
+/** @internal Read the same extracted document text used by scans. */
+export async function readKnowledgeBaseDocuments(
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const { documents } = await readKnowledgeBaseSnapshot(paths, signal);
+  return Object.keys(documents)
+    .sort()
+    .map((name) => documents[name]!);
 }
 
 async function discover(
@@ -160,7 +225,11 @@ function decodeText(path: string, bytes: Uint8Array): string {
   }
 }
 
-async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
+async function extractPdf(
+  path: string,
+  bytes: Uint8Array,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
     const { getDocument, VerbosityLevel } =
       await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -173,6 +242,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       const document = await loadingTask.promise;
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
+        signal?.throwIfAborted();
         const content = await (await document.getPage(number)).getTextContent();
         pages.push(
           content.items
@@ -185,6 +255,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       await loadingTask.destroy();
     }
   } catch (error) {
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });

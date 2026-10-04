@@ -1,19 +1,17 @@
-import { lstat } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import {
+  prepareSemanticScanDraft,
+  type SemanticScan,
+} from "./scan-semantics.js";
+import { relative, sep } from "node:path";
 import { readThreatModelPath } from "./artifact-export.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
-import { ScanAccounting } from "./scan-accounting.js";
 import {
   loadContract,
   readScanFile,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
-import {
-  CodexSecurityError,
-  IncompleteScanError,
-  OutputDirectoryError,
-} from "./errors.js";
+import { IncompleteScanError, OutputDirectoryError } from "./errors.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
@@ -39,13 +37,13 @@ interface ScanResultContext {
 
 export interface ScanPublicationContext extends ScanResultContext {
   scanId: string;
-  workbench: (args: readonly string[]) => Promise<JsonObject>;
+  workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }
 
 /** This is only a read-path hint; the workbench still validates the complete seal and binding. */
 export async function hasSealedScanArtifacts(
   scanDir: string,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   let manifest: unknown;
   try {
@@ -76,45 +74,7 @@ export async function hasSealedScanArtifacts(
   );
 }
 
-/** Missing continuation metadata does not establish zero prior work. */
-export async function restorePriorScanCosts(
-  costs: ScanAccounting,
-  checkpoint: DeepScanCheckpointSummary | null,
-  resumeThreadId: unknown,
-  scanDir: string,
-  maxCostUsd?: number,
-): Promise<void> {
-  if (checkpoint?.legacy)
-    costs.record("legacy", checkpoint.legacy.cost ?? null);
-  if (
-    checkpoint?.costUnavailable ||
-    (typeof resumeThreadId !== "string" &&
-      checkpoint !== null &&
-      (checkpoint.mergeStarted === true ||
-        (checkpoint.mergeStarted !== false &&
-          checkpoint.mergedScanIds.length > 0) ||
-        // The host saves merge inputs before launching a merge. A completed
-        // discovery alone can still be waiting for the rest of its batch.
-        (await lstat(
-          join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
-        ).then(
-          () => true,
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return false;
-            throw error;
-          },
-        ))))
-  ) {
-    costs.record("previous-work", null);
-    if (maxCostUsd !== undefined)
-      throw new ScanCostTrackingError(
-        "A prior scan session is unavailable; its cost limit cannot be verified.",
-        scanDir,
-      );
-  }
-}
-
-/** Recover publication accounting from saved records and logs without creating a model session. */
+/** Read finalized receipts without authenticating or creating a model session. */
 export async function readSealedScanTurn(
   context: Omit<ScanPublicationContext, "pluginRoot"> & {
     codexHome: string;
@@ -122,37 +82,28 @@ export async function readSealedScanTurn(
     startedAt: unknown;
     checkpoint: DeepScanCheckpointSummary | null;
     maxCostUsd?: number;
+    requireCost?: boolean;
     onTrackingError(error: unknown): void;
     onCost(cost: Readonly<ScanCost>): void;
   },
 ): Promise<
   CompletedScanTurn & { cost: ScanCost | null; resumeThreadId: string | null }
 > {
-  const { scanId, scanDir, expectation, model, codexHome, workbench, signal } =
-    context;
-  const mode = expectation.mode;
-  const costs = new ScanAccounting();
-  const measure = async (threadId: string | null, directory: string) => {
-    const tracker = new ScanCostTracker({
-      codexHome,
-      includeArchivedSessions: true,
-      model,
-      repository: expectation.repository,
-      scanDirectory: directory,
-    });
-    if (threadId !== null) tracker.start(threadId);
-    const snapshot = await tracker.stop().catch((error: unknown) => {
-      context.onTrackingError(error);
-      return { cost: null, usage: null };
-    });
-    throwIfAborted(signal, scanDir);
-    return snapshot;
-  };
+  const { scanId, scanDir, model, codexHome, workbench, signal } = context;
   const saved = await workbench(["get-scan", "--scan-id", scanId]);
-  const savedScan = saved["scan"] as SavedScanRecord;
-  const checkpoint = context.checkpoint;
-  let resumeThreadId = savedScan.continuationThreadId;
-  const historicalSnapshot = async (threadId: string) => {
+  const record = saved["scan"] as SavedScanRecord;
+  const threadId = record.continuationThreadId ?? null;
+  let cost =
+    record.progress.status === "complete"
+      ? (record.cost ?? null)
+      : (context.checkpoint?.finalCost ?? null);
+  let usage: unknown =
+    record.progress.status === "complete" ? (record["usage"] ?? null) : null;
+  if (
+    record.progress.status !== "complete" &&
+    context.expectation.mode !== "deep" &&
+    threadId !== null
+  ) {
     const session = await findScanSession(codexHome, threadId).catch(
       (error: unknown) => {
         context.onTrackingError(error);
@@ -163,120 +114,53 @@ export async function readSealedScanTurn(
       typeof context.startedAt === "string"
         ? Date.parse(context.startedAt)
         : NaN;
-    // Native owners can include earlier conversation work, even from this directory.
+    // Native owner sessions may contain earlier conversation work, even in this directory.
     if (
-      session?.workingDirectory !== scanDir ||
-      session.startedAt === null ||
-      !Number.isFinite(startedAt) ||
-      session.startedAt < startedAt
-    )
-      return { cost: null, usage: null };
-    return measure(threadId, scanDir);
-  };
-  const historicalCost = async (threadId: string) =>
-    (await historicalSnapshot(threadId)).cost;
-  await restorePriorScanCosts(
-    costs,
-    checkpoint,
-    resumeThreadId,
-    scanDir,
-    context.maxCostUsd,
-  );
-  // Legacy cost already includes its origin session; do not count that session again.
-  const threadId =
-    typeof resumeThreadId === "string"
-      ? resumeThreadId
-      : (checkpoint?.legacy?.originThreadId ?? null);
-  const emptyComposition =
-    mode === "deep" &&
-    checkpoint?.terminalReason === "capped" &&
-    checkpoint.mergedScanIds.length === 0 &&
-    Array.isArray(savedScan["findings"]) &&
-    savedScan["findings"].length === 0;
-  if (
-    threadId === null &&
-    !emptyComposition &&
-    checkpoint?.mergeStarted !== false &&
-    !costs.has("previous-work")
-  )
-    throw new CodexSecurityError(
-      "The sealed scan has no saved execution session.",
-    );
-  if (checkpoint?.legacy)
-    costs.record(
-      "legacy",
-      checkpoint.legacy.cost ??
-        (checkpoint.legacy.originThreadId
-          ? await historicalCost(checkpoint.legacy.originThreadId)
-          : null),
-    );
-  if (checkpoint !== null) {
-    const children = await workbench([
-      "list-scans",
-      "--scan-root",
-      join(scanDir, "artifacts/deep-scan/passes"),
-    ]);
-    for (const child of children["scans"] as SavedScanRecord[]) {
-      if (child.parentScanId === scanId)
-        costs.record(child.scanId, child.cost ?? null);
+      session?.workingDirectory === scanDir &&
+      session.startedAt !== null &&
+      Number.isFinite(startedAt) &&
+      session.startedAt >= startedAt
+    ) {
+      const tracker = new ScanCostTracker({
+        codexHome,
+        includeArchivedSessions: true,
+        model,
+        repository: context.expectation.repository,
+        scanDirectory: scanDir,
+      });
+      tracker.start(threadId);
+      const snapshot = await tracker.stop().catch((error: unknown) => {
+        context.onTrackingError(error);
+        return null;
+      });
+      if (snapshot !== null && cost === null) usage = snapshot.usage;
+      if (
+        snapshot?.cost &&
+        (cost === null || snapshot.cost.estimatedUsd > cost.estimatedUsd)
+      ) {
+        cost = snapshot.cost;
+        usage = snapshot.usage;
+      }
     }
   }
-  let cost: ScanCost | null = null;
-  if (mode === "deep" && checkpoint === null) {
-    cost = savedScan.cost ?? (await historicalCost(threadId!));
-    costs.record("legacy", cost);
-    // This retired origin was measured above; it is not a composed merge session.
-    resumeThreadId = null;
-  }
+  throwIfAborted(signal, scanDir);
   if (
-    !costs.has("previous-work") &&
-    (savedScan.progress.status === "complete" || !costs.hasUnknown)
+    (context.maxCostUsd !== undefined || context.requireCost) &&
+    cost === null
   )
-    cost ??= savedScan.cost ?? null;
-  if (
-    typeof resumeThreadId !== "string" &&
-    (emptyComposition ||
-      checkpoint?.mergeStarted === false ||
-      checkpoint?.legacy)
-  )
-    cost ??= costs.complete;
-  if (cost === null && context.maxCostUsd !== undefined && costs.hasUnknown)
     throw new ScanCostTrackingError(
-      "The saved child scan cost is unavailable; its cost limit cannot be verified.",
-      scanDir,
-    );
-  const snapshot =
-    mode !== "deep" && typeof resumeThreadId === "string"
-      ? await historicalSnapshot(resumeThreadId)
-      : await measure(
-          resumeThreadId ?? null,
-          mode === "deep"
-            ? join(scanDir, "artifacts", "deep-scan", "merge")
-            : scanDir,
-        );
-  if (snapshot.cost !== null) costs.record("merge", snapshot.cost);
-  const measuredCost = snapshot.cost === null ? null : costs.complete;
-  if (measuredCost && (!cost || measuredCost.estimatedUsd > cost.estimatedUsd))
-    cost = measuredCost;
-  if (context.maxCostUsd !== undefined && cost === null)
-    throw new ScanCostTrackingError(
-      "The sealed scan has no verified cost receipt; its cost limit cannot be verified.",
+      "The sealed scan has no verified cost receipt. Older Deep Scans require their original version for cost recovery.",
       scanDir,
     );
   if (cost !== null) context.onCost(cost);
-  throwIfAborted(signal, scanDir);
   return {
     cost,
     threadId,
-    resumeThreadId: resumeThreadId ?? null,
+    resumeThreadId: threadId,
     turnResult: {
       status: "completed",
       model,
-      usage: cost
-        ? scanCostUsage(cost)
-        : mode === "deep"
-          ? null
-          : snapshot.usage,
+      usage: usage ?? (cost === null ? null : scanCostUsage(cost)),
     },
   };
 }
@@ -291,10 +175,56 @@ export async function publishScan(
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const { scanId, workbench } = context;
+  const { scanId, scanDir, expectation, signal, workbench } = context;
   let preparation: JsonObject = {};
   if (!sealed) {
     try {
+      // Ordinary SDK turns author canonical files after their last MCP checkpoint.
+      // Commit those final documents before completion reads the saved draft.
+      if (expectation.mode !== "deep") {
+        const read = async (name: string) =>
+          JSON.parse(
+            (await readScanFile(scanDir, name, name, signal)).toString("utf8"),
+          );
+        const committed = await read("artifacts/scan-draft.json").catch(
+          (error: unknown) => {
+            if (
+              error instanceof Error &&
+              isRecord(error.cause) &&
+              error.cause["code"] === "ENOENT"
+            )
+              return null;
+            throw error;
+          },
+        );
+        const manifest = await read("scan-manifest.json").catch(
+          (error: unknown) => {
+            if (
+              committed !== null &&
+              error instanceof Error &&
+              isRecord(error.cause) &&
+              error.cause["code"] === "ENOENT"
+            )
+              return null;
+            throw error;
+          },
+        );
+        // The workbench exports the manifest last. A different envelope means
+        // the root files can still be a mixture from an interrupted export.
+        if (
+          manifest !== null &&
+          manifest.scan?.sealedAt == null &&
+          (committed === null ||
+            manifest.scan?.completedAt ===
+              committed.manifest?.scan?.completedAt)
+        ) {
+          await writePreparedScanDraft(workbench, scanId, {
+            manifest,
+            findings: await read("findings.json"),
+            coverage: await read("coverage.json"),
+          });
+        }
+      }
       preparation = await workbench([
         "prepare-scan-completion",
         "--scan-id",
@@ -439,10 +369,34 @@ export async function collectResult(
   });
 }
 
-export {
-  writeSemanticScanDraft,
-  writePreparedScanDraft,
-} from "./scan-draft-publication.js";
+/** Let the workbench own the committed snapshot and canonical documents. */
+export async function writePreparedScanDraft(
+  workbench: (args: readonly string[], input?: string) => Promise<unknown>,
+  scanId: string,
+  documents: { manifest: unknown; findings: unknown; coverage: unknown },
+  checkpoint?: SemanticScan,
+): Promise<void> {
+  await workbench(
+    ["write-scan-draft", "--scan-id", scanId],
+    JSON.stringify({ documents, checkpoint }),
+  );
+}
+
+/** Publish documents and their semantic checkpoint through one checked operation. */
+export async function writeSemanticScanDraft(
+  options: {
+    contract: Parameters<typeof prepareSemanticScanDraft>[0];
+    workbench: (args: readonly string[], input?: string) => Promise<unknown>;
+  },
+  draft: SemanticScan,
+): Promise<void> {
+  await writePreparedScanDraft(
+    options.workbench,
+    draft.scanId,
+    prepareSemanticScanDraft(options.contract, draft),
+    draft,
+  );
+}
 
 /** Optional post-scan work may fail, but cannot replace the completed artifacts. */
 export async function preservePublishedArtifacts(

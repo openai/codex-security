@@ -56,10 +56,15 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
-def measured_scan_cost_json(usage: Mapping[str, Any]) -> str:
-    """Keep usage in the already-migrated scans.cost_json column."""
-
-    return json.dumps({"usage": dict(usage)}, separators=(",", ":"), allow_nan=False)
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Keep measured usage unless an incoming receipt explicitly replaces it."""
+    if incoming is None:
+        return existing
+    replacement = stored_scan_cost_fields(incoming)
+    if "usage" in replacement:
+        return json.dumps(replacement, allow_nan=False)
+    fields = {**stored_scan_cost_fields(existing), **replacement}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
 
 
 def reconcile_completed_scan_cost(
@@ -76,17 +81,6 @@ def reconcile_completed_scan_cost(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-
-
-def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
-    """Keep measured usage unless an incoming receipt explicitly replaces it."""
-    if incoming is None:
-        return existing
-    replacement = stored_scan_cost_fields(incoming)
-    if "usage" in replacement:
-        return json.dumps(replacement, allow_nan=False)
-    fields = {**stored_scan_cost_fields(existing), **replacement}
-    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
 
 
 def collect_scan_usage(
@@ -233,18 +227,6 @@ def _scan_root_thread_ids(
     candidates.extend(composition.execution_threads)
     if scan["mode"] == "deep":
         candidates.extend(child["continuation_thread_id"] for child in composition.children)
-        candidates.extend(
-            row["sdk_thread_id"]
-            for row in connection.execute(
-                """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
-                """,
-                (scan["id"],),
-            )
-        )
     roots: dict[str, None] = {}
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():

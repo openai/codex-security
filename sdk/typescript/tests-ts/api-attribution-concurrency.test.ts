@@ -7,6 +7,7 @@ import type {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
+import type { WorkbenchCommandOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
@@ -32,14 +33,16 @@ describe("delegated scan attribution", () => {
       await mkdir(ambientHome);
       let active = 0;
       let maximumActive = 0;
+      const observationFailures: unknown[] = [];
       const configPaths = new Set<string>();
       const programs = selectProgram
         ? (["daybreak_blue", "standard"] as const)
         : ([undefined, undefined] as const);
       const concurrentScans = Promise.withResolvers<void>();
 
+      const controllers = [new AbortController(), new AbortController()];
       const clients = await Promise.all(
-        (["cli", "sdk"] as const).map(async (surface) => {
+        (["cli", "sdk"] as const).map(async (surface, index) => {
           const program = surface === "cli" ? programs[0] : programs[1];
           const features = selectProgram
             ? {
@@ -61,6 +64,7 @@ describe("delegated scan attribution", () => {
           await symlink(await realpath(hostGit!), git);
           const expectedGitDirectory = await realpath(gitDirectory);
           await mkdir(scanDirectory, { mode: 0o700 });
+          let registrations = 0;
           return new InternalSecurity(
             {
               pluginPath: PLUGIN_ROOT,
@@ -77,24 +81,38 @@ describe("delegated scan attribution", () => {
               },
               resolvePluginPython: async () => "/managed/python",
               probeCodexSandbox: async () => {},
-              prepareOutputDir: async () => scanDirectory,
+              prepareOutputDir: async (requested: string | undefined) => {
+                const directory = requested ?? scanDirectory;
+                await mkdir(directory, { recursive: true, mode: 0o700 });
+                return directory;
+              },
+              prepareScanArtifactRestorer: async () => ({
+                prepareDirectory: async () => {},
+                restore: async () => {},
+                restoreMany: async () => {},
+                remove: async () => {},
+              }),
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (
-                _options: unknown,
+                options: WorkbenchCommandOptions,
                 args: readonly string[],
               ) => {
+                expect(options.environment["CODEX_HOME"]).toBe(credentialHome);
+                if (args[0] === "list-scans") return { scans: [] };
+                if (args[0] === "get-scan")
+                  return { scan: { progress: { status: "running" } } };
                 if (args[0] === "register-cli-scan") {
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: `scan_${surface}_${++registrations}`,
                     targetId: `target_${surface}`,
                     targetRevision: "deadbeef",
-                    scanDir: scanDirectory,
+                    scanDir: args[args.indexOf("--scan-dir") + 1],
                     contract: { target: { allowedKinds: ["git_revision"] } },
                   };
                 }
                 if (args[0] === "get-scan-feedback") {
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: args[args.indexOf("--scan-id") + 1],
                     targetId: `target_${surface}`,
                     falsePositives: [],
                   };
@@ -108,92 +126,127 @@ describe("delegated scan attribution", () => {
                     _input: unknown,
                     turnOptions?: TurnOptions,
                   ) {
-                    active += 1;
-                    maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) concurrentScans.resolve();
-                    try {
-                      const initialEnvironment = { ...options.env };
-                      expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
-                      expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
-                      expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-                        expectedGitDirectory,
-                      );
-                      expect(
-                        options.env?.["PATH"]?.split(delimiter),
-                      ).not.toContain(
-                        join(
-                          root,
-                          `${surface === "cli" ? "sdk" : "cli"}-tools`,
-                        ),
-                      );
-                      expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
-                        `synthetic-${surface}-ssh`,
-                      );
-                      expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
-                      expect(options.apiKey).toBe(`synthetic-${surface}-key`);
-                      expect(turnOptions?.cyberAccessProgram).toBe(program);
-                      expect(options.config).toMatchObject({
-                        features,
-                        responses_api_metadata: {
-                          codex_security_surface: surface,
-                        },
-                      });
-                      expect(threadOptions.threadSource).toBe("security_scan");
-                      const configPath =
-                        options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-                      expect(configPath).toBeString();
-                      configPaths.add(configPath!);
-                      const initialConfig = await readFile(configPath!, "utf8");
-                      const runtimeConfig = parseToml(initialConfig);
-                      expect(runtimeConfig).toMatchObject({ features });
-                      if (program === undefined) {
-                        expect(runtimeConfig).not.toHaveProperty(
-                          "codex_security",
-                        );
-                        for (const config of [options.config, runtimeConfig]) {
-                          expect(config?.["features"]).not.toHaveProperty(
-                            "api_key_cyber_access_programs",
+                    return {
+                      events: (async function* () {
+                        yield {
+                          type: "thread.started",
+                          thread_id: `synthetic-${surface}-thread`,
+                        };
+                        active += 1;
+                        maximumActive = Math.max(maximumActive, active);
+                        if (active === 2) concurrentScans.resolve();
+                        try {
+                          const initialEnvironment = { ...options.env };
+                          expect(options.env?.["CODEX_HOME"]).toBe(
+                            credentialHome,
                           );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).toContain(expectedGitDirectory);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).not.toContain(
+                            join(
+                              root,
+                              `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                            ),
+                          );
+                          expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                            `synthetic-${surface}-ssh`,
+                          );
+                          expect(options.env).not.toHaveProperty(
+                            "OPENAI_API_KEY",
+                          );
+                          expect(options.apiKey).toBe(
+                            `synthetic-${surface}-key`,
+                          );
+                          expect(turnOptions?.cyberAccessProgram).toBe(program);
+                          expect(options.config).toMatchObject({
+                            features,
+                            responses_api_metadata: {
+                              codex_security_surface: surface,
+                            },
+                          });
+                          expect(threadOptions.threadSource).toBe(
+                            "security_scan",
+                          );
+                          const configPath =
+                            options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                          expect(configPath).toBeString();
+                          configPaths.add(configPath!);
+                          const initialConfig = await readFile(
+                            configPath!,
+                            "utf8",
+                          );
+                          const runtimeConfig = parseToml(initialConfig);
+                          expect(runtimeConfig).toMatchObject({ features });
+                          if (program === undefined) {
+                            expect(runtimeConfig).not.toHaveProperty(
+                              "codex_security",
+                            );
+                            for (const config of [
+                              options.config,
+                              runtimeConfig,
+                            ]) {
+                              expect(config?.["features"]).not.toHaveProperty(
+                                "api_key_cyber_access_programs",
+                              );
+                            }
+                          } else {
+                            expect(runtimeConfig).toMatchObject({
+                              codex_security: { cyber_access_program: program },
+                            });
+                          }
+                          await concurrentScans.promise;
+                          const sharedConfig = parseToml(
+                            await readFile(
+                              join(credentialHome, "config.toml"),
+                              "utf8",
+                            ),
+                          );
+                          expect(sharedConfig).not.toHaveProperty(
+                            "responses_api_metadata",
+                          );
+                          expect(sharedConfig).not.toHaveProperty(
+                            "codex_security",
+                          );
+                          expect(
+                            sharedConfig["features"] ?? {},
+                          ).not.toHaveProperty("api_key_cyber_access_programs");
+                          expect(
+                            sharedConfig["features"] ?? {},
+                          ).not.toHaveProperty("api_key_model_discovery");
+                          expect(JSON.stringify(sharedConfig)).not.toContain(
+                            "synthetic-cli-key",
+                          );
+                          expect(JSON.stringify(sharedConfig)).not.toContain(
+                            "synthetic-sdk-key",
+                          );
+                          expect(await readFile(configPath!, "utf8")).toBe(
+                            initialConfig,
+                          );
+                          expect(options.env).toEqual(initialEnvironment);
+                          const observed = new Error(
+                            "delegated attribution observed",
+                          );
+                          controllers[index]!.abort(observed);
+                          throw observed;
+                        } catch (error) {
+                          if (
+                            !(error instanceof Error) ||
+                            error.message !== "delegated attribution observed"
+                          )
+                            observationFailures.push(error);
+                          throw error;
+                        } finally {
+                          active -= 1;
                         }
-                      } else {
-                        expect(runtimeConfig).toMatchObject({
-                          codex_security: { cyber_access_program: program },
-                        });
-                      }
-                      await concurrentScans.promise;
-                      const sharedConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(sharedConfig).not.toHaveProperty(
-                        "responses_api_metadata",
-                      );
-                      expect(sharedConfig).not.toHaveProperty("codex_security");
-                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
-                        "api_key_cyber_access_programs",
-                      );
-                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
-                        "api_key_model_discovery",
-                      );
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "synthetic-cli-key",
-                      );
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "synthetic-sdk-key",
-                      );
-                      expect(await readFile(configPath!, "utf8")).toBe(
-                        initialConfig,
-                      );
-                      expect(options.env).toEqual(initialEnvironment);
-                      throw new Error("delegated attribution observed");
-                    } finally {
-                      active -= 1;
-                    }
+                      })(),
+                    };
                   },
                 }),
               }),
@@ -207,17 +260,23 @@ describe("delegated scan attribution", () => {
         const results = await Promise.allSettled(
           clients.map((client, index) =>
             client
-              .run(repository, { mode, cyberAccessProgram: programs[index] })
+              .run(repository, {
+                mode,
+                cyberAccessProgram: programs[index],
+                ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 1 } : {}),
+                signal: controllers[index]!.signal,
+              })
               .finally(concurrentScans.resolve),
           ),
         );
         for (const result of results) {
-          expect(result).toMatchObject({
-            status: "rejected",
-            reason: expect.objectContaining({
-              message: "delegated attribution observed",
-            }),
-          });
+          expect(result.status).toBe("rejected");
+        }
+        expect(observationFailures).toEqual([]);
+        for (const controller of controllers) {
+          expect(controller.signal.reason?.message).toBe(
+            "delegated attribution observed",
+          );
         }
         expect(maximumActive).toBe(2);
         expect(configPaths.size).toBe(2);

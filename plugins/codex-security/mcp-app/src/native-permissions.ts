@@ -107,11 +107,6 @@ export function resolveNativeParentSandbox(
           "a parent filesystem permission has an invalid glob",
         );
       }
-      if (!isDeny) {
-        throw unsupportedParentSandbox(
-          "parent filesystem glob grants cannot be preserved",
-        );
-      }
       if (!isAbsolute(path.pattern)) {
         if (path.pattern.startsWith("codex-project-roots://")) {
           throw unsupportedParentSandbox(
@@ -122,7 +117,7 @@ export function resolveNativeParentSandbox(
           "a parent filesystem denial glob cannot be preserved",
         );
       }
-      filesystemDenies.push(path.pattern);
+      if (isDeny) filesystemDenies.push(path.pattern);
     } else {
       throw unsupportedParentSandbox(
         "an unknown parent filesystem permission cannot be preserved",

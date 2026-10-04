@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
     register,
@@ -77,7 +78,7 @@ def test_recovery_retains_current_child_finding_and_refreshes_source_history(
         **updated_draft["coverage"],
     }
     updated = write_checkpoint(directory / "checkpoints", updated_draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": updated.name}))
+    select_checkpoint(directory, updated)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
     accepted_child = json.loads((directory / "findings.json").read_text())["findings"][0]
     assert accepted_child["severity"] == current["severity"]

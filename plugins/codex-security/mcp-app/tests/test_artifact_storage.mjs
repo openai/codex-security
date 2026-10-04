@@ -16,6 +16,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { applicationRoot, buildServer } from "./build-server.mjs";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const fixture = await temporaryDirectory("codex-security-storage-test-", true);
 const stateRoot = path.join(fixture, "state");
@@ -30,7 +31,7 @@ try {
   await buildServer(bundle, {
     define: {
       __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__filename",
+      ...mcpBundleOptions.define,
     },
   });
   client = await connect();

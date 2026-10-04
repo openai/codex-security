@@ -193,7 +193,7 @@
       {
         "id": "surface",
         "label": "Archive input",
-        "candidateId": "candidate-é",
+        "candidateId": "candidate-\u00e9",
         "disposition": "reported",
         "receiptRefs": ["artifacts/receipt.json"]
       }
@@ -223,8 +223,8 @@
     ]
   },
   "files": {
-    "findings/check/check.md": "# Synthetic proof\nSee [evidence](@CHILD@-CHECK.MD) and [trace](@CHILD@-check-2.md/trace.txt).\n",
-    "findings/check/@CHILD@-CHECK.MD": "Evidence whose name aliases the projected report.\n",
+    "findings/check/check.md": "# Synthetic proof\nSee [evidence](@CHILD@-CHEC\u212a.MD) and [trace](@CHILD@-check-2.md/trace.txt).\n",
+    "findings/check/@CHILD@-CHEC\u212a.MD": "Evidence whose name aliases the projected report.\n",
     "findings/check/@CHILD@-check-2.md/trace.txt": "Trace under a directory that aliases the next suffix.\n",
     "findings/check-3/check-3.md": "# Other synthetic proof\n",
     "artifacts/receipt.json": "{}\n"
@@ -310,7 +310,7 @@
           "receiptRefs": [
             "artifacts/deep-scan/passes/pass-1/artifacts/receipt.json"
           ],
-          "sourceCandidateId": "candidate-é"
+          "sourceCandidateId": "candidate-\u00e9"
         }
       ],
       "explicitExclusions": [
@@ -341,7 +341,7 @@
     },
     "fileProjections": {
       "artifacts/deep-scan/passes/pass-1/findings/check/check.md": "findings/check/check.md",
-      "artifacts/deep-scan/passes/pass-1/findings/check/@CHILD@-CHECK.MD": "findings/check/@CHILD@-CHECK.MD",
+      "artifacts/deep-scan/passes/pass-1/findings/check/@CHILD@-CHEC\u212a.MD": "findings/check/@CHILD@-CHEC\u212a.MD",
       "artifacts/deep-scan/passes/pass-1/findings/check/@CHILD@-check-2.md/trace.txt": "findings/check/@CHILD@-check-2.md/trace.txt",
       "artifacts/deep-scan/passes/pass-1/findings/check-3/check-3.md": "findings/check-3/check-3.md"
     }
