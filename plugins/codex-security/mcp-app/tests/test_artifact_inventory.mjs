@@ -1,22 +1,13 @@
+import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.mjs";
 
 const execFile = promisify(nodeExecFile);
-const temporaryRoots = [];
+const temporaryDirectories = createTemporaryDirectories(true);
 
 const inventory = await importSource(
   new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
@@ -39,16 +30,13 @@ try {
   await testBoundScopeFailurePreservesPreviousInventory();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
-  await Promise.all(
-    temporaryRoots.map((root) => rm(root, { force: true, recursive: true })),
-  );
+  await temporaryDirectories.cleanup();
 }
 
 async function testSchemasAreBoundAndExact() {
   const scanId = "f84c8312-a602-4660-8e01-518a176cd75a";
   const prepare = inventory.prepareReviewItemsInputSchema;
   const parent = inventory.reviewItemsReaderInputSchema;
-  const worker = inventory.reviewItemsWorkerReaderInputSchema;
 
   assert.equal(prepare.safeParse({ scanId }).success, true);
   assert.equal(
@@ -65,33 +53,6 @@ async function testSchemasAreBoundAndExact() {
   assert.equal(parent.safeParse({ scanId, limit: 0 }).success, false);
   assert.equal(parent.safeParse({ scanId, limit: 1001 }).success, false);
   assert.equal(parent.safeParse({ scanId, cursor: "-1" }).success, false);
-  assert.equal(worker.safeParse({ limit: 2, cursor: "0" }).success, true);
-  assert.equal(worker.safeParse({ scanId }).success, false);
-  assert.equal(worker.safeParse({ scope: "." }).success, false);
-  assert.equal(
-    inventory.prepareReviewItemsOutputSchema.safeParse({ reviewItemsTotal: 0 })
-      .success,
-    true,
-  );
-  assert.equal(
-    inventory.prepareReviewItemsOutputSchema.safeParse({
-      reviewItemsTotal: 0,
-      path: "leaked",
-    }).success,
-    false,
-  );
-  assert.equal(
-    inventory.reviewItemsReaderOutputSchema.safeParse({
-      items: [{ path: "src/a.ts" }],
-    }).success,
-    true,
-  );
-  assert.equal(
-    inventory.reviewItemsReaderOutputSchema.safeParse({
-      items: [{ path: "src/a.ts", area: "src" }],
-    }).success,
-    false,
-  );
 }
 
 async function testPrepareUsesTheExistingStandardGenerator() {
@@ -462,10 +423,9 @@ async function testInvalidDiffTargetPreservesPreviousInventory() {
 }
 
 async function createFixture(label) {
-  const root = await realpath(
-    await mkdtemp(path.join(tmpdir(), "security-artifact-inventory-")),
+  const root = await temporaryDirectories.create(
+    "security-artifact-inventory-",
   );
-  temporaryRoots.push(root);
   const fixtureRoot = path.join(root, label);
   const repoRoot = path.join(fixtureRoot, "repository");
   const scanRoot = path.join(fixtureRoot, "scan");

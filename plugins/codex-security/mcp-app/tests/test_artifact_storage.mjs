@@ -1,8 +1,8 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -17,9 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 import { applicationRoot, buildServer } from "./build-server.mjs";
 
-const fixture = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-storage-test-")),
-);
+const fixture = await temporaryDirectory("codex-security-storage-test-", true);
 const stateRoot = path.join(fixture, "state");
 const repository = path.join(fixture, "repository");
 const bundle = path.join(fixture, "server.cjs");
