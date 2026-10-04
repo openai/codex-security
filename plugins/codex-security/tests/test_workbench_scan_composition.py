@@ -83,7 +83,7 @@ def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple
     return tmp_path / "state", target
 
 
-@pytest.mark.parametrize("name", ["current", "legacy"])
+@pytest.mark.parametrize("name", ["current", "legacy", "pending-stop"])
 def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     state, target = _scan_workspace(tmp_path)
     scan = register(state, target, tmp_path / "scan", mode="deep")
@@ -1512,3 +1512,32 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
                 "SELECT retained_source_digests_json FROM scans WHERE id = ?", (parent["scanId"],)
             ).fetchone()[0]
         assert json.loads(recorded) == frozen
+
+
+def test_completed_child_rejects_failed_retirement_without_changing_results(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    directory = Path(parent["scanDir"]) / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    before = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    response = run_workbench(
+        state,
+        "fail-scan",
+        "--scan-id",
+        child["scanId"],
+        "--message",
+        "Synthetic parent cancellation.",
+        check=False,
+    )
+    assert response["returncode"] != 0
+    assert "A completed scan cannot be marked failed." in response["stderr"]
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
+        == "complete"
+    )
+    assert {name: (directory / name).read_bytes() for name in before} == before

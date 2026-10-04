@@ -9,6 +9,8 @@ export interface DeepScanPass {
   directory: string;
   scanId?: string;
   failed?: true;
+  /** No child row exists to record when this reserved pass failed. */
+  failedBeforeRegistration?: string;
   /** The success and its effect on the error streak have been observed. */
   completed?: true;
   [extension: string]: unknown;
@@ -32,6 +34,12 @@ interface CompositionMetadata {
     cost?: ScanCost;
     originThreadId?: string;
     [extension: string]: unknown;
+  };
+  /** A stop decision awaiting durable retirement of interrupted children. */
+  pendingStop?: {
+    reason: "capped" | "failed" | "canceled";
+    message: string;
+    costs: Record<string, ScanCost>;
   };
   /** A discovery stop decision. Sealing and publication belong to the parent. */
   terminalReason?: "saturated" | "capped" | "failed" | "canceled";
