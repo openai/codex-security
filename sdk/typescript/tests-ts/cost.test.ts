@@ -2040,6 +2040,76 @@ describe("live scan cost tracking", () => {
     expect([3, 5]).toContain(updates[0]!.filesCompleted);
   });
 
+  test.each([false, true])(
+    "ignores archived prefixes for worker activity and progress (raw events: %p)",
+    async (rawEvents) => {
+      const home = await codexHome();
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        "scan-thread",
+      );
+      const other = await writeSession(
+        home,
+        "other-worker",
+        usage,
+        "scan-thread",
+      );
+      await appendSessionItem(worker, {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "review-files",
+        arguments: JSON.stringify({ cmd: "rg entry src" }),
+      });
+      await appendSessionItem(worker, progressMessage(1));
+      const archivedPrefix = await filesystem.readFile(worker);
+      await appendSessionItem(worker, {
+        type: "function_call_output",
+        call_id: "review-files",
+        output: "Review complete",
+      });
+      await appendSessionItem(worker, progressMessage(3));
+      await appendSessionItem(other, progressMessage(2));
+      const activities: ScanActivity[] = [];
+      const progress: ScanProgress[] = [];
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        repository: home,
+        includeArchivedSessions: true,
+        expectedFilesTotal: 8,
+        onActivity: (activity) => activities.push(activity),
+        onProgress: (update) => progress.push(update),
+        ...(rawEvents
+          ? { onSessionEvent: (event: ScanSessionEvent) => events.push(event) }
+          : {}),
+      });
+      tracker.start("scan-thread");
+      try {
+        await tracker.refresh();
+        expect(activities.at(-1)?.status).toBe("completed");
+        expect(progress.at(-1)?.filesCompleted).toBe(5);
+        const observed = [...activities];
+        const archive = join(home, "archived_sessions");
+        await mkdir(archive);
+        await writeFile(join(archive, "worker-copy.jsonl"), archivedPrefix);
+        await tracker.refresh();
+        await appendSessionItem(other, progressMessage(3));
+        await tracker.refresh();
+        expect({
+          activities,
+          filesCompleted: progress.at(-1)?.filesCompleted,
+        }).toEqual({ activities: observed, filesCompleted: 6 });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
