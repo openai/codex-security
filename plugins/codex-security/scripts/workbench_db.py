@@ -1096,7 +1096,7 @@ def pin_legacy_manifest_digest(
     connection: sqlite3.Connection, scan_id: str, manifest_digest: str
 ) -> None:
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = require_scan(connection, scan_id)
         current = scan["seal_manifest_digest"]
         if current is not None and current != manifest_digest:
@@ -1106,10 +1106,6 @@ def pin_legacy_manifest_digest(
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def complete_scan(
@@ -1543,17 +1539,13 @@ def complete_scan_locked(
     manifest_digest = published_manifest_digest(scan_dir, manifest)
     if prepare_only:
         connection.execute("BEGIN IMMEDIATE")
-        try:
+        with connection:
             updated = connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
                 (json.dumps(warnings), scan["id"]),
             )
             if updated.rowcount != 1:
                 raise SystemExit("Only a running scan can be prepared for completion.")
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
         return context
@@ -1686,7 +1678,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     workspace_id = str(uuid.uuid4())
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
         target_id = ensure_security_target(connection, str(repository))
         if parent_scan_id is not None:
@@ -1741,10 +1733,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         )
         if workflow_id is not None:
             register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     scan = require_scan(connection, scan_id)
     return {
         "contract": scan_contract(scan),
@@ -1877,7 +1865,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     note = optional_text(args.note, maximum=2400)
     require_close_note(close_reason, note)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         if args.status == "closed":
@@ -1949,10 +1937,6 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
             """,
             (occurrence["id"], args.status, close_reason, note, timestamp),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2276,7 +2260,7 @@ def set_finding_remediation(
     action_token = require_uuid(args.action_token, "action-token")
     summary = optional_text(args.summary, maximum=2400)
     verification_summary = optional_text(args.verification_summary, maximum=2400)
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2391,10 +2375,6 @@ def set_finding_remediation(
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2899,7 +2879,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
         return
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         current = require_scan(connection, scan["id"])
         recorded_digest = current["seal_manifest_digest"]
         if recorded_digest is not None and recorded_digest != manifest_digest:
@@ -2917,10 +2897,6 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:

@@ -191,17 +191,13 @@ def prepare_linear_publication(
 ) -> dict[str, Any]:
     payload, destination, findings = linear_publication_input(db, args, recording=False)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         result = {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
         }
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 
@@ -246,7 +242,7 @@ def record_linear_publications(
         external_ids.add(issue_identifier)
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         timestamp = db.now()
         for publication in publications:
@@ -331,10 +327,6 @@ def record_linear_publications(
                 }
             )
         result = {"scanId": scan["id"], "destination": destination, "created": created}
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 

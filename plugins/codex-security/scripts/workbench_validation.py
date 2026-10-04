@@ -45,9 +45,7 @@ def path_within_scope(path: str, scope: str) -> bool:
     requested = PurePosixPath(scope)
     if candidate.is_absolute() or ".." in candidate.parts:
         return False
-    if requested == PurePosixPath("."):
-        return True
-    return candidate == requested or requested in candidate.parents
+    return candidate.is_relative_to(requested)
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
