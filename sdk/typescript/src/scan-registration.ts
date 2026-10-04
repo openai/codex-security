@@ -47,7 +47,6 @@ export async function registerScan(options: {
   expectation: ScanExpectation;
   scanDir: string;
   archivedScanDir: string | null;
-  codexHome: string;
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }) {
   const {
@@ -56,7 +55,6 @@ export async function registerScan(options: {
     expectation,
     scanDir,
     archivedScanDir,
-    codexHome,
     workbench,
   } = options;
   const repo = expectation.repository;
@@ -121,7 +119,6 @@ export async function registerScan(options: {
       "The knowledge base changed since this scan started. Restore the original documents before resuming.",
     );
   if (scanOptions.resumeScanId !== undefined) {
-    const savedRecipe = registration["recipe"];
     if (
       scanId !== scanOptions.resumeScanId ||
       !isRecord(savedRecipe) ||
@@ -132,17 +129,6 @@ export async function registerScan(options: {
       throw new CodexSecurityError(
         "The workbench returned mismatched scan resume context.",
       );
-    }
-    if (typeof registration["sealedProducerVersion"] !== "string") {
-      const savedSession =
-        typeof resumeThreadId === "string"
-          ? await findScanSession(codexHome, resumeThreadId)
-          : null;
-      if (savedSession === null || savedSession.workingDirectory !== scanDir) {
-        throw new CodexSecurityError(
-          `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-        );
-      }
     }
   }
   if (typeof registration["sealedProducerVersion"] === "string") {

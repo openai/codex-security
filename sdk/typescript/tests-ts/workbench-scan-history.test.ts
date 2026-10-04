@@ -1,3 +1,4 @@
+import { workbenchFixture } from "./support/workbench-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -23,13 +24,11 @@ async function runPythonProbe(
 
 test("keeps inline and stdin comparison transports compatible", async () => {
   const python = await resolvePluginPython();
-  const probe = [
-    "import json, sys",
-    "sys.path.insert(0, sys.argv.pop(1))",
-    "from workbench_cli import parse_args",
-    "args = parse_args('Synthetic comparison transport')",
-    "print(json.dumps({'matchesJson': args.matches_json, 'matchesJsonStdin': args.matches_json_stdin}))",
-  ].join("\n");
+  const probe = `import json, sys
+sys.path.insert(0, sys.argv.pop(1))
+from workbench_cli import parse_args
+args = parse_args('Synthetic comparison transport')
+print(json.dumps({'matchesJson': args.matches_json, 'matchesJsonStdin': args.matches_json_stdin}))`;
   const args = [
     "-I",
     "-B",
@@ -90,29 +89,19 @@ test("keeps unrelated legacy repositories out of matching inputs", async () => {
 import argparse, json, sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 import workbench_scan_history as history
-connection = sqlite3.connect(':memory:')
-connection.row_factory = sqlite3.Row
-connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, started_at TEXT);
-CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT);
-CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
-CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
-CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);
-CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);
-''')
+connection = migrated_connection()
 for index, (scan, repository) in enumerate([
     ('unrelated-before', 'unrelated'), ('unrelated-after', 'unrelated'),
     ('before', 'selected'), ('after', 'selected')
 ]):
-    connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
-                       (scan, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
-connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
+    seed(connection, 'scans', ('id', 'target_id', 'target_path', 'status', 'started_at'), (scan, None, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+seed_many(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id'), [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
 ])
-connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)',
-                   ('unrelated-before', 'unrelated-after', 'unrelated-first', 'unrelated-second'))
+seed(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id'), ('unrelated-before', 'unrelated-after', 'unrelated-first', 'unrelated-second'))
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
@@ -128,35 +117,16 @@ test("validates related pairs by confirmed group without replacing saved results
   const probe = `
 import argparse, json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 import workbench_scan_history as history
-connection = sqlite3.connect(':memory:')
-connection.row_factory = sqlite3.Row
-connection.executescript('''
-PRAGMA foreign_keys = ON;
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
-CREATE TABLE finding_occurrences (
-    id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
-);
-CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
-CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
-CREATE TABLE scan_comparisons (
-    before_scan_id TEXT, after_scan_id TEXT, result_json TEXT, created_at TEXT, updated_at TEXT,
-    PRIMARY KEY(before_scan_id, after_scan_id)
-);
-CREATE TABLE scan_comparison_matches (
-    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT,
-    reason TEXT,
-    FOREIGN KEY(before_scan_id, after_scan_id)
-        REFERENCES scan_comparisons(before_scan_id, after_scan_id) ON DELETE CASCADE
-);
-CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
-CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
-''')
+connection = migrated_connection()
+
+connection.execute("PRAGMA foreign_keys = ON")
 for scan, names in [('before', ('a1', 'a2', 'b', 'c')), ('after', ('x1', 'x2', 'y', 'z'))]:
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status'), (scan, sys.argv[2], 'target', 'complete'))
     for name in names:
-        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, 'high'))
-        connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, 'src/example.py', 'root_control', 0))
+        seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title', 'severity'), (name, name, scan, name, 'high'))
+        seed(connection, 'finding_locations', ('occurrence_id', 'relative_path', 'role', 'sort_order'), (name, 'src/example.py', 'root_control', 0))
 connection.commit()
 def pair(before, after):
     return {'beforeOccurrenceId': before, 'afterOccurrenceId': after, 'reason': 'Separate synthetic controls.'}
@@ -219,6 +189,7 @@ test("upgrades existing history with indexed identity and reverse comparison loo
 import json, sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 from finalize_scan_contract import _derived_finding_identity_rows
 from workbench_schema import MIGRATIONS, apply_migrations
 connection = sqlite3.connect(':memory:')
@@ -306,72 +277,61 @@ print(json.dumps({'unchanged': rows() == original, 'comparisons': len(original),
 });
 
 test("loads each scan once and scopes saved links to uncached history", async () => {
-  const probe = [
-    "import argparse, json, sqlite3, sys",
-    "sys.path.insert(0, sys.argv[1])",
-    "import workbench_scan_history as history",
-    "connection = sqlite3.connect(':memory:')",
-    "connection.row_factory = sqlite3.Row",
-    "connection.executescript('''",
-    "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
-    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT, parent_scan_role TEXT);",
-    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
-    "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);",
-    "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
-    "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
-    "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
-    "''')",
-    "for index in range(3):",
-    "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans (id, target_path, target_id, status, started_at) VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
-    "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
-    "queries = []",
-    "connection.set_trace_callback(queries.append)",
-    "backfilled = []",
-    "result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})",
-    "finding_queries = sum('FROM finding_occurrences AS occurrences' in query for query in queries)",
-    "connection.executemany('INSERT INTO scan_comparisons VALUES (?, ?)', [('scan-0', 'scan-1'), ('scan-0', 'scan-2'), ('scan-1', 'scan-2')])",
-    "queries.clear()",
-    "cached = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda _scan: {})",
-    "cached_link_queries = sum('FROM scan_comparison_matches' in query for query in queries)",
-    "for name in ('foreign-a', 'foreign-b'):",
-    "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (name, name, name, '{}', 'fix', 'high', 'summary', 'title'))",
-    "connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)', [('scan-0', 'scan-1', 'scan-0', 'scan-1'), ('foreign-a', 'foreign-b', 'foreign-a', 'foreign-b')])",
-    "queries.clear()",
-    "scoped = history._saved_finding_links(connection, {'scan-0', 'scan-1'})",
-    "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
-    "for index in (3, 4):",
-    "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans (id, target_path, target_id, status, started_at) VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
-    "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
-    "def coverage(scan):",
-    "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
-    "        raise SystemExit('Synthetic unavailable artifacts')",
-    "    return {}",
-    "unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
-    "forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
-    "connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)', [('scan-1', 'scan-2', 'scan-1', 'scan-2'), ('scan-2', 'scan-0', 'scan-2', 'scan-0'), ('scan-0', 'foreign-a', 'scan-0', 'foreign-a'), ('foreign-a', 'scan-1', 'foreign-a', 'scan-1')])",
-    "limited = hasattr(connection, 'setlimit')",
-    "if limited:",
-    "    old_limit = connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)",
-    "queries.clear()",
-    "batched = history._saved_finding_links(connection, {'scan-2', 'scan-0', 'scan-1'})",
-    "batched_queries = len(queries)",
-    "if limited:",
-    "    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)",
-    "queries.clear()",
-    "empty = history._saved_finding_links(connection, set())",
-    "print(json.dumps({",
-    "    'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries,",
-    "    'cached': cached, 'cachedLinkQueries': cached_link_queries,",
-    "    'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries),",
-    "    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),",
-    "    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],",
-    "    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],",
-    "    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,",
-    "    'emptyLinks': empty, 'emptyQueryCount': len(queries),",
-    "}))",
-  ].join("\n");
+  const probe = `import argparse, json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
+import workbench_scan_history as history
+connection = migrated_connection()
+for index in range(3):
+    scan = f'scan-{index}'
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', str(index)))
+    seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))
+queries = []
+connection.set_trace_callback(queries.append)
+backfilled = []
+result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})
+finding_queries = sum('FROM finding_occurrences AS occurrences' in query for query in queries)
+seed_many(connection, 'scan_comparisons', ('before_scan_id', 'after_scan_id'), [('scan-0', 'scan-1'), ('scan-0', 'scan-2'), ('scan-1', 'scan-2')])
+queries.clear()
+cached = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda _scan: {})
+cached_link_queries = sum('FROM scan_comparison_matches' in query for query in queries)
+for name in ('foreign-a', 'foreign-b'):
+    seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (name, name, name, '{}', 'fix', 'high', 'summary', 'title'))
+seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id'), [('scan-0', 'scan-1', 'scan-0', 'scan-1'), ('foreign-a', 'foreign-b', 'foreign-a', 'foreign-b')])
+queries.clear()
+scoped = history._saved_finding_links(connection, {'scan-0', 'scan-1'})
+link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]
+for index in (3, 4):
+    scan = f'scan-{index}'
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', str(index)))
+    seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))
+def coverage(scan):
+    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:
+        raise SystemExit('Synthetic unavailable artifacts')
+    return {}
+unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)
+forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)
+seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id'), [('scan-1', 'scan-2', 'scan-1', 'scan-2'), ('scan-2', 'scan-0', 'scan-2', 'scan-0'), ('scan-0', 'foreign-a', 'scan-0', 'foreign-a'), ('foreign-a', 'scan-1', 'foreign-a', 'scan-1')])
+limited = hasattr(connection, 'setlimit')
+if limited:
+    old_limit = connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)
+queries.clear()
+batched = history._saved_finding_links(connection, {'scan-2', 'scan-0', 'scan-1'})
+batched_queries = len(queries)
+if limited:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+queries.clear()
+empty = history._saved_finding_links(connection, set())
+print(json.dumps({
+    'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries,
+    'cached': cached, 'cachedLinkQueries': cached_link_queries,
+    'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries),
+    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),
+    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],
+    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],
+    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,
+    'emptyLinks': empty, 'emptyQueryCount': len(queries),
+}))`;
 
   const observed = await runPythonProbe(
     probe,
@@ -424,40 +384,20 @@ test("reconciles cached statuses without losing grouped coverage or uncertainty"
   const probe = `
 import argparse, json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 import workbench_scan_history as history
-connection = sqlite3.connect(':memory:')
-connection.row_factory = sqlite3.Row
-connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
-CREATE TABLE finding_occurrences (
-    id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
-);
-CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
-CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
-CREATE TABLE scan_comparisons (
-    before_scan_id TEXT, after_scan_id TEXT, result_json TEXT,
-    PRIMARY KEY(before_scan_id, after_scan_id)
-);
-CREATE TABLE scan_comparison_matches (
-    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT
-);
-CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
-CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
-''')
+connection = migrated_connection()
 for scan in ('before', 'after', 'later', 'latest'):
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status'), (scan, sys.argv[2], 'target', 'complete'))
 for scan, names in [('before', ('a1', 'a2')), ('after', ('b1', 'b2')),
                     ('later', ('c1', 'c2')), ('latest', ('d1',))]:
     for name in names:
         severity = 'low' if name.endswith('1') else 'high'
         path = 'src/excluded.py' if name == 'a1' else 'src/covered.py'
-        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, severity))
-        connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, path, 'root_control', 0))
+        seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title', 'severity'), (name, name, scan, name, severity))
+        seed(connection, 'finding_locations', ('occurrence_id', 'relative_path', 'role', 'sort_order'), (name, path, 'root_control', 0))
 def link(before, after):
-    connection.execute('''INSERT INTO scan_comparison_matches
-        SELECT previous.scan_id, current.scan_id, previous.id, current.id
-        FROM finding_occurrences AS previous, finding_occurrences AS current
-        WHERE previous.id = ? AND current.id = ?''', (before, after))
+    seed(connection, 'scan_comparison_matches', ('before_occurrence_id', 'after_occurrence_id'), (before, after))
 for before, after in [('a1', 'c1'), ('a2', 'c1'), ('b1', 'c2'), ('b2', 'c2')]:
     link(before, after)
 payload = {
@@ -466,7 +406,7 @@ payload = {
     'related': [{'beforeOccurrenceId': 'a2', 'afterOccurrenceId': 'b2', 'reason': 'Separate synthetic controls.'}]
 }
 def cache():
-    connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
+    seed(connection, 'scan_comparisons', ('before_scan_id', 'after_scan_id', 'result_json'), ('before', 'after', json.dumps(payload)), replace=True)
 coverage = {'completeness': 'complete', 'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
@@ -481,11 +421,11 @@ cache()
 excluded = compare()
 coverage['excludePaths'] = []
 resolved = compare()
-connection.execute('INSERT INTO finding_triage VALUES (?, ?, ?)', ('a1', 'closed', 'already_fixed'))
+seed(connection, 'finding_triage', ('occurrence_id', 'status', 'close_reason'), ('a1', 'closed', 'already_fixed'))
 link('c1', 'd1')
 link('c2', 'd1')
 linked = compare()
-unchanged = json.loads(connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0]) == payload
+unchanged = json.loads(connection.execute("SELECT result_json FROM scan_comparisons WHERE before_scan_id = 'before' AND after_scan_id = 'after'").fetchone()[0]) == payload
 connection.execute("DELETE FROM scan_comparison_matches WHERE after_scan_id = 'latest'")
 restored = compare()
 print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': resolved,
@@ -537,30 +477,15 @@ test("loads displayed relations in bulk and follows current confirmed identities
   const probe = `
 import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 import workbench_scan_history as history
-connection = sqlite3.connect(':memory:')
-connection.row_factory = sqlite3.Row
-connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT);
-CREATE INDEX scans_by_target ON scans(target_id, id);
-CREATE TABLE finding_occurrences (
-    id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT,
-    UNIQUE(scan_id, finding_id)
-);
-CREATE INDEX occurrences_by_finding ON finding_occurrences(finding_id, id);
-CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);
-CREATE TABLE scan_comparison_matches (
-    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT
-);
-CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
-CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
-''')
-connection.executemany('INSERT INTO scans VALUES (?, ?)', [
+connection = migrated_connection()
+seed_many(connection, 'scans', ('id', 'target_id'), [
     ('one', 'target'), ('two', 'target'), ('three', 'clone'),
     ('four', 'clone'), ('foreign-one', 'unrelated-target'),
     ('foreign-two', 'unrelated-target')
 ])
-connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (
+seed_many(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title'), (
     (f'{side}-{index}', f'{side}-identity-{index}', scan, f'Synthetic {side} {index}')
     for index in range(10_000)
     for side, scan in [('left', 'one'), ('right', 'two')]
@@ -570,7 +495,7 @@ payload = json.dumps({'matches': [], 'uncertain': [], 'related': [
      'reason': 'Separate synthetic controls.'}
     for index in range(10_000)
 ]})
-connection.execute('INSERT INTO scan_comparisons VALUES (?, ?, ?)', ('one', 'two', payload))
+seed(connection, 'scan_comparisons', ('before_scan_id', 'after_scan_id', 'result_json'), ('one', 'two', payload))
 queries = []
 connection.set_trace_callback(queries.append)
 scoped = history.finding_relations(connection, 'one', ['left-0'])
@@ -578,13 +503,13 @@ scoped_queries = len(queries)
 queries.clear()
 empty = history.finding_relations(connection, 'one', [])
 empty_queries = len(queries)
-connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', [
+seed_many(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title'), [
     ('recurring-left', 'left-identity-0', 'four', 'Recurring control'),
     ('bridge', 'bridge-identity', 'three', 'Renamed control'),
     ('foreign-a', 'foreign-identity-a', 'foreign-one', 'Unrelated A'),
     ('foreign-b', 'foreign-identity-b', 'foreign-two', 'Unrelated B')
 ])
-connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)', [
+seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id'), [
     ('four', 'three', 'recurring-left', 'bridge'),
     ('two', 'three', 'right-0', 'bridge'),
     ('foreign-one', 'foreign-two', 'foreign-a', 'foreign-b')
@@ -650,21 +575,14 @@ test("includes recurring stable identities in confirmed finding history", async 
   const observed = await runPythonProbe(`
 import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
 from workbench_scan_history import finding_matches
-connection = sqlite3.connect(':memory:')
-connection.row_factory = sqlite3.Row
-connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, started_at TEXT, parent_scan_role TEXT);
-CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT);
-CREATE TABLE scan_comparison_matches (
-    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT
-);
-''')
+connection = migrated_connection()
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    connection.execute('INSERT INTO scans (id, started_at) VALUES (?, ?)', (scan, str(index)))
-    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
-connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
+    seed(connection, 'scans', ('id', 'started_at'), (scan, str(index)))
+    seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title'), (scan, finding, scan, scan))
+seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id', 'reason'), [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
     ('b', 'c', 'b', 'c', 'Second confirmed link.')
 ])
@@ -725,25 +643,19 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
 test("loads oversized comparison matches from stdin", async () => {
   const python = await resolvePluginPython();
 
-  const probe = [
-    "import argparse, io, json, sqlite3, sys",
-    "sys.path.insert(0, sys.argv[1])",
-    "import workbench_scan_history as history",
-    "connection = sqlite3.connect(':memory:')",
-    "connection.row_factory = sqlite3.Row",
-    "connection.executescript('''",
-    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT, created_at TEXT, updated_at TEXT);",
-    "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);",
-    "''')",
-    "scans = {'before': {'id': 'before', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}, 'after': {'id': 'after', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}}",
-    "findings = {'before': {'old': {'id': 'old'}}, 'after': {'new': {'id': 'new'}}}",
-    "history._scan_findings = lambda _connection, scan_id: findings[scan_id]",
-    "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
-    "payload = sys.stdin.read()",
-    "sys.stdin = io.StringIO(payload)",
-    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {})",
-    "print(json.dumps(result))",
-  ].join("\n");
+  const probe = `import argparse, io, json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+${workbenchFixture}
+import workbench_scan_history as history
+connection = migrated_connection()
+scans = {'before': {'id': 'before', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}, 'after': {'id': 'after', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}}
+findings = {'before': {'old': {'id': 'old'}}, 'after': {'new': {'id': 'new'}}}
+history._scan_findings = lambda _connection, scan_id: findings[scan_id]
+history.compare_scans = lambda *_args, **_kwargs: {'saved': True}
+payload = sys.stdin.read()
+sys.stdin = io.StringIO(payload)
+result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {})
+print(json.dumps(result))`;
   const payload = JSON.stringify({
     matches: [
       {

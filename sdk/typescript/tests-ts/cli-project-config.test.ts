@@ -39,7 +39,7 @@ async function fixture(input: ProjectConfigInput | string) {
   directories.push(root);
   const repository = join(root, "repository");
   const configDirectory = join(root, "settings");
-  await mkdir(repository);
+  await mkdir(repository, { mode: 0o700 });
   await mkdir(configDirectory);
   await mkdir(join(repository, "src"));
   await mkdir(join(repository, "lib"));

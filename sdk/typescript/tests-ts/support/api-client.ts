@@ -1,3 +1,6 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { preparedRuntime } from "./api-events.js";
 import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
 
@@ -69,6 +72,7 @@ export class TestClient extends CodexSecurity {
         },
         environment: {},
         probeCodexSandbox: async () => {},
+        acquireScanExecution: async () => () => {},
         prepareScanArtifactRestorer: async () => ({
           async projectChild() {
             throw new Error("Unexpected projection in test");
@@ -92,4 +96,33 @@ export const SHELL_ENVIRONMENT_PREFIX =
 
 export function shellEnvironmentReference(name: string, suffix = ""): string {
   return `"${SHELL_ENVIRONMENT_PREFIX}${name}${suffix}"`;
+}
+
+export async function cancellationSetup(root: string) {
+  const repository = join(root, "repository");
+  const codexHome = join(root, "codex-home");
+  const scanDir = join(root, "scan");
+  await Promise.all(
+    [repository, codexHome, scanDir].map((path) =>
+      mkdir(path, { mode: 0o700 }),
+    ),
+  );
+  const commands: Array<readonly string[]> = [];
+  const dependencies: Partial<ClientArguments[1]> = {
+    prepareRuntime: async () => preparedRuntime(codexHome),
+    resolvePluginPython: async () => "/managed/python",
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+    runWorkbench: async (_options, args, input) => {
+      commands.push(args);
+      return mockWorkbench(args, input);
+    },
+  };
+  return {
+    repository,
+    scanDir,
+    commands,
+    controller: new AbortController(),
+    dependencies,
+  };
 }

@@ -15,7 +15,6 @@ from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_aggregate_ready,
-    mark_deep_coordinator_succeeded,
     run_workbench,
     source_plugin_version,
     stable_target_id,
@@ -68,7 +67,6 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
         "thread-completion-binding",
         environment={"CODEX_HOME": str(tmp_path / "codex-home")},
     )
-    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
     mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     return state_dir, scan_id, scan_dir
@@ -574,7 +572,6 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
                 "thread-completion-binding",
                 environment={"CODEX_HOME": str(codex_home)},
             )
-            mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
             mark_deep_aggregate_ready(state_dir, scan_id, scan_dir)
         write_completed_contract(
             scan_dir,
