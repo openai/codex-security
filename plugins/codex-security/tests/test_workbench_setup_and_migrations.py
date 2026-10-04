@@ -1573,6 +1573,16 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
         assert connection.execute(
             "SELECT name FROM schema_migrations WHERE version = 20"
         ).fetchone() == ("phase-specific scan progress",)
+        with pytest.raises(sqlite3.IntegrityError) as invalid_unit:
+            connection.execute(
+                "UPDATE scan_progress SET phase_progress_unit = 'invalid' WHERE scan_id = ?",
+                (scan_id,),
+            )
+        assert str(invalid_unit.value) == (
+            "CHECK constraint failed: phase_progress_unit IS NULL OR phase_progress_unit IN ("
+            "'checks', 'threat_surfaces', 'review_receipts', 'candidate_findings', "
+            "'validated_findings', 'report_artifacts')"
+        )
 
 
 @pytest.mark.parametrize(
