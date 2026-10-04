@@ -36,6 +36,7 @@ import {
   compactFinding,
   findingCatalogue,
   groupFindings,
+  findingGroupRoots,
   type ComparisonFinding as Finding,
 } from "./finding-catalogue.js";
 import {
@@ -108,40 +109,20 @@ export interface ScanComparisonResult {
 export function unionFindingGroups(
   groups: readonly (readonly string[])[],
 ): string[][] {
-  const parents = new Map<string, string>();
-  const representative = (identity: string): string => {
-    let root = identity;
-    while (parents.get(root) !== root) root = parents.get(root)!;
-    let current = identity;
-    while (parents.get(current) !== current) {
-      const previous = parents.get(current)!;
-      parents.set(current, root);
-      current = previous;
-    }
-    return root;
-  };
+  const { parents, root: representative } = findingGroupRoots();
 
   for (const group of groups) {
     const [first, ...rest] = group.filter(
       (identity) => identity.trim().length > 0,
     );
     if (first === undefined) continue;
-    if (!parents.has(first)) parents.set(first, first);
     const firstRoot = representative(first);
     for (const identity of rest) {
-      if (!parents.has(identity)) parents.set(identity, identity);
       parents.set(representative(identity), firstRoot);
     }
   }
 
-  const united = new Map<string, string[]>();
-  for (const identity of parents.keys()) {
-    const root = representative(identity);
-    const group = united.get(root);
-    if (group === undefined) united.set(root, [identity]);
-    else group.push(identity);
-  }
-  return [...united.values()];
+  return [...Map.groupBy(parents.keys(), representative).values()];
 }
 
 /** @internal */
