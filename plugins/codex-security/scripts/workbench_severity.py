@@ -3,10 +3,13 @@
 import argparse
 import json
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from workbench_finding_index import upsert_finding
 

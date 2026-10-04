@@ -223,8 +223,8 @@ def _scan_root_thread_ids(
         ).fetchone()
         if workspace is not None:
             candidates.append(workspace["thread_id"])
+    candidates.extend(composition.execution_threads)
     if scan["mode"] == "deep":
-        candidates.extend(composition.execution_threads)
         candidates.extend(child["continuation_thread_id"] for child in composition.children)
         candidates.extend(
             row["sdk_thread_id"]

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -17,12 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _read_scan_local_json,
-    open_scan_local_file_descriptor,
 )
 from workbench.storage import scan_completion_lock
 
 COMPOSITION_CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
-EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
 class _PassDirectory(TypedDict):
@@ -97,33 +93,27 @@ def composition_children(connection: sqlite3.Connection, scan: sqlite3.Row) -> l
     ).fetchall()
 
 
-def composition_execution_threads(scan: sqlite3.Row) -> tuple[str, ...]:
-    scan_dir = Path(scan["scan_dir"])
-    try:
-        (scan_dir / EXECUTION_THREADS).lstat()
-    except FileNotFoundError:
-        return ()
-    descriptor = open_scan_local_file_descriptor(
-        scan_dir, EXECUTION_THREADS, "Deep Scan execution threads"
+def composition_execution_threads(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[str, ...]:
+    return tuple(
+        row["thread_id"]
+        for row in connection.execute(
+            "SELECT thread_id FROM scan_execution_threads WHERE scan_id = ? ORDER BY thread_id",
+            (scan["id"],),
+        )
     )
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        additional = json.load(handle)
-    if not isinstance(additional, list) or any(
-        not isinstance(thread_id, str) for thread_id in additional
-    ):
-        raise ContractError("Deep Scan execution threads must be an array of strings.")
-    return tuple(additional)
 
 
 def load_composition(
     connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
 ) -> CompositionView:
     if scan["mode"] != "deep":
-        return CompositionView(None, (), (), None)
+        return CompositionView(None, (), composition_execution_threads(connection, scan), None)
     return CompositionView(
         read_composition_checkpoint(scan) if checkpoint else None,
         tuple(composition_children(connection, scan)),
-        composition_execution_threads(scan),
+        composition_execution_threads(connection, scan),
         connection.execute(
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
         ).fetchone(),
