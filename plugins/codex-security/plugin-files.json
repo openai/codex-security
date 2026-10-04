@@ -69,6 +69,7 @@
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
     "scripts/rank_preview.py",
+    "scripts/project_scan_artifacts.py",
     "scripts/report_projection.py",
     "scripts/reserved_artifact_paths.json",
     "scripts/snapshot_sqlite.py",
