@@ -1,9 +1,10 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { parseJsonLines, jsonLines } from "./support/json.js";
+import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
   chmod,
-  cp,
   mkdir,
   readFile,
   readdir,
@@ -31,9 +32,10 @@ import {
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { execNodePython } from "./support/python-probe.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
 
 const SCAN_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -43,10 +45,10 @@ const OPTIONS = {
   projectId: "project-example",
 } as const;
 
-const NODE_EXECUTABLE = execFileSync("node", ["-p", "process.execPath"], {
-  encoding: "utf8",
-}).trim();
-const temporaryDirectories = createTemporaryDirectories();
+const NODE_EXECUTABLE = nodeCommand().command;
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-publication-integration-",
+);
 
 interface PublicationFixture {
   python: string;
@@ -81,18 +83,14 @@ interface StoredPublication {
   external_url: string;
 }
 
-afterEach(temporaryDirectories.cleanup);
+afterEach(cleanup);
 
 async function fixture(count: number): Promise<PublicationFixture> {
-  const root = await temporaryDirectories.create(
-    "codex-security-publication-integration-",
-  );
+  const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   const stateDirectory = join(root, "state");
   const repository = join(root, "repository");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDirectory, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDirectory);
   await mkdir(stateDirectory, { mode: 0o700 });
   await mkdir(repository, { mode: 0o700 });
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
@@ -369,14 +367,10 @@ describe("database-backed Linear publication integration", () => {
     cli.publishScan = (directory, options) =>
       publishScanInternal(directory, options, {
         environment,
-        resolveCodex: () => {
-          throw new Error("Direct publication must not start Codex.");
-        },
+        resolveCodex: throwing("Direct publication must not start Codex."),
         linearClient: () =>
           ({
-            users: async () => {
-              throw new Error("Unassigned publication must not look up users.");
-            },
+            users: rejecting("Unassigned publication must not look up users."),
             createIssue: async (input: IssueInput) => {
               const index = completed.findings.findIndex(({ findingId }) =>
                 input.description?.includes(findingId),
@@ -523,15 +517,11 @@ describe("database-backed Linear publication integration", () => {
     cli.publishScan = async (directory, options) =>
       publishScanInternal(directory, options, {
         environment,
-        resolveCodex: () => {
-          throw new Error("Direct publication must not start Codex.");
-        },
+        resolveCodex: throwing("Direct publication must not start Codex."),
         linearClient: ({ apiKey }) => {
           expect(apiKey).toBe(key);
           return {
-            users: async () => {
-              throw new Error("Unassigned publication must not look up users.");
-            },
+            users: rejecting("Unassigned publication must not look up users."),
             createIssue: async (input: IssueInput) => {
               const index = completed.findings.findIndex(({ findingId }) =>
                 input.description?.includes(findingId),
@@ -676,10 +666,7 @@ describe("database-backed Linear publication integration", () => {
               );
               await appendFile(
                 payload.handoffFile,
-                `${settled
-                  .reverse()
-                  .map((record) => JSON.stringify(record))
-                  .join("\n")}\n`,
+                `${jsonLines(settled.reverse())}\n`,
               );
             }
             onEvent?.({
@@ -797,10 +784,7 @@ describe("database-backed Linear publication integration", () => {
                     }),
               };
             });
-            await appendFile(
-              payload.handoffFile,
-              `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
-            );
+            await appendFile(payload.handoffFile, `${jsonLines(records)}\n`);
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },
@@ -883,11 +867,9 @@ describe("database-backed Linear publication integration", () => {
           );
           return { exitCode: 0, stdout: "", stderr: "" };
         },
-        writeReceipt: async () => {
-          throw new Error(
-            "Receipt storage unavailable: sk-proj-SYNTHETIC_RECEIPT_SECRET",
-          );
-        },
+        writeReceipt: rejecting(
+          "Receipt storage unavailable: sk-proj-SYNTHETIC_RECEIPT_SECRET",
+        ),
       });
 
     expect(
@@ -1102,9 +1084,9 @@ describe("database-backed Linear publication integration", () => {
         expect(new Set(groups).size).toBe(1);
         forceTerminatePublicationProcesses({
           platform: "win32",
-          runTaskkill: () => {
-            throw new Error("No-signal publication entered force registry.");
-          },
+          runTaskkill: throwing(
+            "No-signal publication entered force registry.",
+          ),
         });
       } finally {
         const publisherPid = await readProcessId(publisherPidFile);
@@ -1345,11 +1327,9 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
       receipt.created.map(({ issueIdentifier }) => issueIdentifier),
     ).toEqual(["SEC-701", "SEC-702"]);
     expect(
-      (await readFile(handoffFile, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { issueIdentifier: string })
-        .map(({ issueIdentifier }) => issueIdentifier),
+      parseJsonLines<{ issueIdentifier: string }>(
+        await readFile(handoffFile, "utf8"),
+      ).map(({ issueIdentifier }) => issueIdentifier),
     ).toEqual(["SEC-701", "SEC-702"]);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);

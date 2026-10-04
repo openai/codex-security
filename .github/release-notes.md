@@ -66,6 +66,7 @@
 - reuse Markdown tool setup ([#1215](https://github.com/openai/codex-security/pull/1215))
 - simplify command setup and fixtures ([#1208](https://github.com/openai/codex-security/pull/1208))
 - simplify persisted finding workflows ([#1210](https://github.com/openai/codex-security/pull/1210))
+- simplify publication preparation ([#1211](https://github.com/openai/codex-security/pull/1211))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
