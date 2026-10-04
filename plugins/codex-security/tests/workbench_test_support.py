@@ -407,6 +407,16 @@ def recipe(target: Path, mode: str = "standard") -> dict:
     }
 
 
+def private_directory(directory: Path) -> None:
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        path.mkdir(mode=0o700)
+
+
 def register(
     state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
 ) -> dict:
