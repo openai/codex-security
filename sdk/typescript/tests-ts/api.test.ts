@@ -2827,10 +2827,13 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       threadSource: "security_scan",
-      workingDirectory: scanDir,
+      workingDirectory: expect.any(String),
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
     });
+    expect(
+      dirname((threadOptions as ThreadOptions | null)?.workingDirectory ?? ""),
+    ).toBe(join(scanDir, "artifacts/follow-up"));
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
       "Codex_Home",
@@ -2885,7 +2888,9 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain(
       "Additional scan instructions:\nFocus on authentication and authorization.",
     );
-    expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
+    expect(followUpPrompt).toContain("Draft fixes for confirmed findings.");
+    expect(followUpPrompt).toContain(JSON.stringify(scanDir));
+    expect(followUpPrompt).toContain("report.md");
     expect(commands[0]).toContain("--registration-json-stdin");
     expect(JSON.parse(registrationInput!).userContext).toBe(
       "Focus on authentication and authorization.",
@@ -4719,7 +4724,7 @@ describe("CodexSecurity orchestration", () => {
       } else {
         expect((await result).coverage.completeness).toBe(outcome);
       }
-      expect(prompts.at(-1)).toBe("Record the scan cost.");
+      expect(prompts.at(-1)).toContain("Record the scan cost.");
       expect(prompts).toHaveLength(2);
       expect(warnings).toEqual(
         followUpFails
