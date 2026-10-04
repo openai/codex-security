@@ -1,15 +1,7 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.mjs";
 
@@ -93,9 +85,7 @@ assert.equal(
   false,
 );
 
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-validation-phase-")),
-);
+const root = await temporaryDirectory("codex-security-validation-phase-", true);
 try {
   const context = await scanContext(root, "scan", scanId);
   const ledger = path.join(
@@ -297,9 +287,7 @@ async function assertNoMutation(context, ledger, input, expectedError) {
 async function writeJsonl(file, rows) {
   await writeFile(
     file,
-    rows.length > 0
-      ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
-      : "",
+    rows.length > 0 ? `${rows.map(JSON.stringify).join("\n")}\n` : "",
   );
 }
 

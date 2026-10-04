@@ -1,7 +1,8 @@
+import { canonicalDirectory } from "./artifact-context.js";
 import { isRecord } from "./record.js";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 
 export interface DeepReducerWorkerContext {
   id: string;
@@ -101,10 +102,7 @@ async function artifactSourcePath(
       throw new Error(label + ": the requested artifact is unavailable.");
     }
     const isLast = index === components.length - 1;
-    if (
-      metadata.isSymbolicLink() ||
-      (isLast ? !metadata.isFile() : !metadata.isDirectory())
-    ) {
+    if (isLast ? !metadata.isFile() : !metadata.isDirectory()) {
       throw new Error(
         label + ": the requested artifact is not a safe regular file.",
       );
@@ -226,7 +224,7 @@ export async function artifactDestination(
       }
       metadata = await inspectOptionalPath(directory, label);
     }
-    if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    if (!metadata || !metadata.isDirectory()) {
       throw new Error(
         label + ": destination directory is not a regular directory.",
       );
@@ -241,8 +239,7 @@ export async function artifactDestination(
   if (!destination.startsWith(root + sep)) {
     throw new Error(label + ": destination escaped its bound context.");
   }
-  const metadata = await inspectOptionalPath(destination, label);
-  if (metadata && (metadata.isSymbolicLink() || !metadata.isFile())) {
+  if ((await inspectOptionalPath(destination, label))?.isFile() === false) {
     throw new Error(label + ": destination is not a regular file.");
   }
   return destination;
@@ -338,27 +335,16 @@ function validateArtifactComponents(
   }
 }
 
-export async function requireArtifactRoot(
+export function requireArtifactRoot(
   artifactRoot: string,
   label: string,
 ): Promise<string> {
   if (!artifactRoot || !isAbsolute(artifactRoot)) {
-    throw new Error(
-      label + ": artifact context must have an absolute bound root.",
+    return Promise.reject(
+      new Error(label + ": artifact context must have an absolute bound root."),
     );
   }
-  const requested = resolve(artifactRoot);
-  const metadata = await fs.lstat(requested).catch(() => undefined);
-  if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new Error(
-      label + ": artifact context is not a safe regular directory.",
-    );
-  }
-  try {
-    return await fs.realpath(requested);
-  } catch {
-    throw new Error(label + ": artifact context cannot be resolved.");
-  }
+  return canonicalDirectory(artifactRoot, label + ": artifact context");
 }
 
 async function inspectOptionalPath(

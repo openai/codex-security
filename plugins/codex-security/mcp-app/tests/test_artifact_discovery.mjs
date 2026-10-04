@@ -1,16 +1,13 @@
+import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import {
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
-  realpath,
-  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -86,9 +83,8 @@ assert.deepEqual(toolSchemas.$defs.workbenchListCandidatesInput.required, [
   "scanId",
 ]);
 
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "security-artifact-discovery-")),
-);
+const rootDirectories = createTemporaryDirectories(true);
+const root = await rootDirectories.create("security-artifact-discovery-");
 const runtimePluginRoot = path.join(root, "plugin");
 try {
   await build({
@@ -134,7 +130,7 @@ try {
   await verifyMalformedLedgerIsNotModified(root, repoRoot);
   await verifySymlinkRejection(root, repoRoot);
 } finally {
-  await rm(root, { recursive: true, force: true });
+  await rootDirectories.cleanup();
 }
 
 async function verifyInputSchema() {
@@ -446,10 +442,7 @@ async function verifyReaderPreservesSharedPhaseRecords(context) {
     "candidate_ledger.jsonl",
   );
   const original = await readFile(destination, "utf8");
-  const rows = original
-    .trimEnd()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const rows = original.trimEnd().split("\n").map(JSON.parse);
   rows[0].validation = {
     disposition: "reportable",
     evidence: "The existing validation phase confirmed the affected code path.",
@@ -458,10 +451,7 @@ async function verifyReaderPreservesSharedPhaseRecords(context) {
     disposition: "reportable",
     evidence: "The existing attack-path phase confirmed request reachability.",
   };
-  await writeFile(
-    destination,
-    `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
-  );
+  await writeFile(destination, `${rows.map(JSON.stringify).join("\n")}\n`);
 
   const page = await listCodexSecurityCandidates({}, context);
   assert.deepEqual(page.rows, rows);

@@ -54,9 +54,16 @@ export async function runReducerPagingEval({
   const { renderDedupPrompt } = await import(
     pathToFileURL(promptModulePath).href
   );
+  const claimedWorkerIds = fixture.context.deepReducer.claimedWorkers.map(
+    (worker) => worker.id,
+  );
   const prompt = renderDedupPrompt({
     reducerLabel: "paging-eval",
-    discoveries: fixture.context.deepReducer.claimedWorkers,
+    claimedWorkerIds,
+  });
+  assert.deepEqual(JSON.parse(prompt.match(/```json\n([\s\S]*?)\n```/)[1]), {
+    reducerLabel: "paging-eval",
+    claimedWorkerIds,
   });
   const mcpServers = {
     cs_artifacts: {
