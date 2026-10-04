@@ -2,8 +2,10 @@
 
 import argparse
 import json
+import os
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
 MIGRATIONS = (
     (
@@ -923,7 +925,25 @@ MIGRATIONS = (
             (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);
         """,
     ),
+    (
+        45,
+        "persist scan execution sessions",
+        """
+        CREATE TABLE scan_execution_threads (
+            scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            thread_id TEXT NOT NULL,
+            PRIMARY KEY (scan_id, thread_id)
+        );
+        INSERT INTO scan_execution_threads(scan_id, thread_id)
+            SELECT id, continuation_thread_id FROM scans
+            WHERE continuation_thread_id IS NOT NULL AND recipe_json IS NOT NULL;
+        INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id)
+            SELECT scan_id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;
+        """,
+    ),
     (46, "recover unindexed severity assessments", ""),
+    (47, "remove unused severity reuse index", "DROP INDEX scan_severity_reuse;"),
+    (48, "repair stored composition membership", ""),
 )
 
 
@@ -946,6 +966,47 @@ def backfill_unindexed_severity_assessments(connection: sqlite3.Connection) -> N
                 "SELECT ?, assessment.* FROM finding_severity_assessments AS assessment "
                 "WHERE assessment.finding_id = ?",
                 (row["scan_id"], row["finding_id"]),
+            )
+
+
+def backfill_composition_children(connection: sqlite3.Connection) -> None:
+    # Preserve the previous membership rule using stored paths, including archived
+    # scans and scans whose outputs no longer exist. Do not consult checkpoints.
+    rows = connection.execute(
+        "SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir "
+        "FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id "
+        "WHERE parents.mode = 'deep' AND children.mode = 'standard'"
+    ).fetchall()
+    connection.executemany(
+        "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?",
+        (
+            (child["id"],)
+            for child in rows
+            if Path(child["scan_dir"]).parent
+            == Path(child["parent_scan_dir"]) / "artifacts/deep-scan/passes"
+        ),
+    )
+
+
+def backfill_execution_threads(connection: sqlite3.Connection) -> None:
+    from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
+
+    for scan in connection.execute("SELECT id, scan_dir FROM scans WHERE mode = 'deep'"):
+        try:
+            descriptor = open_scan_local_file_descriptor(
+                Path(scan["scan_dir"]),
+                "artifacts/deep-scan/execution-threads.json",
+                "Deep Scan execution threads",
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                threads = json.load(handle)
+        except (OSError, ValueError, ContractError):
+            # Deleted or unreadable optional history must not block database upgrades.
+            continue
+        if isinstance(threads, list) and all(isinstance(thread, str) for thread in threads):
+            connection.executemany(
+                "INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id) VALUES (?, ?)",
+                ((scan["id"], thread) for thread in threads),
             )
 
 
@@ -1102,6 +1163,10 @@ def apply_migrations(
                     migrate_finding_workflow_columns(connection)
                 elif version == 39:
                     migrate_finding_workflow_review_columns(connection)
+                elif version in (43, 48):
+                    backfill_composition_children(connection)
+                elif version == 45:
+                    backfill_execution_threads(connection)
                 elif version == 46:
                     backfill_unindexed_severity_assessments(connection)
             connection.execute(

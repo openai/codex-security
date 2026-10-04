@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from jsonschema import Draft202012Validator
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
@@ -132,23 +134,101 @@ def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
         assert markdown.count(text) == 1
 
 
-def test_retained_findings_visit_sources_before_history_and_handle_cycles() -> None:
-    previous = {"remediation": "Retain the earlier fix."}
-    source = {"provenance": {"previousFindings": [previous, None]}}
-    finding = {
-        "provenance": {
-            "sourceFindings": [{"id": "source:0", "finding": source}, {"finding": None}],
-            "previousFindings": [previous],
-        }
+def test_projection_deduplicates_combined_and_retained_remediation_paragraphs() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    first = "Validate the record length."
+    second = "Reject duplicate record keys."
+    third = "Normalize keys before checking for duplicates."
+    finding["remediation"] = f"{first}\n\n{second}"
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "review-1:0", "finding": {"remediation": first}},
+            {"id": "review-2:0", "finding": {"remediation": f"{second}\n\n{third}"}},
+            {"id": "review-3:0", "finding": {"remediation": third}},
+        ],
+        "previousFindings": [{"remediation": f"{first}\n\n{second}\n\n{third}"}],
     }
-    previous["provenance"] = {"previousFindings": [finding]}
-    assert [
-        (source_id, id(value)) for source_id, value in PROJECTION.retained_findings(finding)
-    ] == [
-        ("finding", id(finding)),
-        ("source:0", id(source)),
-        ("source:0", id(previous)),
-    ]
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    for paragraph in (first, second, third):
+        assert markdown.count(paragraph) == 1
+    assert f"Source review-2:0: {third}" in markdown
+    assert f"Source review-2:0: {second}" not in markdown
+    assert findings == original
+
+
+def test_projection_renders_partial_retained_assessments() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["provenance"] = {
+        "sourceFindings": [
+            {
+                "id": "review-1:0",
+                "finding": {
+                    "severity": {"rationale": "Prior assessment."},
+                    "confidence": {"level": "medium"},
+                    "validation": {"method": "Prior validation."},
+                },
+            }
+        ]
+    }
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "**Unknown** — Prior assessment." in markdown
+    assert "Prior validation." in markdown
+    assert findings == original
+
+
+@pytest.mark.parametrize(
+    "retained_fields",
+    [
+        {"severity": {"level": None}},
+        {"severity": {"level": []}},
+        {"locations": None},
+        {"locations": [None, {}, {"path": "src/retained.py"}]},
+        {"confidence": {"rationale": None}},
+        {"confidence": {"rationale": {"unstructured": "Historical context"}}},
+    ],
+)
+def test_projection_renders_schema_valid_noncanonical_history(retained_fields: dict) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding.update(
+        findingId="csf_" + "0" * 24,
+        occurrenceId="occ_" + "0" * 24,
+        ruleId="synthetic-check",
+        identity={"anchor": "shared-check"},
+        fingerprints={
+            "algorithm": "codex-security/v1",
+            "primary": "codex-security/v1:sha256:" + "0" * 64,
+        },
+        provenance={
+            "source": "local_plugin",
+            "previousFindings": [
+                {
+                    "validation": {"method": "Retained offline evidence."},
+                    "rootCause": {"code": "synthetic_check(record)"},
+                    **retained_fields,
+                }
+            ],
+        },
+    )
+    findings.update(documentType="codex-security.findings", schemaVersion="1.0", scanId="test")
+    schema = json.loads((PLUGIN_DIR / "schemas/findings.schema.json").read_text())
+    Draft202012Validator(schema).validate(findings)
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert markdown.count("Retained offline evidence.") == 1
+    assert markdown.count("synthetic_check(record)") == 1
+    assert "| Severity | high |" in markdown
+    assert findings == original
 
 
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
@@ -540,7 +620,10 @@ def test_projection_links_detailed_writeup_without_repeating_inline_finding() ->
 
 
 @pytest.mark.parametrize("source_count", [1, 2])
-def test_projection_renders_composed_details_alongside_source_writeup(source_count: int) -> None:
+@pytest.mark.parametrize("history_field", ["sourceFindings", "previousFindings"])
+def test_projection_renders_composed_details_alongside_source_writeup(
+    source_count: int, history_field: str
+) -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["mode"] = "deep_repository"
     finding = findings["findings"][0]
@@ -554,6 +637,10 @@ def test_projection_renders_composed_details_alongside_source_writeup(source_cou
             for index in range(source_count)
         ],
     }
+    if history_field == "previousFindings":
+        finding["provenance"][history_field] = [
+            source["finding"] for source in finding["provenance"].pop("sourceFindings")
+        ]
     finding["summary"] = "Combined evidence establishes both affected entry points."
     finding["remediation"] = "Apply the shared fix to both entry points."
     original = copy.deepcopy(findings)
@@ -564,6 +651,76 @@ def test_projection_renders_composed_details_alongside_source_writeup(source_cou
     assert finding["remediation"] in markdown
     assert f"]({report_path})" in markdown
     assert "See the [detailed technical write-up]" not in markdown
+    assert findings == original
+
+
+@pytest.mark.parametrize("linked_writeup", [False, True])
+def test_projection_retains_distinct_source_evidence_without_repeating_reports(
+    linked_writeup: bool,
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = "Combined observations of the shared check."
+    if linked_writeup:
+        finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
+    source = copy.deepcopy(finding)
+    source["title"] = "Retained source title"
+    source["summary"] = "The second source establishes an alternate entry point."
+    source["rootCause"] = {
+        "summary": "A distinct source identifies the missing check.",
+        "evidenceRefs": ["source-check"],
+    }
+    source["codeEvidence"] = [
+        {"id": "source-check", "code": "synthetic_check(record)", "language": "python"}
+    ]
+    source["validation"] = {
+        "summary": "The second source has independent validation.",
+        "assertions": ["The alternate path reaches the shared check."],
+        "evidence": ["An offline fixture confirms the alternate path."],
+        "counterEvidence": ["The protected path rejects the same fixture."],
+        "limitations": ["Deployment configuration remains unverified."],
+    }
+    source["attackPath"] = {
+        "dataFlow": {"summary": "The alternate entry point uses the shared check."},
+        "reachability": {"summary": "The caller must select the alternate entry point."},
+        "preconditions": ["The alternate mode must be enabled."],
+    }
+    source["severity"]["rationale"] = "The alternate path explains the highest severity."
+    historical = {"validation": {"summary": "A prior accepted validation remains relevant."}}
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "first:0", "finding": copy.deepcopy(finding)},
+            {"id": "second:0", "finding": source},
+            {"id": "third:0", "finding": copy.deepcopy(source)},
+        ],
+        "previousFindings": [copy.deepcopy(source), historical],
+    }
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    for detail in (
+        finding["summary"],
+        source["summary"],
+        source["rootCause"]["summary"],
+        "synthetic_check(record)",
+        source["validation"]["summary"],
+        *source["validation"]["assertions"],
+        *source["validation"]["evidence"],
+        *source["validation"]["counterEvidence"],
+        *source["validation"]["limitations"],
+        source["attackPath"]["dataFlow"]["summary"],
+        source["attackPath"]["reachability"]["summary"],
+        *source["attackPath"]["preconditions"],
+        source["severity"]["rationale"],
+        historical["validation"]["summary"],
+    ):
+        assert markdown.count(detail) == 1
+    assert "Source second:0:" in markdown
+    assert source["title"] not in markdown
+    assert markdown.count('id="finding-1"') == 1
+    if linked_writeup:
+        assert "](findings/parser/parser.md)" in markdown
     assert findings == original
 
 
@@ -1016,3 +1173,39 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+def test_retained_findings_visit_sources_before_history_and_handle_cycles() -> None:
+    previous = {"remediation": "Retain the earlier fix."}
+    source = {"provenance": {"previousFindings": [previous, None]}}
+    finding = {
+        "provenance": {
+            "sourceFindings": [{"id": "source:0", "finding": source}, {"finding": None}],
+            "previousFindings": [previous],
+        }
+    }
+    previous["provenance"] = {"previousFindings": [finding]}
+    assert [
+        (source_id, id(value)) for source_id, value in PROJECTION.retained_findings(finding)
+    ] == [
+        ("finding", id(finding)),
+        ("source:0", id(source)),
+        ("source:0", id(previous)),
+    ]
+
+
+def test_historical_severity_does_not_borrow_current_rationale() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["severity"]["rationale"] = "Current assessment rationale."
+    finding["severity"]["changeConditions"] = "Current assessment conditions."
+    finding["provenance"] = {"previousFindings": [{"severity": {"level": "low"}}]}
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert markdown.count("Current assessment rationale.") == 1
+    assert markdown.count("Current assessment conditions.") == 1
+    assert (
+        "**Low** — The scan assigned low severity; no separate canonical severity rationale was recorded."
+        in markdown
+    )
