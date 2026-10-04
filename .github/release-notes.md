@@ -75,6 +75,8 @@
 - simplify workbench persistence ([#1226](https://github.com/openai/codex-security/pull/1226))
 - reuse parsed artifact tool inputs ([#1224](https://github.com/openai/codex-security/pull/1224))
 - reuse parsing and Git helpers ([#1222](https://github.com/openai/codex-security/pull/1222))
+- bump the codex group across 3 directories with 2 updates ([#1220](https://github.com/openai/codex-security/pull/1220))
+- reuse migration repair declarations ([#1225](https://github.com/openai/codex-security/pull/1225))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
