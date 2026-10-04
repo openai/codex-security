@@ -61,6 +61,82 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+@pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
+def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    if linked_writeup:
+        finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
+    finding["remediation"] = "Validate the record length."
+    finding["remediationTests"] = ["Reject a record longer than the allowed size."]
+    finding["preventiveControls"] = ["Centralize record validation."]
+    finding["provenance"] = {
+        "sourceFindings": [
+            {"id": "review-1:0", "finding": {"remediation": "Validate the record length."}},
+            {
+                "id": "review-2:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Reject a record longer than the allowed size.",
+                        "Cover duplicate keys in parser tests.",
+                    ],
+                    "preventiveControls": [
+                        "Centralize record validation.",
+                        "Track keys while parsing a record.",
+                    ],
+                },
+            },
+            {
+                "id": "review-3:0",
+                "finding": {
+                    "remediation": "Reject duplicate record keys.",
+                    "remediationTests": [
+                        "Cover duplicate keys in parser tests.",
+                        "Reject case-variant duplicate keys.",
+                    ],
+                    "preventiveControls": ["Track keys while parsing a record."],
+                },
+            },
+        ]
+    }
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    if linked_writeup:
+        assert "findings/parser/parser.md" in markdown
+    assert "Source review-2:0: Reject duplicate record keys." in markdown
+    for text in (
+        "Validate the record length.",
+        "Reject duplicate record keys.",
+        "Reject a record longer than the allowed size.",
+        "Cover duplicate keys in parser tests.",
+        "Reject case-variant duplicate keys.",
+        "Centralize record validation.",
+        "Track keys while parsing a record.",
+    ):
+        assert markdown.count(text) == 1
+
+
+def test_retained_findings_visit_sources_before_history_and_handle_cycles() -> None:
+    previous = {"remediation": "Retain the earlier fix."}
+    source = {"provenance": {"previousFindings": [previous, None]}}
+    finding = {
+        "provenance": {
+            "sourceFindings": [{"id": "source:0", "finding": source}, {"finding": None}],
+            "previousFindings": [previous],
+        }
+    }
+    previous["provenance"] = {"previousFindings": [finding]}
+    assert [
+        (source_id, id(value)) for source_id, value in PROJECTION.retained_findings(finding)
+    ] == [
+        ("finding", id(finding)),
+        ("source:0", id(source)),
+        ("source:0", id(previous)),
+    ]
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
@@ -449,6 +525,34 @@ def test_projection_links_detailed_writeup_without_repeating_inline_finding() ->
     assert "## Injected remediation" not in markdown
 
 
+@pytest.mark.parametrize("source_count", [1, 2])
+def test_projection_renders_composed_details_alongside_source_writeup(source_count: int) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    finding = findings["findings"][0]
+    report_path = "findings/first-parser/first-parser.md"
+    finding["writeup"] = {"reportPath": report_path}
+    finding["provenance"] = {
+        "source": "local_plugin",
+        "sourceFindingIds": [f"scan-{index}:0" for index in range(source_count)],
+        "sourceFindings": [
+            {"id": f"scan-{index}:0", "finding": copy.deepcopy(finding)}
+            for index in range(source_count)
+        ],
+    }
+    finding["summary"] = "Combined evidence establishes both affected entry points."
+    finding["remediation"] = "Apply the shared fix to both entry points."
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert finding["summary"] in markdown
+    assert finding["remediation"] in markdown
+    assert f"]({report_path})" in markdown
+    assert "See the [detailed technical write-up]" not in markdown
+    assert findings == original
+
+
 @pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
 def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -495,6 +599,167 @@ def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> N
     assert '<a id="finding-2"></a>' in markdown
 
 
+@pytest.mark.parametrize("candidate_field", ["provenance", "extensions"])
+@pytest.mark.parametrize("same_worker", [False, True])
+@pytest.mark.parametrize("source_metadata", ["references", "null", "opaque", "mixed"])
+@pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
+def test_projection_keeps_worker_local_candidates_distinct(
+    candidate_field, same_worker, source_metadata, coverage_mode
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = coverage_mode
+    coverage["inventoryStrategy"] = (
+        "scoped_path" if coverage_mode == "scoped_path" else "repository"
+    )
+    first = findings["findings"][0]
+    first["title"] = "First retained finding"
+    first["provenance"] = {"sourceFindingIds": ["worker-001:0"]}
+    first.setdefault(candidate_field, {})["candidateId"] = "candidate-1"
+    second = copy.deepcopy(first)
+    second["occurrenceId"] = "occ_2"
+    second["title"] = "Second retained finding"
+    second["provenance"]["sourceFindingIds"] = ["worker-001:1" if same_worker else "worker-002:0"]
+    for finding in (first, second):
+        if source_metadata == "null":
+            finding["provenance"]["sourceFindingIds"] = None
+        elif source_metadata == "opaque":
+            finding["provenance"]["sourceFindingIds"] = [{"origin": "saved source"}]
+        elif source_metadata == "mixed":
+            finding["provenance"]["sourceFindingIds"].append({"origin": "saved source"})
+    findings["findings"].append(second)
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    count = (
+        1
+        if same_worker or candidate_field == "extensions" or source_metadata in ("null", "opaque")
+        else 2
+    )
+    if (
+        coverage_mode == "scoped_path"
+        and candidate_field == "provenance"
+        and source_metadata in ("null", "opaque")
+    ):
+        assert "| Reportable findings | 2 |" in markdown
+        assert "| Report instances |" not in markdown
+    else:
+        assert f"| Reportable DSS findings | {count} |" in markdown
+        assert "| Report instances | 2 |" in markdown
+    assert "First retained finding" in markdown
+    assert "Second retained finding" in markdown
+    assert findings == original
+
+
+@pytest.mark.parametrize(
+    "workers, expected_groups",
+    [
+        ([["a", "b"], ["a"]], 1),
+        ([["a"], ["b"], ["a", "b"]], 1),
+        ([["a", "b"], ["b", "c"], ["c"]], 1),
+        ([["a"], ["b"]], 2),
+    ],
+)
+def test_projection_groups_partially_corroborated_candidate_reports(workers, expected_groups):
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    template = findings["findings"][0]
+    findings["findings"] = []
+    for index, sources in enumerate(workers):
+        finding = copy.deepcopy(template)
+        finding["occurrenceId"] = f"occ_{index}"
+        finding["title"] = f"Retained report {index}"
+        finding["provenance"] = {
+            "candidateId": "candidate-1",
+            "sourceFindingIds": [f"source:worker-{worker}:{index}" for worker in sources],
+        }
+        finding["extensions"] = {"candidateId": "candidate-1", "reportId": f"report-{index}"}
+        findings["findings"].append(finding)
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert f"| Reportable DSS findings | {expected_groups} |" in markdown
+    assert f"| Report instances | {len(workers)} |" in markdown
+    for index in range(len(workers)):
+        assert f"Retained report {index}" in markdown
+    assert findings == original
+
+
+@pytest.mark.parametrize("candidate_field", ["provenance", "extensions"])
+@pytest.mark.parametrize("second_candidate", ["candidate-1", "candidate-2"])
+def test_projection_groups_by_retained_worker_candidate(candidate_field, second_candidate):
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    template = findings["findings"][0]
+    first = copy.deepcopy(template)
+    first["provenance"] = {
+        "candidateId": "candidate-1",
+        "sourceFindingIds": ["source:worker-a:0", "source:worker-b:0"],
+        "sourceFindings": [
+            {
+                "id": "source:worker-a:0",
+                "finding": {candidate_field: {"candidateId": "candidate-1"}},
+            },
+            {
+                "id": "source:worker-b:0",
+                "finding": {candidate_field: {"candidateId": second_candidate}},
+            },
+        ],
+    }
+    second = copy.deepcopy(template)
+    second["occurrenceId"] = "occ_2"
+    second["provenance"] = {
+        "candidateId": "candidate-1",
+        "sourceFindingIds": ["source:worker-b:1"],
+        "sourceFindings": [
+            {
+                "id": "source:worker-b:1",
+                "finding": {candidate_field: {"candidateId": "candidate-1"}},
+            },
+        ],
+    }
+    findings["findings"] = [first, second]
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    count = 1 if second_candidate == "candidate-1" else 2
+    assert f"| Reportable DSS findings | {count} |" in markdown
+    assert "| Report instances | 2 |" in markdown
+    assert findings == original
+
+
+@pytest.mark.parametrize("shared_instance", [False, True])
+def test_projection_keeps_retained_findings_without_optional_ids_distinct(shared_instance):
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    template = findings["findings"][0]
+    findings["findings"] = []
+    for index in range(2):
+        finding = copy.deepcopy(template)
+        finding["occurrenceId"] = f"occ_{index}"
+        finding["extensions"] = {"candidateId": f"candidate-{index}", "reportId": f"report-{index}"}
+        source = {"provenance": {"source": "local_plugin"}}
+        if shared_instance:
+            source.update(
+                ruleId=f"rule-{index}",
+                identity={"anchor": f"anchor-{index}", "instance": "primary"},
+            )
+        finding["provenance"] = {
+            "sourceFindingIds": [f"worker:{index}"],
+            "sourceFindings": [{"id": f"worker:{index}", "finding": source}],
+        }
+        findings["findings"].append(finding)
+    original = copy.deepcopy(findings)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Reportable DSS findings | 2 |" in markdown
+    assert "| Report instances | 2 |" in markdown
+    assert findings == original
+
+
 def test_projection_moves_legacy_deep_title_annotations_to_reports() -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["mode"] = "deep_repository"
@@ -535,13 +800,16 @@ def test_projection_moves_legacy_deep_title_annotations_to_reports() -> None:
     )
 
 
-def test_projection_keeps_standard_findings_table_unchanged() -> None:
+@pytest.mark.parametrize("candidate", [False, True])
+def test_projection_keeps_standard_findings_table_unchanged(candidate: bool) -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["mode"] = "scoped_path"
     coverage["inventoryStrategy"] = "scoped_path"
     finding = findings["findings"][0]
     finding["title"] = "Parser boundary [SCAN-001-parser]"
     finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
+    if candidate:
+        finding["provenance"] = {"candidateId": "candidate-1"}
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
@@ -552,16 +820,20 @@ def test_projection_keeps_standard_findings_table_unchanged() -> None:
     assert "[Parser boundary \\[SCAN-001-parser\\]](#finding-1)" in markdown
 
 
-def test_projection_rejects_unsafe_detailed_writeup_path() -> None:
+@pytest.mark.parametrize("report_path", ["../outside.md", "findings/one/../../outside.md"])
+def test_projection_rejects_unsafe_detailed_writeup_path(report_path: str) -> None:
     manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["writeup"] = {"reportPath": "../outside.md"}
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
 
     with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
         PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    findings["findings"][0]["writeup"] = {"reportPath": "findings/one/two.md"}
-    with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
-        PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+@pytest.mark.parametrize("report_path", ["findings/one/two.md", "findings/source-scan/one/two.md"])
+def test_projection_preserves_original_report_names(report_path: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
+    assert report_path in PROJECTION.build_report_markdown(manifest, findings, coverage)
 
 
 def test_projection_rejects_duplicate_detailed_writeup_paths() -> None:
@@ -579,6 +851,25 @@ def test_projection_rejects_duplicate_detailed_writeup_paths() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert f"[Open report]({report_path})" in markdown
     assert "[Open report](findings/second-boundary/second-boundary.md)" in markdown
+
+
+@pytest.mark.parametrize("prefix", ["", "artifacts/deep-scan/passes/pass-1/"])
+@pytest.mark.parametrize("second_level", ["high", "informational"])
+def test_projection_preserves_historical_writeups_in_shared_evidence_directories(
+    prefix: str, second_level: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    first = findings["findings"][0]
+    first["writeup"] = {"reportPath": prefix + "findings/shared/first.md"}
+    second = copy.deepcopy(first)
+    second["title"] = "Second parser boundary"
+    second["severity"]["level"] = second_level
+    second["writeup"] = {"reportPath": prefix + "findings/shared/second.md"}
+    findings["findings"].append(second)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert first["writeup"]["reportPath"] in markdown
+    assert (second["writeup"]["reportPath"] in markdown) == (second_level != "informational")
 
 
 def test_projection_links_structural_hardening_portfolio() -> None:

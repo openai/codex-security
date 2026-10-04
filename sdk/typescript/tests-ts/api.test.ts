@@ -52,7 +52,8 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
-import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import { estimateScanCost, scanCostUsage, type ScanCost } from "../src/cost.js";
+import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
 import {
   resolveCodexCommand,
   runWorkbench,
@@ -109,7 +110,21 @@ async function scanDirectories() {
   return { ...directories, scanDir };
 }
 
-test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
+test.each([
+  "completed",
+  "receipt-lost",
+  "receipt-lost-no-thread",
+  "receipt-lost-missing-cache-writes",
+  "receipt-lost-zero-cache-writes",
+  "receipt-lost-missing-cache-writes-no-cost",
+  "receipt-lost-zero-cache-writes-no-cost",
+  "receipt-lost-no-cost",
+  "receipt-lost-unavailable-usage",
+  "receipt-lost-partial-usage",
+  "receipt-lost-partial-usage-no-cost",
+  "scan-interrupted",
+  "prompt-files",
+])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -128,9 +143,51 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
+    const savedUsage = {
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      ...(scenario.includes("missing-cache-writes")
+        ? {}
+        : {
+            cache_write_input_tokens: scenario.includes("zero-cache-writes")
+              ? 0
+              : 1,
+          }),
+      output_tokens: 3,
+      reasoning_output_tokens: 1,
+      total_tokens: 13,
+    };
+    const savedCost = {
+      ...estimateScanCost("gpt-5.6-sol", savedUsage)!,
+      estimatedUsd: 123,
+    };
+    const noCostReceipt = scenario.endsWith("no-cost");
+    const collectedUsage =
+      noCostReceipt && !scenario.includes("partial")
+        ? (JSON.parse(
+            execFileSync(
+              pythonExecutable()!,
+              [
+                "-I",
+                "-B",
+                "-c",
+                [
+                  "import json, sys",
+                  "sys.path.insert(0, sys.argv[1])",
+                  "from workbench_scan_usage import _token_snapshot",
+                  "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+                  "print(json.dumps(_token_snapshot(payload)))",
+                ].join("\n"),
+                join(PLUGIN_ROOT, "scripts"),
+                JSON.stringify(savedUsage),
+              ],
+              { encoding: "utf8" },
+            ),
+          ) as JsonObject)
+        : undefined;
     let modelCalls = 0;
     let completed = false;
-    let loseReceipt = scenario === "receipt-lost";
+    let loseReceipt = scenario.startsWith("receipt-lost");
     const makeClient = async (attempt: number) => {
       const codexHome = join(root, `codex-home-${attempt}`);
       await mkdir(codexHome);
@@ -142,7 +199,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (options, args, input) => {
+          runWorkbench: async (options, args, input): Promise<JsonObject> => {
             if (args[0] === "finding-workflow") {
               const payload = JSON.parse(input!);
               if (
@@ -162,7 +219,41 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
               return {
                 scan: {
                   progress: { status: completed ? "complete" : "failed" },
-                  continuationThreadId: "thread-1",
+                  continuationThreadId:
+                    scenario === "receipt-lost-no-thread" ? null : "thread-1",
+                  cost: noCostReceipt
+                    ? null
+                    : (JSON.parse(JSON.stringify(savedCost)) as JsonObject),
+                  usage:
+                    scenario === "receipt-lost-unavailable-usage"
+                      ? {
+                          coverage: "unavailable",
+                          source: "codex_rollout",
+                          threadCount: 0,
+                        }
+                      : {
+                          coverage: scenario.startsWith("receipt-lost-partial")
+                            ? "partial"
+                            : "complete",
+                          source: "codex_rollout",
+                          threadCount: 1,
+                          inputTokens: scenario.startsWith(
+                            "receipt-lost-partial",
+                          )
+                            ? 5
+                            : 10,
+                          cachedInputTokens: 2,
+                          cacheWriteInputTokens:
+                            savedUsage.cache_write_input_tokens ?? 0,
+                          outputTokens: 3,
+                          reasoningOutputTokens: 1,
+                          totalTokens: scenario.startsWith(
+                            "receipt-lost-partial",
+                          )
+                            ? 8
+                            : 13,
+                          ...collectedUsage,
+                        },
                 },
               };
             if (args[0] === "register-cli-scan") {
@@ -226,7 +317,59 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       expect(python).toHaveBeenCalledWith(
         expect.objectContaining({ protectedRoot: repository }),
       );
+      if (scenario === "receipt-lost-no-thread")
+        expect(result.threadId).toBeNull();
       if (original) expect(result.toJSON()).toEqual(original);
+      const persisted = (
+        await new FindingWorkflow(workflowId, environment).get()
+      )?.stages.scan.result as { cost?: unknown; turnResult?: unknown };
+      expect(persisted.cost).toEqual(result.cost);
+      expect(persisted.turnResult).toEqual(result.turnResult);
+      if (scenario === "receipt-lost-partial-usage-no-cost") {
+        expect(result.cost).toBeNull();
+        expect(result.turnResult.usage).toBeNull();
+        expect(formatTokenUsage(result.turnResult.usage)).toBeNull();
+      } else if (noCostReceipt) {
+        expect(result.cost).toBeNull();
+        expect(collectedUsage?.["cacheWriteInputTokens"]).toBe(
+          savedUsage.cache_write_input_tokens ?? 0,
+        );
+        expect(tokenUsage(result.turnResult.usage)).toEqual(
+          tokenUsage({
+            ...savedUsage,
+            cache_write_input_tokens_reported: false,
+          }),
+        );
+        expect(formatTokenUsage(result.turnResult.usage)).toBe(
+          "unavailable uncached input, 2 cache reads, unavailable cache writes, 3 output, 13 total",
+        );
+        expect(
+          (await resumed.run(repository, { workflowId })).toJSON(),
+        ).toEqual(result.toJSON());
+      } else if (scenario.startsWith("receipt-lost")) {
+        expect(result.cost).toEqual(savedCost);
+        expect(tokenUsage(result.turnResult.usage)).toEqual(
+          scenario === "receipt-lost-unavailable-usage" ||
+            scenario === "receipt-lost-partial-usage"
+            ? tokenUsage(scanCostUsage(savedCost))
+            : tokenUsage(savedUsage),
+        );
+        expect(formatTokenUsage(result.turnResult.usage)).toContain("13 total");
+        if (scenario.endsWith("cache-writes")) {
+          const missing = scenario === "receipt-lost-missing-cache-writes";
+          expect(result.cost?.cacheWriteInputTokensReported).toBe(
+            missing ? false : undefined,
+          );
+          expect(formatTokenUsage(result.turnResult.usage)).toBe(
+            missing
+              ? "unavailable uncached input, 2 cache reads, unavailable cache writes, 3 output, 13 total"
+              : "8 uncached input, 2 cache reads, 0 cache writes, 3 output, 13 total",
+          );
+          expect(
+            (await resumed.run(repository, { workflowId })).toJSON(),
+          ).toEqual(result.toJSON());
+        }
+      }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
@@ -2053,64 +2196,112 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("archives existing output before starting a fresh scan", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const output = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(output, { mode: 0o700 });
-    await writeFile(join(output, "previous.txt"), "previous scan\n");
-    let archived: string | undefined;
-    let registration: readonly string[] | undefined;
-    const observerErrors: Array<[ScanObserverName, string]> = [];
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          if (args[0] !== "register-cli-scan")
-            return mockWorkbench(args, input);
-          registration = args;
-          return mockScanRegistration(args, input);
+  test.each([false, true])(
+    "checks child state before archiving output (running child: %p)",
+    async (runningChild) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const output = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      let archived: string | undefined;
+      let registration: readonly string[] | undefined;
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> => {
+            if (args[0] === "list-scans") {
+              expect(args).toEqual([
+                "list-scans",
+                "--scan-root",
+                output,
+                "--status",
+                "running",
+                "--limit",
+                "1",
+              ]);
+              return {
+                scans: runningChild
+                  ? [{ progress: { status: "running" } }]
+                  : [],
+              };
+            }
+            if (args[0] === "get-scan-feedback") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                falsePositives: [],
+              };
+            }
+            if (args[0] !== "register-cli-scan") return {};
+            registration = args;
+            return mockScanRegistration(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("scan did not start");
+              },
+            }),
+          }),
         },
-        createCodex: codexFactory(scanDidNotStart),
-      },
-    );
+      );
 
-    await expect(
-      client.run(repository, {
+      const result = client.run(repository, {
         outputDir: output,
         archiveExisting: true,
         onOutputArchived: (archiveDir) => {
           archived = archiveDir;
           throw new Error("archive observer exploded");
         },
-        onObserverError: collectObserverErrors(observerErrors),
-      }),
-    ).rejects.toThrow("scan did not start");
-    expect(observerErrors).toEqual([
-      ["onOutputArchived", "archive observer exploded"],
-    ]);
-    expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
-    expect(registration).toContain("--archive-existing");
-    expect(
-      registration?.[registration.indexOf("--archived-scan-dir") + 1],
-    ).toBe(archived);
-    expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
-      "previous scan\n",
-    );
-    await expect(stat(output)).resolves.toBeDefined();
-    await client.close();
-  });
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
+        },
+      });
+      if (runningChild) {
+        await expect(result).rejects.toThrow("Cannot archive output");
+        expect(archived).toBeUndefined();
+        expect(registration).toBeUndefined();
+        expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+          "previous scan\n",
+        );
+        expect(
+          (await readdir(root)).some((name) =>
+            name.startsWith("scan.previous-"),
+          ),
+        ).toBe(false);
+        await client.close();
+        return;
+      }
+      await expect(result).rejects.toThrow("scan did not start");
+      expect(observerErrors).toEqual([
+        ["onOutputArchived", "archive observer exploded"],
+      ]);
+      expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+      expect(registration).toContain("--archive-existing");
+      expect(
+        registration?.[registration.indexOf("--archived-scan-dir") + 1],
+      ).toBe(archived);
+      expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      await expect(stat(output)).resolves.toBeDefined();
+      await client.close();
+    },
+  );
 
   test("reports the real scan failure when scan cleanup also fails", async () => {
     const root = await temporaryDirectory();
@@ -4295,6 +4486,11 @@ describe("CodexSecurity orchestration", () => {
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
           prepareScanArtifactRestorer: async () => ({
+            prepareDirectory: async () => {},
+            remove: async () => {},
+            projectChild: async () => {
+              throw new Error("Unexpected child projection");
+            },
             restore: async (name, contents) => {
               if (scenario === "restore failure")
                 throw new Error("write failed");

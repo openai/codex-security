@@ -115,11 +115,13 @@ import {
   writeCodexConfig,
 } from "./config.js";
 import {
+  scanCostUsage,
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
+import { tokenUsage } from "./cost-model.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -263,6 +265,12 @@ export interface ScanOptions extends ScanSettings {
   preserveProviderEnvironment?: boolean;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
+  /** @internal A complete ordinary pass owned by a Deep Scan. */
+  deepScanPass?: boolean;
+  /** @internal Persist composition membership after normal registration. */
+  onRegisteredScan?: (registration: JsonObject) => Promise<void>;
+  /** @internal A parent budget requires child usage tracking to succeed. */
+  requireCost?: boolean;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -511,7 +519,7 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+      "threadId" | "turnResult" | "cost" | "sarifPath" | "repositoryFindings"
     >;
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -522,11 +530,30 @@ export class CodexSecurity {
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
-        if (completed)
+        if (completed) {
+          const cost = (scan["cost"] as ScanCost | null) ?? null;
+          const savedUsage = scan["usage"];
+          const usage =
+            isRecord(savedUsage) && savedUsage["coverage"] === "complete"
+              ? tokenUsage({
+                  input_tokens: savedUsage["inputTokens"],
+                  cached_input_tokens: savedUsage["cachedInputTokens"],
+                  cache_write_input_tokens: savedUsage["cacheWriteInputTokens"],
+                  cache_write_input_tokens_reported:
+                    cost === null ? false : cost.cacheWriteInputTokensReported,
+                  output_tokens: savedUsage["outputTokens"],
+                  reasoning_output_tokens: savedUsage["reasoningOutputTokens"],
+                })
+              : null;
           metadata = {
-            threadId: (scan["continuationThreadId"] as string) ?? "",
-            turnResult: { status: "completed" },
+            threadId: (scan["continuationThreadId"] as string | null) ?? null,
+            turnResult: {
+              status: "completed",
+              usage: usage ?? (cost === null ? null : scanCostUsage(cost)),
+            },
+            cost,
           };
+        }
       }
       if (completed) {
         const contract = await loadContract(state.scanDir, {
@@ -535,7 +562,7 @@ export class CodexSecurity {
           signal,
         });
         await workflow.bind({ artifactDigest: workflowDigest(contract) });
-        metadata ??= { threadId: "", turnResult: { status: "completed" } };
+        metadata ??= { threadId: null, turnResult: { status: "completed" } };
         await workflow.complete("scan", metadata);
         return new ScanResult({
           ...contract,
@@ -565,6 +592,7 @@ export class CodexSecurity {
       await workflow.complete("scan", {
         threadId: result.threadId,
         turnResult: result.turnResult,
+        cost: result.cost,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
       } satisfies ScanMetadata);
@@ -1266,6 +1294,27 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...withoutCodexHome(environmentWithGit(git.environment, git)),
+          CODEX_HOME: runtime.codexHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the Codex Security scan",
+      };
+      if (
+        options.archiveExisting &&
+        requestedOutput !== null &&
+        options.resumeScanId === undefined
+      ) {
+        await requireStoppedArchiveOutput(
+          (args) => workbench(workbenchOptions, args),
+          requestedOutput,
+        );
+      }
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
@@ -1358,6 +1407,7 @@ export class CodexSecurity {
         model,
         repository: repo,
         scanDirectory: scanDir,
+        includeArchivedSessions: options.resumeScanId !== undefined,
         maxCostUsd: options.maxCostUsd,
         onActivity:
           options.onActivity === undefined
@@ -1416,17 +1466,6 @@ export class CodexSecurity {
         recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot: runtime.plugin.pluginRoot,
-        environment: {
-          ...withoutCodexHome(environmentWithGit(git.environment, git)),
-          CODEX_HOME: runtime.codexHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the Codex Security scan",
-      };
       const {
         registration,
         scanId,
@@ -2682,6 +2721,22 @@ export class CodexSecurity {
         );
         await knowledgeBase.cleanup();
       }
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot,
+        environment: {
+          ...this.#dependencies.environment,
+          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the mock scan",
+      };
+      if (options.archiveExisting && local.outputDir !== null) {
+        await requireStoppedArchiveOutput(
+          (args) => workbench(workbenchOptions, args),
+          local.outputDir,
+        );
+      }
       const outputRoot =
         local.outputDir === null
           ? await preparePersistentOutputRoot(
@@ -2711,16 +2766,6 @@ export class CodexSecurity {
         ...DEFAULT_CODEX_CONFIG,
         ...this.config.codexOverrides,
       });
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot,
-        environment: {
-          ...this.#dependencies.environment,
-          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the mock scan",
-      };
       const registration = await workbench(
         workbenchOptions,
         [
@@ -3647,4 +3692,23 @@ async function pluginSupportsIsolatedDeepScanConfig(
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
   );
+}
+
+async function requireStoppedArchiveOutput(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  output: string,
+): Promise<void> {
+  const saved = await workbench([
+    "list-scans",
+    "--scan-root",
+    output,
+    "--status",
+    "running",
+    "--limit",
+    "1",
+  ]);
+  if ((saved["scans"] as JsonObject[]).length > 0)
+    throw new OutputDirectoryError(
+      "Cannot archive output while a scan in that directory is running.",
+    );
 }
