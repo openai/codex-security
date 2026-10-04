@@ -240,7 +240,7 @@ for (const scenario of [
   );
 }
 
-async function publicationFixture(t) {
+async function publicationFixture(t, mode = "standard") {
   const root = await privateDirectory("codex-security-publication-recovery-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const repository = join(root, "repository");
@@ -292,7 +292,7 @@ async function publicationFixture(t) {
       recipe: {
         repository,
         target: { kind: "repository", paths: [] },
-        mode: "standard",
+        mode,
         config: {},
       },
     }),
@@ -415,10 +415,18 @@ for (const pendingNewer of [true, false]) {
   test(`MCP reconciliation keeps the ${pendingNewer ? "pending" : "committed"} terminal decision by recency`, async (t) => {
     const f = await publicationFixture(t);
     const original = f.finding("candidate");
-    await f.save({ findings: [original] });
+    const committedModel = {
+      format: "markdown",
+      content: "# Committed model\n",
+    };
+    const pendingModel = { format: "markdown", content: "# Pending model\n" };
+    await f.save({ findings: [original], threatModel: committedModel });
     await assert.rejects(
       f.save(
-        { coverage: semanticCoverage({ surfaces: [f.rejection] }) },
+        {
+          coverage: semanticCoverage({ surfaces: [f.rejection] }),
+          threatModel: pendingModel,
+        },
         "artifacts/scan-draft.json",
       ),
       /Synthetic publication interruption/,
@@ -439,7 +447,17 @@ for (const pendingNewer of [true, false]) {
       ])
         await utimes(join(f.scanDir, relative), timestamp, timestamp);
     }
-    await f.save({ complete: false });
+    await f.save({
+      complete: false,
+      threatModel: {
+        format: "markdown",
+        content: "# Incomplete retry model\n",
+      },
+    });
+    assert.deepEqual(
+      (await f.read("scan-manifest.json")).scan.threatModel,
+      pendingNewer ? pendingModel : committedModel,
+    );
     const findings = (await f.read("findings.json")).findings;
     assert.equal(findings.length, pendingNewer ? 0 : 1);
     if (pendingNewer) {
@@ -456,6 +474,86 @@ for (const pendingNewer of [true, false]) {
     const evidence = await f.read(join("checkpoints", pending[0]));
     assert.equal(evidence.coverage.surfaces[0].disposition, "rejected");
   });
+}
+
+for (const mode of ["standard", "deep"]) {
+  for (const source of ["canonical", "pending"]) {
+    for (const newer of [true, false]) {
+      test(`MCP ${mode} draft preserves the newest threat model (${source} ${newer ? "newer" : "older"})`, async (t) => {
+        const f = await publicationFixture(t, mode);
+        const committedModel = {
+          format: "markdown",
+          content: "# Committed model\n",
+        };
+        const authoredModel = {
+          format: "markdown",
+          content: "# Authored model\n",
+        };
+        await f.save({ complete: false, threatModel: committedModel });
+        const authoredPaths = [];
+        if (source === "canonical") {
+          const manifest = await f.read("scan-manifest.json");
+          manifest.scan.threatModel = authoredModel;
+          await writeFile(
+            join(f.scanDir, "scan-manifest.json"),
+            JSON.stringify(manifest),
+          );
+          authoredPaths.push(
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+          );
+        } else {
+          await assert.rejects(
+            f.save(
+              { complete: false, threatModel: authoredModel },
+              "artifacts/scan-draft.json",
+            ),
+            /Synthetic publication interruption/,
+          );
+          const pending = await readdir(join(f.scanDir, "checkpoints/pending"));
+          assert.equal(pending.length, 1);
+          authoredPaths.push(
+            join("checkpoints", pending[0]),
+            join("checkpoints/pending", pending[0]),
+          );
+        }
+        await utimes(
+          join(f.scanDir, "artifacts/scan-draft.json"),
+          1700000010,
+          1700000010,
+        );
+        for (const path of authoredPaths) {
+          const timestamp = newer ? 1700000020 : 1700000000;
+          await utimes(join(f.scanDir, path), timestamp, timestamp);
+        }
+
+        await f.save({ complete: false });
+        for (const manifest of [
+          await f.read("scan-manifest.json"),
+          (await f.read("artifacts/scan-draft.json")).manifest,
+        ])
+          assert.deepEqual(
+            manifest.scan.threatModel,
+            newer ? authoredModel : committedModel,
+          );
+
+        const explicitModel = {
+          format: "markdown",
+          content: "# Explicit new model\n",
+        };
+        await f.save({ complete: false, threatModel: explicitModel });
+        assert.deepEqual(
+          (await f.read("scan-manifest.json")).scan.threatModel,
+          explicitModel,
+        );
+        assert.deepEqual(
+          (await f.read("artifacts/scan-draft.json")).manifest.scan.threatModel,
+          explicitModel,
+        );
+      });
+    }
+  }
 }
 
 test("MCP rejection and re-report preserve every finding for one candidate", async (t) => {
@@ -540,7 +638,11 @@ for (const complete of [false, true]) {
   ]) {
     test(`MCP retries concurrent canonical ${changed} edits (complete: ${complete})`, async (t) => {
       const f = await publicationFixture(t);
-      await f.save({ complete: false, findings: [f.finding("initial")] });
+      await f.save({
+        complete: false,
+        findings: [f.finding("initial")],
+        threatModel: { format: "markdown", content: "# Initial model\n" },
+      });
       const committed = await readFile(
         join(f.scanDir, "artifacts/scan-draft.json"),
       );

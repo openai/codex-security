@@ -222,7 +222,6 @@ async function preserveScanDraft(
   );
   let result = semanticDraft(context, prepareSemanticScanDraft(context, input));
   requireDraftIdentities(result);
-  result.threatModel ??= state.input?.threatModel;
   for (const draft of previous) {
     // Final Deep aggregates supersede accepted history, but not uncommitted evidence.
     if (
@@ -233,6 +232,7 @@ async function preserveScanDraft(
       continue;
     result = preserveDraft(result, draft);
   }
+  result.threatModel ??= state.input?.threatModel;
   return {
     input: result,
     previousDigest: state.digest,
