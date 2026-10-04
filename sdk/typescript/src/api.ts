@@ -2576,7 +2576,15 @@ export class CodexSecurity {
         completedTurn,
         completionCost,
         sealed,
-      );
+      ).catch((error: unknown) => {
+        if (mode !== "deep") throw error;
+        throwIfAborted(signal, scanDir);
+        throw new DeepScanPublicationError(
+          `Could not publish accepted Deep Scan results: ${errorMessage(error)}`,
+          scanDir,
+          { cause: error },
+        );
+      });
       activeScan = null;
       reportWarnings(warnings);
       if (runPostScan !== null) {

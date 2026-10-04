@@ -26,6 +26,7 @@ import {
   replaceArtifactText,
   readArtifactJsonObject,
   readArtifactText,
+  readArtifactTextWithMetadata,
   requireArtifactRoot,
 } from "./artifact-io.js";
 import {
@@ -58,6 +59,12 @@ export interface CompletedScanResult {
   findings: JsonObject;
   coverage: JsonObject;
 }
+
+type SavedDraftRecord = {
+  name: string;
+  input: ScanDraftInput;
+  modifiedMs: number;
+};
 
 type PublishScanDraft = (
   draft: PreparedScanDraft,
@@ -198,9 +205,15 @@ async function preserveScanDraft(
     context,
     state.acknowledged ?? [],
   );
-  const previous = [state.input, ...pending.map((entry) => entry.input)].filter(
-    (draft) => draft !== undefined,
-  );
+  // A partial retry adopts the first terminal decision, including one whose
+  // pending checkpoint was saved after the committed snapshot.
+  const previous = [...state.drafts, ...pending]
+    .sort(
+      (left, right) =>
+        right.modifiedMs - left.modifiedMs ||
+        right.name.localeCompare(left.name),
+    )
+    .map((entry) => entry.input);
   validateDeferredClosures(input, previous);
   // Parsed input belongs to this operation. Assign once so retries keep the same IDs.
   assignDraftIds(
@@ -321,6 +334,12 @@ function preserveDraft(
     const disposition = rejected.get(findingCandidateId(finding));
     if (disposition) {
       disposition.finding ??= finding;
+      disposition.previousFindings = exactUnion(
+        Array.isArray(disposition.previousFindings)
+          ? disposition.previousFindings
+          : [],
+        [finding],
+      );
       continue;
     }
     const id = scanFindingIdentity(finding);
@@ -382,6 +401,12 @@ function preserveDraft(
     result.coverage.deferred.push(row);
   }
   for (const surface of previous.coverage.surfaces) {
+    const retainedSurface = surfaces.get(surface.id);
+    if (retainedSurface)
+      retainedSurface.receiptRefs = exactUnion(
+        retainedSurface.receiptRefs ?? [],
+        surface.receiptRefs ?? [],
+      );
     const current =
       resolvedCandidates.get(surface.candidateId) ??
       pendingCandidates.get(surface.candidateId) ??
@@ -427,12 +452,22 @@ function preserveCandidateEvidence(
           : [],
         [previous.candidate],
       );
-    if (isObject(previous.finding))
-      preserveFindingDetails(current, previous.finding);
+    for (const finding of [
+      previous.finding,
+      ...(Array.isArray(previous.previousFindings)
+        ? previous.previousFindings
+        : []),
+    ])
+      if (isObject(finding)) preserveFindingDetails(current, finding);
   } else {
     if (previous.candidate !== undefined)
       current.candidate ??= previous.candidate;
     if (previous.finding !== undefined) current.finding ??= previous.finding;
+    if (Array.isArray(previous.previousFindings))
+      current.previousFindings = exactUnion(
+        Array.isArray(current.previousFindings) ? current.previousFindings : [],
+        previous.previousFindings,
+      );
   }
 }
 
@@ -494,68 +529,109 @@ function assignDraftIds(
 
 async function readPreviousScanDraft(context: ArtifactContext): Promise<{
   input?: ScanDraftInput;
+  drafts: SavedDraftRecord[];
   digest: string;
   acknowledged?: unknown[];
 }> {
-  const snapshot = await readOptionalArtifactText(context, [
+  const snapshot = await readOptionalArtifact(context, [
     "artifacts",
     "scan-draft.json",
   ]);
-  if (snapshot !== undefined) {
-    const draft = parseJsonObject(
-      snapshot,
-      "committed scan draft",
-    ) as unknown as PreparedScanDraft & { reconciledCheckpointIds?: unknown };
-    return {
-      input: savedDraft(context, draft),
-      acknowledged: Array.isArray(draft.reconciledCheckpointIds)
-        ? draft.reconciledCheckpointIds
-        : [],
-      digest: createHash("sha256").update(snapshot).digest("hex"),
-    };
-  }
-  // A canonical draft from before committed snapshots may be imported once.
+  const draft =
+    snapshot === undefined
+      ? undefined
+      : (parseJsonObject(
+          snapshot.contents,
+          "committed scan draft",
+        ) as unknown as PreparedScanDraft & {
+          reconciledCheckpointIds?: unknown;
+          canonicalExport?: {
+            previous?: Record<string, string | null>;
+            current?: Record<string, string>;
+          };
+        });
+  const input = draft === undefined ? undefined : savedDraft(context, draft);
+  const drafts: SavedDraftRecord[] =
+    input === undefined
+      ? []
+      : [
+          {
+            input,
+            name: "artifacts/scan-draft.json",
+            modifiedMs: snapshot!.modifiedMs,
+          },
+        ];
   const names = [
     "scan-manifest.json",
     "findings.json",
     "coverage.json",
   ] as const;
-  const contents = await Promise.all(
-    names.map((name) => readOptionalArtifactText(context, [name])),
+  const files = await Promise.all(
+    names.map((name) => readOptionalArtifact(context, [name])),
   );
-  const digest = draftDigest(
-    names.map((name, index) => [name, contents[index]]),
-  );
-  if (contents.every((value) => value === undefined)) return { digest };
+  const contents = files.map((file) => file?.contents);
+  const state = {
+    input,
+    drafts,
+    acknowledged: Array.isArray(draft?.reconciledCheckpointIds)
+      ? draft.reconciledCheckpointIds
+      : [],
+    digest:
+      snapshot === undefined
+        ? draftDigest(names.map((name, index) => [name, contents[index]]))
+        : createHash("sha256").update(snapshot.contents).digest("hex"),
+  };
+  if (contents.every((value) => value === undefined)) return state;
   if (contents.some((value) => value === undefined)) {
+    if (snapshot !== undefined) return state;
     throw new Error("previous scan draft: canonical documents are incomplete.");
   }
+  if (
+    draft?.canonicalExport &&
+    names.every((name, index) => {
+      const digest = createHash("sha256")
+        .update(contents[index]!)
+        .digest("hex");
+      return (
+        digest === draft.canonicalExport!.current?.[name] ||
+        digest === draft.canonicalExport!.previous?.[name]
+      );
+    })
+  )
+    return state;
   const manifest = parseJsonObject(
     contents[0]!,
     "previous scan draft manifest",
   );
-  const findings = parseJsonObject(
-    contents[1]!,
-    "previous scan draft findings",
-  );
-  const coverage = parseJsonObject(
-    contents[2]!,
-    "previous scan draft coverage",
-  );
-  return {
-    digest,
-    input: savedDraft(context, {
-      manifest,
-      findings,
-      coverage,
-    } as unknown as PreparedScanDraft),
-  };
+  // Older snapshots lack export digests. Preserve their matching-envelope
+  // fallback; current snapshots admit authored changes without timestamp rules.
+  if (
+    draft !== undefined &&
+    !draft.canonicalExport &&
+    (!isObject(manifest.scan) ||
+      manifest.scan.completedAt == null ||
+      manifest.scan.completedAt !==
+        (draft.manifest.scan as JsonObject)["completedAt"])
+  )
+    return state;
+  const canonical = savedDraft(context, {
+    manifest,
+    findings: parseJsonObject(contents[1]!, "previous scan draft findings"),
+    coverage: parseJsonObject(contents[2]!, "previous scan draft coverage"),
+  } as unknown as PreparedScanDraft);
+  drafts.push({
+    input: canonical,
+    name: "scan-manifest.json",
+    modifiedMs: Math.max(...files.map((file) => file!.modifiedMs)),
+  });
+  state.input ??= canonical;
+  return state;
 }
 
 async function readPendingCheckpoints(
   context: ArtifactContext,
   acknowledged: readonly unknown[],
-): Promise<Array<{ name: string; input: ScanDraftInput }>> {
+): Promise<SavedDraftRecord[]> {
   let directory = await requireArtifactRoot(
     context.root,
     "pending scan checkpoints",
@@ -628,7 +704,7 @@ async function readPendingCheckpoints(
     (left, right) =>
       right.modifiedMs - left.modifiedMs || right.name.localeCompare(left.name),
   );
-  return checkpoints.map(({ name, input }) => ({ name, input }));
+  return checkpoints;
 }
 
 function savedDraft(
@@ -670,8 +746,19 @@ async function readOptionalArtifactText(
   context: ArtifactContext,
   components: readonly string[],
 ): Promise<string | undefined> {
+  return (await readOptionalArtifact(context, components))?.contents;
+}
+
+async function readOptionalArtifact(
+  context: ArtifactContext,
+  components: readonly string[],
+): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactText(context, components, "previous scan draft");
+    return await readArtifactTextWithMetadata(
+      context,
+      components,
+      "previous scan draft",
+    );
   } catch (error) {
     if (
       error instanceof Error &&

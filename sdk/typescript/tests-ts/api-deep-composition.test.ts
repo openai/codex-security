@@ -87,6 +87,8 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
   let stopAfterSealing: "deep" | "standard" | undefined;
   let stopCommand = "complete-scan";
   let publicationFails = false;
+  let finalPublicationFailure:
+    "prepare-scan-completion" | "complete-scan" | undefined;
   let childProjectionFails = false;
   let runMustNotStart = false;
   let repositoryFindings: JsonObject[] | undefined;
@@ -114,6 +116,7 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
   let reducerFailure: Error | undefined;
   let mergeDuplicates = false;
   let afterParentFailure: (() => Promise<void>) | undefined;
+  let afterParentCompletion: (() => Promise<void>) | undefined;
   let firstChild: string | undefined;
   let firstChildEmpty = false;
   let firstChildCompleted:
@@ -189,6 +192,13 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
         runWorkbench: async (options, args, input) => {
           commands.push(args[0]!);
           if (
+            args[0] === finalPublicationFailure &&
+            records.get(args[2]!)?.mode === "deep"
+          ) {
+            finalPublicationFailure = undefined;
+            throw new Error("Synthetic transient final publication failure");
+          }
+          if (
             (interruptedPublication === "draft" &&
               args[0] === "write-scan-draft" &&
               records.get(args[2]!)?.mode === "deep") ||
@@ -228,6 +238,15 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
           )
             throw new Error("Synthetic publication failure");
           const result = await runWorkbench(options, args, input);
+          if (
+            args[0] === "complete-scan" &&
+            records.get(args[2]!)?.mode === "deep" &&
+            afterParentCompletion
+          ) {
+            const afterCompletion = afterParentCompletion;
+            afterParentCompletion = undefined;
+            await afterCompletion();
+          }
           if (args[0] === "complete-scan" && args[2] === firstChild)
             firstChildCompleted?.resolve();
           if (args[0] === "fail-scan" && records.get(args[2]!)?.mode === "deep")
@@ -522,8 +541,14 @@ async function fixture(partialCheckpoint?: "active" | "completed") {
     failPublication(value: boolean) {
       publicationFails = value;
     },
+    failFinalPublication(command: NonNullable<typeof finalPublicationFailure>) {
+      finalPublicationFailure = command;
+    },
     failChildProjection(value: boolean) {
       childProjectionFails = value;
+    },
+    afterCompletion(callback: () => Promise<void>) {
+      afterParentCompletion = callback;
     },
     cancellation,
     publicationFailure: () => publicationFailure,
@@ -1057,6 +1082,125 @@ test("accepted publication failure remains resumable without repeating child wor
     resumeScanId: parentId,
   });
   expect(result.findings.findings).toHaveLength(2);
+  expect(h.launches).toHaveLength(3);
+});
+
+test.each([
+  { resumed: false, command: "prepare-scan-completion" },
+  { resumed: true, command: "prepare-scan-completion" },
+  { resumed: false, command: "complete-scan" },
+  { resumed: true, command: "complete-scan" },
+] as const)(
+  "final Deep publication can retry accepted work (%p)",
+  async ({ resumed, command }) => {
+    const h = await fixture();
+    const options = { ...h.options, knowledgeBasePaths: undefined };
+    let resumeScanId: string | undefined;
+    if (resumed) {
+      h.stopBeforeSealing("deep");
+      await using first = h.makeClient();
+      await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+        ScanTransportClosedError,
+      );
+      resumeScanId = [...h.records].find(
+        ([, record]) => record.mode === "deep",
+      )![0];
+    }
+
+    h.failFinalPublication(command);
+    await using interrupted = h.makeClient();
+    const failure = await interrupted
+      .run(h.repository, { ...options, signal: undefined, resumeScanId })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "Synthetic transient final publication failure",
+    );
+    const [parentId, parent] = [...h.records].find(
+      ([, record]) => record.mode === "deep",
+    )!;
+    const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+      "get-scan",
+      "--scan-id",
+      parentId,
+    ]);
+    expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+      status: "running",
+    });
+    expect(failure).toBeInstanceOf(DeepScanPublicationError);
+    expect(h.commands).not.toContain("fail-scan");
+    const accepted = await loadDeepScanCheckpoint(h.outputDir);
+    expect(accepted!.mergedScanIds).toHaveLength(2);
+    expect(accepted!.aggregate!.findings).toHaveLength(2);
+    expect(accepted!.finalCost).toBeDefined();
+    expect(accepted!.finalCost).not.toBeNull();
+    expect(h.launches).toHaveLength(3);
+    const manifest = JSON.parse(
+      await readFile(join(h.outputDir, "scan-manifest.json"), "utf8"),
+    );
+    if (command === "complete-scan") {
+      expect(manifest.scan.sealedAt).toBeString();
+      h.forbidCodex();
+    } else {
+      expect(manifest.scan.sealedAt).toBeUndefined();
+    }
+
+    await using retry = h.makeClient();
+    const result = await retry.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+    expect(result.findings.findings).toHaveLength(2);
+    expect(result.cost).toEqual(accepted!.finalCost!);
+    expect(h.launches).toHaveLength(3);
+    const completed = await runWorkbench(
+      { ...parent.options, signal: undefined },
+      ["get-scan", "--scan-id", parentId],
+    );
+    expect((completed["scan"] as JsonObject)["progress"]).toMatchObject({
+      status: "complete",
+    });
+  },
+);
+
+test("lost final completion response preserves the completed Deep result", async () => {
+  const h = await fixture();
+  const artifacts = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+    "report.md",
+  ];
+  const readArtifacts = () =>
+    Promise.all(artifacts.map((name) => readFile(join(h.outputDir, name))));
+  let sealedArtifacts: Awaited<ReturnType<typeof readArtifacts>> | undefined;
+  h.afterCompletion(async () => {
+    sealedArtifacts = await readArtifacts();
+    throw new Error("Synthetic lost final completion response");
+  });
+  await using first = h.makeClient();
+  await expect(
+    first.run(h.repository, { ...h.options, knowledgeBasePaths: undefined }),
+  ).rejects.toBeInstanceOf(DeepScanPublicationError);
+  const [parentId, parent] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+    "get-scan",
+    "--scan-id",
+    parentId,
+  ]);
+  expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+    status: "complete",
+  });
+  expect(sealedArtifacts).toBeDefined();
+  expect(
+    JSON.parse(sealedArtifacts![0]!.toString()).scan.sealedAt,
+  ).toBeString();
+  expect(await readArtifacts()).toEqual(sealedArtifacts!);
+  expect(h.commands).not.toContain("fail-scan");
+
   expect(h.launches).toHaveLength(3);
 });
 
