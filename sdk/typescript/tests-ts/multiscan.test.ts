@@ -1,3 +1,4 @@
+import { createCliTest, captureCli } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { parseJsonLines, readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
@@ -400,11 +401,11 @@ describe("multiscan", () => {
       `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
     );
     const failure = "Bulk failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     expect(
-      await main(
+      await runCli(
         [
           "bulk-scan",
           paths.input,
@@ -414,8 +415,6 @@ describe("multiscan", () => {
           "1",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         {
           ...deps,
           createSecurity: (config) => ({
@@ -677,13 +676,8 @@ describe("multiscan", () => {
       ["--recover"],
       [paths.input, "--output-dir", paths.output, "--recover"],
     ]) {
-      const error = capture();
-      const code = await main(
-        ["bulk-scan", ...args],
-        capture().stream,
-        error.stream,
-        dependencies(),
-      );
+      const error = captureCli(main, "stderr");
+      const code = await error.run(["bulk-scan", ...args], dependencies());
       expect(code).toBe(2);
       expect(error.text()).toMatch(/recovery requires/i);
     }
@@ -860,12 +854,12 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nsample,${source.path},${source.revision}\n`,
     );
-    const stdout = capture();
-    const stderr = capture();
+    const { runCli } = createCliTest(main);
+
     let scanOptions: unknown;
 
     expect(
-      await main(
+      await runCli(
         [
           "bulk-scan",
           "repositories.csv",
@@ -875,8 +869,6 @@ describe("multiscan", () => {
           "12.5",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           currentDirectory: paths.root,
           onTurn: (_repository, options) => (scanOptions = options),
@@ -885,12 +877,10 @@ describe("multiscan", () => {
     ).toBe(0);
     expect(scanOptions).toMatchObject({ maxCostUsd: 12.5 });
 
-    const invalid = capture();
+    const invalid = captureCli(main, "stderr");
     expect(
-      await main(
+      await invalid.run(
         ["bulk-scan", "--max-cost=0"],
-        capture().stream,
-        invalid.stream,
         dependencies({ currentDirectory: paths.root }),
       ),
     ).toBe(2);
@@ -1222,8 +1212,8 @@ describe("multiscan", () => {
         `id,repository,revision\nsample,${source.path},${source.revision}\n`,
       );
       const outputDir = join(paths.output, "artifacts", "sample", "attempt-1");
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const onRun = mock();
       const arguments_ = [
         "bulk-scan",
@@ -1251,14 +1241,7 @@ describe("multiscan", () => {
         };
       };
 
-      expect(
-        await main(
-          arguments_,
-          stdout.stream,
-          stderr.stream,
-          clientDependencies,
-        ),
-      ).toBe(2);
+      expect(await runCli(arguments_, clientDependencies)).toBe(2);
       expect(onRun).toHaveBeenCalledTimes(1);
       expect(JSON.parse(stdout.text())).toMatchObject({
         total: 1,

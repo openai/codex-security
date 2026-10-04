@@ -2,7 +2,9 @@ import { rejecting } from "./support/errors.js";
 import { resolve } from "node:path";
 import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
+
+import { captureCli, runCapturedCli } from "./support/cli-run.js";
 
 const result = {
   schemaVersion: 1 as const,
@@ -17,7 +19,7 @@ test.each(["latest", "scan_prefix"])(
   "classify-severity accepts saved scan selector %s",
   async (selector) => {
     const deps = dependencies();
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     deps.classifyScanSeverity = async (scanId, options, history, surface) => {
       expect(scanId).toBe(selector);
       expect(options!.rubricPath).toBe(
@@ -35,7 +37,7 @@ test.each(["latest", "scan_prefix"])(
       return result;
     };
     expect(
-      await main(
+      await stdout.run(
         [
           "classify-severity",
           "--scan",
@@ -55,8 +57,6 @@ test.each(["latest", "scan_prefix"])(
           "--reprocess",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -77,10 +77,9 @@ test("classify-severity accepts external scan directories and defaults to existi
     return result;
   };
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["classify-severity", "--scan-dir", "saved scan", "--json"],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(0);
@@ -93,23 +92,13 @@ test("classify-severity rejects missing or conflicting selectors and surfaces SD
   deps.classifyScanSeverity = classifyScanSeverity;
   for (const args of [[], ["--scan", "latest", "--scan-dir", "saved"]]) {
     expect(
-      await main(
-        ["classify-severity", ...args],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
+      await runCapturedCli(main, ["classify-severity", ...args], deps),
     ).toBe(2);
   }
   expect(classifyScanSeverity).toHaveBeenCalledTimes(0);
-  const stderr = capture();
+  const stderr = captureCli(main, "stderr");
   expect(
-    await main(
-      ["classify-severity", "--scan", "latest"],
-      capture().stream,
-      stderr.stream,
-      deps,
-    ),
+    await stderr.run(["classify-severity", "--scan", "latest"], deps),
   ).toBe(2);
   expect(stderr.text()).toBe("codex-security: The scan is incomplete\n");
 });
@@ -131,10 +120,9 @@ test.each([
       return result;
     };
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["classify-severity", "--scan", "latest"],
-        capture().stream,
-        capture().stream,
         deps,
       ),
     ).toBe(expectedCode);
@@ -159,7 +147,8 @@ test("publication forwards selected finding IDs only to Linear", async () => {
     };
   };
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "publish",
         "scan",
@@ -176,13 +165,12 @@ test("publication forwards selected finding IDs only to Linear", async () => {
         "--dry-run",
         "--json",
       ],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(0);
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "publish",
         "scan",
@@ -195,8 +183,6 @@ test("publication forwards selected finding IDs only to Linear", async () => {
         "--finding-id",
         "finding-one",
       ],
-      capture().stream,
-      capture().stream,
       deps,
     ),
   ).toBe(2);

@@ -34,6 +34,11 @@ import {
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
+import {
+  createCliTest,
+  runCapturedCli,
+  captureCli,
+} from "./support/cli-run.js";
 
 async function copyCompletedScan(root: string): Promise<string> {
   const scan = join(root, "scan");
@@ -68,15 +73,13 @@ describe("CLI", () => {
       ["json", '{"documentType":"codex-security.findings"}\n'],
       ["sarif", '{"version":"2.1.0"}\n'],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const deps = dependencies();
       deps.createSecurity = mustNotInitializeCodex;
       expect(
-        await main(
+        await runCli(
           ["export", "scan", "--export-format", format, "--output", "-"],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -99,14 +102,9 @@ describe("CLI", () => {
       return new Uint8Array();
     };
 
-    expect(
-      await main(
-        ["export", "--output", "-"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCapturedCli(main, ["export", "--output", "-"], deps)).toBe(
+      0,
+    );
     expect(exportedScanDir).toBe(scanDir);
   });
 
@@ -123,11 +121,9 @@ describe("CLI", () => {
         exports += 1;
         return undefined;
       };
-      const stdout = capture();
-      const stderr = capture();
-      expect(await main(["export"], stdout.stream, stderr.stream, deps)).toBe(
-        2,
-      );
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["export"], deps)).toBe(2);
       expect(stderr.text()).toBe(
         lookupFails
           ? "codex-security: Synthetic history failure.\n"
@@ -285,8 +281,8 @@ describe("CLI", () => {
 
   test("exports a saved provisional model by scan prefix without starting Codex", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-export-model-"));
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const calls: string[][] = [];
     const deps = dependencies({
       onWorkbench: (args) => {
@@ -310,7 +306,7 @@ describe("CLI", () => {
     };
     try {
       expect(
-        await main(
+        await runCli(
           [
             "export",
             "--scan",
@@ -320,8 +316,6 @@ describe("CLI", () => {
             "--output",
             "-",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -363,21 +357,13 @@ describe("CLI", () => {
     };
     try {
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["export", "saved", "--artifact", "threat-model"],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
-      expect(
-        await main(
-          ["export", "saved"],
-          capture().stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCapturedCli(main, ["export", "saved"], deps)).toBe(0);
       expect(selected).toMatchObject([
         {
           artifact: "threat-model",
@@ -412,14 +398,12 @@ describe("CLI", () => {
         "Markdown stdout cannot",
       ],
     ] as const) {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const deps = dependencies();
       deps.exportFindings = async () => {
         throw new Error("must not export invalid input");
       };
-      expect(
-        await main(["export", ...args], capture().stream, stderr.stream, deps),
-      ).toBe(2);
+      expect(await stderr.run(["export", ...args], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
     }
   });
@@ -791,7 +775,8 @@ describe("CLI", () => {
       const exports = mock<typeof deps.exportFindings>(resolving(undefined));
       deps.exportFindings = exports;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "export",
             "~/scan",
@@ -802,8 +787,6 @@ describe("CLI", () => {
             "--source-root",
             "~/source",
           ],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -827,12 +810,10 @@ describe("CLI", () => {
     const root = await temporaryDirectory("codex-security-export-missing-");
     try {
       const output = join(root, "reports", "results.sarif");
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["export", "scan", "--output", output],
-          capture().stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(2);
@@ -888,10 +869,9 @@ describe("CLI", () => {
           return new TextEncoder().encode('{"version":"2.1.0"}\n');
         };
         expect(
-          await main(
+          await runCapturedCli(
+            main,
             ["export", join(linked, "scan"), "--output", output],
-            capture().stream,
-            capture().stream,
             deps,
           ),
         ).toBe(0);
@@ -970,10 +950,10 @@ describe("CLI", () => {
         linked,
         process.platform === "win32" ? "junction" : "dir",
       );
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
 
       expect(
-        await main(
+        await stderr.run(
           [
             "export",
             scan,
@@ -982,8 +962,6 @@ describe("CLI", () => {
             "--output",
             join(linked, "results.json"),
           ],
-          capture().stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(2);
@@ -1012,7 +990,7 @@ describe("CLI", () => {
         join(repository, "reports"),
         process.platform === "win32" ? "junction" : "dir",
       );
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const deps = dependencies();
       deps.currentDirectory = () => repository;
       deps.exportFindings = async () => {
@@ -1020,15 +998,13 @@ describe("CLI", () => {
       };
 
       expect(
-        await main(
+        await stderr.run(
           [
             "export",
             scan,
             "--output",
             join(repository, "reports", "results.sarif"),
           ],
-          capture().stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -1041,22 +1017,15 @@ describe("CLI", () => {
   });
 
   test("reports strict export failures without a stack trace", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     deps.exportFindings = async () => {
       throw new CodexSecurityError(
         "manifest.scan: SARIF projection requires a sealed scan",
       );
     };
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
       "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
@@ -1064,21 +1033,14 @@ describe("CLI", () => {
   });
 
   test("preserves caught export failures", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     deps.exportFindings = async () => {
       throw new CodexSecurityError(`export failed ${SYNTHETIC_CREDENTIALS}`);
     };
 
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
       `codex-security: export failed ${SYNTHETIC_CREDENTIALS}\n`,

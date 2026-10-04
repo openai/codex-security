@@ -7,14 +7,14 @@ import { main } from "../src/cli.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
-import {
-  capture,
-  dependencies,
-  fakeResult,
-  fakeSecurity,
-} from "./cli-fixtures.js";
+import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "cli-project-config-",
@@ -55,12 +55,12 @@ test.each([
   async (file, modules) => {
     const input = await fixture({});
     const args = ["init", ...(file === undefined ? [] : [file]), "--json"];
-    const output = capture();
+    const output = captureCli(main, "stdout");
     const deps = dependencies({
       currentDirectory: input.root,
       onConfig: throwing("No runtime for init"),
     });
-    expect(await main(args, output.stream, capture().stream, deps)).toBe(0);
+    expect(await output.run(args, deps)).toBe(0);
     const path = join(input.root, file ?? "codex-security.yaml");
     expect(JSON.parse(output.text())).toEqual({ path });
     const selected = await readProjectConfig(path);
@@ -68,7 +68,7 @@ test.each([
       $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
     });
     const contents = await readFile(path, "utf8");
-    expect(await main(args, capture().stream, capture().stream, deps)).toBe(2);
+    expect(await runCapturedCli(main, args, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
   },
 );
@@ -91,12 +91,10 @@ test("info resolves a config and its sources without a target, prompt reads, or 
     join(home, "codex-security", "config.toml"),
     "[deep_scan]\nsubagents = 1\n",
   );
-  const stdout = capture();
+  const stdout = captureCli(main, "stdout");
   expect(
-    await main(
+    await stdout.run(
       ["info", "-c", input.config, "--json"],
-      stdout.stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.configDirectory,
         environment: { CODEX_HOME: home },
@@ -127,12 +125,10 @@ test("info resolves a config and its sources without a target, prompt reads, or 
 
 test("info without a file reports default sources, including unset settings", async () => {
   const input = await fixture({});
-  const stdout = capture();
+  const stdout = captureCli(main, "stdout");
   expect(
-    await main(
+    await stdout.run(
       ["info", "--json", "--filter-output", "configuration"],
-      stdout.stream,
-      capture().stream,
       dependencies({ currentDirectory: input.root }),
     ),
   ).toBe(0);
@@ -166,10 +162,9 @@ test("an explicit config flag overrides the operator-selected environment file",
   ] as const) {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["scan", ...flags, "--json"],
-        capture().stream,
-        capture().stream,
         dependencies({
           currentDirectory: input.repository,
           environment: { CODEX_SECURITY_PROJECT_CONFIG: input.config },
@@ -190,7 +185,8 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
     });
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         [
           "scan",
           input.repository,
@@ -201,8 +197,6 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
             ? []
             : ["--cyber-access-program", override]),
         ],
-        capture().stream,
-        capture().stream,
         dependencies({
           currentDirectory: input.repository,
           onTurn,
@@ -218,10 +212,9 @@ test("a missing operator-selected environment file fails without falling back", 
   const input = await fixture({});
   const onConfig = mock();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["scan", "--json"],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         environment: {
@@ -241,12 +234,10 @@ test.each([123, "", "   "])(
       codex: { profile: "selected", profiles: { selected: { model } } },
     });
     const onConfig = mock();
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           currentDirectory: input.repository,
           onConfig,
@@ -264,13 +255,11 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   const input = await fixture({});
   const prompt = join(input.root, "empty.md");
   await writeFile(prompt, " \n");
-  const stderr = capture();
+  const stderr = captureCli(main, "stderr");
   const onConfig = mock();
   expect(
-    await main(
+    await stderr.run(
       ["scans", "rerun", "saved", "--scan-prompt-file", prompt, "--json"],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.root,
         onWorkbench: async () => ({
@@ -307,11 +296,9 @@ test.each(["instructions_file", "validation_file"] as const)(
       `id,repository,revision\nsource,${input.repository},${"a".repeat(40)}\n`,
     );
     const onConfig = mock(throwing("Runtime must not start"));
-    const stderr = capture();
-    const exit = await main(
+    const stderr = captureCli(main, "stderr");
+    const exit = await stderr.run(
       ["bulk-scan", csv, "-c", input.config, "--json"],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -420,8 +407,8 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     "3",
     "--json",
   ];
-  const output = capture();
-  expect(await main(args, output.stream, capture().stream, deps)).toBe(1);
+  const output = captureCli(main, "stdout");
+  expect(await output.run(args, deps)).toBe(1);
   expect(JSON.parse(output.text())).toMatchObject({
     completed: 2,
     failed: 0,
@@ -445,8 +432,8 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     workers: 2,
     subagents: 0,
   });
-  const resumed = capture();
-  expect(await main(args, resumed.stream, capture().stream, deps)).toBe(1);
+  const resumed = captureCli(main, "stdout");
+  expect(await resumed.run(args, deps)).toBe(1);
   expect(JSON.parse(resumed.text())).toMatchObject({
     skipped: 2,
     policyFailed: true,
@@ -456,8 +443,8 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     input.config,
     JSON.stringify({ ...config, policy: { fail_on_severity: "low" } }),
   );
-  const stderr = capture();
-  expect(await main(args, capture().stream, stderr.stream, deps)).toBe(2);
+  const stderr = captureCli(main, "stderr");
+  expect(await stderr.run(args, deps)).toBe(2);
   expect(stderr.text()).toContain("manifest does not match");
   expect(selected).toHaveLength(2);
 });
@@ -491,15 +478,15 @@ test.each(["standard", "deep"] as const)(
       "Validate synthetic boundaries.",
     );
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const result = fakeResult(["high"], "complete", {
       input_tokens: 1250,
       cached_input_tokens: 200,
       output_tokens: 30,
     });
     expect(
-      await main(
+      await runCli(
         [
           "scan-components",
           input.repository,
@@ -510,8 +497,6 @@ test.each(["standard", "deep"] as const)(
           "--headless",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           currentDirectory: input.root,
           result,
@@ -559,13 +544,11 @@ test("actual CLI parsing preserves file values when flags are absent", async () 
   });
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   expect(
-    await main(
+    await runCli(
       ["scan", "-c", input.config, "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.repository,
         environment: { OPENAI_API_KEY: "synthetic-test-key" },
@@ -618,7 +601,8 @@ test("CLI values override matching file values, including native objects and lis
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "scan",
         "--config",
@@ -645,8 +629,6 @@ test("CLI values override matching file values, including native objects and lis
         "synthetic_setting.names=[]",
         "--json",
       ],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -692,9 +674,9 @@ test("rerun accepts replacement scan and validation files relative to the invoca
     cyberAccessProgram: "daybreak_blue",
   };
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
-  const stderr = capture();
+  const stderr = captureCli(main, "stderr");
   expect(
-    await main(
+    await stderr.run(
       [
         "scans",
         "rerun",
@@ -705,8 +687,6 @@ test("rerun accepts replacement scan and validation files relative to the invoca
         "validation.md",
         "--json",
       ],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.configDirectory,
         onWorkbench: async () => ({ recipe }),
@@ -748,12 +728,10 @@ test.each([
       scan: { scope: structuredClone(scope) },
     } as ProjectConfigInput);
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scan", "-c", input.config, ...flags, "--json"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           currentDirectory: input.repository,
           onTurn,
@@ -781,12 +759,10 @@ test.each([
   async (flags, message) => {
     const input = await fixture({});
     const onConfig = mock();
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scan", "-c", input.config, ...flags, "--json"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           currentDirectory: input.repository,
           onConfig,
@@ -807,10 +783,9 @@ test("selecting standard mode leaves inactive file deep settings out of the acti
   });
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["scan", "-c", input.config, "--mode", "standard", "--json"],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         onTurn,
@@ -841,7 +816,8 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
   );
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [
         "scan",
         "-c",
@@ -850,8 +826,6 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
         "validate.md",
         "--json",
       ],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         onTurn,
@@ -871,10 +845,9 @@ test("an explicit file can supply the model required by a provider override", as
   });
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -903,7 +876,8 @@ test.each(["file", "CLI"])(
     });
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         [
           "scan",
           "-c",
@@ -913,8 +887,6 @@ test.each(["file", "CLI"])(
           ...(overrideProfile ? ["--codex", 'profile="review"'] : []),
           "--json",
         ],
-        capture().stream,
-        capture().stream,
         dependencies({
           currentDirectory: input.repository,
           onConfig,
@@ -936,13 +908,11 @@ test("an unselected file profile does not satisfy the provider model requirement
       profiles: { review: { model: "synthetic-profile-model" } },
     },
   });
-  const stderr = capture();
+  const stderr = captureCli(main, "stderr");
   const onConfig = mock();
   expect(
-    await main(
+    await stderr.run(
       ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -964,10 +934,9 @@ test.each([
   await writeFile(join(input.repository, "codex-security.yaml"), "scan: [");
   const onConfig = mock();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       [...argv],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -981,12 +950,10 @@ test.each(["--help", "--schema"])(
   "%s does not load even an explicitly selected invalid file",
   async (flag) => {
     const input = await fixture("scan: [");
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["scan", "-c", input.config, flag, "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies({ currentDirectory: input.repository }),
       ),
     ).toBe(0);
@@ -1000,13 +967,11 @@ test.each(["--help", "--schema"])(
 test("a malformed selected file fails before constructing a client", async () => {
   const input = await fixture("scan: [");
   const onConfig = mock();
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   expect(
-    await main(
+    await runCli(
       ["scan", "-c", input.config, "--dry-run", "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         currentDirectory: input.repository,
         onConfig,
@@ -1048,8 +1013,8 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     codex_home: ambient,
     CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
   };
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, runCli } = createCliTest(main);
+
   const createCodex = mock(throwing("No inference in dry-run"));
   const prepareRuntime = mock(rejecting("No runtime in dry-run"));
   const deps = dependencies({
@@ -1062,7 +1027,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     prepareRuntime,
   });
   expect(
-    await main(
+    await runCli(
       [
         "scan",
         "-c",
@@ -1074,8 +1039,6 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
         "--dry-run",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       deps,
     ),
   ).toBe(0);
@@ -1125,7 +1088,7 @@ test.each([
       CODEX_HOME: join(input.root, "ambient"),
       CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
     };
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     const createCodex = mock(throwing("No inference"));
     const prepareRuntime = mock(rejecting("No runtime"));
     const deps = dependencies({
@@ -1138,10 +1101,8 @@ test.each([
       prepareRuntime,
     });
     expect(
-      await main(
+      await stderr.run(
         ["scan", "-c", input.config, "--dry-run", "--json"],
-        capture().stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -1172,10 +1133,9 @@ test("rerun restores all saved deep settings and authentication without loading 
   };
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await main(
+    await runCapturedCli(
+      main,
       ["scans", "rerun", "saved", "--json"],
-      capture().stream,
-      capture().stream,
       dependencies({
         currentDirectory: input.repository,
         environment: {
@@ -1212,13 +1172,11 @@ test.each([
       config: {},
       ...extra,
     };
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     const onRun = mock();
     expect(
-      await main(
+      await stderr.run(
         ["scans", "rerun", "saved", "--json"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           currentDirectory: input.repository,
           onWorkbench: async () => ({ recipe }),

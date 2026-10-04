@@ -16,6 +16,11 @@ import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 function linearIssue(identifier: string, comments: string[] = []) {
   const nodes = comments.map((body, index) => ({
@@ -51,10 +56,10 @@ describe("CLI skill commands", () => {
         await writeFile(file, `${command} file contents\n`);
         let invocation: readonly string[] = [];
         let prompt = "";
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
+
         expect(
-          await main(
+          await runCli(
             [
               command,
               `${command}.txt`,
@@ -62,8 +67,6 @@ describe("CLI skill commands", () => {
               "C:\\tmp\\finding one.txt",
               "\\\\server\\share\\issue.txt",
             ],
-            stdout.stream,
-            stderr.stream,
             dependencies({
               currentDirectory: directory,
               onCodex: (args, output, _environment, input) => {
@@ -128,15 +131,8 @@ describe("CLI skill commands", () => {
             : "",
         );
 
-        const help = capture();
-        expect(
-          await main(
-            [command, "--help"],
-            help.stream,
-            capture().stream,
-            dependencies(),
-          ),
-        ).toBe(0);
+        const help = captureCli(main, "stdout");
+        expect(await help.run([command, "--help"], dependencies())).toBe(0);
         expect(help.text()).toContain(
           `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
@@ -163,7 +159,8 @@ describe("CLI skill commands", () => {
     let environment: NodeJS.ProcessEnv | undefined;
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         [
           "patch",
           "--linear-issue",
@@ -173,8 +170,6 @@ describe("CLI skill commands", () => {
           "--linear-api-key",
           "lin_api_SYNTHETIC_EXPLICIT",
         ],
-        capture().stream,
-        capture().stream,
         dependencies({
           environment: {
             CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
@@ -260,10 +255,9 @@ describe("CLI skill commands", () => {
         }) as typeof filesystem.lstat);
         try {
           expect(
-            await main(
+            await runCapturedCli(
+              main,
               ["patch", selected, "--linear-issue", "SEC-123"],
-              capture().stream,
-              capture().stream,
               dependencies({
                 currentDirectory: repository,
                 environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
@@ -299,7 +293,8 @@ describe("CLI skill commands", () => {
     let inputs: string[] = [];
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         [
           "patch",
           "--linear-project",
@@ -307,8 +302,6 @@ describe("CLI skill commands", () => {
           "--linear-filter",
           '{"labels":{"name":{"eq":"security"}}}',
         ],
-        capture().stream,
-        capture().stream,
         dependencies({
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
           linearClient: ({ accessToken }) => {
@@ -412,12 +405,10 @@ describe("CLI skill commands", () => {
 
     for (const [args, message, environment] of cases) {
       const onCodex = mock<() => number>().mockReturnValue(0);
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           args,
-          capture().stream,
-          stderr.stream,
           dependencies({
             environment: environment ?? {
               CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
@@ -461,12 +452,10 @@ describe("CLI skill commands", () => {
           "linked-finding.txt",
           join("linked-directory", "finding.txt"),
         ]) {
-          const stderr = capture();
+          const stderr = captureCli(main, "stderr");
           expect(
-            await main(
+            await stderr.run(
               [command, input],
-              capture().stream,
-              stderr.stream,
               dependencies({
                 currentDirectory: repository,
                 onCodex,
@@ -483,10 +472,9 @@ describe("CLI skill commands", () => {
           join(linkedDirectory, "finding.txt"),
         ]) {
           expect(
-            await main(
+            await runCapturedCli(
+              main,
               [command, selected],
-              capture().stream,
-              capture().stream,
               dependencies({
                 currentDirectory: repository,
                 onCodex: (_args, output, _environment, input) => {
@@ -564,11 +552,9 @@ describe("CLI skill commands", () => {
     );
     try {
       const onCodex = mock<() => number>().mockReturnValue(0);
-      const stderr = capture();
-      const status = await main(
+      const stderr = captureCli(main, "stderr");
+      const status = await stderr.run(
         ["validate", "finding.txt"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           currentDirectory: root,
           onCodex,
@@ -626,11 +612,9 @@ describe("CLI skill commands", () => {
 
       try {
         const onCodex = mock<() => number>().mockReturnValue(0);
-        const stderr = capture();
-        const status = await main(
+        const stderr = captureCli(main, "stderr");
+        const status = await stderr.run(
           ["validate", "finding.txt"],
-          capture().stream,
-          stderr.stream,
           dependencies({
             currentDirectory: repository,
             onCodex,
@@ -713,10 +697,10 @@ describe("CLI skill commands", () => {
       }
 
       const onCodex = mock<OnCodex>().mockReturnValue(0);
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "validate",
             localFile,
@@ -724,8 +708,6 @@ describe("CLI skill commands", () => {
             ...posixDoubleSlashPaths,
             ...networkPaths,
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             currentDirectory: directory,
             onCodex,
@@ -751,9 +733,9 @@ describe("CLI skill commands", () => {
   test("applies bounded model and reasoning overrides to validation and patching", async () => {
     for (const command of ["validate", "patch"] as const) {
       const onCodex = mock<OnCodex>().mockReturnValue(0);
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           [
             command,
             "a candidate finding",
@@ -762,8 +744,6 @@ describe("CLI skill commands", () => {
             "--codex",
             'model_reasoning_effort="high"',
           ],
-          capture().stream,
-          stderr.stream,
           dependencies({
             onCodex,
           }),
@@ -783,10 +763,9 @@ describe("CLI skill commands", () => {
       );
     const onCodex = mock<OnCodex>().mockReturnValue(0);
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["validate", longLiteral],
-        capture().stream,
-        capture().stream,
         dependencies({
           currentDirectory: process.cwd(),
           onCodex,
@@ -804,12 +783,10 @@ describe("CLI skill commands", () => {
       'model="  "',
     ]) {
       const onCodex = mock<() => number>().mockReturnValue(0);
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["validate", "finding", "--codex", override],
-          capture().stream,
-          stderr.stream,
           dependencies({
             onCodex,
           }),
@@ -845,7 +822,7 @@ describe("CLI skill commands", () => {
             `model_providers.synthetic.${key}=${JSON.stringify(value)}`,
         ),
       ];
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const onCodex = mock<OnCodex>((_args, output, environment) => {
         expect(output?.modelProvider).toBe("synthetic");
         expect(output?.codexOverrides).toMatchObject({
@@ -868,15 +845,13 @@ describe("CLI skill commands", () => {
         return 0;
       });
       expect(
-        await main(
+        await stderr.run(
           [
             command,
             "Synthetic finding",
             ...selection,
             ...overrides.flatMap((override) => ["--codex", override]),
           ],
-          capture().stream,
-          stderr.stream,
           dependencies({
             environment: { SYNTHETIC_GATEWAY_KEY: "SYNTHETIC_VALUE" },
             onCodex,
@@ -910,9 +885,9 @@ describe("CLI skill commands", () => {
         "analytics={enabled=false}",
       ]) {
         let invocation: readonly string[] = [];
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await stderr.run(
             [
               command,
               "Synthetic finding",
@@ -921,8 +896,6 @@ describe("CLI skill commands", () => {
               "--codex",
               override,
             ],
-            capture().stream,
-            stderr.stream,
             dependencies({
               onCodex: (args, output) => {
                 invocation = args;
@@ -956,9 +929,9 @@ describe("CLI skill commands", () => {
         "analytics.enabled=false",
       ]) {
         const onCodex = mock<() => number>().mockReturnValue(0);
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await stderr.run(
             [
               command,
               "Synthetic finding",
@@ -968,8 +941,6 @@ describe("CLI skill commands", () => {
                 ? ["--codex", "analytics.enabled=true"]
                 : []),
             ],
-            capture().stream,
-            stderr.stream,
             dependencies({
               onCodex,
             }),
@@ -986,9 +957,9 @@ describe("CLI skill commands", () => {
     async (command) => {
       for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
         let invocation: readonly string[] = [];
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await stderr.run(
             [
               command,
               "a candidate finding",
@@ -998,8 +969,6 @@ describe("CLI skill commands", () => {
               "--effort",
               "max",
             ],
-            capture().stream,
-            stderr.stream,
             dependencies({
               onCodex: (args, output) => {
                 invocation = args;
@@ -1043,12 +1012,10 @@ describe("CLI skill commands", () => {
         [["--model"], "Missing value for flag: --model"],
       ] as const) {
         const onCodex = mock<() => number>().mockReturnValue(0);
-        const invalidStderr = capture();
+        const invalidStderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await invalidStderr.run(
             [command, "a candidate finding", ...options],
-            capture().stream,
-            invalidStderr.stream,
             dependencies({
               onCodex,
             }),
@@ -1072,12 +1039,10 @@ describe("CLI skill commands", () => {
       ];
       for (const [input, expected] of invalidInputs) {
         const onCodex = mock<() => number>().mockReturnValue(0);
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await stderr.run(
             ["validate", input!],
-            capture().stream,
-            stderr.stream,
             dependencies({
               currentDirectory: directory,
               onCodex,
@@ -1107,10 +1072,9 @@ describe("CLI skill commands", () => {
       ]) {
         let received: string[] = [];
         expect(
-          await main(
+          await runCapturedCli(
+            main,
             ["validate", ...inputs],
-            capture().stream,
-            capture().stream,
             dependencies({
               currentDirectory: directory,
               onCodex: (args, _output, _environment, input) => {

@@ -16,6 +16,7 @@ import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -118,8 +119,10 @@ async function runWorkflow(
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
 ) {
-  const stdout = capture();
-  const stderr = capture(options.interactive);
+  const { stdout, stderr, runCli } = createCliTest(main, {
+    stderr: options.interactive,
+  });
+
   const current = dependencies({
     currentDirectory: CURRENT_REPOSITORY,
     onCodex: (args, output) => {
@@ -136,7 +139,7 @@ async function runWorkflow(
   }
   options.configure?.(current);
   return {
-    exitCode: await main(arguments_, stdout.stream, stderr.stream, current),
+    exitCode: await runCli(arguments_, current),
     stdout: stdout.text(),
     stderr: stderr.text(),
   };
@@ -147,8 +150,8 @@ describe("scan and patch workflow", () => {
     "shows progress during baseline preparation and cleans up on failure: %p",
     async (failSnapshot) => {
       const result = resultWithFindings(["high"]);
-      const stdout = capture();
-      const stderr = capture(true);
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+
       let snapshotHadProgress = false;
       let resultSnapshotHadProgress = false;
       let modelStarted = false;
@@ -178,10 +181,8 @@ describe("scan and patch workflow", () => {
       current.setInterval = setInterval;
       current.clearInterval = clearInterval;
 
-      const status = await main(
+      const status = await runCli(
         ["scan", "--patch", "--patch-severity", "high"],
-        stdout.stream,
-        stderr.stream,
         current,
       );
 
@@ -247,8 +248,8 @@ describe("scan and patch workflow", () => {
     async (title) => {
       const result = resultWithFindings(["high"]);
       result.findings.findings[0]!.title = title;
-      const stdout = capture();
-      const stderr = capture(true);
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
       const current = dependencies({
@@ -267,12 +268,7 @@ describe("scan and patch workflow", () => {
       current.clearInterval = () => {};
 
       expect(
-        await main(
-          ["patch", "--scan", "scan-1", "--json"],
-          stdout.stream,
-          stderr.stream,
-          current,
-        ),
+        await runCli(["patch", "--scan", "scan-1", "--json"], current),
       ).toBe(0);
 
       const frames = stripVTControlCharacters(stderr.text())
@@ -292,8 +288,8 @@ describe("scan and patch workflow", () => {
       ["patch", "--scan", "scan-1", "--json"],
     ]) {
       const result = resultWithFindings(["high", "high"]);
-      const stdout = capture();
-      const stderr = capture(true);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
       let now = 0;
       let index = 0;
       const timers = new Map<NodeJS.Timeout, () => void>();
@@ -342,10 +338,7 @@ describe("scan and patch workflow", () => {
         timers.delete(timer);
       };
 
-      expect(
-        await main(args, stdout.stream, stderr.stream, current),
-        stderr.text(),
-      ).toBe(0);
+      expect(await runCli(args, current), stderr.text()).toBe(0);
       expect(index).toBe(2);
       expect(timers.size).toBe(0);
       const progress = stderr.text();

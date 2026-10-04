@@ -1,3 +1,8 @@
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
@@ -31,7 +36,7 @@ import {
   type PublishedScanIssue,
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { execNodePython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -403,14 +408,9 @@ describe("database-backed Linear publication integration", () => {
       "--json",
     ];
     const run = async (flags: string[] = []) => {
-      const stdout = capture();
-      const stderr = capture();
-      const code = await main(
-        [...command, ...flags],
-        stdout.stream,
-        stderr.stream,
-        cli,
-      );
+      const { stdout, runCli } = createCliTest(main);
+
+      const code = await runCli([...command, ...flags], cli);
       return { code, result: JSON.parse(stdout.text()) as PublishScanResult };
     };
 
@@ -432,11 +432,11 @@ describe("database-backed Linear publication integration", () => {
       checkScanPublicationInternal(directory, options, {
         environment: localEnvironment,
       });
-    const checkOutput = capture();
+    const checkOutput = captureCli(main, "stdout");
     const database = join(completed.stateDirectory, "workbench.sqlite3");
     const before = sha256(await readFile(database));
     expect(
-      await main(
+      await checkOutput.run(
         [
           "publish",
           "check",
@@ -449,8 +449,6 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.projectId,
           "--json",
         ],
-        checkOutput.stream,
-        capture().stream,
         checkCli,
       ),
     ).toBe(0);
@@ -505,8 +503,8 @@ describe("database-backed Linear publication integration", () => {
       ...completed.environment,
       CODEX_SECURITY_LINEAR_API_KEY: key,
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, runCli } = createCliTest(main);
+
     const created: string[] = [];
     const cli = dependencies({ environment });
     type LinearClient = ReturnType<
@@ -550,7 +548,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -561,8 +559,6 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.teamId,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         cli,
       ),
     ).toBe(0);
@@ -595,8 +591,8 @@ describe("database-backed Linear publication integration", () => {
   test("publishes 23 sealed findings through a durable handoff without Codex JSON", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const progress: PublishScanProgress[] = [];
     const cli = dependencies({ environment: completed.environment });
     let sdkResult: PublishScanResult | undefined;
@@ -685,7 +681,7 @@ describe("database-backed Linear publication integration", () => {
     };
 
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -698,8 +694,6 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.projectId,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         cli,
       ),
     ).toBe(0);
@@ -755,8 +749,8 @@ describe("database-backed Linear publication integration", () => {
   test("retains team-only database-backed partial successes when a later batch fails", async () => {
     const completed = await fixture(22);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const cli = dependencies({ environment: completed.environment });
     cli.publishScan = async (directory, options) =>
       await publishScanInternal(directory, options, {
@@ -791,7 +785,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -802,8 +796,6 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.teamId,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         cli,
       ),
     ).toBe(2);
@@ -841,8 +833,8 @@ describe("database-backed Linear publication integration", () => {
   test("keeps SQLite-backed Linear issues successful when their optional receipt cannot be saved", async () => {
     const completed = await fixture(2);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const cli = dependencies({ environment: completed.environment });
     let publicationAttempts = 0;
 
@@ -873,7 +865,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -886,8 +878,6 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.projectId,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         cli,
       ),
     ).toBe(0);
@@ -933,8 +923,8 @@ describe("database-backed Linear publication integration", () => {
       }
       const storedBefore = storedPublications(completed);
       const pending = completed.findings[Number(skipExisting)]!;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const cli = dependencies({ environment: completed.environment });
       let handoffFile = "";
       let handoffLine = "";
@@ -984,7 +974,7 @@ describe("database-backed Linear publication integration", () => {
         });
 
       expect(
-        await main(
+        await runCli(
           [
             "publish",
             "scan",
@@ -998,8 +988,6 @@ describe("database-backed Linear publication integration", () => {
             ...(skipExisting ? ["--skip-existing"] : []),
             "--json",
           ],
-          stdout.stream,
-          stderr.stream,
           cli,
         ),
       ).toBe(2);
@@ -1121,10 +1109,9 @@ describe("database-backed Linear publication integration", () => {
       };
 
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["publish", "scan", "completed-scan", "--to", "linear"],
-          capture().stream,
-          capture().stream,
           cli,
         ),
       ).toBe(130);
@@ -1191,10 +1178,9 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
     try {
       expect(
         await Promise.race([
-          main(
+          runCapturedCli(
+            main,
             ["publish", "scan", completed.scanDirectory, "--to", "linear"],
-            capture().stream,
-            capture().stream,
             cli,
           ),
           Bun.sleep(20_000).then(() => -1),
@@ -1228,8 +1214,8 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const signals = new FakeSignals();
     const cli = dependencies({ environment: completed.environment, signals });
     let handoffFile = "";
@@ -1292,7 +1278,7 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
       });
 
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -1305,8 +1291,6 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
           OPTIONS.projectId,
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         cli,
       ),
     ).toBe(130);
