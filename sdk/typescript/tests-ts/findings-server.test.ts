@@ -942,6 +942,74 @@ test("imports persist repository associations and keep untagged findings in expl
   ]);
 });
 
+test.each([
+  undefined,
+  "text/plain;charset=UTF-8",
+  "application/x-www-form-urlencoded",
+  "multipart/form-data; boundary=synthetic-qa",
+])(
+  "rejects non-JSON mutation bodies before side effects: %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const embed = mock(embedder.embed);
+    const base = await start(store, { embed });
+    const existing = [finding(1), finding(2)];
+    expect((await insert(base, existing)).status).toBe(201);
+    embed.mockClear();
+    const writeGroups = spyOn(store, "storeDedupeGroups");
+    try {
+      for (const [path, body] of [
+        ["/v1/bulk/findings", { findings: [finding(3)] }],
+        ["/v1/dedupe-groups", { groups: [existing.map((f) => f.findingId)] }],
+      ] as const) {
+        const response = await fetch(base + path, {
+          method: "POST",
+          headers: {
+            Origin: "null",
+            "Sec-Fetch-Site": "cross-site",
+            ...(mediaType === undefined ? {} : { "Content-Type": mediaType }),
+          },
+          body: Buffer.from(JSON.stringify(body)),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "invalid_request",
+          message: "Request body must use application/json.",
+        });
+      }
+      expect(embed).not.toHaveBeenCalled();
+      expect(writeGroups).not.toHaveBeenCalled();
+      expect(
+        (await (await fetch(base + "/v1/findings")).json()).findings,
+      ).toEqual(existing);
+      expect(await getGroups(base, existing[0]!.findingId)).toEqual([]);
+    } finally {
+      writeGroups.mockRestore();
+    }
+  },
+);
+
+test.each(["application/json", "Application/JSON; charset=UTF-8"])(
+  "accepts JSON mutation bodies with MIME type %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const base = await start(store);
+    const findings = [finding(1), finding(2)];
+    for (const [path, body] of [
+      ["/v1/bulk/findings", { findings }],
+      ["/v1/dedupe-groups", { groups: [findings.map((f) => f.findingId)] }],
+    ] as const) {
+      const response = await fetch(base + path, {
+        method: "POST",
+        headers: { "Content-Type": mediaType },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+    }
+    expect(await getGroups(base, findings[0]!.findingId)).toHaveLength(1);
+  },
+);
+
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
   const { store } = await fixture();
   const embed = mock<() => Promise<never[]>>().mockResolvedValue([]);
@@ -1094,41 +1162,4 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", original.findingId],
     ["repository-history", finding(2).findingId],
   ]);
-});
-
-test("JSON API rejects simple browser POSTs before embedding or storing findings", async () => {
-  const { store } = await fixture();
-  let embedded = 0;
-  const base = await start(store, {
-    async embed(findings) {
-      embedded += findings.length;
-      return embedder.embed(findings);
-    },
-  });
-  const body = JSON.stringify({
-    findings: [finding()],
-    repositoryId: "synthetic-browser-qa",
-  });
-  for (const contentType of [
-    undefined,
-    "text/plain",
-    "application/x-www-form-urlencoded",
-    "multipart/form-data",
-  ]) {
-    const response = await fetch(`${base}/v1/bulk/findings`, {
-      method: "POST",
-      ...(contentType ? { headers: { "Content-Type": contentType } } : {}),
-      body,
-    });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: "invalid_request" });
-  }
-  expect(embedded).toBe(0);
-  const accepted = await fetch(`${base}/v1/bulk/findings`, {
-    method: "POST",
-    headers: { "Content-Type": "Application/JSON; charset=utf-8" },
-    body,
-  });
-  expect(accepted.status).toBe(201);
-  expect(embedded).toBe(1);
 });

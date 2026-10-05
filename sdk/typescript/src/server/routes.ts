@@ -118,14 +118,15 @@ export async function handleFindingsRequest(
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
-  if (
-    request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !==
-    "application/json"
-  ) {
+  const mediaType = request.headers["content-type"]
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (mediaType !== "application/json") {
     request.resume();
     throw new FindingsError(
       "invalid_request",
-      "Request Content-Type must be application/json.",
+      "Request body must use application/json.",
     );
   }
   const chunks: Buffer[] = [];

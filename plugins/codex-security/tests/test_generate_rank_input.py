@@ -26,7 +26,7 @@ def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 def test_cli_loads_preview_helper_with_safe_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-P", str(SCRIPT), "--help"],
+        [sys.executable, "-I", str(SCRIPT), "--help"],
         check=True,
         capture_output=True,
         text=True,

@@ -1478,6 +1478,44 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("info metadata field");
   });
 
+  test.each([
+    { options: [["--format", "json"]] },
+    { options: [["--filter-output", "model,reasoningEffort"]] },
+    { options: [["--token-limit", "4"]] },
+    {
+      options: [
+        ["--token-offset", "1"],
+        ["--token-limit", "4"],
+      ],
+    },
+  ])("accepts equivalent output option forms %j", async ({ options }) => {
+    const separated = captureCli(main, "stdout");
+    const equals = captureCli(main, "stdout");
+    expect(
+      await separated.run(["info", ...options.flat()], dependencies()),
+    ).toBe(0);
+    expect(
+      await equals.run(
+        ["info", ...options.map(([flag, value]) => `${flag}=${value}`)],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(equals.text()).toBe(separated.text());
+    expect(equals.text()).not.toBe("");
+  });
+
+  test.each(["--format", "--filter-output", "--token-limit", "--token-offset"])(
+    "rejects missing values for output option %s",
+    async (flag) => {
+      for (const args of [[flag], [flag, "--json"], [`${flag}=`]]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(await runCli(["info", ...args], dependencies())).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(flag);
+      }
+    },
+  );
+
   test("registers the scoped package as the MCP command", async () => {
     const home = await temporaryDirectory("codex-security-mcp-home-");
     try {
@@ -2520,6 +2558,65 @@ describe("CLI", () => {
         ),
       ).toThrow("--provider conflicts with --codex model_provider");
     }
+  });
+
+  test("ignores override key whitespace and preserves literal string contents", () => {
+    expect(
+      parseCodexOverrides([
+        ' model = "  example  " ',
+        " agents . max_threads = 4",
+      ]),
+    ).toEqual({ model: "  example  ", agents: { max_threads: 4 } });
+    expect(() =>
+      parseCodexOverrides([
+        "agents.max_threads=4",
+        " agents . max_threads = 8",
+      ]),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(["agents=4", " agents . max_threads = 8"]),
+    ).toThrow("Conflicting --codex key");
+    expect(() => parseCodexOverrides([' model = "example"'], "other")).toThrow(
+      "--model conflicts with --codex model",
+    );
+    for (const key of ["agents. .limit", "agents. __proto__ .limit"]) {
+      expect(() => parseCodexOverrides([`${key}=1`])).toThrow(
+        "Invalid --codex key",
+      );
+    }
+  });
+
+  test.each(
+    [
+      ["classify-severity", "--scan", "--rubric", "policy.md"],
+      ["classify-severity", "--scan-dir", "--rubric", "policy.md"],
+      ["classify-severity", "--scan", "latest", "--rubric", "--reprocess"],
+      [
+        "dedupe",
+        "--scan",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+      [
+        "dedupe",
+        "--workflow-id",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+    ].map((args) => ({ args })),
+  )("rejects missing option values before running %j", async ({ args }) => {
+    const deps = dependencies();
+    const unexpected = mock(throwing("Unexpected SDK or workbench call"));
+    deps.classifyScanSeverity = unexpected;
+    deps.classifyScanDirectorySeverity = unexpected;
+    deps.deduplicateScan = unexpected;
+    deps.runWorkbench = unexpected;
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(args, deps)).toBe(2);
+    expect(stderr.text()).toContain("Missing value for flag:");
+    expect(unexpected).not.toHaveBeenCalled();
   });
 
   test("does not echo malformed --codex overrides and accepts large values", () => {

@@ -7,8 +7,10 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from unittest import mock
 
+import pytest
 from test_workbench_db import (
     SCRIPT,
     create_saved_workspace,
@@ -325,3 +327,82 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
     assert started["scan"]["diffTarget"]["baseRevision"] == head
     assert started["scan"]["diffTarget"]["headRevision"] == head
     assert started["workspace"]["diffTarget"] == started["scan"]["diffTarget"]
+
+
+@pytest.mark.parametrize("change_target", [False, True])
+def test_prompt_registration_keeps_existing_scans_readable(
+    tmp_path: Path, change_target: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "fixture.py"
+    source.write_text("original\n")
+    existing = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
+    scan_id = existing["scan"]["scanId"]
+    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_registration_readers")
+    start = namespace["_start_prompt_driven_scan"]
+    real_identity = start.__globals__["scan_target_identity"]
+    hashing = Event()
+    resume = Event()
+    calls = 0
+
+    def pause_second_hash(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            hashing.set()
+            assert resume.wait(20)
+        return real_identity(*args, **kwargs)
+
+    def register():
+        connection = namespace["connect"]()
+        try:
+            return start(
+                connection,
+                argparse.Namespace(
+                    thread_id="thread-prompt-only-scan",
+                    target_path=str(target),
+                    scope=".",
+                    mode="standard",
+                    diff_target_kind=None,
+                    diff_base_revision=None,
+                    diff_head_revision=None,
+                    diff_content_digest=None,
+                    user_context="Inspect authentication boundaries",
+                    user_context_file=None,
+                    target_summary="Prompt-only scan",
+                    scan_root=str(tmp_path / "scans"),
+                    model=None,
+                    reasoning_effort=None,
+                ),
+                headless_standard=False,
+            )
+        finally:
+            connection.close()
+
+    def read_scans():
+        read = run_workbench(state_dir, "get-scan", "--scan-id", str(scan_id))
+        listed = run_workbench(state_dir, "list-scans")
+        assert read["scan"]["scanId"] == scan_id
+        assert any(scan["scanId"] == scan_id for scan in listed["scans"])
+
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+        mock.patch.dict(start.__globals__, {"scan_target_identity": pause_second_hash}),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        registration = pool.submit(register)
+        try:
+            assert hashing.wait(10)
+            pool.submit(read_scans).result(timeout=10)
+            if change_target:
+                source.write_text("changed during registration\n")
+        finally:
+            resume.set()
+        if change_target:
+            with pytest.raises(SystemExit, match="target changed while the scan was starting"):
+                registration.result(timeout=10)
+        else:
+            assert registration.result(timeout=10)["startDisposition"] == "joined"
+    assert calls == 2

@@ -256,11 +256,13 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-Use device authentication on remote or headless machines:
+On remote or headless machines, use device auth if your workspace allows it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
+
+If device auth is disabled, [sign in over SSH](#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -271,6 +273,28 @@ printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
+
+### Remote login with SSH forwarding
+
+Use an SSH tunnel when device auth is disabled.
+
+On your local machine, replace `user@remote-host` with your SSH address and run:
+
+```bash
+ssh -L 1455:localhost:1455 user@remote-host
+```
+
+Run login in that SSH session:
+
+```bash
+npx @openai/codex-security login
+```
+
+Open the sign-in URL in your local browser. Keep SSH connected until login finishes.
+
+See the [authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh).
+
+### Native command authentication and other providers
 
 SDK callers can select native command authentication through
 `codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
@@ -1873,6 +1897,11 @@ cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+CSV escapes spreadsheet formula prefixes and literal leading apostrophes with
+an extra apostrophe; import removes that escape. Older CSV exports cannot
+distinguish some literal apostrophes from escapes. Use the JSON export when
+recovering those values from an older scan. Distinct CSV occurrence IDs are
+retained even when their finding IDs match, including when publishing CSV.
 
 For CI, save output outside the checkout and set a severity threshold:
 
@@ -2174,6 +2203,12 @@ an authenticated proxy. It does not add authentication or broaden the default
 network binding.
 
 ### API
+
+Mutation requests to `POST /v1/bulk/findings` and `POST /v1/dedupe-groups` require
+`Content-Type: application/json`; charset parameters are accepted. Other media
+types, including a missing content type, return HTTP 400 `invalid_request`
+before embedding or storage. The API remains unauthenticated and requires an
+authenticated TLS proxy before sharing access.
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
@@ -2804,6 +2839,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
+Use device login only if your workspace allows it.
 With a published image, run from the Codex Security repository root:
 
 ```bash
