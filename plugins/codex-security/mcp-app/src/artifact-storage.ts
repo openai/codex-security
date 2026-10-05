@@ -111,8 +111,8 @@ async function storageContext(
     root,
     "Temporary artifact storage",
   );
-  const uid = process.getuid?.();
-  if (uid !== undefined && (await fs.lstat(canonicalRoot)).uid !== uid) {
+  const uid = process.geteuid?.();
+  if (uid !== undefined && (await fs.lstat(root)).uid !== uid) {
     throw new Error(
       "Temporary artifact storage must be owned by the current user.",
     );
