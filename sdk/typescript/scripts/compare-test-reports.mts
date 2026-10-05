@@ -94,18 +94,17 @@ function seconds(value: string): number {
 function readReport(path: string): TestReport {
   const parser = new SaxesParser({ xmlns: true, fileName: path });
   let root: SaxesTagNS | undefined;
-  const stack: Array<{ record: TestRecord | undefined }> = [];
+  const stack: Array<TestRecord | undefined> = [];
   const records: TestRecord[] = [];
   const suites: SaxesTagNS[] = [];
   parser.on("opentag", (node) => {
     root ??= node;
     const name = node.uri ? `{${node.uri}}${node.local}` : node.local;
     const parent = stack.at(-1);
-    if (parent?.record) {
-      if (name === "failure" || name === "error")
-        parent.record.status = "failed";
-      else if (name === "skipped" && parent.record.status === "passed")
-        parent.record.status = "skipped";
+    if (parent) {
+      if (name === "failure" || name === "error") parent.status = "failed";
+      else if (name === "skipped" && parent.status === "passed")
+        parent.status = "skipped";
     }
     let record: TestRecord | undefined;
     if (name === "testcase") {
@@ -113,7 +112,7 @@ function readReport(path: string): TestReport {
       records.push(record);
     }
     if (name === "testsuite" || name === "testsuites") suites.push(node);
-    stack.push({ record });
+    stack.push(record);
   });
   parser.on("closetag", () => stack.pop());
   const content = new TextDecoder("utf-8", { fatal: true }).decode(
@@ -121,7 +120,8 @@ function readReport(path: string): TestReport {
   );
   parser.write(content).close();
 
-  const cases = new Map<string, TestStatus>();
+  const identities = new Set<string>();
+  const cases = new Map<string, number>();
   for (const { attributes, status } of records) {
     const identity: TestIdentity = [
       (attributes["file"]?.value ?? "")
@@ -131,11 +131,12 @@ function readReport(path: string): TestReport {
       attributes["name"]?.value ?? "",
     ];
     const key = JSON.stringify(identity);
-    if (cases.has(key))
+    if (identities.has(key))
       throw new Error(
         `${path}: duplicate test identity: ${identity.join(" > ")}`,
       );
-    cases.set(key, status);
+    identities.add(key);
+    cases.set(JSON.stringify([...identity, status]), 1);
   }
   if (!cases.size) throw new Error(`${path}: no test cases`);
   if (
@@ -145,7 +146,7 @@ function readReport(path: string): TestReport {
     throw new Error(`${path}: reported test count does not match test cases`);
   }
   const failed =
-    [...cases.values()].includes("failed") ||
+    records.some(({ status }) => status === "failed") ||
     suites.some((node) =>
       ["failures", "errors"].some(
         (field) => integer(node.attributes[field]?.value ?? "0") !== 0n,
@@ -153,19 +154,12 @@ function readReport(path: string): TestReport {
     );
   if (failed) console.error(`${path}: test run failed`);
   const duration = seconds(root!.attributes["time"]?.value ?? "0");
-  const skipped = [...cases.values()].filter(
-    (status) => status === "skipped",
-  ).length;
+  const skipped = records.filter(({ status }) => status === "skipped").length;
   console.log(
     `| ${basename(path)} | ${cases.size} | ${skipped} | ${duration.toFixed(2)} |`,
   );
   return {
-    cases: new Map(
-      [...cases].map(([identity, status]) => [
-        JSON.stringify([...(JSON.parse(identity) as TestIdentity), status]),
-        1,
-      ]),
-    ),
+    cases,
     duration,
     failed,
   };
@@ -188,7 +182,7 @@ function main(): number {
   }
   if (args.values.help) {
     console.log(
-      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node compare-test-reports.mjs baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
+      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types compare-test-reports.mts baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
     );
     return 0;
   }
