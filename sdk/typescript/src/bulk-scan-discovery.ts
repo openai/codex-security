@@ -325,7 +325,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
   const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {

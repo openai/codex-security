@@ -1840,15 +1840,26 @@ export async function canonicalizeModelSafePath(
 ): Promise<string> {
   const path = resolve(expandHome(input));
   requireModelSafeOutputDir(path);
-  for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+  const canonical = await canonicalConfigPath(path);
+  requireModelSafeOutputDir(canonical);
+  return canonical;
+}
+
+export async function canonicalConfigPath(path: string): Promise<string> {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (true) {
     try {
-      const canonicalAncestor = resolve(ancestor, await realpath(ancestor));
-      const canonical = resolve(canonicalAncestor, relative(ancestor, path));
-      requireModelSafeOutputDir(canonical);
-      return canonical;
+      return join(await realpath(existing), ...missing);
     } catch (error) {
-      if (nodeErrorCode(error) !== "ENOENT") throw error;
-      if (dirname(ancestor) === ancestor) throw error;
+      const parent = dirname(existing);
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+        parent === existing
+      )
+        throw error;
+      missing.unshift(basename(existing));
+      existing = parent;
     }
   }
 }

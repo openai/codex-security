@@ -42,6 +42,7 @@ bashTest(
         ],
         ["pull_request", false, [".github/actionlint.yaml"], "true"],
         ["pull_request", false, [".github/zizmor.yml"], "true"],
+        ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
         ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
         ["pull_request", false, ["README.md"], "false"],
       ] as const) {
