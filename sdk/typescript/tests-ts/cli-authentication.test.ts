@@ -1,4 +1,4 @@
-import { parseJsonLines } from "./support/json.js";
+import { readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -1369,12 +1369,7 @@ describe("skill authentication", () => {
         },
       }),
     );
-    const records = existsSync(log)
-      ? (await readFile(log, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line))
-      : [];
+    const records = existsSync(log) ? await readJsonLines(log) : [];
     if (ambientConfig !== undefined) {
       expect(await readFile(join(ambientHome, "config.toml"), "utf8")).toBe(
         ambientConfig,
@@ -2193,7 +2188,7 @@ describe("skill authentication", () => {
             : "Authentication failed using OPENAI_API_KEY",
         );
       else expect(stderr.text()).toBe("Patch applied. Files changed: 1.\n");
-      const requests = parseJsonLines(await readFile(requestLog, "utf8"));
+      const requests = await readJsonLines(requestLog);
       const methods = requests.map((request) => request.method);
       if (!loginFailure) {
         expect(
@@ -2203,7 +2198,7 @@ describe("skill authentication", () => {
       }
       expect(methods).toEqual([
         "initialize",
-        "notifications/initialized",
+        "initialized",
         ...(usesSessionKey ? ["account/login/start"] : []),
         ...(loginFailure && usesSessionKey ? [] : ["thread/start"]),
         ...(loginFailure ? [] : ["command/exec", "turn/start"]),

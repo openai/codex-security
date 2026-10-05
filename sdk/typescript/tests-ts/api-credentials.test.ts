@@ -10,14 +10,13 @@ import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {

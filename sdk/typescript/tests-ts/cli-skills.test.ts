@@ -955,7 +955,11 @@ describe("CLI skill commands", () => {
   test.each(["validate", "patch", "verify-fix"] as const)(
     "selects the model and reasoning effort directly for %s",
     async (command) => {
-      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+      for (const [model, effort] of [
+        ["gpt-6-astra", "max"],
+        ["gpt-6.1-sol", "max"],
+        ["synthetic-future-model", "synthetic-future-effort"],
+      ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
         expect(
@@ -967,7 +971,7 @@ describe("CLI skill commands", () => {
                 ? ["--model", model]
                 : [`--model=${model}`]),
               "--effort",
-              "max",
+              effort,
             ],
             dependencies({
               onCodex: (args, output) => {
@@ -992,14 +996,11 @@ describe("CLI skill commands", () => {
           stderr.text(),
         ).toBe(0);
         expect(invocation).toContain(`model="${model}"`);
-        expect(invocation).toContain('model_reasoning_effort="max"');
+        expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
       }
 
       for (const [options, message] of [
-        [
-          ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, xhigh, or max",
-        ],
+        [["--effort="], "--effort must not be empty"],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
           "--effort conflicts with --codex model_reasoning_effort",
@@ -1361,6 +1362,7 @@ process.stdout.write(JSON.stringify({
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let initialized = false;
 const item = (threadId, turnId, text, phase = "final_answer") =>
   send({ method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text, phase } } });
 const complete = (threadId, id) =>
@@ -1372,7 +1374,10 @@ lines.on("line", (line) => {
   } else if (request.id === 1 && !request.method) {
     assert.equal(request.error.code, -32601);
     send({ id: 1, result: {} });
+  } else if (request.method === "initialized") {
+    initialized = true;
   } else if (request.method === "thread/start") {
+    assert.equal(initialized, true);
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
     assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
     send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });

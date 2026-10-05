@@ -223,6 +223,7 @@ describe("CLI help", () => {
       for (const command of [
         [],
         ["scan"],
+        ["login"],
         ["publish", "scan"],
         ["scan", "import"],
       ]) {
@@ -244,6 +245,9 @@ describe("CLI help", () => {
       }
       const text = await help(["scan", "--help"], columns);
       expect(text).toMatch(/^  codex-security scan \.(?:\s+#.*)?$/mu);
+      const login = await help(["login", "--help"], columns);
+      expect(login).toMatch(/^    ssh -L 1455:localhost:1455 user@remote$/mu);
+      expect(login).toMatch(/^    codex-security login$/mu);
     },
   );
 });
