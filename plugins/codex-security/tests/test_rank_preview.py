@@ -616,10 +616,33 @@ def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, a
         "return /* one */ /* two */ /=>/;",
         "const ratio = { valueOf() { return 12; } } /* units */ / 2;",
         "const ratio = {} /* scale */ / { valueOf() { return 12 / 2; } };",
+        "const ratio = value\n/* units */ / { valueOf() { return 12 / 2; } };",
+        "return ! /{/.test(input);",
+        "return ! /* reason */ /{/.test(input);",
+        "return !! /* reason */ /{/.test(input);",
+        "return ! /* outer */ ! /* inner */ /{/.test(input);",
+        "return ! // reason \n /{/.test(input);",
+        "if (ready) ! /* reason */ /{/.test(input);",
+        "return 1 + ! /* reason */ /{/.test(input);",
+        "return value / ! /* reason */ /{/.test(input);",
+        "return typeof ! /* reason */ /{/.test(input);",
+        "while (true) { break\n /}/.test('x'); }",
+        "while (true) { break\n /* note */ /}/.test('x'); }",
+        "while (true) { continue\n /}/.test('x'); }",
+        "while (true) { continue\n /* note */ /}/.test('x'); }",
+        "debugger\n /}/.test('x');",
+        "debugger\n /* note */ /}/.test('x');",
+        "let value\n /}/.test('x');",
+        "var value\n /}/.test('x');",
+        "if (ready) {} ! /{/.test(input);",
+        "if (ready) {} /* reason */ ! /{/.test(input);",
+        "if (ready) {} /* reason */ !! /{/.test(input);",
+        "const value = 12\n ! /{/.test(input);",
     ],
 )
+@pytest.mark.parametrize("filename", ["service.js", "service.ts"])
 def test_javascript_comment_context_preserves_the_following_method(
-    tmp_path: Path, statement: str
+    tmp_path: Path, statement: str, filename: str
 ) -> None:
     source = f"""class Service {{
   check() {{ {statement} }} // note
@@ -627,12 +650,45 @@ def test_javascript_comment_context_preserves_the_following_method(
 }}
 """
 
-    preview = generate_preview(tmp_path, "service.js", source)
+    preview = generate_preview(tmp_path, filename, source)
 
     assert preview.splitlines() == [
         "class Service",
         "method Service.check",
         "method Service.authorize",
+    ]
+
+
+@pytest.mark.parametrize(
+    "operand",
+    [
+        "numerator! /* guaranteed */",
+        "numerator!! /* guaranteed */",
+        "numerator!\n/* guaranteed */",
+        "numerator /* first */ ! /* guaranteed */",
+        "12! /* guaranteed */",
+        '"12"! /* guaranteed */',
+        "`12`! /* guaranteed */",
+        "/12/! /* guaranteed */",
+        "numerator[0]! /* guaranteed */",
+        "numerator()! /* guaranteed */",
+        "{}! /* guaranteed */",
+        "object.return! /* guaranteed */",
+    ],
+)
+def test_typescript_postfix_assertion_preserves_division(tmp_path: Path, operand: str) -> None:
+    source = f"""class Service {{
+  calculate() {{ return {operand} / (() => {{ return count / total; }})(); }}
+  visible() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "service.ts", source)
+
+    assert preview.splitlines() == [
+        "class Service",
+        "method Service.calculate",
+        "method Service.visible",
     ]
 
 

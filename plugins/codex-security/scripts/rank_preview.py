@@ -297,31 +297,48 @@ def javascript_regex_end(
     failed_scans: set[tuple[int, bool]],
     after_control: bool,
     block_comment_starts: dict[int, int],
+    suffix: str,
 ) -> int | None:
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
     previous = start - 1
     skipped_comment = False
+    skipped_bangs = False
     while previous >= 0:
-        if text[previous] in " \t\r\ufeff":
-            previous -= 1
-        elif previous in block_comment_starts:
+        if previous in block_comment_starts:
             previous = block_comment_starts[previous] - 1
             skipped_comment = True
+        elif text[previous] in " \t\r\ufeff" or (
+            text[previous] == "\n" and skipped_comment and not skipped_bangs
+        ):
+            previous -= 1
+        elif (
+            text[previous] == "!" and skipped_comment and suffix in {".cts", ".mts", ".ts", ".tsx"}
+        ):
+            previous -= 1
+            skipped_bangs = True
         else:
             break
     # A comment after an object expression must not turn division into a regex.
     if skipped_comment and previous >= 0 and text[previous] == "}" and not after_control:
         return None
-    if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
-        prefix = text[max(0, previous - 8) : previous + 1]
-        keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
-        if keyword is None:
-            return None
-        if keyword.group() != "=>" and javascript_keyword_has_identifier_prefix(
-            masked, previous + 1 - len(keyword.group())
-        ):
-            return None
+    if skipped_bangs and previous >= 0 and masked[previous] != text[previous]:
+        return None
+    prefix_operators = "=(:,[!&|?{};\n" + ("+-*/%~^<>" if skipped_bangs else "")
+    if not after_control and previous >= 0 and text[previous] not in prefix_operators:
+        if text[max(0, previous - 1) : previous + 1] != "=>":
+            word_start = previous + 1
+            while javascript_identifier_continues(masked, word_start):
+                word_start -= 1
+            keywords = {"case", "return", "throw", "else"}
+            if skipped_comment and "\n" in text[previous + 1 : start]:
+                keywords |= {"break", "continue", "debugger"}
+            if skipped_bangs:
+                keywords |= {"typeof", "void", "delete", "await", "yield", "instanceof", "in"}
+            if "".join(
+                masked[word_start : previous + 1]
+            ) not in keywords or javascript_keyword_has_identifier_prefix(masked, word_start):
+                return None
 
     index = start + 1
     in_character_class = False
@@ -501,7 +518,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 continue
         if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
             regex_end = javascript_regex_end(
-                text, index, masked, failed_regex_scans, after_control, block_comment_starts
+                text, index, masked, failed_regex_scans, after_control, block_comment_starts, suffix
             )
             if regex_end is not None:
                 masked.extend(" " * (regex_end - index))
@@ -539,7 +556,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 )
             if char == ")":
                 after_control = bool(control_parentheses) and control_parentheses.pop()
-            elif not char.isspace() and char != "\ufeff":
+            elif not char.isspace() and char not in "\ufeff!":
                 after_control = False
         if char in {'"', "'", "`"}:
             quote = char
