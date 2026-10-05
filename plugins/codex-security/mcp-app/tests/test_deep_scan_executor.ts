@@ -1118,6 +1118,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         >;
         const serviceTier =
           index === 0 ? undefined : index === 3 ? "flex" : "fast";
+        const instructionsFile =
+          index === 0
+            ? undefined
+            : path.join(fixture.root, `instructions ${index}.md`);
+        const verbosity = [undefined, "low", "medium", "high"][index];
         const entryPath = `${configPath}.${index}`;
         const deepPath = `${entryPath}.deep`;
         const parentSandbox = {
@@ -1157,6 +1162,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           provider,
           providerConfig,
           serviceTier,
+          instructionsFile,
+          verbosity,
           configuration: {
             ...parsedConfiguration,
             ...(index === 0
@@ -1190,6 +1197,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   entry.provider === undefined
                     ? {}
                     : {
+                        model_instructions_file: entry.instructionsFile,
+                        model_verbosity: entry.verbosity,
                         model_provider: entry.provider,
                         model_providers: {
                           [entry.provider]: entry.providerConfig,
@@ -1359,6 +1368,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               model_reasoning_summary: expected,
               model_reasoning_effort: reasoningEffort,
               service_tier: workerConfigurations[index].serviceTier,
+              model_instructions_file:
+                workerConfigurations[index].instructionsFile,
+              model_verbosity: workerConfigurations[index].verbosity,
             });
             assertFlagPair(invocation.argv, "--model", model);
             assert.equal(
@@ -1435,6 +1447,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same isolated provider",
             );
+            assertConfigOverrides(preflight.argv, {
+              model_instructions_file: selectedProvider.instructionsFile,
+              model_verbosity: selectedProvider.verbosity,
+            });
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 preflight.argv.some(
@@ -1485,7 +1501,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\n',
+                  '[worker_runtime]\nmodel_provider = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n',
                 ),
               ]),
             ),

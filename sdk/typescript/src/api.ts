@@ -1326,7 +1326,7 @@ export class CodexSecurity {
           deepScanConfiguration,
           runtime.deepScanConfigPath === undefined
             ? undefined
-            : selectedWorkerProviderConfig(effectiveConfig, modelProvider),
+            : selectedWorkerRuntimeConfig(effectiveConfig, modelProvider),
         );
       }
       checkOpen();
@@ -2285,6 +2285,15 @@ export class CodexSecurity {
                 },
               ),
             environment,
+            config: {
+              codexOverrides: {
+                ...session.preflightConfig,
+                ...selectedWorkerRuntimeConfig(
+                  session.sessionConfig,
+                  modelProvider,
+                ),
+              },
+            },
             model,
             cyberAccessProgram: options.cyberAccessProgram,
             signal,
@@ -4820,14 +4829,20 @@ async function pluginSupportsWorkerProviderSnapshot(
   );
 }
 
-function selectedWorkerProviderConfig(
+function selectedWorkerRuntimeConfig(
   config: JsonObject,
   selectedProvider: unknown,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
+  const resolved = resolveCodexProfile(config);
   const providers = config["model_providers"];
   return {
+    ...Object.fromEntries(
+      ["model_instructions_file", "model_verbosity"]
+        .filter((key) => resolved[key] !== undefined)
+        .map((key) => [key, resolved[key]!]),
+    ),
     ...(provider === undefined ? {} : { model_provider: provider }),
     ...(isRecord(providers)
       ? {

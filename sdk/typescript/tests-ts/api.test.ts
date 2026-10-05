@@ -1708,6 +1708,8 @@ describe("CodexSecurity orchestration", () => {
             "cloud.production": {
               model_reasoning_summary: "concise",
               service_tier: "fast",
+              model_instructions_file: join(root, "profile-instructions.md"),
+              model_verbosity: "high",
             },
           },
         },
@@ -1775,6 +1777,16 @@ describe("CodexSecurity orchestration", () => {
                     subagents: index,
                     stop_after_consecutive_errors: index + 2,
                   });
+                  const workerConfig = parseToml(
+                    await readFile(deepConfigPath, "utf8"),
+                  )["worker_runtime"] as JsonObject;
+                  const profile = resolveCodexProfile(overrides);
+                  for (const key of [
+                    "model_instructions_file",
+                    "model_verbosity",
+                  ]) {
+                    expect(workerConfig[key]).toBe(profile[key]);
+                  }
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;

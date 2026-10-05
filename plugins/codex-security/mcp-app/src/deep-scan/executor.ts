@@ -52,7 +52,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
-  providerOverrides?: string[];
+  configOverrides?: string[];
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
@@ -85,7 +85,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
-      configOverrides.push(...(runtimeSettings.providerOverrides ?? []));
+      configOverrides.push(...(runtimeSettings.configOverrides ?? []));
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -515,8 +515,16 @@ async function workerRuntimeSettings(
   const provider = isRecord(workerConfig)
     ? workerConfig.model_provider
     : undefined;
+  for (const key of ["model_instructions_file", "model_verbosity"]) {
+    const value = isRecord(workerConfig) ? workerConfig[key] : undefined;
+    if (typeof value === "string") {
+      (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
+    }
+  }
   if (typeof provider === "string") {
-    settings.providerOverrides = [`model_provider=${JSON.stringify(provider)}`];
+    (settings.configOverrides ??= []).push(
+      `model_provider=${JSON.stringify(provider)}`,
+    );
   }
   const providers = isRecord(workerConfig)
     ? workerConfig.model_providers
@@ -528,7 +536,7 @@ async function workerRuntimeSettings(
           ? { [provider]: providers[provider] }
           : {}
         : providers;
-    (settings.providerOverrides ??= []).push(
+    (settings.configOverrides ??= []).push(
       `model_providers=${inlineToml(selected)}`,
     );
   }
