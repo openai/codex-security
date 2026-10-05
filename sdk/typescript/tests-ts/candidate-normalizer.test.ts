@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { parseJsonLines } from "./support/json.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -102,10 +103,7 @@ function invoke(
   );
 }
 function ledger(f: Fixture): Row[] {
-  return readFileSync(f.output, "utf8")
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as Row);
+  return parseJsonLines<Row>(readFileSync(f.output, "utf8"));
 }
 afterEach(() => {
   for (const root of roots.splice(0))

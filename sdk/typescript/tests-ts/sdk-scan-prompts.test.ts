@@ -10,8 +10,7 @@ import { completedCodex, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([
@@ -46,7 +45,7 @@ test.each([
             recipe = JSON.parse(input!).recipe;
           return mockWorkbench(args, input);
         },
-        createCodex: completedCodex(root, copyCompletedScan, "thread-1"),
+        createCodex: completedCodex(root, "thread-1"),
       },
     );
     await client.run(

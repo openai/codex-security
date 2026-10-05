@@ -16,8 +16,7 @@ export function afterEach(context: {
   test: PromptfooTest;
 }) {
   const row = context.result;
-  const vars = row.vars || context.test.vars;
-  const caseId = String(vars?.case_id || "");
+  const caseId = String(row.vars.case_id || "");
   const expectedGroundTruth = String(context.test.metadata?.ground_truth || "");
   const output = row.response?.output;
   let status = "model_error";
