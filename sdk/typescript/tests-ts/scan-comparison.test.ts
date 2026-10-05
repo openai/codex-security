@@ -899,7 +899,7 @@ describe("semantic scan comparison", () => {
           ? join(root, " selected home ")
           : root;
       if (home !== root) {
-        await mkdir(home);
+        await mkdir(home, { mode: 0o700 });
         await mkdir(home.trim());
         await writeFile(
           join(home.trim(), "config.toml"),
