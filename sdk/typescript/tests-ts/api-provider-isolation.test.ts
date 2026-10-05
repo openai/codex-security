@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -59,16 +61,7 @@ async function effectiveProvider(
   }
 }
 
-test("concurrent provider snapshots do not inherit another scan's credentials", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const state = join(root, "state");
-  const sharedHome = join(state, "codex-home");
-  await mkdir(repository);
-  await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-  // Initialize native state before the mocked primary scans start concurrently.
-  await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
-
+async function loadWorkerSettings(root: string) {
   const executor = fileURLToPath(
     new URL(
       "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
@@ -96,9 +89,24 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
     pathToFileURL(bundledPath).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      providerOverrides: string[];
+      providerOverrides?: string[];
     }>;
   };
+
+  return workerRuntimeSettings;
+}
+
+test("concurrent provider snapshots do not inherit another scan's credentials", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const state = join(root, "state");
+  const sharedHome = join(state, "codex-home");
+  await mkdir(repository);
+  await mkdir(sharedHome, { recursive: true, mode: 0o700 });
+  // Initialize native state before the mocked primary scans start concurrently.
+  await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
+
+  const workerRuntimeSettings = await loadWorkerSettings(root);
 
   const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
   const clients: TestClient[] = [];
@@ -145,7 +153,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   const actual = await effectiveProvider(
                     environment,
                     repository,
-                    settings.providerOverrides,
+                    settings.providerOverrides ?? [],
                   );
                   expect(actual).toMatchObject(provider);
                   expect(actual.http_headers ?? {}).toEqual(
@@ -187,3 +195,192 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
     await Promise.all(clients.map((client) => client.close()));
   }
 }, 30_000);
+
+test("workers preserve native provider inheritance without an explicit selection", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "native-home");
+  await mkdir(home, { mode: 0o700 });
+  const provider = {
+    name: "Inherited gateway",
+    base_url: "https://inherited.example.test/v1",
+    wire_api: "responses",
+  };
+  await writeFile(
+    join(home, "config.toml"),
+    stringifyToml({
+      model_provider: "inherited.gateway",
+      model_providers: { "inherited.gateway": provider },
+    }),
+  );
+  const snapshot = join(root, "snapshot.toml");
+  const environment = {
+    CODEX_HOME: home,
+    CODEX_SECURITY_CONFIG_PATH: snapshot,
+  };
+  const workerRuntimeSettings = await loadWorkerSettings(root);
+  for (const providers of [
+    undefined,
+    {
+      "inherited.gateway": {
+        ...provider,
+        base_url: "https://selected.example.test/v1",
+      },
+    },
+  ]) {
+    await writeFile(
+      snapshot,
+      stringifyToml(providers ? { model_providers: providers } : {}),
+    );
+    const settings = await workerRuntimeSettings(environment);
+    expect(
+      settings.providerOverrides?.some((value) =>
+        value.startsWith("model_provider="),
+      ),
+    ).not.toBe(true);
+    expect(
+      await effectiveProvider(
+        environment,
+        root,
+        settings.providerOverrides ?? [],
+      ),
+    ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
+  }
+});
+
+const legacyProviders: Array<[string, JsonObject]> = [
+  [
+    "explicit gateway",
+    {
+      model_provider: "openrouter",
+      model_providers: {
+        openrouter: {
+          name: "Synthetic gateway",
+          base_url: "https://gateway.example.test/v1",
+          wire_api: "responses",
+          env_key: "OPENROUTER_API_KEY",
+        },
+      },
+    },
+  ],
+  ["explicit OpenAI", { model_provider: "openai" }],
+  [
+    "profile-selected OpenAI",
+    {
+      profile: "selected",
+      profiles: { selected: { model_provider: "openai" } },
+    },
+  ],
+  [
+    "inherited provider definition",
+    {
+      model_providers: {
+        openai: {
+          name: "Synthetic OpenAI gateway",
+          base_url: "https://gateway.example.test/v1",
+          wire_api: "responses",
+        },
+      },
+    },
+  ],
+];
+test.each(legacyProviders)(
+  "checks older custom worker compatibility before launching %s",
+  async (_name, overrides) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const plugin = join(root, "custom-plugin");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await cp(PLUGIN_ROOT, plugin, { recursive: true });
+    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.codexSecurity;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    let launched = false;
+    const client = new TestClient(
+      { pluginPath: plugin, codexOverrides: overrides },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-openai-key",
+          OPENROUTER_API_KEY: "synthetic-gateway-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          launched = true;
+          throw new Error("unexpected model launch");
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "Update the custom plugin or use the bundled plugin",
+      );
+      expect(launched).toBe(false);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(["standard", "deep", "standard with explicit provider"] as const)(
+  "keeps older custom plugins working for %s scans",
+  async (scenario) => {
+    const mode = scenario === "deep" ? "deep" : "standard";
+    const explicitProvider = scenario === "standard with explicit provider";
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const plugin = join(root, "custom-plugin");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await cp(PLUGIN_ROOT, plugin, { recursive: true });
+    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.codexSecurity;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        ...(explicitProvider ? { codexOverrides: legacyProviders[0]![1] } : {}),
+      },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-openai-key",
+          OPENROUTER_API_KEY: "synthetic-gateway-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const config = parseToml(
+                await readFile(
+                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+              );
+              expect(config["model_provider"]).toBe(
+                explicitProvider ? "openrouter" : undefined,
+              );
+              throw new Error("synthetic compatible scan started");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "synthetic compatible scan started",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);

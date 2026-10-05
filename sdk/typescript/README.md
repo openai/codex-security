@@ -166,6 +166,14 @@ Constructor options:
 | `pythonPath`     | Python interpreter; overrides `PYTHON`.                                 |
 | `codexOverrides` | Supported settings to deep-merge into the isolated Codex configuration. |
 
+Deep Scans with explicit provider selection or provider definitions require a
+plugin that supports per-scan worker provider snapshots. Older custom plugins
+fail before starting model work with an upgrade message; update the plugin or
+omit `pluginPath` to use the bundled version. Older custom plugins remain usable
+for standard scans and Deep Scans that inherit native provider configuration.
+When no provider is selected, discovery, reducer, and resumed workers inherit the
+same native configuration as the parent.
+
 Options for `security.run(repository, options)` and
 `security.preflight(repository, options)`:
 

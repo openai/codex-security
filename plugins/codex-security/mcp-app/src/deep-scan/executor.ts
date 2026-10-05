@@ -497,15 +497,18 @@ async function workerRuntimeSettings(
       : config.model_provider;
   if (typeof provider === "string") {
     settings.providerOverrides = [`model_provider=${JSON.stringify(provider)}`];
-    const providers = config.model_providers;
-    if (isRecord(providers)) {
-      const selected = Object.hasOwn(providers, provider)
-        ? { [provider]: providers[provider] }
-        : {};
-      settings.providerOverrides.push(
-        `model_providers=${inlineToml(selected)}`,
-      );
-    }
+  }
+  const providers = config.model_providers;
+  if (isRecord(providers)) {
+    const selected =
+      typeof provider === "string"
+        ? Object.hasOwn(providers, provider)
+          ? { [provider]: providers[provider] }
+          : {}
+        : providers;
+    (settings.providerOverrides ??= []).push(
+      `model_providers=${inlineToml(selected)}`,
+    );
   }
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {

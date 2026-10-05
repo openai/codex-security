@@ -1118,7 +1118,7 @@ async function testWorkerRuntimeSettings() {
         ].join("\n"),
       );
       const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
-        const provider = index === 0 ? "openai" : "synthetic.gateway";
+        const provider = index === 0 ? undefined : "synthetic.gateway";
         const providerConfig =
           index === 0
             ? undefined
@@ -1140,10 +1140,12 @@ async function testWorkerRuntimeSettings() {
           providerConfig,
           configuration: {
             ...parseToml(configuration),
-            model_provider: provider,
-            model_providers: providerConfig
-              ? { [provider]: providerConfig }
-              : {},
+            ...(provider === undefined
+              ? {}
+              : {
+                  model_provider: provider,
+                  model_providers: { [provider]: providerConfig },
+                }),
           },
         };
       });
@@ -1320,11 +1322,22 @@ async function testWorkerRuntimeSettings() {
               workerConfigurations[index].path,
             );
             const selectedProvider = workerConfigurations[index];
-            assert.ok(
-              invocation.argv.includes(
-                `model_provider=${JSON.stringify(selectedProvider.provider)}`,
-              ),
-            );
+            if (selectedProvider.provider === undefined) {
+              assert.equal(
+                invocation.argv.some(
+                  (arg) =>
+                    arg.startsWith("model_provider=") ||
+                    arg.startsWith("model_providers="),
+                ),
+                false,
+              );
+            } else {
+              assert.ok(
+                invocation.argv.includes(
+                  `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+                ),
+              );
+            }
             if (selectedProvider.providerConfig) {
               const providerOverride = invocation.argv.find((arg) =>
                 arg.startsWith("model_providers="),
@@ -1341,8 +1354,6 @@ async function testWorkerRuntimeSettings() {
                   [selectedProvider.provider]: selectedProvider.providerConfig,
                 },
               );
-            } else {
-              assert.ok(invocation.argv.includes("model_providers={}"));
             }
             assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
             for (const [name, value] of Object.entries(gitEnvironment)) {
@@ -1377,25 +1388,36 @@ async function testWorkerRuntimeSettings() {
               selectedProvider,
               "worker preflight must use the same isolated provider",
             );
-            assert.ok(
-              preflight.argv.includes(
-                `model_provider=${JSON.stringify(selectedProvider.provider)}`,
-              ),
-            );
-            const providerOverride = preflight.argv.find((arg) =>
-              arg.startsWith("model_providers="),
-            );
-            assert.deepEqual(
-              JSON.parse(
-                JSON.stringify(parseToml(providerOverride).model_providers),
-              ),
-              selectedProvider.providerConfig
-                ? {
-                    [selectedProvider.provider]:
-                      selectedProvider.providerConfig,
-                  }
-                : {},
-            );
+            if (selectedProvider.provider === undefined) {
+              assert.equal(
+                preflight.argv.some(
+                  (arg) =>
+                    arg.startsWith("model_provider=") ||
+                    arg.startsWith("model_providers="),
+                ),
+                false,
+              );
+            } else {
+              assert.ok(
+                preflight.argv.includes(
+                  `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+                ),
+              );
+              const providerOverride = preflight.argv.find((arg) =>
+                arg.startsWith("model_providers="),
+              );
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(parseToml(providerOverride).model_providers),
+                ),
+                selectedProvider.providerConfig
+                  ? {
+                      [selectedProvider.provider]:
+                        selectedProvider.providerConfig,
+                    }
+                  : {},
+              );
+            }
             assert.equal(
               workerPermissionProfileOverride(launch.args),
               workerPermissionProfileOverride(workerLaunches[0].args),

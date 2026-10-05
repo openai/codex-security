@@ -65,7 +65,6 @@ import {
   scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
-  type JsonValue,
   type ScanModelConfiguration,
   writeCodexConfig,
 } from "./config.js";
@@ -2751,7 +2750,7 @@ export class CodexSecurity {
     >,
     signal: AbortSignal,
     temporaryRoot?: string,
-    keepCredentialLock = false,
+    deepScan = false,
   ): Promise<PreparedSession> {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
@@ -2826,20 +2825,33 @@ export class CodexSecurity {
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      const providers = effectiveConfig["model_providers"];
+      if (
+        deepScan &&
+        (typeof modelProvider === "string" ||
+          (isRecord(providers) && Object.keys(providers).length > 0)) &&
+        !(await pluginSupportsWorkerProviderSnapshot(runtime.plugin.pluginRoot))
+      ) {
+        throw new CodexSecurityError(
+          "This custom plugin cannot forward per-scan provider settings to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
+        );
+      }
       if (runtime.configPath !== undefined) {
-        const selectedProvider = modelProvider ?? "openai";
-        const providers = effectiveConfig["model_providers"];
         await writeCodexConfig(runtime.configPath, {
           ...preflightConfig,
-          // Workers share the credential home, whose selected provider can change
-          // when another scan starts. Keep their provider in this private file.
-          model_provider: selectedProvider as JsonValue,
-          model_providers:
-            typeof selectedProvider === "string" &&
-            isRecord(providers) &&
-            Object.hasOwn(providers, selectedProvider)
-              ? { [selectedProvider]: providers[selectedProvider]! }
-              : {},
+          ...(typeof modelProvider === "string"
+            ? { model_provider: modelProvider }
+            : {}),
+          ...(isRecord(providers)
+            ? {
+                model_providers:
+                  typeof modelProvider === "string"
+                    ? Object.hasOwn(providers, modelProvider)
+                      ? { [modelProvider]: providers[modelProvider]! }
+                      : {}
+                    : providers,
+              }
+            : {}),
           ...(options.cyberAccessProgram === undefined
             ? {}
             : {
@@ -2880,7 +2892,7 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!keepCredentialLock || runtime.deepScanConfigPath !== undefined) {
+      if (!deepScan || runtime.deepScanConfigPath !== undefined) {
         await releaseCredentialHome?.();
         releaseCredentialHome = null;
       }
@@ -4788,6 +4800,19 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
   }
   return result;
+}
+
+async function pluginSupportsWorkerProviderSnapshot(
+  pluginRoot: string,
+): Promise<boolean> {
+  const manifest: unknown = JSON.parse(
+    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  return (
+    isRecord(manifest) &&
+    isRecord(manifest["codexSecurity"]) &&
+    manifest["codexSecurity"]["workerProviderSnapshot"] === true
+  );
 }
 
 async function pluginSupportsIsolatedDeepScanConfig(

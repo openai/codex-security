@@ -5209,9 +5209,7 @@ describe("CodexSecurity orchestration", () => {
                         "utf8",
                       ),
                     );
-                    expect(workerConfig["model_provider"]).toBe(
-                      provider ?? "openai",
-                    );
+                    expect(workerConfig["model_provider"]).toBe(provider);
                     if (provider !== undefined) {
                       expect(workerConfig["model_providers"]).toEqual({
                         [provider]: OPENROUTER_CODEX_PROVIDER,
