@@ -2671,7 +2671,7 @@ def write_sarif_projection(
 
 def csv_cell(value: Any) -> Any:
     if isinstance(value, str) and (
-        value.startswith(("\t", "\r", "\n"))
+        value.startswith(("'", "\t", "\r", "\n"))
         or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
     ):
         return f"'{value}"

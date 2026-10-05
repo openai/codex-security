@@ -1865,6 +1865,11 @@ cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+CSV escapes spreadsheet formula prefixes and literal leading apostrophes with
+an extra apostrophe; import removes that escape. Older CSV exports cannot
+distinguish some literal apostrophes from escapes. Use the JSON export when
+recovering those values from an older scan. Distinct CSV occurrence IDs are
+retained even when their finding IDs match, including when publishing CSV.
 
 For CI, save output outside the checkout and set a severity threshold:
 
