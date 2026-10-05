@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+export { gitText } from "../../../../plugins/codex-security/mcp-app/scripts/git.mjs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export function bashCommand(): string {
@@ -36,4 +37,35 @@ export function runCommand(
     child.stdin?.on("error", reject);
     child.stdin?.end(input);
   });
+}
+
+export { pythonExecutable } from "./python.js";
+
+export function writeSource(
+  repository: string,
+  path: string,
+  content: string | Buffer,
+): void {
+  const destination = join(repository, path);
+  mkdirSync(dirname(destination), { recursive: true });
+  writeFileSync(destination, content);
+}
+
+export function nodeCommand() {
+  return {
+    command: execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim(),
+  };
+}
+
+export async function readSubprocess(
+  child: Bun.Subprocess<"ignore", "pipe" | "ignore", "pipe">,
+) {
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { status, stdout, stderr };
 }

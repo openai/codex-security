@@ -1,50 +1,9 @@
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
-import subprocess
-import sys
-import uuid
 from pathlib import Path
 
-PLUGIN_DIR = Path(__file__).resolve().parent.parent
-WORKBENCH_SCRIPT = PLUGIN_DIR / "scripts" / "workbench_db.py"
-
-
-def run_workbench(state_dir: Path, *args: str) -> dict[str, object]:
-    completed = subprocess.run(
-        [sys.executable, str(WORKBENCH_SCRIPT), *args],
-        check=True,
-        capture_output=True,
-        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
-        text=True,
-    )
-    return json.loads(completed.stdout)
-
-
-def create_saved_workspace(state_dir: Path, target: Path, mode: str) -> dict[str, object]:
-    workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    return run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        mode,
-    )
+from workbench_test_support import create_saved_git_workspace, run_workbench
 
 
 def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> None:
@@ -56,10 +15,10 @@ def test_scan_context_reports_only_other_running_deep_scans(tmp_path: Path) -> N
         target.mkdir()
 
     workspaces = {
-        name: create_saved_workspace(
+        name: create_saved_git_workspace(
             state_dir,
             target,
-            "standard" if name == "standard" else "deep",
+            mode="standard" if name == "standard" else "deep",
         )
         for name, target in targets.items()
     }

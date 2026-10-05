@@ -1,7 +1,7 @@
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
-  codexSecurityStateDirectory,
+  workbenchEnvironment,
   resolvePluginPython,
   runWorkbench,
 } from "../runtime.js";
@@ -87,13 +87,9 @@ export async function deduplicateScanDirectoryInternal(
 ): Promise<DeduplicateScanResult> {
   options.signal?.throwIfAborted();
   deduplicationConcurrency(options.concurrency);
-  const repository = await normalizeRepository(
-    options.repository,
-    options.signal,
-  );
   return await deduplicateResolvedScan(
     scanDirectory,
-    repository,
+    await normalizeRepository(options.repository, options.signal),
     options.expectedScanId,
     options,
     dependencies,
@@ -117,10 +113,7 @@ export async function deduplicateScanInternal(
     runWorkbench:
       dependencies.runWorkbench ??
       (async (args) => {
-        const stateEnvironment = {
-          ...environment,
-          CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
-        };
+        const stateEnvironment = workbenchEnvironment(environment);
         return await runWorkbench(
           {
             environment: stateEnvironment,

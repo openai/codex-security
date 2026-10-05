@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
@@ -13,6 +13,7 @@ import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { rejecting } from "./support/errors.js";
 
 const servers: Server[] = [];
 const directories: string[] = [];
@@ -130,9 +131,7 @@ async function dashboard(
 test("dashboard serves only findings and groups, and never calls an embedding provider", async () => {
   const { store } = await fixture();
   const base = await start(store, {
-    async embed() {
-      throw new Error("Read-only dashboard called embeddings");
-    },
+    embed: rejecting("Read-only dashboard called embeddings"),
   });
   for (const path of ["/", "/dashboard"]) {
     const redirect = await fetch(`${base}${path}`, { redirect: "manual" });
@@ -503,9 +502,19 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
-test("bulk insert preserves complete findings and embeddings without creating scans", async () => {
+test("bulk insert keeps startup dependencies and complete findings without creating scans", async () => {
   const { store, environment } = await fixture();
-  const base = await start(store);
+  const options = { store, embeddings: embedder, host: "127.0.0.1", port: 0 };
+  const server = await startFindingsServer(options);
+  servers.push(server);
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("No port");
+  const base = `http://127.0.0.1:${address.port}`;
+  options.store = (await fixture()).store;
+  options.embeddings = {
+    embed: rejecting("Replaced server embedder was used"),
+  };
   const findings = [finding(1), finding(2)];
   const log = spyOn(console, "log").mockImplementation(() => undefined);
   try {
@@ -620,9 +629,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
 test("rolls back the entire dedupe batch if a finding is missing and rejects invalid groups", async () => {
   const { store, environment } = await fixture();
   const base = await start(store, {
-    embed: async () => {
-      throw new Error("Grouping must not embed");
-    },
+    embed: rejecting("Grouping must not embed"),
   });
   await store.insert([embedded(1), embedded(2), embedded(3)]);
   const [a, b, c] = [1, 2, 3].map((index) => finding(index).findingId) as [
@@ -899,6 +906,7 @@ test("imports persist repository associations and keep untagged findings in expl
     (
       await fetch(`${base}/v1/bulk/findings`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ findings: [findings[2]] }),
       })
     ).status,
@@ -934,14 +942,79 @@ test("imports persist repository associations and keep untagged findings in expl
   ]);
 });
 
+test.each([
+  undefined,
+  "text/plain;charset=UTF-8",
+  "application/x-www-form-urlencoded",
+  "multipart/form-data; boundary=synthetic-qa",
+])(
+  "rejects non-JSON mutation bodies before side effects: %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const embed = mock(embedder.embed);
+    const base = await start(store, { embed });
+    const existing = [finding(1), finding(2)];
+    expect((await insert(base, existing)).status).toBe(201);
+    embed.mockClear();
+    const writeGroups = spyOn(store, "storeDedupeGroups");
+    try {
+      for (const [path, body] of [
+        ["/v1/bulk/findings", { findings: [finding(3)] }],
+        ["/v1/dedupe-groups", { groups: [existing.map((f) => f.findingId)] }],
+      ] as const) {
+        const response = await fetch(base + path, {
+          method: "POST",
+          headers: {
+            Origin: "null",
+            "Sec-Fetch-Site": "cross-site",
+            ...(mediaType === undefined ? {} : { "Content-Type": mediaType }),
+          },
+          body: Buffer.from(JSON.stringify(body)),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "invalid_request",
+          message: "Request body must use application/json.",
+        });
+      }
+      expect(embed).not.toHaveBeenCalled();
+      expect(writeGroups).not.toHaveBeenCalled();
+      expect(
+        (await (await fetch(base + "/v1/findings")).json()).findings,
+      ).toEqual(existing);
+      expect(await getGroups(base, existing[0]!.findingId)).toEqual([]);
+    } finally {
+      writeGroups.mockRestore();
+    }
+  },
+);
+
+test.each(["application/json", "Application/JSON; charset=UTF-8"])(
+  "accepts JSON mutation bodies with MIME type %s",
+  async (mediaType) => {
+    const { store } = await fixture();
+    const base = await start(store);
+    const findings = [finding(1), finding(2)];
+    for (const [path, body] of [
+      ["/v1/bulk/findings", { findings }],
+      ["/v1/dedupe-groups", { groups: [findings.map((f) => f.findingId)] }],
+    ] as const) {
+      const response = await fetch(base + path, {
+        method: "POST",
+        headers: { "Content-Type": mediaType },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+    }
+    expect(await getGroups(base, findings[0]!.findingId)).toHaveLength(1);
+  },
+);
+
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
   const { store } = await fixture();
-  let calls = 0;
+  const embed = mock<() => Promise<never[]>>().mockResolvedValue([]);
   const base = await start(store, {
-    async embed() {
-      calls++;
-      return [];
-    },
+    embed,
   });
   for (const body of [
     "not json",
@@ -955,6 +1028,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
   ]) {
     const response = await fetch(`${base}/v1/bulk/findings`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body,
     });
     expect(response.status).toBe(400);
@@ -993,7 +1067,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "not_found" });
   }
-  expect(calls).toBe(0);
+  expect(embed).toHaveBeenCalledTimes(0);
 });
 
 test("embedding failure leaves no partial findings or vectors", async () => {
