@@ -270,6 +270,18 @@ def _read_saved_threat_model(
         descriptor = open_scan_local_file_descriptor(scan_dir, filename, "Saved threat model")
         with os.fdopen(descriptor, "rb") as handle:
             contents = handle.read()
+        if sealed_artifact_paths is None:
+            entries = {entry.name: entry for entry in path.parent.iterdir()}
+            if path.name not in entries:
+                path = next(
+                    (
+                        entry
+                        for entry in entries.values()
+                        if entry.name.casefold() == path.name.casefold() and entry.samefile(path)
+                    ),
+                    path,
+                )
+                filename = path.relative_to(scan_dir).as_posix()
         try:
             body = contents.decode("utf-8")
         except UnicodeDecodeError as exc:
