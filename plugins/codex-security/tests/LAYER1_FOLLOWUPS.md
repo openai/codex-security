@@ -11,11 +11,12 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 - **CLI and harness dry runs:** every Python script supports `--help`; major command paths run against temporary repositories and scan bundles without a model call.
 - **Static checks:** Ruff and Python bytecode compilation/import smoke checks cover the plugin scripts and tests.
 - **Golden files:** deterministic repository ranking JSONL output is compared against a checked-in golden file.
+- **Documentation references:** deterministic tests validate plugin-local Markdown paths and anchors without network access.
 
 ## Deferred
 
 - **Strict mypy hard gate:** the current scripts and tests have pre-existing strict-mypy errors. Enable the gate after reducing that baseline to zero; completion means `mypy scripts tests --strict` passes without suppressing real contract errors.
-- **Full documentation reference validation:** add a checker for internal file paths, Markdown anchors, and documented command invocations. Completion means every plugin-local reference resolves and every documented command has a deterministic smoke test.
+- **Documented command validation:** add deterministic smoke coverage for documented command invocations. Completion means every documented plugin command has a matching deterministic smoke test.
 - **Expanded report and SARIF snapshots:** add larger artifact snapshots and platform-specific path portability fixtures. Completion means representative Windows, macOS, and Linux path cases are covered without platform-dependent golden churn.
 - **Automated runtime budget enforcement:** the suite does not track its own historical runtime. Completion means CI records the Layer 1 duration and fails a stable regression threshold before its hard timeout.
 - **Canonical plugin manifest schema:** replace the local manifest contract assertions when a centrally maintained Codex plugin manifest schema becomes available. Completion means this project validates against that schema and only keeps local assertions for Codex Security-specific invariants.
