@@ -87,6 +87,12 @@ describe("findings import formats", () => {
       "'Literal",
       "ordinary λ",
       "=formula",
+      "\u0085=formula",
+      "\u001c=formula",
+      "\u001d=formula",
+      "\u001e=formula",
+      "\u001f=formula",
+      "\uFEFF=formula",
       " +formula",
       "-option",
       "@owner",
@@ -104,7 +110,10 @@ describe("findings import formats", () => {
         summary: value,
         remediation: value,
         locations: [
-          { path: value.replace(/[\t\n]/gu, "") + ".ts", startLine: 1 },
+          {
+            path: value.replace(/[\u0000-\u001F]/gu, "") + ".ts",
+            startLine: 1,
+          },
         ],
       };
       const [imported] = await parseImportedFindings(
@@ -119,6 +128,17 @@ describe("findings import formats", () => {
         locations: source.locations,
       });
     }
+  });
+
+  test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {
+    const title = "'\uFEFF=formula";
+    const [imported] = await parseImportedFindings(
+      CSV_SOURCE.replace("Reported CSV import issue", title),
+      "csv",
+      PLUGIN_ROOT,
+    );
+
+    expect(imported!.title).toBe(title);
   });
 
   test("accepts full findings documents and findings-service payloads", async () => {

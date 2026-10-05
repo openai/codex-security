@@ -10,7 +10,9 @@ import type { Finding, FindingsDocument } from "./models.js";
 export const CSV_TARGET_ID = "codex-security-csv-import";
 export type FindingsImportFormat = "csv" | "json";
 
-const EXPORTED_CSV_ESCAPE = /^'(?:['\t\r\n]|\s*[=+\-@＝＋－＠])/u;
+// Match the Python exporter's str.lstrip(), including its extra C0 separators.
+const EXPORTED_CSV_ESCAPE =
+  /^'(?:['\t\r\n]|[\p{White_Space}\u001c-\u001f]*[=+\-@＝＋－＠])/u;
 const csvFindingRowSchema = z
   .object({
     occurrence_id: z.string().regex(/^occ_[a-f0-9]{24}$/u, {
