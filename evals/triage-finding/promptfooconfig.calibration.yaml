@@ -28,8 +28,8 @@ defaultTest:
     - type: contains-json
       value: file://./schemas/triage-result-v0.schema.json
     - type: javascript
-      value: file://./assertions/triage-io.js
+      value: file://./assertions/triage-io.mts
     - type: javascript
-      value: file://./assertions/calibration-evidence.js
+      value: file://./assertions/calibration-evidence.mts
 
 tests: file://./tests/calibration-oss.yaml
