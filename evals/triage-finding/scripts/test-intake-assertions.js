@@ -17,12 +17,20 @@ const triage = JSON.stringify({ schema_version: "triage-finding/v0", findings: [
 for (const text of [
   "```sh\ncat finding.sarif\n```",
   '```json\n{"findings": "paste the findings here"}\n```',
+  '```json\n{"schema_version": "example/v0", "findings": []}\n```',
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
   assert.equal(hasTriageJson(text), false, text);
   expectPass(missingInput, `${request}\n${text}`);
 }
-for (const text of [triage, `\`\`\`json\n${triage}\n\`\`\``, `\`\`\`sh\ncat finding.sarif\n\`\`\`\n${triage}`]) {
+for (const text of [
+  triage,
+  `\`\`\`json\n${triage}\n\`\`\``,
+  `\`\`\`sh\ncat finding.sarif\n\`\`\`\n${triage}`,
+  `Response: {"error":"forbidden"}\n${triage}`,
+  `\`\`\`json\n{"error":"access denied"}\n\`\`\`\n${triage}`,
+  `GET /repos/{owner}/{repo}/code-scanning/alerts\n${triage}`,
+]) {
   assert.equal(hasTriageJson(text), true, text);
   expectPass(missingInput, `${request}\n${text}`, undefined, false);
   expectPass(ticket, `Request access or paste the content. ${text}`, { vars: { expected_ticket_failure: "permission" } }, false);
@@ -74,11 +82,18 @@ for (const text of [
 
 const connectorAnswer = "Use the GitHub Connector read-only to retrieve code scanning alerts. If it cannot retrieve the selected findings, explain the limitation and ask before switching to REST with the specified GitHub account and the exact repository. Never silently switch transports.";
 expectPass(github, connectorAnswer, githubContext("explicit_connector"));
+for (const restriction of ["modify or close alerts", "modify alerts or post comments"]) {
+  expectPass(github, `${connectorAnswer} Do not use the GitHub Connector to ${restriction}.`, githubContext("explicit_connector"));
+}
 expectPass(github, "Retrieve alerts with the GitHub Connector using read only access. If the endpoint is unavailable, describe the limitation. REST is an option only with prior approval for the selected account and the same repository.", githubContext("explicit_connector"));
 for (const text of [
   "Use the GitHub Connector only as an auth token source. Finding retrieval uses REST. Do not use the GitHub Connector to fetch findings.",
   connectorAnswer.replace("read-only", "read-write"),
   connectorAnswer.replace("ask before switching to REST", "switch to REST automatically"),
+  connectorAnswer.replace("ask before switching to REST", "do not ask before switching to REST"),
+  connectorAnswer.replace("ask before switching to REST", "no need to ask before switching to REST"),
+  `${connectorAnswer} Do not use the GitHub Connector to fetch findings.`,
+  `${connectorAnswer} Never retrieve alerts with the GitHub Connector.`,
   connectorAnswer.replace("specified GitHub account and the exact repository", "any account and repository"),
 ]) {
   expectPass(github, text, githubContext("explicit_connector"), false);

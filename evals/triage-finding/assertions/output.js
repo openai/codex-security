@@ -1,16 +1,9 @@
-const { extractTriageResult } = require("../sastbench/scripts/sastbench-result");
-
 function outputText(output) {
   return typeof output === "string" ? output : JSON.stringify(output);
 }
 
 function hasTriageJson(text) {
-  try {
-    extractTriageResult(text);
-    return true;
-  } catch {
-    return false;
-  }
+  return /"schema_version"\s*:\s*"triage-finding\/v0"/.test(text);
 }
 
 function parseExpected(value, trim = typeof value === "string") {

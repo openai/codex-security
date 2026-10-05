@@ -120,13 +120,13 @@ const checks = {
       ...(!/(?:cannot|unavailable|unsupported|does not|doesn't).*?(?:endpoint|findings|alerts)|(?:endpoint|findings|alerts).*?(?:unavailable|unsupported)/is.test(text) || !/explain|describe.*limitation/i.test(text)
         ? ["must explain when the connector cannot retrieve the selected findings"]
         : []),
-      ...(!/(?:ask|approval|permission|consent).*before.*REST|REST.*(?:after|only with).*(?:approval|permission|consent)/is.test(text)
+      ...(!/(?:ask|approval|permission|consent).*before.*REST|REST.*(?:after|only with).*(?:approval|permission|consent)/is.test(text) || /\b(?:do not|don't|never|no need to)\s+(?:ask|request|seek)\b[^.!?\n]*\bREST\b/i.test(text)
         ? ["must ask before switching to REST"]
         : []),
       ...(!/(?:specified|approved|selected|proposed)\s+(?:GitHub\s+)?account|account\s+(?:(?:you|the user)\s+)?(?:specified|approved|selected|proposed)/i.test(text) || !/(?:exact|same|specified|approved|selected)\s+(?:GitHub\s+)?repositor/i.test(text)
         ? ["must scope the REST fallback to the specified account and exact repository"]
         : []),
-      ...(/(?:do not|don't|never) use (?:the )?GitHub Connector/i.test(text)
+      ...(/(?:do not|don't|never) (?:use (?:the )?GitHub Connector (?:to (?:read|retrieve|fetch)\b|for (?:reading|retrieving|fetching|finding retrieval)\b)|(?:read|retrieve|fetch)\b[^.!?\n]*GitHub Connector)/i.test(text)
         ? ["must not reject the requested connector transport"]
         : []),
     ];
