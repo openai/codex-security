@@ -107,7 +107,17 @@ async function storageContext(
       .catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "EEXIST") throw error;
       });
-  return { ...context, root };
+  const canonicalRoot = await requireArtifactRoot(
+    root,
+    "Temporary artifact storage",
+  );
+  const uid = process.getuid?.();
+  if (uid !== undefined && (await fs.lstat(canonicalRoot)).uid !== uid) {
+    throw new Error(
+      "Temporary artifact storage must be owned by the current user.",
+    );
+  }
+  return { ...context, root: canonicalRoot };
 }
 
 function components(path: string): string[] {

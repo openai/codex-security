@@ -103,6 +103,115 @@ async function connect(overrides = {}) {
 }
 
 try {
+  await test(
+    "temporary artifact operations reject a collection owned by another user",
+    { skip: typeof process.getuid !== "function" },
+    async (t) => {
+      const context = await standaloneArtifactContext(
+        repository,
+        workbench,
+        true,
+        path.join(fixture, "temporary-owner"),
+        "persistent",
+      );
+      const saved = await saveCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: "proof.txt", content: "owned evidence" },
+        workbench,
+      );
+      temporaryDirectories.push(saved.directory);
+      const lstat = fs.lstat;
+      t.mock.method(fs, "lstat", async (value, ...options) => {
+        const metadata = await lstat(value, ...options);
+        return String(value) === saved.directory
+          ? Object.assign(Object.create(metadata), {
+              uid: process.getuid() + 1,
+            })
+          : metadata;
+      });
+      let calls = 0;
+      const run = (...args) => {
+        calls += 1;
+        return workbench(...args);
+      };
+      try {
+        const operations = [
+          () =>
+            saveCodexSecurityArtifact(context, { storage: "temporary" }, run),
+          () =>
+            saveCodexSecurityArtifact(
+              context,
+              {
+                storage: "temporary",
+                path: "proof.txt",
+                content: "replacement",
+              },
+              run,
+            ),
+          () =>
+            readCodexSecurityArtifact(
+              context,
+              { storage: "temporary", path: "proof.txt", encoding: "utf8" },
+              run,
+            ),
+          () =>
+            saveCodexSecurityArtifact(
+              context,
+              {
+                storage: "persistent",
+                path: "artifacts/imported.txt",
+                sourcePath: saved.path,
+              },
+              run,
+            ),
+        ];
+        for (const operation of operations) {
+          await assert.rejects(operation, /owned by the current user/);
+          assert.equal(calls, 0);
+        }
+      } finally {
+        t.mock.restoreAll();
+      }
+      assert.equal(await fs.readFile(saved.path, "utf8"), "owned evidence");
+      await assert.rejects(
+        fs.stat(path.join(context.root, "artifacts/imported.txt")),
+        {
+          code: "ENOENT",
+        },
+      );
+      assert.equal(
+        (
+          await saveCodexSecurityArtifact(
+            context,
+            { storage: "temporary" },
+            workbench,
+          )
+        ).directory,
+        saved.directory,
+      );
+      assert.equal(
+        (
+          await readCodexSecurityArtifact(
+            context,
+            { storage: "temporary", path: "proof.txt", encoding: "utf8" },
+            workbench,
+          )
+        ).content,
+        "owned evidence",
+      );
+      const imported = await saveCodexSecurityArtifact(
+        context,
+        {
+          storage: "persistent",
+          path: "artifacts/imported.txt",
+          sourcePath: saved.path,
+        },
+        workbench,
+      );
+      assert.equal(await fs.readFile(imported.path, "utf8"), "owned evidence");
+    },
+  );
+
   await test("binary imports and readback preserve files larger than the workbench JSON buffer", async () => {
     const call = await connect();
     const location = { targetPath: repository };
