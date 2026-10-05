@@ -111,9 +111,16 @@ describe("security policy generation", () => {
     )
       return;
     const f = await fixture();
+    const pluginRoot = join(f.root, "plugin");
+    await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+    await mkdir(join(pluginRoot, "scripts", "__pycache__"), {
+      recursive: true,
+      mode: 0o700,
+    });
     const previous = process.umask(0o600);
     try {
       await f.generate({
+        pluginRoot,
         run: async (stage) => {
           if (stage !== "architecture")
             expect(
@@ -125,6 +132,9 @@ describe("security policy generation", () => {
     } finally {
       process.umask(previous);
     }
+    await cp(PLUGIN_ROOT, join(f.root, "following-plugin-copy"), {
+      recursive: true,
+    });
     for (const name of await readdir(f.outputDir)) {
       const path = join(f.outputDir, name);
       expect((await stat(path)).mode & 0o600).toBe(0o600);
