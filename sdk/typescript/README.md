@@ -248,11 +248,13 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-Use device authentication on remote or headless machines:
+On remote or headless machines, use device auth if your workspace allows it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
+
+If device auth is disabled, [sign in over SSH](#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -263,6 +265,28 @@ printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
+
+### Remote login with SSH forwarding
+
+Use an SSH tunnel when device auth is disabled.
+
+On your local machine, replace `user@remote-host` with your SSH address and run:
+
+```bash
+ssh -L 1455:localhost:1455 user@remote-host
+```
+
+Run login in that SSH session:
+
+```bash
+npx @openai/codex-security login
+```
+
+Open the sign-in URL in your local browser. Keep SSH connected until login finishes.
+
+See the [authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh).
+
+### Native command authentication and other providers
 
 SDK callers can select native command authentication through
 `codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
@@ -2794,6 +2818,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
+Use device login only if your workspace allows it.
 With a published image, run from the Codex Security repository root:
 
 ```bash

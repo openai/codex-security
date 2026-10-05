@@ -5364,6 +5364,16 @@ export async function main(
     })
     .command("login", {
       description: "Sign in with ChatGPT or store credentials.",
+      hint:
+        "For remote login, use --device-auth if your workspace allows it.\n" +
+        "If device auth is disabled, sign in over SSH:\n" +
+        "  On your local machine (replace user@remote):\n" +
+        "    ssh -L 1455:localhost:1455 user@remote\n" +
+        "  In that SSH session:\n" +
+        "    codex-security login\n" +
+        "  Open the sign-in URL in your local browser.\n" +
+        "  Keep SSH connected until login finishes.\n" +
+        "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5376,7 +5386,7 @@ export async function main(
         deviceAuth: z
           .boolean()
           .default(false)
-          .describe("Use device-code authentication."),
+          .describe("Use device auth if your workspace allows it."),
         withApiKey: z
           .boolean()
           .default(false)
