@@ -125,7 +125,9 @@ async function discover(
   for (const entry of entries) {
     signal?.throwIfAborted();
     const name =
-      process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+      process.platform === "win32" || process.platform === "darwin"
+        ? entry.name.toLowerCase()
+        : entry.name;
     if (name === ".git") continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {

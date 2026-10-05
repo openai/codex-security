@@ -28,6 +28,7 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
@@ -556,8 +557,8 @@ async function startReadOnlyCodexThread(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const sdkConfig = { ...config };
-  if (commandAuth) delete sdkConfig["model_providers"];
+  const sdkConfig = structuredCodexConfig(config);
+  const providerOverrides = modelProviderConfigOverride(providerConfig);
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
@@ -583,8 +584,8 @@ async function startReadOnlyCodexThread(
         environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
         environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
         undefined,
-      ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(providerConfig) }
+      ...(providerOverrides.length > 0
+        ? { configOverrides: providerOverrides }
         : {}),
       config: {
         ...sdkConfig,

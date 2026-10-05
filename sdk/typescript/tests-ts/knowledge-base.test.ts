@@ -64,7 +64,7 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
-  test.each(["win32", "linux"])(
+  test.each(["win32", "darwin", "linux"])(
     "matches case-variant Git metadata using %s filename rules",
     async (platform) => {
       const root = await temporaryDirectory();
@@ -93,7 +93,7 @@ describe("scan knowledge bases", () => {
       );
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout).sort()).toEqual(
-        platform === "win32"
+        platform === "win32" || platform === "darwin"
           ? ["Synthetic guide"]
           : ["Synthetic guide", "Synthetic metadata"],
       );

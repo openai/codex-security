@@ -157,6 +157,15 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
+/** @internal Literal-key tables use generated TOML or raw overrides. */
+export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
+  const structured = { ...config };
+  delete structured["projects"];
+  delete structured["permissions"];
+  delete structured["model_providers"];
+  return structured;
+}
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
   if (value === null)

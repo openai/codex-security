@@ -63,6 +63,7 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
   type ScanModelConfiguration,
@@ -2677,12 +2678,7 @@ export class CodexSecurity {
     if (session.safetyIdentifier !== undefined) {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
-    const sdkCodexConfig = { ...(config ?? sessionConfig) };
-    // Projects and permissions already live in generated TOML files; the SDK
-    // cannot safely encode their path and selector keys as dotted overrides.
-    delete sdkCodexConfig["projects"];
-    delete sdkCodexConfig["permissions"];
-    delete sdkCodexConfig["model_providers"];
+    const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
     const providerOverrides = modelProviderConfigOverride(sessionConfig);
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
