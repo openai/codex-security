@@ -221,7 +221,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
   });
@@ -253,6 +253,14 @@ describe("TypeScript package skeleton", () => {
     expect(testStep.run).toContain('python -m pytest "$PYTHON_TEST_PATH"');
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
+    for (const name of [
+      "Install plugin dependencies",
+      "Build SDK and type-check eval tooling",
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      );
+    }
     expect(jobs["required-test"]?.needs).toContain("plugin-source");
     expect(jobs["windows"]?.needs).toContain("plugin-source");
   });
