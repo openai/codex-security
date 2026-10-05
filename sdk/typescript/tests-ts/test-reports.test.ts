@@ -1,52 +1,15 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  describe,
-  expect,
-  test,
-} from "bun:test";
-import { bashCommand, runCommand } from "./support/shell.js";
+import { afterEach, describe, expect, test } from "bun:test";
+import { bashCommand, readSubprocess } from "./support/shell.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
+// Node 22.13 emits this upstream notice when executing TypeScript directly.
+const typeStrippingNotice =
+  /^(?:\(node:\d+\) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n)?$/u;
+
 const bash = bashCommand();
-const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-let buildRoot: string;
-beforeAll(async () => {
-  buildRoot = await mkdtemp(join(tmpdir(), "codex-security-ci-build-"));
-  const result = await runCommand(
-    "node",
-    [
-      join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
-      "--project",
-      join(packageRoot, "tsconfig.ci.json"),
-      "--outDir",
-      buildRoot,
-    ],
-    { timeout: 30_000 },
-  );
-  expect(result.status, result.stdout + result.stderr).toBe(0);
-  await symlink(
-    join(packageRoot, "node_modules"),
-    join(buildRoot, "sdk", "typescript", "node_modules"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
-}, 30_000);
-afterAll(async () => {
-  if (buildRoot) await rm(buildRoot, { recursive: true, force: true });
-});
-const directories = createTemporaryDirectories({ canonical: false });
+const directories = createTemporaryDirectories(false);
 afterEach(directories.cleanup);
 
 async function fixtures() {
@@ -77,13 +40,8 @@ async function compare(baseline: string, ...candidates: string[]) {
   const child = Bun.spawn({
     cmd: [
       "node",
-      join(
-        buildRoot,
-        "sdk",
-        "typescript",
-        "scripts",
-        "compare-test-reports.mjs",
-      ),
+      "--experimental-strip-types",
+      join(import.meta.dirname, "..", "scripts", "compare-test-reports.mts"),
       baseline,
       ...candidates,
     ],
@@ -91,12 +49,7 @@ async function compare(baseline: string, ...candidates: string[]) {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [status, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { status, stdout, stderr };
+  return readSubprocess(child);
 }
 
 describe("JUnit inventory comparison", () => {
@@ -122,8 +75,8 @@ describe("JUnit inventory comparison", () => {
       "reports/runner-windows-latest-shard-*.xml",
     ];
     const mock = `node() {
-  printf '%s\\n' "$3"
-  [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
+  printf '%s\\n' "$4"
+  [[ "$4" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
 }`;
     const summary = join(fixture.root, "summary.md");
     for (const failedReport of ["", expected[0]!]) {
@@ -141,10 +94,7 @@ describe("JUnit inventory comparison", () => {
         },
         timeout: 10_000,
       });
-      const [status, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(failedReport === "" ? 0 : 1);
       expect((await readFile(summary, "utf8")).trim().split(/\r?\n/u)).toEqual(
         expected,
@@ -161,7 +111,7 @@ describe("JUnit inventory comparison", () => {
     await fixture.report("shard-2.xml", [passed]);
     const result = await compare(baseline, join(fixture.root, "shard-*.xml"));
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toMatch(typeStrippingNotice);
     expect(result.stdout).toBe(
       "| Report | Cases | Skipped | Seconds |\n" +
         "| --- | ---: | ---: | ---: |\n" +
@@ -189,7 +139,7 @@ ${testcase("&#97; &#38; &#x22; &#39; &#60; &#62;")}
     );
     const result = await compare(baseline, candidate);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toMatch(typeStrippingNotice);
   });
 
   test("normalizes report paths and rejects duplicates across candidate files", async () => {
