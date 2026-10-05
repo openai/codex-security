@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import runpy
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,7 +64,7 @@ def test_count_validation_still_rejects_nonintegers(value):
 @pytest.mark.parametrize("absolute", [False, True])
 def test_nonblank_home_preserves_literal_spaces(tmp_path, monkeypatch, absolute):
     monkeypatch.chdir(tmp_path)
-    home = tmp_path / " selected home "
+    home = tmp_path / ("configured home" if sys.platform == "win32" else " selected home ")
     home.mkdir()
     (tmp_path / "selected home").mkdir()
     (home / "config.toml").write_text("# selected configuration\n", encoding="utf-8")
