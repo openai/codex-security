@@ -898,12 +898,15 @@ describe("multiscan", () => {
       NonNullable<MultiscanOptions["onProgress"]>
     >[0][] = [];
 
+    const warnings = [
+      "Could not run post-scan instructions.",
+      "Repository changed during the scan.",
+    ];
     const summary = await runMultiscan(
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
-          scanOptions.onWarning?.("Could not run post-scan instructions.");
-          scanOptions.onWarning?.("Repository changed during the scan.");
+          for (const warning of warnings) scanOptions.onWarning?.(warning);
           return await completedScan(scanOptions.outputDir!);
         }),
         { onProgress: (event) => progress.push(event) },
@@ -917,10 +920,7 @@ describe("multiscan", () => {
       warnings: [
         {
           repository: "follow-up-warning",
-          warnings: [
-            "Could not run post-scan instructions.",
-            "Repository changed during the scan.",
-          ],
+          warnings,
         },
       ],
     });
@@ -934,10 +934,7 @@ describe("multiscan", () => {
       {
         id: "follow-up-warning",
         status: "completed",
-        warnings: [
-          "Could not run post-scan instructions.",
-          "Repository changed during the scan.",
-        ],
+        warnings,
       },
     ]);
 
@@ -959,29 +956,18 @@ describe("multiscan", () => {
       warnings: [
         {
           repository: "follow-up-warning",
-          warnings: [
-            "Could not run post-scan instructions.",
-            "Repository changed during the scan.",
-          ],
+          warnings,
         },
       ],
     });
-    expect(resumedProgress).toEqual(
-      expect.arrayContaining([
-        {
-          repository: "follow-up-warning",
-          attempt: 1,
-          status: "completed",
-          warning: "Could not run post-scan instructions.",
-        },
-        {
-          repository: "follow-up-warning",
-          attempt: 1,
-          status: "completed",
-          warning: "Repository changed during the scan.",
-        },
-      ]),
-    );
+    for (const warning of warnings) {
+      expect(resumedProgress).toContainEqual({
+        repository: "follow-up-warning",
+        attempt: 1,
+        status: "completed",
+        warning,
+      });
+    }
   });
 
   test.each([false, true])(

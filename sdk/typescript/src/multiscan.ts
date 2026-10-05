@@ -107,11 +107,6 @@ export interface MultiscanOptions extends ScanPromptSettings {
   }): void;
 }
 
-export interface MultiscanWarning {
-  repository: string;
-  warnings: string[];
-}
-
 export interface MultiscanResult {
   total: number;
   completed: number;
@@ -119,7 +114,7 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
-  warnings?: MultiscanWarning[];
+  warnings?: { repository: string; warnings: string[] }[];
   policyFailed?: boolean;
 }
 
