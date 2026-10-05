@@ -1821,7 +1821,9 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
-                  expect(config["service_tier"]).toBe(expectedTier);
+                  expect(resolveCodexProfile(config)["service_tier"]).toBe(
+                    expectedTier,
+                  );
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );
