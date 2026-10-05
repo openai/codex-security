@@ -116,6 +116,8 @@
 - update MCP SDK to 1.31.0 for plugin and evals ([#1304](https://github.com/openai/codex-security/pull/1304))
 - pass reasoning effort through to Codex ([#1237](https://github.com/openai/codex-security/pull/1237))
 - include Vyper sources in scan inventories ([#1306](https://github.com/openai/codex-security/pull/1306))
+- refresh eval and MCP dependency resolutions ([#1313](https://github.com/openai/codex-security/pull/1313))
+- pin Codex Security smoke test API endpoint ([#1293](https://github.com/openai/codex-security/pull/1293))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
