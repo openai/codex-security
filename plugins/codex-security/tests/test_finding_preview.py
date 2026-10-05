@@ -4,17 +4,19 @@ import json
 import runpy
 from pathlib import Path
 
+import pytest
+
 FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
 
 
 def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     compact = {
-        "severity": "high",
-        "confidence": 0.9,
+        "severity": {"level": "high", "rationale": "Synthetic impact"},
+        "confidence": {"level": "high", "rationale": "Synthetic validation"},
         "ruleId": "example-rule",
         "status": "validated",
-        "identity": {"id": "example-finding"},
+        "identity": {"anchor": "example-finding"},
     }
     finding = {
         **compact,
@@ -31,6 +33,33 @@ def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
 
     assert {key: bounded[key] for key in compact} == compact
     assert bounded["codeEvidence"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
+
+
+@pytest.mark.parametrize("metadata", ["severity", "confidence"])
+def test_verbose_finding_metadata_retains_diagnostics_and_report(metadata: str) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    finding = {
+        metadata: {"rationale": "x" * 20_000, "level": "high"},
+        "identity": {"anchor": "example-finding"},
+        "status": "validated",
+        "writeup": {"reportPath": "findings/example/example.md"},
+        "rootCause": {"summary": "Synthetic root cause"},
+        "validation": {"summary": "Synthetic validation"},
+        "attackPath": {"summary": "Synthetic path"},
+        "codeEvidence": [{"id": "source", "code": "example()"}],
+    }
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert {key: bounded[key] for key in finding if key != metadata} == {
+        key: value for key, value in finding.items() if key != metadata
+    }
+    assert bounded[metadata]["level"] == "high"
+    assert bounded[metadata]["rationale"]
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode())
         <= preview["FINDING_DETAILS_PREVIEW_BYTES"]

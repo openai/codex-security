@@ -244,6 +244,7 @@ def python_outline(text: str) -> list[str]:
 def javascript_regex_end(
     text: str,
     start: int,
+    masked: list[str],
     failed_scans: set[tuple[int, bool]],
     after_control: bool,
 ) -> int | None:
@@ -254,7 +255,13 @@ def javascript_regex_end(
         previous -= 1
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
-        if not re.search(r"(?<![\w.$])(?:case|return|throw|else)$", prefix):
+        keyword = re.search(r"(?<![\w.$])(?:case|return|throw|else)$", prefix)
+        if keyword is None:
+            return None
+        previous -= len(keyword.group())
+        while previous >= 0 and masked[previous].isspace():
+            previous -= 1
+        if previous >= 0 and masked[previous] == ".":
             return None
 
     index = start + 1
@@ -422,7 +429,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 index += len(token)
                 continue
         if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index, failed_regex_scans, after_control)
+            regex_end = javascript_regex_end(text, index, masked, failed_regex_scans, after_control)
             if regex_end is not None:
                 masked.extend(" " * (regex_end - index))
                 index = regex_end

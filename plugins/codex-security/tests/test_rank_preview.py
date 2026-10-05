@@ -556,6 +556,8 @@ def test_javascript_regex_after_control_flow_preserves_declarations(
         "{} / [1, 2]",
         "object.if(ready) / { value: count / total }",
         "object.else / { value: count / total }",
+        "object. else / { value: count / total }",
+        "object./* member */else / { value: count / total }",
     ],
 )
 def test_javascript_division_preserves_the_following_method(

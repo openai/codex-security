@@ -264,6 +264,32 @@ def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
     assert read_jsonl(output)[0]["preview"] == "function visible()"
 
 
+def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "binary.py").write_bytes(b"# comment\n" * 10_000 + b"\0")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "change")
+    output = tmp_path / "rank.jsonl"
+
+    run_cli(
+        "make-diff-rank-input",
+        "--repo",
+        str(repo),
+        "--base",
+        base,
+        "--head",
+        "HEAD",
+        "--out",
+        str(output),
+    )
+
+    assert read_jsonl(output) == []
+
+
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
 def test_rank_input_bounds_large_text_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str

@@ -19,7 +19,9 @@ from workbench_constants import (
     FINDING_CODE_EVIDENCE_SNIPPET_BYTES,
     FINDING_DETAILS_PREVIEW_BYTES,
     FINDING_EVIDENCE_EXCERPT_BYTES,
+    FINDING_LEVEL_BYTES,
     FINDING_ROOT_CAUSE_PREVIEW_BYTES,
+    FINDING_SUMMARY_BYTES,
     FINDING_VALIDATION_PREVIEW_BYTES,
 )
 
@@ -177,24 +179,32 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         for key in ("remediationTests", "preventiveControls")
         if key in prepared and isinstance(prepared[key], list)
     }
+    for key in ("severity", "confidence"):
+        if key in prepared:
+            prepared[key] = bounded_finding_section(
+                prepared[key],
+                FINDING_SUMMARY_BYTES,
+                ("level",),
+                ((("level",), FINDING_LEVEL_BYTES),),
+            )
     diagnostics = (
         "rootCause",
         "root_cause",
         "validation",
         "attackPath",
-        "codeEvidence",
-        "code_evidence",
     )
     core_keys = (
-        "severity",
-        "confidence",
+        "writeup",
+        *diagnostics,
         "ruleId",
         "status",
         "detectedAt",
         "identity",
         "taxonomy",
-        "writeup",
-        *diagnostics,
+        "severity",
+        "confidence",
+        "codeEvidence",
+        "code_evidence",
         "provenance",
         "evidence",
         "evidenceExcerpt",
