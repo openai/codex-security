@@ -58,13 +58,19 @@ without a manual approval step. Failed behavior tests do not suppress a scan.
 ### Setup
 
 Both workflows must be on `main` before automatic scans can run. Configure the
-`invoice-desk-inference` environment without required reviewers or a wait timer,
+`codex-security-smoke-test` environment without required reviewers or a wait timer,
 and with a deployment branch rule allowing only protected `main`. Store a
 dedicated service-account key in its `OPENAI_API_KEY` environment secret, with
 access to `gpt-5.6-sol` and permission to use the API from the selected runner's
 network. Creating a service account alone does not grant that network access.
 Do not use a repository or organization Actions secret for this workflow. A
 missing key fails the scan with a setup error.
+
+The scan uses `https://us.api.openai.com/v1` through Codex's existing
+`openai_base_url` setting. The endpoint is fixed in the workflow on protected
+`main`, so Actions variables and inherited `OPENAI_BASE_URL` values cannot
+redirect the credential. Use a service account whose project supports this US
+endpoint.
 
 The workflow on protected `main` selects and extracts the exact PR source before
 inference. Behavior tests receive no inference credentials; GitHub may separately
