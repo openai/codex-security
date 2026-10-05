@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { isMain } from "./is-main.mjs";
 
 const execFileAsync = promisify(execFile);
 const defaultPackageRoot = resolve(import.meta.dirname, "..");
@@ -22,11 +22,7 @@ export async function assertGeneratedPluginUntracked({
   }
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+if (isMain(import.meta.url)) {
   assertGeneratedPluginUntracked()
     .then(() => {
       console.log("Verified _bundled_plugin contains no tracked files.");

@@ -4741,7 +4741,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
-  // Keep effective execution settings even when preflight filters the profile name.
+  // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];

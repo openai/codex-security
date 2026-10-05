@@ -1,5 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
@@ -64,42 +62,6 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
-  test.each(["win32", "darwin", "linux"])(
-    "matches case-variant Git metadata using %s filename rules",
-    async (platform) => {
-      const root = await temporaryDirectory();
-      await mkdir(join(root, ".GIT"));
-      await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
-      await writeFile(join(root, "guide.md"), "Synthetic guide");
-      const result = spawnSync(
-        process.execPath,
-        [
-          "-e",
-          `
-      Object.defineProperty(process, "platform", { value: process.argv[1] });
-      const { prepareKnowledgeBase } = await import(process.argv[2]);
-      const { readdir, readFile } = await import("node:fs/promises");
-      const { join } = await import("node:path");
-      const prepared = await prepareKnowledgeBase([process.argv[3]]);
-      try {
-        console.log(JSON.stringify(await Promise.all((await readdir(prepared.path)).map(name => readFile(join(prepared.path, name), "utf8")))));
-      } finally { await prepared.cleanup(); }
-    `,
-          platform,
-          fileURLToPath(new URL("../src/knowledge-base.ts", import.meta.url)),
-          root,
-        ],
-        { encoding: "utf8" },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout).sort()).toEqual(
-        platform === "win32" || platform === "darwin"
-          ? ["Synthetic guide"]
-          : ["Synthetic guide", "Synthetic metadata"],
-      );
-    },
-  );
-
   test.each([".git", ".GIT"])(
     "directory knowledge bases handle %s metadata while direct files remain explicit",
     async (metadataName) => {
@@ -116,16 +78,9 @@ describe("scan knowledge bases", () => {
       );
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
-      expect((await extractedDocuments(directory.path)).sort()).toEqual(
-        [
-          "Documented application behavior.",
-          ...(process.platform !== "win32" &&
-          process.platform !== "darwin" &&
-          metadataName !== ".git"
-            ? [await readFile(metadata, "utf8")]
-            : []),
-        ].sort(),
-      );
+      expect(await extractedDocuments(directory.path)).toEqual([
+        "Documented application behavior.",
+      ]);
       const explicit = await prepareKnowledgeBase([metadata]);
       temporaryDirectories.track(explicit.path);
       expect(await extractedDocuments(explicit.path)).toEqual([
@@ -142,6 +97,9 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
+    await mkdir(join(root, ".GiT"));
+    await writeFile(join(root, ".GiT", "config"), "Repository metadata.");
+    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 

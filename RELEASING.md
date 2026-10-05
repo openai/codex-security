@@ -231,6 +231,11 @@ for that exact commit:
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
 
+After npm accepts a publication, its registry can take several minutes to expose
+the version. GitHub publication waits up to ten minutes for that version to
+become available before verifying its archive and signed provenance. Other
+registry errors fail immediately.
+
 `node-release` generates the npm plugin payload from the canonical source under
 `plugins/codex-security/` during `prepack`. The generated
 `sdk/typescript/_bundled_plugin/` directory is not a committed release input;
