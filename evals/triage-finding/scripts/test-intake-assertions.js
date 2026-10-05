@@ -18,6 +18,8 @@ for (const text of [
   "```sh\ncat finding.sarif\n```",
   '```json\n{"findings": "paste the findings here"}\n```',
   '```json\n{"schema_version": "example/v0", "findings": []}\n```',
+  '{"findings":[{"message":"Paste the scanner finding here"}]}',
+  JSON.stringify({ example: '"schema_version": "triage-finding/v0"' }),
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
   assert.equal(hasTriageJson(text), false, text);
@@ -30,6 +32,9 @@ for (const text of [
   `Response: {"error":"forbidden"}\n${triage}`,
   `\`\`\`json\n{"error":"access denied"}\n\`\`\`\n${triage}`,
   `GET /repos/{owner}/{repo}/code-scanning/alerts\n${triage}`,
+  `\`\`\`json\n${triage.replace("triage-finding/v0", "triage-finding\\/v0")}\n\`\`\``,
+  `Response: {"error":"forbidden"}\n${triage.replace("triage-finding/v0", "triage-finding\\u002fv0")}`,
+  '{"findings":[{"input_id":"SEC-293","verdict":"not_actionable"}]}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
   expectPass(missingInput, `${request}\n${text}`, undefined, false);
@@ -85,6 +90,16 @@ expectPass(github, connectorAnswer, githubContext("explicit_connector"));
 for (const restriction of ["modify or close alerts", "modify alerts or post comments"]) {
   expectPass(github, `${connectorAnswer} Do not use the GitHub Connector to ${restriction}.`, githubContext("explicit_connector"));
 }
+expectPass(github, connectorAnswer.replace("ask before switching to REST", "ask for approval to switch to REST"), githubContext("explicit_connector"));
+for (const repository of ["example/project", "https://github.com/example/project"]) {
+  expectPass(github, connectorAnswer.replace("the exact repository", repository), githubContext("explicit_connector"));
+}
+for (const restriction of [
+  "Do not use the GitHub Connector to fetch findings from any repository other than example/project.",
+  "Never retrieve alerts from other repositories with the GitHub Connector.",
+]) {
+  expectPass(github, `${connectorAnswer} ${restriction}`, githubContext("explicit_connector"));
+}
 expectPass(github, "Retrieve alerts with the GitHub Connector using read only access. If the endpoint is unavailable, describe the limitation. REST is an option only with prior approval for the selected account and the same repository.", githubContext("explicit_connector"));
 for (const text of [
   "Use the GitHub Connector only as an auth token source. Finding retrieval uses REST. Do not use the GitHub Connector to fetch findings.",
@@ -92,8 +107,6 @@ for (const text of [
   connectorAnswer.replace("ask before switching to REST", "switch to REST automatically"),
   connectorAnswer.replace("ask before switching to REST", "do not ask before switching to REST"),
   connectorAnswer.replace("ask before switching to REST", "no need to ask before switching to REST"),
-  `${connectorAnswer} Do not use the GitHub Connector to fetch findings.`,
-  `${connectorAnswer} Never retrieve alerts with the GitHub Connector.`,
   connectorAnswer.replace("specified GitHub account and the exact repository", "any account and repository"),
 ]) {
   expectPass(github, text, githubContext("explicit_connector"), false);
