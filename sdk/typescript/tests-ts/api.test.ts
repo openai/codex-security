@@ -61,7 +61,11 @@ import {
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  INTEGRATION_TARGET,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import {
   mockScanRegistration,
   mockWorkbench,
@@ -91,8 +95,7 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 async function runtimeDirectories() {
@@ -1399,7 +1402,7 @@ describe("CodexSecurity orchestration", () => {
     "runs %s scans without signing in to OpenAI",
     async (_name, provider, apiKey, model, providerConfig) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      const createCodex = mock(completedCodex(root, copyCompletedScan));
+      const createCodex = mock(completedCodex(root));
       const onAuthentication = mock<(selected: ScanAuthentication) => void>();
       const competingApiKey =
         provider === "openrouter" ? "FIREWORKS_API_KEY" : "OPENROUTER_API_KEY";
@@ -1467,7 +1470,7 @@ describe("CodexSecurity orchestration", () => {
     "runs Amazon Bedrock scans through %s without signing in to OpenAI",
     async (_name, credentials, source) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      const createCodex = mock(completedCodex(root, copyCompletedScan));
+      const createCodex = mock(completedCodex(root));
       const onAuthentication = mock<(selected: ScanAuthentication) => void>();
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
@@ -1544,7 +1547,7 @@ describe("CodexSecurity orchestration", () => {
 
   test("uses the selected Bedrock profile for authentication and cost limits", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const createCodex = mock(completedCodex(root, copyCompletedScan));
+    const createCodex = mock(completedCodex(root));
     const onAuthentication = mock<(selected: ScanAuthentication) => void>();
     let savedRecipe: Record<string, unknown> | undefined;
     const environment = {
@@ -1686,24 +1689,35 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     await mkdir(repository);
-    const scenarios: [JsonObject, string][] = [
-      [{}, "none"],
-      [{ model_reasoning_summary: "auto" }, "auto"],
+    const scenarios: [JsonObject, string, string | undefined][] = [
+      [{}, "none", undefined],
+      [
+        { model_reasoning_summary: "auto", service_tier: "flex" },
+        "auto",
+        "flex",
+      ],
       [
         {
           profile: "cloud",
-          profiles: { cloud: { model_reasoning_summary: "concise" } },
+          profiles: {
+            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+          },
         },
         "concise",
+        "fast",
       ],
       [
         {
           profile: "cloud.production",
           profiles: {
-            "cloud.production": { model_reasoning_summary: "concise" },
+            "cloud.production": {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+            },
           },
         },
         "concise",
+        "fast",
       ],
     ];
     let started = 0;
@@ -1716,7 +1730,7 @@ describe("CodexSecurity orchestration", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const clients = await Promise.all(
-      scenarios.map(async ([overrides, expected], index) => {
+      scenarios.map(async ([overrides, expected, expectedTier], index) => {
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
         return new TestClient(
@@ -1774,6 +1788,9 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
+                  expect(resolveCodexProfile(config)["service_tier"]).toBe(
+                    expectedTier,
+                  );
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );
@@ -3122,7 +3139,7 @@ describe("CodexSecurity orchestration", () => {
           }
           return mockWorkbench(args, input);
         },
-        createCodex: completedCodex(root, copyCompletedScan),
+        createCodex: completedCodex(root),
       },
     );
 
@@ -3166,7 +3183,7 @@ describe("CodexSecurity orchestration", () => {
           }
           return mockWorkbench(args, input);
         },
-        createCodex: completedCodex(root, copyCompletedScan),
+        createCodex: completedCodex(root),
       },
     );
 
@@ -3200,7 +3217,7 @@ describe("CodexSecurity orchestration", () => {
             commands.push(args[0]!);
             return mockWorkbench(args, input);
           },
-          createCodex: completedCodex(root, copyCompletedScan),
+          createCodex: completedCodex(root),
         },
       );
 
@@ -3778,7 +3795,7 @@ describe("CodexSecurity orchestration", () => {
               uncertain: [],
             };
           },
-          createCodex: completedCodex(root, copyCompletedScan),
+          createCodex: completedCodex(root),
         },
       );
 
@@ -3910,7 +3927,7 @@ describe("CodexSecurity orchestration", () => {
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
-        createCodex: completedCodex(root, copyCompletedScan),
+        createCodex: completedCodex(root),
       },
     );
 
@@ -5995,7 +6012,7 @@ describe("CodexSecurity orchestration", () => {
       await mkdir(repository);
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
-      const createCodex = mock(completedCodex(root, copyCompletedScan));
+      const createCodex = mock(completedCodex(root));
       const client = new TestClient(
         {},
         {
@@ -6091,7 +6108,7 @@ describe("CodexSecurity orchestration", () => {
       ...pathEnvironment,
     };
     const originalEnvironment = { ...runtimeEnvironment };
-    const createCodex = mock(completedCodex(root, copyCompletedScan));
+    const createCodex = mock(completedCodex(root));
     const client = new TestClient(
       {},
       {
@@ -6190,7 +6207,7 @@ process.exit(2);
 `,
     );
     const fakeCommand = nodeCodex(fakeCodex);
-    const createCodex = mock(completedCodex(root, copyCompletedScan));
+    const createCodex = mock(completedCodex(root));
     const onAuthentication =
       mock<(authentication: ScanAuthentication) => void>();
     let pythonEnvironment: Record<string, string | undefined> | undefined;
@@ -6528,7 +6545,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        createCodex: completedCodex(root, copyCompletedScan),
+        createCodex: completedCodex(root),
       },
     );
     const controller = new AbortController();
@@ -6822,7 +6839,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(repository);
     await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
-    const createCodex = mock(completedCodex(root, copyCompletedScan));
+    const createCodex = mock(completedCodex(root));
     const client = new TestClient(
       {},
       {

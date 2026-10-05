@@ -53,6 +53,7 @@ export interface CodexSdkWorkerArtifactContext {
 
 interface CodexSdkWorkerRuntimeSettings {
   reasoningSummary?: string;
+  serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
     api_key_cyber_access_programs?: boolean;
@@ -120,6 +121,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
+          ...(runtimeSettings.serviceTier === undefined
+            ? {}
+            : { service_tier: runtimeSettings.serviceTier }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -486,8 +490,13 @@ async function workerRuntimeSettings(
     isRecord(profile) && profile.model_reasoning_summary !== undefined
       ? profile.model_reasoning_summary
       : config.model_reasoning_summary;
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
   const settings: CodexSdkWorkerRuntimeSettings = {
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
+    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
