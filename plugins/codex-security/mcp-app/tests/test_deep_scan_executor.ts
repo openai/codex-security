@@ -1173,7 +1173,10 @@ async function testWorkerRuntimeSettings() {
       };
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
-      const codexHome = path.join(fixture.root, "scan [home]");
+      const codexHome = path.join(
+        fixture.root,
+        process.platform === "win32" ? "scan [home]" : "scan [home] ",
+      );
       const promptPath = path.join(fixture.root, "prompt.md");
       await mkdir(codexHome);
       await writeFile(
@@ -1466,6 +1469,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               },
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
@@ -2670,15 +2674,24 @@ function assertConfigOverrides(
   args: readonly string[],
   values: Record<string, string | number | boolean | undefined>,
 ) {
+  const overrides = args.flatMap((arg, index) =>
+    arg === "--config" || arg === "-c" ? [parseToml(args[index + 1])] : [],
+  );
   for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) {
-      assert.equal(
-        args.some((arg) => arg.startsWith(`${key}=`)),
-        false,
-      );
-    } else {
-      assert.equal(args.includes(`${key}=${JSON.stringify(value)}`), true);
-    }
+    const supplied = overrides.map((config) =>
+      key
+        .split(".")
+        .reduce<unknown>(
+          (current, part) =>
+            (current as Record<string, unknown> | undefined)?.[part],
+          config,
+        ),
+    );
+    assert.deepEqual(
+      supplied.findLast((item) => item !== undefined),
+      value,
+      key,
+    );
   }
 }
 

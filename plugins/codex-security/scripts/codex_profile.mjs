@@ -29,11 +29,9 @@ export function isPermissionProfileFallbackWarning(message, profileId) {
 }
 
 export function profileConfigOverrides(config) {
-  const overrides = [];
-  flattenConfig(config, "", (key, value) =>
-    overrides.push(`${key}=${toml(value)}`),
-  );
-  return overrides;
+  return Object.entries(config)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${toml(value)}`);
 }
 
 // Native profile files keep provider configuration off process arguments while
@@ -178,29 +176,6 @@ function nativeArguments(options, thread, id, turn, schemaPath) {
   if (thread.approvalPolicy) config("approval_policy", thread.approvalPolicy);
   if (id) args.push("resume", id);
   return args;
-}
-
-function flattenConfig(object, prefix, add) {
-  // Native CLI override paths split on dots, including inside quoted keys.
-  // An inline table retains literal names from the inherited configuration.
-  if (prefix && Object.keys(object).some((key) => key.includes("."))) {
-    add(prefix, object);
-    return;
-  }
-  for (const [key, value] of Object.entries(object)) {
-    if (value === undefined) continue;
-    const path = prefix ? `${prefix}.${key}` : key;
-    if (
-      value !== null &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      Object.keys(value).length
-    ) {
-      flattenConfig(value, path, add);
-    } else {
-      add(path, value);
-    }
-  }
 }
 
 function toml(value) {

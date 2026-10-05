@@ -137,7 +137,9 @@ describe("CodexSecurity orchestration", () => {
           ...overrides.model_providers["synthetic.provider"],
           auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
         };
-        expect(captured!.configOverrides).toBeUndefined();
+        expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
+          "model_providers",
+        );
         expect(
           parseToml(
             await readFile(

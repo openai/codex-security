@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { isRecord } from "./record.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -33,7 +34,6 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
-import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,

@@ -577,7 +577,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["allowed", "disallowed", "fallback"])(
+  test.each(["allowed", "disallowed", "fallback", "empty"])(
     "checks the actual helper permission child before starting a turn when %s",
     async (mode) => {
       const home = await temporaryDirectory();
@@ -659,25 +659,33 @@ describe("semantic scan comparison", () => {
               CODEX_CLI_PATH: executable,
               CODEX_HOME: home,
               SYNTHETIC_PREFLIGHT_SENTINEL: "synthetic-inherited-setting",
+              ...(mode === "empty"
+                ? { OPENAI_API_KEY: "synthetic-api-key" }
+                : {}),
             },
             config: {
-              codexOverrides: {
-                model_provider: "synthetic.provider",
-                model_providers: {
-                  "synthetic.provider": {
-                    name: "Synthetic provider",
-                    wire_api: "responses",
-                    auth: {
-                      command: "synthetic-auth",
-                      env: { SYNTHETIC_SECRET: "synthetic-private-marker" },
+              codexOverrides:
+                mode === "empty"
+                  ? { model_providers: {} }
+                  : {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          name: "Synthetic provider",
+                          wire_api: "responses",
+                          auth: {
+                            command: "synthetic-auth",
+                            env: {
+                              SYNTHETIC_SECRET: "synthetic-private-marker",
+                            },
+                          },
+                        },
+                      },
                     },
-                  },
-                },
-              },
             },
           },
         );
-        if (mode === "allowed") {
+        if (mode === "allowed" || mode === "empty") {
           await expect(matching).resolves.toEqual({
             matches: [],
             uncertain: [],
@@ -690,6 +698,11 @@ describe("semantic scan comparison", () => {
               : "did not select",
           );
           expect(startThread).not.toHaveBeenCalled();
+        }
+        if (mode === "empty") {
+          expect(existsSync(callsPath)).toBe(false);
+          expect(profileClient.profiles).toEqual([]);
+          return;
         }
         const calls = (await readFile(callsPath, "utf8"))
           .trim()
@@ -1024,62 +1037,6 @@ describe("semantic scan comparison", () => {
       } finally {
         profileClient.spy.mockRestore();
         startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each([undefined, {}])(
-    "keeps an empty provider table on the ordinary read-only helper path: %j",
-    async (providers) => {
-      const home = await temporaryDirectory();
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          permissions: {
-            codex_security_deep_scan_worker: {
-              extends: ":read-only",
-              filesystem: { [home]: "read" },
-            },
-          },
-        }),
-      );
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const profileClient = spyOn(
-        providerProfiles,
-        "createProfileCodex",
-      ).mockResolvedValue(codex as unknown as Codex);
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation((options) => {
-        expect(options?.sandboxMode).toBe("read-only");
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            workingDirectory: home,
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-              OPENAI_API_KEY: "synthetic-key",
-            },
-            config: {
-              codexOverrides:
-                providers === undefined ? {} : { model_providers: providers },
-            },
-          },
-        );
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(profileClient).not.toHaveBeenCalled();
-        expect(
-          (await readdir(home)).filter((name) => name.endsWith(".config.toml")),
-        ).toEqual([]);
-      } finally {
-        startThread.mockRestore();
-        profileClient.mockRestore();
       }
     },
   );
