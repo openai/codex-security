@@ -234,7 +234,7 @@ def release_completion_file_lock(descriptor: int) -> None:
     windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
 
 
-def connect() -> sqlite3.Connection:
+def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
     create_private_directory(path.parent)
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
@@ -243,8 +243,8 @@ def connect() -> sqlite3.Connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
-            # Writer admission on retries lets real upgrades wait on the busy timeout.
-            apply_migrations(connection, immediate=attempt > 0)
+            # Keep writer admission retries; readers only wait when a repair needs to write.
+            apply_migrations(connection, immediate=not deferred or attempt > 0)
             connection.execute("PRAGMA journal_mode = WAL")
             path.chmod(0o600)
             return connection
@@ -2881,7 +2881,15 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     if not updates:
         return
 
-    connection.execute("BEGIN IMMEDIATE")
+    # Reads normally avoid writer admission, but legacy details still need a write.
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                raise
+            time.sleep(0.05 * (2**attempt))
     with connection:
         current = require_scan(connection, scan["id"])
         recorded_digest = current["seal_manifest_digest"]
@@ -3324,7 +3332,9 @@ def main() -> None:
         result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    with closing(connect()) as connection:
+    with closing(
+        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+    ) as connection:
         remediation.require_available(connection, args, require_scan)
         if args.command == "create-workspace":
             result = create_workspace(connection, args)
