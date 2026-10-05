@@ -969,15 +969,16 @@ max_concurrent_threads_per_session = 9
 sandbox = "unelevated"
 ```
 
-Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
+Use `--model MODEL` to choose a model and `--effort EFFORT`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
 `policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
 `scans match`, and `scans compare`.
 
-Model IDs are passed through to Codex, including `gpt-6-astra`, `gpt-6.1-sol`,
-and `gpt-6-luna`; availability depends on your credentials and inference provider.
-For Astra and GPT-6.1 Sol, use `low`, `medium`, `high`, `xhigh`, or `max`, as
-documented in the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
+Model IDs and reasoning effort values are passed through to Codex unchanged.
+The wrapper accepts values such as `minimal`, `none`, and `high`, as
+well as future values, without requiring a wrapper update. Supported combinations
+depend on the model, inference provider, installed Codex version, and credentials.
+Codex and provider errors are reported without substituting another model or effort.
 Omitting these flags preserves each command's defaults: scans, policy generation,
 validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
 matching and severity classification use Codex's configured model and `medium` effort.

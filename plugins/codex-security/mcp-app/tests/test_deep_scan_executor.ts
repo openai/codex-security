@@ -1102,7 +1102,9 @@ async function testWorkerRuntimeSettings() {
       await mkdir(codexHome);
       await writeFile(
         path.join(codexHome, "config.toml"),
-        `model_provider = "synthetic"
+        `model = "fixture-inherited-model"
+model_reasoning_effort = "medium"
+model_provider = "synthetic"
 [model_providers.synthetic]
 name = "Synthetic gateway"
 base_url = "https://gateway.example.test/v1"
@@ -1154,12 +1156,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        // Omitted settings preserve the model and effort in the Codex home.
+        {},
       ];
-      const providerKeys = [
-        "synthetic-gateway-key-0",
-        "synthetic-gateway-key-1",
-        undefined,
-      ];
+      const providerKeys = settings.map((_, index) =>
+        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
+      );
       const executors = settings.map(
         (modelSettings) =>
           new CodexSdkWorkerExecutor({
@@ -1168,7 +1171,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             artifactContext: {
               pluginRoot: fixture.root,
               repoRoot: fixture.root,
-              scanId: `fixture-scan-${modelSettings.model}`,
+              scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
             },
           }),
@@ -1215,8 +1218,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(
-              ({ args }) => args[args.indexOf("--model") + 1] === model,
+            const workerLaunch = workerLaunches.find(({ args }) =>
+              model === undefined
+                ? !args.includes("--model")
+                : args[args.indexOf("--model") + 1] === model,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
             assert.equal(
@@ -1254,9 +1259,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
-              model_reasoning_effort: reasoningEffort,
             });
-            assertFlagPair(invocation.argv, "--model", model);
+            assert.deepEqual(
+              invocation.argv.filter((arg: string) =>
+                arg.startsWith("model_reasoning_effort="),
+              ),
+              reasoningEffort === undefined
+                ? []
+                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+            );
+            if (model === undefined) {
+              assert.equal(invocation.argv.includes("--model"), false);
+            } else {
+              assertFlagPair(invocation.argv, "--model", model);
+            }
             assert.equal(
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,
