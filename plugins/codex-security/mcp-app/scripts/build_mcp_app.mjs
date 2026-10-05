@@ -124,12 +124,19 @@ export async function buildMcpApp({ output, native = "universal" }) {
   }
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  invokedPath !== "-" &&
-  pathToFileURL(realpathSync(invokedPath)).href === import.meta.url
-) {
+function isMain() {
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      process.argv[1] !== "-" &&
+      pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const args = process.argv.slice(2);
   if (
     args[0] !== "--output" ||

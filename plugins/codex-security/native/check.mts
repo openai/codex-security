@@ -38,11 +38,19 @@ function versionAfter(value: string, floor: string): boolean {
   return false;
 }
 
-if (
-  process.argv[1] !== undefined &&
-  process.argv[1] !== "-" &&
-  pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
-) {
+function isMain() {
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      process.argv[1] !== "-" &&
+      pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const bytes = readFileSync(binaryPath);
   checkPrivatePaths(bytes);
   let floor: string;

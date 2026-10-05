@@ -4841,7 +4841,7 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test("imports maintainer utilities from a Node stdin module", async () => {
+test("imports maintainer utilities from Node stdin and eval modules", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
   const packageRoot = resolve(import.meta.dir, "..");
   try {
@@ -4860,13 +4860,19 @@ test("imports maintainer utilities from a Node stdin module", async () => {
     const checker = pathToFileURL(
       join(workspace, "plugins/codex-security/native/check.mjs"),
     ).href;
-    const result = spawnSync("node", ["--input-type=module", "-"], {
-      cwd: packageRoot,
-      input: `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`,
-      encoding: "utf8",
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout.trim()).toBe("function function function function");
+    const source = `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`;
+    for (const args of [
+      ["--input-type=module", "-"],
+      ["--input-type=module", "--eval", source, "synthetic-virtual-entrypoint"],
+    ]) {
+      const result = spawnSync("node", args, {
+        cwd: packageRoot,
+        input: source,
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("function function function function");
+    }
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
