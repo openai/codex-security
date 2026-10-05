@@ -67,7 +67,7 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
-  const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
+  const existingRoot = await resolveStoragePath(scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
     throw new Error("Artifact storage must be outside the target repository.");
   }

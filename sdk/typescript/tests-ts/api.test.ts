@@ -1694,15 +1694,22 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     await mkdir(repository);
-    const scenarios: [JsonObject, string, string?][] = [
-      [{}, "none"],
-      [{ model_reasoning_summary: "auto" }, "auto"],
+    const scenarios: [JsonObject, string, string | undefined][] = [
+      [{}, "none", undefined],
+      [
+        { model_reasoning_summary: "auto", service_tier: "flex" },
+        "auto",
+        "flex",
+      ],
       [
         {
           profile: "cloud",
-          profiles: { cloud: { model_reasoning_summary: "concise" } },
+          profiles: {
+            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+          },
         },
         "concise",
+        "fast",
       ],
       [
         {

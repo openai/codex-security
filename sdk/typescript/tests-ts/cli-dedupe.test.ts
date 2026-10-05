@@ -52,7 +52,10 @@ test.each([false, true])(
   },
 );
 
-test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the SDK", async () => {
+test.each([
+  ["--workflow-id", "--findings-url"],
+  ["--workflowId", "--findingsUrl"],
+])("dedupe accepts %s and %s", async (workflowFlag, findingsFlag) => {
   const deps = dependencies();
   deps.runWorkbench = async (args, input) => {
     expect(args).toEqual(["finding-workflow"]);
@@ -83,9 +86,9 @@ test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the
     await stdout.run(
       [
         "dedupe",
-        "--workflow-id",
+        workflowFlag,
         "workflow-example",
-        "--findings-url",
+        findingsFlag,
         "http://localhost:3000",
         "--json",
       ],

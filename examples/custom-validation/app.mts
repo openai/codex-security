@@ -1,8 +1,8 @@
 // Deliberately vulnerable local fixture. Do not deploy this application.
 import { once } from "node:events";
+import { realpathSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { pathToFileURL } from "node:url";
 
 // These identities, tokens, and records are synthetic demo data.
 const tokens = new Map([
@@ -49,10 +49,19 @@ export async function createServer(): Promise<Server> {
   return server;
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+// Keep the copied demo fixture independent of repository helpers.
+function isMain(): boolean {
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const server = await createServer();
   console.log(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
 }

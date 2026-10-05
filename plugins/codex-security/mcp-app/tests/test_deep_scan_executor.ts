@@ -1648,6 +1648,7 @@ async function testWorkerCyberAccessSettings() {
     name: string;
     configuration: string;
     program?: string;
+    serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
@@ -1656,7 +1657,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "blue",
       configuration:
-        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      serviceTier: "fast",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: true,
@@ -1666,7 +1668,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "explicit-false",
       configuration:
-        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+      serviceTier: "flex",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: false,
@@ -1676,7 +1679,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "other-program",
       configuration:
-        '[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+      serviceTier: "fast",
       program: "standard",
       features: {
         api_key_cyber_access_programs: true,
@@ -1686,7 +1690,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "features-only",
       configuration:
-        "[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n",
+        'service_tier = "fast"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n',
+      serviceTier: "fast",
       features: {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: true,
@@ -1760,11 +1765,19 @@ async function testWorkerCyberAccessSettings() {
           ({ args }) => args[0] === "exec",
         );
         assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, features = {} } of cases) {
+        for (const { name, program, serviceTier, features = {} } of cases) {
           const launch = workerLaunches.find(
             ({ args }) => args[args.indexOf("--model") + 1] === name,
           );
           const invocation = await readJson(launch!.markerPath);
+          assert.deepEqual(
+            invocation.argv.filter((arg: string) =>
+              arg.startsWith("service_tier="),
+            ),
+            serviceTier === undefined
+              ? []
+              : [`service_tier=${JSON.stringify(serviceTier)}`],
+          );
           if (program === undefined) {
             assert.equal(
               invocation.argv.includes("--cyber-access-program"),
