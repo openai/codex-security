@@ -2735,9 +2735,7 @@ export async function resolvePluginPython(
 
   const home = options.homeDirectory ?? homedir();
   const cacheDirectory =
-    (process.platform !== "win32" &&
-      environmentValue(environment, "XDG_CACHE_HOME")) ||
-    join(home, ".cache");
+    environmentValue(environment, "XDG_CACHE_HOME") || join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
     join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
   ];

@@ -1657,6 +1657,9 @@ describe("CodexSecurity orchestration", () => {
         {
           environment: { AWS_PROFILE: "synthetic-bedrock" },
           ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            deepScanConfigPath: join(codexHome, "deep-scan.toml"),
+          })),
           createCodex: () => ({
             startThread: () => ({
               id: null,
@@ -1688,7 +1691,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     await mkdir(repository);
-    const scenarios: [JsonObject, string][] = [
+    const scenarios: [JsonObject, string, string?][] = [
       [{}, "none"],
       [{ model_reasoning_summary: "auto" }, "auto"],
       [
@@ -1702,10 +1705,14 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud.production",
           profiles: {
-            "cloud.production": { model_reasoning_summary: "concise" },
+            "cloud.production": {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+            },
           },
         },
         "concise",
+        "fast",
       ],
     ];
     let started = 0;
@@ -1718,7 +1725,7 @@ describe("CodexSecurity orchestration", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const clients = await Promise.all(
-      scenarios.map(async ([overrides, expected], index) => {
+      scenarios.map(async ([overrides, expected, expectedTier], index) => {
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
         return new TestClient(
@@ -1776,6 +1783,7 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
+                  expect(config["service_tier"]).toBe(expectedTier);
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );

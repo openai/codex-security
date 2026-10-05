@@ -1324,6 +1324,9 @@ export class CodexSecurity {
           runtime.deepScanConfigPath ??
             join(runtimeHome, "codex-security", "config.toml"),
           deepScanConfiguration,
+          runtime.deepScanConfigPath === undefined
+            ? undefined
+            : selectedWorkerProviderConfig(effectiveConfig, modelProvider),
         );
       }
       checkOpen();
@@ -1895,6 +1898,18 @@ export class CodexSecurity {
         runtimePaths,
         options.auth,
         git,
+        undefined,
+        mode === "deep" && runtime.deepScanConfigPath !== undefined
+          ? [
+              // The coordinator reads provider credentials; model shell commands cannot.
+              `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
+                ":root": "read",
+                ":workspace_roots": "write",
+                [runtimeHome]: "read",
+                [runtime.deepScanConfigPath]: { ".": "deny" },
+              })}`,
+            ]
+          : [],
       );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2830,7 +2845,10 @@ export class CodexSecurity {
         deepScan &&
         (typeof modelProvider === "string" ||
           (isRecord(providers) && Object.keys(providers).length > 0)) &&
-        !(await pluginSupportsWorkerProviderSnapshot(runtime.plugin.pluginRoot))
+        (runtime.deepScanConfigPath === undefined ||
+          !(await pluginSupportsWorkerProviderSnapshot(
+            runtime.plugin.pluginRoot,
+          )))
       ) {
         throw new CodexSecurityError(
           "This custom plugin cannot forward per-scan provider settings to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
@@ -2839,19 +2857,6 @@ export class CodexSecurity {
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(runtime.configPath, {
           ...preflightConfig,
-          ...(typeof modelProvider === "string"
-            ? { model_provider: modelProvider }
-            : {}),
-          ...(isRecord(providers)
-            ? {
-                model_providers:
-                  typeof modelProvider === "string"
-                    ? Object.hasOwn(providers, modelProvider)
-                      ? { [modelProvider]: providers[modelProvider]! }
-                      : {}
-                    : providers,
-              }
-            : {}),
           ...(options.cyberAccessProgram === undefined
             ? {}
             : {
@@ -4725,11 +4730,11 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
-  // Keep the effective summary even when preflight filters the profile name.
+  // Keep effective execution settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
-  const reasoningSummary = resolved["model_reasoning_summary"];
-  if (safeString(reasoningSummary)) {
-    result["model_reasoning_summary"] = reasoningSummary;
+  for (const key of ["model_reasoning_summary", "service_tier"]) {
+    const value = resolved[key];
+    if (safeString(value)) result[key] = value;
   }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
@@ -4811,8 +4816,30 @@ async function pluginSupportsWorkerProviderSnapshot(
   return (
     isRecord(manifest) &&
     isRecord(manifest["codexSecurity"]) &&
-    manifest["codexSecurity"]["workerProviderSnapshot"] === true
+    manifest["codexSecurity"]["workerProviderSnapshot"] === 2
   );
+}
+
+function selectedWorkerProviderConfig(
+  config: JsonObject,
+  selectedProvider: unknown,
+): JsonObject {
+  const provider =
+    typeof selectedProvider === "string" ? selectedProvider : undefined;
+  const providers = config["model_providers"];
+  return {
+    ...(provider === undefined ? {} : { model_provider: provider }),
+    ...(isRecord(providers)
+      ? {
+          model_providers:
+            provider === undefined
+              ? providers
+              : Object.hasOwn(providers, provider)
+                ? { [provider]: providers[provider]! }
+                : {},
+        }
+      : {}),
+  };
 }
 
 async function pluginSupportsIsolatedDeepScanConfig(

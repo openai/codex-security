@@ -19,7 +19,7 @@
   "apps": "./.app.json",
   "mcpServers": "./.mcp.json",
   "codexSecurity": {
-    "workerProviderSnapshot": true
+    "workerProviderSnapshot": 2
   },
   "interface": {
     "displayName": "Codex Security",

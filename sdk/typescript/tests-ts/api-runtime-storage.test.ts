@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as runtime from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
+import { parse as parseToml } from "smol-toml";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -66,9 +67,30 @@ test.each([false, true])(
               launched = true;
               const file = options.env!["CODEX_SECURITY_CONFIG_PATH"]!;
               expect(dirname(file)).toBe(protectedDirectory!);
-              expect(await readFile(file, "utf8")).toContain(
+              expect(await readFile(file, "utf8")).not.toContain(
                 "synthetic-client-secret",
               );
+              const workerFile =
+                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+              expect(dirname(workerFile)).toBe(protectedDirectory!);
+              expect(await readFile(workerFile, "utf8")).toContain(
+                "synthetic-client-secret",
+              );
+              const filesystem = parseToml(
+                options.configOverrides!.find((value) =>
+                  value.startsWith(
+                    "permissions.codex_security_scan.filesystem=",
+                  ),
+                )!,
+              )["permissions"] as Record<string, Record<string, unknown>>;
+              expect(
+                (
+                  filesystem["codex_security_scan"]!["filesystem"] as Record<
+                    string,
+                    unknown
+                  >
+                )[workerFile],
+              ).toEqual({ ".": "deny" });
               if (process.platform !== "win32") {
                 expect((await stat(file)).mode & 0o777).toBe(0o600);
                 expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
@@ -80,7 +102,7 @@ test.each([false, true])(
       },
     );
     try {
-      await expect(client.run(repository)).rejects.toThrow(
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         failAcl ? "synthetic ACL denial" : "synthetic scan reached",
       );
       expect(protectedDirectory).toBeDefined();

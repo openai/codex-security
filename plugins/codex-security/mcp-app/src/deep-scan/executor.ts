@@ -54,6 +54,7 @@ export interface CodexSdkWorkerArtifactContext {
 interface CodexSdkWorkerRuntimeSettings {
   providerOverrides?: string[];
   reasoningSummary?: string;
+  serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
     api_key_cyber_access_programs?: boolean;
@@ -122,6 +123,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
+          ...(runtimeSettings.serviceTier === undefined
+            ? {}
+            : { service_tier: runtimeSettings.serviceTier }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -325,6 +329,10 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
     filesystem: Object.fromEntries([
       [":root", "read"],
       ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
+      ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
+        key,
+        { ".": "deny" },
+      ]),
       ...(sandbox.globScanMaxDepth === undefined
         ? []
         : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
@@ -488,17 +496,31 @@ async function workerRuntimeSettings(
     isRecord(profile) && profile.model_reasoning_summary !== undefined
       ? profile.model_reasoning_summary
       : config.model_reasoning_summary;
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
   const settings: CodexSdkWorkerRuntimeSettings = {
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
+    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
-  const provider =
-    isRecord(profile) && profile.model_provider !== undefined
-      ? profile.model_provider
-      : config.model_provider;
+  const workerConfigPath = environmentVariable(
+    environment,
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    process.platform,
+  );
+  const workerConfig = workerConfigPath
+    ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
+    : undefined;
+  const provider = isRecord(workerConfig)
+    ? workerConfig.model_provider
+    : undefined;
   if (typeof provider === "string") {
     settings.providerOverrides = [`model_provider=${JSON.stringify(provider)}`];
   }
-  const providers = config.model_providers;
+  const providers = isRecord(workerConfig)
+    ? workerConfig.model_providers
+    : undefined;
   if (isRecord(providers)) {
     const selected =
       typeof provider === "string"
