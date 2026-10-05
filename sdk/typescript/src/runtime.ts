@@ -75,6 +75,22 @@ const execFile = promisify(execFileCallback);
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
+const MARKETPLACE_MANIFEST = `${JSON.stringify(
+  {
+    name: MARKETPLACE_NAME,
+    interface: { displayName: "Codex Security SDK" },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+        category: "Security",
+      },
+    ],
+  },
+  null,
+  2,
+)}\n`;
 
 const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
@@ -2354,18 +2370,6 @@ export async function createMarketplace(
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
   throwIfSignalAborted(signal);
-  const manifest = {
-    name: MARKETPLACE_NAME,
-    interface: { displayName: "Codex Security SDK" },
-    plugins: [
-      {
-        name: PLUGIN_NAME,
-        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Security",
-      },
-    ],
-  };
   const manifestPath = join(
     marketplace,
     ".agents",
@@ -2373,7 +2377,7 @@ export async function createMarketplace(
     "marketplace.json",
   );
   await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+  await writeFile(manifestPath, MARKETPLACE_MANIFEST, {
     encoding: "utf8",
     flag: "wx",
     mode: 0o600,
@@ -2481,6 +2485,10 @@ export async function bootstrapPlugin(
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
   const stagedMatches =
     staged?.version === version &&
+    (await readFile(
+      join(marketplace, ".agents", "plugins", "marketplace.json"),
+      "utf8",
+    ).catch(nullIfMissingFileError)) === MARKETPLACE_MANIFEST &&
     (await pluginContentsMatch(root, stagedRoot, options.signal));
 
   if (!stagedMatches) {
