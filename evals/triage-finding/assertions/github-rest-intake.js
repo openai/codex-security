@@ -22,7 +22,7 @@ function normalizesAs(text, sourceType) {
   const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)\\s*:\\s*|\x60?normalize as\\s+)`;
   const value = `(?:"${sourceType}"|'${sourceType}'|\x60${sourceType}\x60|${sourceType})`;
   const normalization = field + value + "\x60?";
-  return new RegExp(`(?:^|[\\s{,(\\[])(?:${normalization}|(\\*+|_+)${normalization}\\1)(?=$|[\\s\x60,}.;!?\\)\\]])`, "i").test(text);
+  return new RegExp(`(?:^|[\\s{,(\\[])[*_]*${normalization}[*_]*(?=$|[\\s\x60,}.;:!?\\)\\]])`, "i").test(text);
 }
 
 const checks = {
