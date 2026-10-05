@@ -287,7 +287,7 @@ def javascript_regex_end(
         previous -= 1
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
-        keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$", prefix)
+        keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
         if keyword is None:
             return None
         if javascript_keyword_follows_member_access(masked, previous + 1 - len(keyword.group())):

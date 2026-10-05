@@ -590,6 +590,22 @@ def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Pa
     assert "method Service.visible" in preview
 
 
+def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path) -> None:
+    source = """class Service {
+  makeMatcher() { const matcher = () => /if(enabled)/; } // note
+  authorize(request) {}
+}
+"""
+
+    preview = generate_preview(tmp_path, "service.js", source)
+
+    assert preview.splitlines() == [
+        "class Service",
+        "method Service.makeMatcher",
+        "method Service.authorize",
+    ]
+
+
 @pytest.mark.parametrize(
     "condition",
     ["if (ready)", "if /* condition */ (check(value))", "while (ready)", "if (ready) {} else"],
