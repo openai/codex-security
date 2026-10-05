@@ -86,7 +86,7 @@ const checks = {
       "state=open",
       "per_page=100",
     ])(text, context);
-    const hasInstances = /code-scanning\/alerts\/(?:\{alert_number\}|\d+)\/instances\?(?:[^\s`"\']*&)?per_page=100(?=$|[&\s`"\'.,)*_>\]])/i.test(text);
+    const hasInstances = /code-scanning\/alerts\/(?:\{alert_number\}|\d+)\/instances\b[^\r\n]*?\bper_page=100(?=$|[&\s`"\'.,)*_>\]])/i.test(text);
     return [
       ...(!hasAlerts ? ["must use code scanning alerts endpoint with state=open and per_page=100"] : []),
       ...(!hasInstances ? ["must fetch code scanning alert instances per alert"] : []),

@@ -95,6 +95,12 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     for (const query of ["", "?page=2", "?per_page=1000"]) {
       expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"), false);
     }
+    for (const request of [
+      `GET /repos/${repository}/code-scanning/alerts/${alert}/instances with per_page=100`,
+      `gh api --method GET /repos/${repository}/code-scanning/alerts/${alert}/instances -f per_page=100 --paginate`,
+    ]) {
+      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100. ${request}. source_type: "sarif"`, githubContext("code_scanning"));
+    }
   }
 }
 expectPass(github, 'GitHub Issues require an explicit issue and are not included in all sources. source_type: "freeform"', githubContext("explicit_issue"));
