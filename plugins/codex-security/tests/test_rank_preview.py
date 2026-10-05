@@ -425,6 +425,60 @@ inline int answer() { return 42; }
     )
 
 
+@pytest.mark.parametrize(
+    "suffix", [".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm", ".CPP"]
+)
+def test_cpp_raw_string_does_not_hide_following_declarations(tmp_path: Path, suffix: str) -> None:
+    source = """void before() {}
+const char* text = R"tag("{)tag";
+class Service {
+public:
+  const char* value() { return R"("{)"; }
+  void visible() {}
+};
+void after() {}
+"""
+
+    preview = generate_preview(tmp_path, f"sample{suffix}", source)
+
+    assert preview.splitlines() == [
+        "function before",
+        "class Service",
+        "method Service.value",
+        "method Service.visible",
+        "function after",
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "u8", "u", "U", "L"])
+@pytest.mark.parametrize("delimiter", ["", "tag", "abcdefghijklmnop"])
+def test_cpp_raw_string_body_is_not_code(tmp_path: Path, prefix: str, delimiter: str) -> None:
+    source = f'''void before() {{}}
+const auto text = {prefix}R"{delimiter}(
+void fake() {{}}
+" {{ /*
+){delimiter}";
+void after() {{}}
+'''
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
+@pytest.mark.parametrize("macro", ["ERROR", "FORMAT_u8R", "x\u0301R"])
+def test_cpp_macro_before_string_is_not_a_raw_string(tmp_path: Path, macro: str) -> None:
+    source = f"""#define {macro} "error: "
+void before() {{}}
+const char* text = {macro}"(connection failed";
+void after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
 def test_expression_bodied_function_does_not_consume_next_type_body(tmp_path: Path) -> None:
     source = """fun answer(): Int = 42
 class Service {
