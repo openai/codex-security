@@ -248,11 +248,16 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-Use device authentication on remote or headless machines:
+On remote or headless machines, use device authentication if your workspace
+permits it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
+
+If your workspace disables device authentication, use
+[browser login with SSH forwarding](#remote-login-with-ssh-forwarding) on
+SSH-accessible machines.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -263,6 +268,40 @@ printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
+
+### Remote login with SSH forwarding
+
+When device authentication is disabled, forward Codex's localhost browser-login
+callback over SSH.
+
+On your local machine (the one with a browser), open an SSH session with port
+forwarding. Replace `user@remote-host` with your SSH destination:
+
+```bash
+ssh -L 1455:localhost:1455 user@remote-host
+```
+
+In that SSH session, on the remote machine, start browser login:
+
+```bash
+npx @openai/codex-security login
+```
+
+Open the URL printed by the login command in your local browser and finish
+signing in. Keep the SSH session open until login completes; the tunnel forwards
+the browser callback to the remote machine's localhost port 1455.
+
+On the remote machine, verify the saved login and start your scan:
+
+```bash
+npx @openai/codex-security login status
+npx @openai/codex-security scan .
+```
+
+See the [Codex authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh)
+for the SSH forwarding fallback.
+
+### Native command authentication and other providers
 
 SDK callers can select native command authentication through
 `codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
@@ -2794,6 +2833,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
+The device-login example requires your workspace to permit device authentication.
 With a published image, run from the Codex Security repository root:
 
 ```bash
