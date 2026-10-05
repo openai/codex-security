@@ -95,6 +95,11 @@
 - cover container and native dependencies ([#1246](https://github.com/openai/codex-security/pull/1246))
 - exclude Git metadata from document discovery ([#1273](https://github.com/openai/codex-security/pull/1273))
 - verify calibration checkout roots before hydration ([#1250](https://github.com/openai/codex-security/pull/1250))
+- require JSON content types for mutations ([#1277](https://github.com/openai/codex-security/pull/1277))
+- preserve legacy document filename spelling ([#1283](https://github.com/openai/codex-security/pull/1283))
+- send the app-server initialized notification ([#1282](https://github.com/openai/codex-security/pull/1282))
+- require owned temporary artifact storage ([#1278](https://github.com/openai/codex-security/pull/1278))
+- parse existing option values consistently ([#1248](https://github.com/openai/codex-security/pull/1248))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

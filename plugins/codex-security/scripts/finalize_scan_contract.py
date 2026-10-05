@@ -267,7 +267,13 @@ def _read_saved_threat_model(
         path = scan_dir / filename
         if not path.exists() and not path.is_symlink():
             continue
-        descriptor = open_scan_local_file_descriptor(scan_dir, filename, "Saved threat model")
+        descriptor, filename = _open_scan_local_file_with_path(
+            scan_dir,
+            filename,
+            "Saved threat model",
+            resolve_spelling=sealed_artifact_paths is None,
+        )
+        path = scan_dir / filename
         with os.fdopen(descriptor, "rb") as handle:
             contents = handle.read()
         try:
@@ -584,13 +590,22 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
 
 
 def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
+    return _open_scan_local_file_with_path(scan_dir, relative_path, context)[0]
+
+
+def _open_scan_local_file_with_path(
+    scan_dir: Path, relative_path: str, context: str, *, resolve_spelling: bool = False
+) -> tuple[int, str]:
     scan_dir = _require_scan_directory(scan_dir)
     relative_path = _require_portable_relative_path(relative_path, context)
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
         try:
-            return _windows_scan_local_files().open_read_fd(scan_dir, relative_path, context)
+            backend = _windows_scan_local_files()
+            if resolve_spelling:
+                return backend.open_read_fd_with_path(scan_dir, relative_path, context)
+            return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
@@ -622,9 +637,22 @@ def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ContractError(f"{context}: expected a regular non-symlink file")
+        if resolve_spelling:
+            names = os.listdir(parent_fd)
+            if parts[-1] not in names:
+                for name in names:
+                    if name.casefold() != parts[-1].casefold():
+                        continue
+                    try:
+                        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if os.path.samestat(metadata, entry):
+                        relative_path = PurePosixPath(relative_path).with_name(name).as_posix()
+                        break
         result = descriptor
         descriptor = None
-        return result
+        return result, relative_path
     finally:
         if descriptor is not None:
             os.close(descriptor)

@@ -2191,6 +2191,12 @@ network binding.
 
 ### API
 
+Mutation requests to `POST /v1/bulk/findings` and `POST /v1/dedupe-groups` require
+`Content-Type: application/json`; charset parameters are accepted. Other media
+types, including a missing content type, return HTTP 400 `invalid_request`
+before embedding or storage. The API remains unauthenticated and requires an
+authenticated TLS proxy before sharing access.
+
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
 A complete exported `findings.json` document is also accepted; only its
