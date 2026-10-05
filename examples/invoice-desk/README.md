@@ -66,10 +66,11 @@ network. Creating a service account alone does not grant that network access.
 Do not use a repository or organization Actions secret for this workflow. A
 missing key fails the scan with a setup error.
 
-The scan defaults to `https://api.openai.com/v1`. If the service account's project
-requires a regional endpoint, set the `OPENAI_BASE_URL` Actions variable in the
-same environment to the full API base URL, including `/v1`. The workflow passes
-it through Codex's existing `openai_base_url` setting.
+The scan uses `https://us.api.openai.com/v1` through Codex's existing
+`openai_base_url` setting. The endpoint is fixed in the workflow on protected
+`main`, so Actions variables and inherited `OPENAI_BASE_URL` values cannot
+redirect the credential. Use a service account whose project supports this US
+endpoint.
 
 The workflow on protected `main` selects and extracts the exact PR source before
 inference. Behavior tests receive no inference credentials; GitHub may separately

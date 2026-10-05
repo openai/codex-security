@@ -161,7 +161,6 @@ jobs:
         shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
           CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
         run: |
           if [[ -z "$OPENAI_API_KEY" ]]; then
@@ -174,7 +173,7 @@ jobs:
           scan_status=0
           "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" scan . \
             --provider openai --auth api-key \
-            --codex "openai_base_url=\"${OPENAI_BASE_URL:-https://api.openai.com/v1}\"" \
+            --codex 'openai_base_url="https://us.api.openai.com/v1"' \
             --model gpt-5.6-sol --effort high --mode standard \
             --headless --format json \
             --output-dir "$RUNNER_TEMP/invoice-desk-scan" \
