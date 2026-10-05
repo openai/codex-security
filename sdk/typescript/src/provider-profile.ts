@@ -6,6 +6,7 @@ import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
+  inlineToml,
   writeCodexConfig,
   type JsonObject,
 } from "./config.js";
@@ -76,6 +77,7 @@ export async function createProviderProfile(
 export async function createProfileCodex(
   options: CodexOptions,
   profileName: string,
+  requestedPermissionProfile?: string,
 ): Promise<Codex> {
   const command =
     options.codexPathOverride ?? resolveCodexCommand(options.env).command;
@@ -84,10 +86,73 @@ export async function createProfileCodex(
     ...options,
     codexPathOverride: executablePathForSpawn(command),
     profileName,
+    requestedPermissionProfile,
     ...(options.env === undefined
       ? {}
       : { env: bundledCodexSdkEnvironment(command, options.env) }),
   }) as Codex;
+}
+
+/** Verify the effective helper policy before starting exec with a private profile. */
+export async function preflightReadOnlyProfileCodex(
+  options: CodexOptions,
+  expectedProfile: JsonObject,
+  providerConfig: JsonObject,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ permissionProfileId: string; configOverrides: string[] }> {
+  const preflight = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const permissionProfileId =
+    preflight.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID as string;
+  const configOverrides = [
+    ...(options.configOverrides ?? []),
+    `default_permissions=${JSON.stringify(permissionProfileId)}`,
+    `permissions.${permissionProfileId}=${inlineToml(expectedProfile)}`,
+  ];
+  const command =
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command;
+  const client = await nativeProfileClient();
+  const providers = resolveCodexProfile(providerConfig)["model_providers"];
+  const definitions = isRecord(providers)
+    ? (client.preflightProviderDefinitions(providers) as JsonObject)
+    : {};
+  const env =
+    options.env === undefined
+      ? undefined
+      : bundledCodexSdkEnvironment(command, options.env);
+  await preflight.preflightDeepScanWorkerPermissionProfile({
+    codexPath: executablePathForSpawn(command),
+    cwd,
+    configOverrides: [
+      ...client.profileConfigOverrides(options.config ?? {}),
+      ...configOverrides,
+    ],
+    providerConfigOverrides: modelProviderConfigOverride({
+      model_providers: definitions,
+    }),
+    ...(env === undefined
+      ? {}
+      : {
+          env: {
+            ...env,
+            ...(options.apiKey === undefined
+              ? {}
+              : { CODEX_API_KEY: options.apiKey }),
+          },
+        }),
+    expectedProfile,
+    signal: signal ?? new AbortController().signal,
+    context: "helper",
+  });
+  return { permissionProfileId, configOverrides };
 }
 
 async function nativeProfileClient() {

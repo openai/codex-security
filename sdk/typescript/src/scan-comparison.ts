@@ -23,7 +23,6 @@ import {
   deepMerge,
   hasCommandAuth,
   mergedCodexConfig,
-  inlineToml,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCyberAccessConfig,
@@ -37,6 +36,7 @@ import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  preflightReadOnlyProfileCodex,
   providerPreflightCommand,
 } from "./provider-profile.js";
 import {
@@ -651,6 +651,7 @@ async function startReadOnlyCodexThread(
       : undefined;
   const profile = options.nativeProfile ?? ownProfile;
   try {
+    let requestedPermissionProfile: string | undefined;
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
       codexOptions.config = {
@@ -659,22 +660,31 @@ async function startReadOnlyCodexThread(
           resolveCodexProfile(providerConfig)["windows"] ??
           DEFAULT_CODEX_CONFIG["windows"],
       } as NonNullable<CodexOptions["config"]>;
-      codexOptions.configOverrides = [
-        `default_permissions=${JSON.stringify(profile.name)}`,
-        `permissions.${profile.name}=${inlineToml({
+      const permissions = await preflightReadOnlyProfileCodex(
+        codexOptions,
+        {
           extends: ":read-only",
           filesystem: {
             ":root": "read",
             [dirname(profile.path)]: { ".": "deny" },
           },
           network: { enabled: false },
-        })}`,
-      ];
+        },
+        providerSettings,
+        threadOptions.workingDirectory!,
+        options.signal,
+      );
+      codexOptions.configOverrides = permissions.configOverrides;
+      requestedPermissionProfile = permissions.permissionProfileId;
     }
     const codex =
       profile === undefined
         ? new Codex(codexOptions)
-        : await createProfileCodex(codexOptions, profile.name);
+        : await createProfileCodex(
+            codexOptions,
+            profile.name,
+            requestedPermissionProfile,
+          );
     return {
       thread: codex.startThread(threadOptions),
       ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),

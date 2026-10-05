@@ -19,6 +19,23 @@ export function preflightProviderDefinitions(providers) {
   );
 }
 
+export function isPermissionProfileFallbackWarning(message, profileId) {
+  if (typeof message !== "string") return false;
+  const prefix =
+    "Configured value for `permission_profile` is disallowed by requirements; " +
+    `falling back from \`${profileId}\` to required value \``;
+  const warning = message.trim();
+  return warning.startsWith(prefix) && warning.endsWith("`.");
+}
+
+export function profileConfigOverrides(config) {
+  const overrides = [];
+  flattenConfig(config, "", (key, value) =>
+    overrides.push(`${key}=${toml(value)}`),
+  );
+  return overrides;
+}
+
 // Native profile files keep provider configuration off process arguments while
 // retaining the existing CODEX_HOME credential store.
 export function createCodexProfileClient(options) {
@@ -95,6 +112,20 @@ class ProfileThread {
         } catch (cause) {
           throw new Error(`Failed to parse item: ${line}`, { cause });
         }
+        const item = event.type === "item.completed" ? event.item : event;
+        if (
+          this.options.requestedPermissionProfile !== undefined &&
+          item.type === "error" &&
+          isPermissionProfileFallbackWarning(
+            item.message,
+            this.options.requestedPermissionProfile,
+          )
+        ) {
+          throw new Error(
+            "Read-only Codex helper stopped because organization policy changed its permission profile. Its results were discarded.\n" +
+              item.message,
+          );
+        }
         if (event.type === "thread.started") this.id = event.thread_id;
         if (event.type === "turn.completed")
           event.usage.cache_write_input_tokens ??= 0;
@@ -118,7 +149,8 @@ function nativeArguments(options, thread, id, turn, schemaPath) {
     options.profileName,
   ];
   const config = (key, value) => args.push("--config", `${key}=${toml(value)}`);
-  if (options.config) flattenConfig(options.config, "", config);
+  for (const override of profileConfigOverrides(options.config ?? {}))
+    args.push("--config", override);
   for (const override of options.configOverrides ?? [])
     args.push("--config", override);
   if (options.baseUrl) config("openai_base_url", options.baseUrl);

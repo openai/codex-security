@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
 import { executablePathForSpawn } from "./executable-path.js";
+import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profile.mjs";
 
 /** The stable profile id selected by the worker's raw config overrides. */
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
@@ -31,6 +32,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
+  /** Internal SDK helper context changes the wrapper-owned subject label. */
+  readonly context?: "helper";
 }
 
 type PendingRequest = {
@@ -70,7 +73,8 @@ export async function preflightDeepScanWorkerPermissionProfile(
     const matchingEntries = catalog.filter(
       (entry) => entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
     );
-    if (matchingEntries.length !== 1) throw malformedPreflightError();
+    if (matchingEntries.length !== 1)
+      throw malformedPreflightError(options.context);
     const catalogEntry = matchingEntries[0];
     const requirementsResponse =
       catalogEntry.allowed === true
@@ -97,6 +101,11 @@ export async function preflightDeepScanWorkerPermissionProfile(
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
+  } catch (error) {
+    await client.close();
+    const stderr = client.stderrText;
+    if (error instanceof Error && stderr) error.message += "\n" + stderr;
+    throw error;
   } finally {
     await client.close();
   }
@@ -108,6 +117,7 @@ class AppServerPreflightClient {
   private readonly stdoutLines: Interface;
   private pending: PendingRequest | undefined;
   private nextId = 1;
+  private readonly stderr: Buffer[] = [];
   private terminalError: Error | undefined;
   private closed = false;
   private childClosed = false;
@@ -141,25 +151,37 @@ class AppServerPreflightClient {
         resolve();
       });
     });
-    // stderr can contain paths or repository contents. Drain it so the child
-    // cannot block, but never retain or surface it in Deep Scan errors.
-    this.child.stderr.resume();
+    this.child.stderr.on("data", (chunk) => this.stderr.push(chunk));
     this.stdoutLines = createInterface({
       input: this.child.stdout,
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    const onStdioError = () => {
-      this.fail(codexExecutableStdioError(options.codexPath));
+    const onStdioError = (error: Error) => {
+      const failure = codexExecutableStdioError(
+        options.codexPath,
+        options.context,
+      );
+      failure.message += "\n" + error.message;
+      this.fail(failure);
     };
     this.stdoutLines.on("error", onStdioError);
     this.child.stdin.on("error", onStdioError);
     this.child.on("error", (error) => {
-      this.fail(codexExecutableStartError(options.codexPath, error));
+      this.fail(
+        codexExecutableStartError(options.codexPath, error, options.context),
+      );
     });
-    this.child.on("exit", (code, signal) => {
+    this.child.on("close", (code, signal) => {
       if (!this.closed) {
-        this.fail(codexExecutableExitError(options.codexPath, code, signal));
+        this.fail(
+          codexExecutableExitError(
+            options.codexPath,
+            code,
+            signal,
+            options.context,
+          ),
+        );
       }
     });
 
@@ -170,6 +192,10 @@ class AppServerPreflightClient {
     options.signal.addEventListener("abort", onAbort, { once: true });
     this.removeAbortListener = () =>
       options.signal.removeEventListener("abort", onAbort);
+  }
+
+  get stderrText(): string {
+    return Buffer.concat(this.stderr).toString("utf8");
   }
 
   async initialize(): Promise<void> {
@@ -196,21 +222,23 @@ class AppServerPreflightClient {
         ...(cursor === undefined ? {} : { cursor }),
       });
       const data = result.data;
-      if (!Array.isArray(data)) throw malformedPreflightError();
+      if (!Array.isArray(data))
+        throw malformedPreflightError(this.options.context);
       for (const value of data) {
         const entry = record(value);
         // Catalog ids are opaque. Only our requested profile id is fixed and
         // non-empty; unrelated valid ids may be empty or otherwise unusual.
         if (!entry || typeof entry.id !== "string") {
-          throw malformedPreflightError();
+          throw malformedPreflightError(this.options.context);
         }
-        if (typeof entry.allowed !== "boolean") throw malformedPreflightError();
+        if (typeof entry.allowed !== "boolean")
+          throw malformedPreflightError(this.options.context);
         if (
           entry.description !== null &&
           entry.description !== undefined &&
           typeof entry.description !== "string"
         ) {
-          throw malformedPreflightError();
+          throw malformedPreflightError(this.options.context);
         }
         entries.push(entry);
       }
@@ -222,7 +250,7 @@ class AppServerPreflightClient {
         nextCursor.length === 0 ||
         seenCursors.has(nextCursor)
       ) {
-        throw malformedPreflightError();
+        throw malformedPreflightError(this.options.context);
       }
       seenCursors.add(nextCursor);
       cursor = nextCursor;
@@ -264,7 +292,8 @@ class AppServerPreflightClient {
     this.closed = true;
     this.removeAbortListener();
     this.pending?.reject(
-      this.terminalError ?? codexExecutableStdioError(this.options.codexPath),
+      this.terminalError ??
+        codexExecutableStdioError(this.options.codexPath, this.options.context),
     );
     this.pending = undefined;
     this.stopChild();
@@ -274,11 +303,20 @@ class AppServerPreflightClient {
 
   private write(message: JsonRecord): void {
     if (!this.child.stdin.writable) {
-      this.fail(codexExecutableStdioError(this.options.codexPath));
+      this.fail(
+        codexExecutableStdioError(this.options.codexPath, this.options.context),
+      );
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) this.fail(codexExecutableStdioError(this.options.codexPath));
+      if (error) {
+        const failure = codexExecutableStdioError(
+          this.options.codexPath,
+          this.options.context,
+        );
+        failure.message += "\n" + error.message;
+        this.fail(failure);
+      }
     });
   }
 
@@ -288,12 +326,12 @@ class AppServerPreflightClient {
     try {
       value = JSON.parse(line);
     } catch {
-      this.fail(malformedPreflightError());
+      this.fail(malformedPreflightError(this.options.context));
       return;
     }
     const message = record(value);
     if (!message) {
-      this.fail(malformedPreflightError());
+      this.fail(malformedPreflightError(this.options.context));
       return;
     }
     const id = message.id;
@@ -304,7 +342,7 @@ class AppServerPreflightClient {
     }
     const pending = this.pending;
     if (!pending || pending.id !== id) {
-      this.fail(malformedPreflightError());
+      this.fail(malformedPreflightError(this.options.context));
       return;
     }
     this.pending = undefined;
@@ -314,13 +352,14 @@ class AppServerPreflightClient {
           this.options.codexPath,
           pending.method,
           message.error,
+          this.options.context,
         ),
       );
       return;
     }
     const result = record(message.result);
     if (!result) {
-      pending.reject(malformedPreflightError());
+      pending.reject(malformedPreflightError(this.options.context));
       return;
     }
     pending.resolve(result);
@@ -350,8 +389,8 @@ function verifyPreflightResult(
 ): void {
   if (catalogEntry.allowed !== true) {
     throw existingAllowlistExcludesProfile(requirementsResponse)
-      ? disallowedProfileAllowlistError()
-      : managedPolicyRejectedError();
+      ? disallowedProfileAllowlistError(options.context)
+      : managedPolicyRejectedError(options.context);
   }
 
   const config = record(configResponse.config);
@@ -365,16 +404,22 @@ function verifyPreflightResult(
     !actualProfile ||
     typeof config.default_permissions !== "string"
   )
-    throw malformedPreflightError();
+    throw malformedPreflightError(options.context);
 
   if (config.default_permissions !== DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID) {
-    throw profileNotSelectedError();
+    throw profileNotSelectedError(options.context);
   }
 
-  const expectedProfile = comparableProfile(options.expectedProfile);
-  const actualWithoutDescription = comparableProfile(actualProfile);
+  const expectedProfile = comparableProfile(
+    options.expectedProfile,
+    options.context,
+  );
+  const actualWithoutDescription = comparableProfile(
+    actualProfile,
+    options.context,
+  );
   if (!isDeepStrictEqual(actualWithoutDescription, expectedProfile)) {
-    throw profileCollisionError();
+    throw profileCollisionError(options.context);
   }
 }
 
@@ -405,11 +450,12 @@ function existingAllowlistExcludesProfile(
  */
 function comparableProfile(
   value: Readonly<Record<string, unknown>>,
+  context?: "helper",
 ): JsonRecord {
   const normalized = stripNullObjectFields(value) as JsonRecord;
   const description = normalized.description;
   if (description !== undefined && typeof description !== "string") {
-    throw malformedPreflightError();
+    throw malformedPreflightError(context);
   }
   const { description: _description, ...rest } = normalized;
   return rest;
@@ -443,49 +489,57 @@ function validateOptions(
     !options.signal ||
     typeof options.signal.addEventListener !== "function"
   ) {
-    throw malformedPreflightError();
+    throw malformedPreflightError(options.context);
   }
-  comparableProfile(options.expectedProfile);
+  comparableProfile(options.expectedProfile, options.context);
 }
 
 // Verified permission incompatibilities explicitly stop the scan. A failed
 // transport attempt alone does not establish that the scan cannot proceed.
-function disallowedProfileAllowlistError(): DeepScanNonRetryableError {
+function disallowedProfileAllowlistError(
+  context?: "helper",
+): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because organization policy does not allow the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n\nDeep Scan did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because organization policy does not allow the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n\n${subject(context)} did not run.`,
   );
 }
 
-function managedPolicyRejectedError(): DeepScanNonRetryableError {
+function managedPolicyRejectedError(
+  context?: "helper",
+): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because managed Codex policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. Deep Scan did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because managed Codex policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to review the managed permission, sandbox, and filesystem requirements. ${subject(context)} did not run.`,
   );
 }
 
-function profileNotSelectedError(): DeepScanNonRetryableError {
+function profileNotSelectedError(
+  context?: "helper",
+): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because Codex did not select the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to allow that profile for Deep Scan. Deep Scan did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because Codex did not select the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to allow that profile for ${subject(context)}. ${subject(context)} did not run.`,
   );
 }
 
-function profileCollisionError(): DeepScanNonRetryableError {
+function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    `Deep Scan cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\` stub limited to \`extends = ":read-only"\`; Deep Scan supplies its deny rules at runtime. Deep Scan did not run.`,
+    `${subject(context)} cannot safely start a read-only worker because existing Codex configuration changes the reserved \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile. Ask your Codex administrator to keep the normal-config \`[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\` stub limited to \`extends = ":read-only"\`; ${subject(context)} supplies its deny rules at runtime. ${subject(context)} did not run.`,
   );
 }
 
-function malformedPreflightError(): Error {
+function malformedPreflightError(context?: "helper"): Error {
   return new Error(
-    "Deep Scan cannot safely verify its read-only worker permission profile with this Codex configuration. Deep Scan did not run.",
+    `${subject(context)} cannot safely verify its read-only worker permission profile with this Codex configuration. ${subject(context)} did not run.`,
   );
 }
 
 function unsupportedCodexApiError(
   codexPath: string,
   api: string,
+  context?: "helper",
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    "Deep Scan cannot safely verify its read-only worker permission profile because " +
+    subject(context) +
+      " cannot safely verify its read-only worker permission profile because " +
       "the selected Codex executable " +
       JSON.stringify(codexPath) +
       " does not support the required " +
@@ -493,7 +547,9 @@ function unsupportedCodexApiError(
       " API. " +
       "Update the Codex installation at that path " +
       "(the desktop app if it is bundled, otherwise the selected CLI) and retry." +
-      " Deep Scan did not run.",
+      " " +
+      subject(context) +
+      " did not run.",
   );
 }
 
@@ -501,25 +557,39 @@ function jsonRpcPreflightError(
   codexPath: string,
   method: string,
   value: unknown,
+  context?: "helper",
 ): Error {
   const error = record(value);
   const code =
     typeof error?.code === "number" && Number.isFinite(error.code)
       ? error.code
       : undefined;
-  if (code === -32601) return unsupportedCodexApiError(codexPath, method);
+  if (code === -32601) {
+    const failure = unsupportedCodexApiError(codexPath, method, context);
+    if (typeof error?.message === "string")
+      failure.message += "\n" + error.message;
+    return failure;
+  }
   return new Error(
-    "Deep Scan cannot safely verify its read-only worker permission profile because " +
+    subject(context) +
+      " cannot safely verify its read-only worker permission profile because " +
       "the selected Codex executable " +
       JSON.stringify(codexPath) +
       " returned an error for " +
       JSON.stringify(method) +
       (code === undefined ? "" : " (JSON-RPC code " + code + ")") +
-      ". Check the Codex configuration and retry. Deep Scan did not run.",
+      ". Check the Codex configuration and retry. " +
+      subject(context) +
+      " did not run." +
+      (typeof error?.message === "string" ? "\n" + error.message : ""),
   );
 }
 
-function codexExecutableStartError(codexPath: string, error: Error): Error {
+function codexExecutableStartError(
+  codexPath: string,
+  error: Error,
+  context?: "helper",
+): Error {
   const value = "code" in error ? error.code : undefined;
   const code =
     typeof value === "string" && /^[A-Z0-9_]+$/u.test(value)
@@ -527,7 +597,13 @@ function codexExecutableStartError(codexPath: string, error: Error): Error {
       : undefined;
   const codeDetail = code === undefined ? "" : " (" + code + ")";
   return new Error(
-    codexExecutableFailureMessage(codexPath, "could not start" + codeDetail),
+    codexExecutableFailureMessage(
+      codexPath,
+      "could not start" + codeDetail,
+      context,
+    ) +
+      "\n" +
+      error.message,
     { cause: error },
   );
 }
@@ -536,6 +612,7 @@ function codexExecutableExitError(
   codexPath: string,
   code: number | null,
   signal: NodeJS.Signals | null,
+  context?: "helper",
 ): Error {
   const detail =
     code !== null
@@ -545,14 +622,18 @@ function codexExecutableExitError(
         ? "was terminated before permission-profile verification completed by signal " +
           signal
         : "exited before permission-profile verification completed";
-  return new Error(codexExecutableFailureMessage(codexPath, detail));
+  return new Error(codexExecutableFailureMessage(codexPath, detail, context));
 }
 
-function codexExecutableStdioError(codexPath: string): Error {
+function codexExecutableStdioError(
+  codexPath: string,
+  context?: "helper",
+): Error {
   return new Error(
     codexExecutableFailureMessage(
       codexPath,
       "could not exchange app-server JSON-RPC over stdio",
+      context,
     ),
   );
 }
@@ -560,16 +641,20 @@ function codexExecutableStdioError(codexPath: string): Error {
 function codexExecutableFailureMessage(
   codexPath: string,
   detail: string,
+  context?: "helper",
 ): string {
   return (
-    "Deep Scan cannot safely verify its read-only worker permission profile because " +
+    subject(context) +
+    " cannot safely verify its read-only worker permission profile because " +
     "the selected Codex executable " +
     JSON.stringify(codexPath) +
     " " +
     detail +
     ". " +
     "Check that the named executable runs with --version, and check CODEX_CLI_PATH/PATH, then retry." +
-    " Deep Scan did not run."
+    " " +
+    subject(context) +
+    " did not run."
   );
 }
 
@@ -583,17 +668,20 @@ export function deepScanPermissionProfileFallbackError(
   message: unknown,
 ): DeepScanNonRetryableError | undefined {
   if (typeof message !== "string") return undefined;
-  const prefix =
-    "Configured value for `permission_profile` is disallowed by requirements; " +
-    `falling back from \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` to required value \``;
-  const warning = message.trim();
-  // The destination is an opaque quoted profile id. It can be empty and can
-  // itself contain backticks or newlines, so only anchor the known source
-  // prefix and the warning's terminal backtick-period.
-  if (!warning.startsWith(prefix) || !warning.endsWith("`.")) return undefined;
+  if (
+    !isPermissionProfileFallbackWarning(
+      message,
+      DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+    )
+  )
+    return undefined;
   return new DeepScanNonRetryableError(
-    `Deep Scan stopped a worker because organization policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile after the turn started. The worker was stopped and its results were discarded. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true`,
+    `Deep Scan stopped a worker because organization policy rejected the required \`${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}\` permission profile after the turn started. The worker was stopped and its results were discarded. Ask your Codex administrator to define this read-only stub in a normal config layer:\n\n[permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}]\nextends = ":read-only"\n\nand add this entry to your existing allowlist in requirements.toml:\n\n[allowed_permission_profiles]\n${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID} = true\n${message}`,
   );
+}
+
+function subject(context?: "helper"): string {
+  return context === "helper" ? "Read-only Codex helper" : "Deep Scan";
 }
 
 function isAbortError(error: unknown): boolean {

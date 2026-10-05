@@ -91,6 +91,13 @@ async function fixture(mode = "success") {
       process.exit(0);
     } else if (process.env.PROFILE_TEST_MODE === "wait") {
       setInterval(() => {}, 1000);
+    } else if (process.env.PROFILE_TEST_MODE.startsWith("fallback_")) {
+      emit({ type: "item.completed", item: { type: "agent_message", id: "discarded-item", text: "discarded synthetic response" } });
+      const message = "Configured value for \u0060permission_profile\u0060 is disallowed by requirements; falling back from \u0060synthetic_read_only\u0060 to required value \u0060:workspace\u0060.";
+      emit(process.env.PROFILE_TEST_MODE === "fallback_item"
+        ? { type: "item.completed", item: { type: "error", message } }
+        : { type: "error", message });
+      setInterval(() => {}, 1000);
     } else {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
       emit({ type: "turn.completed", usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } });
@@ -300,6 +307,27 @@ test("native profile abort and abandoned streams close the actual child", async 
         await events.return(undefined);
       }
       assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("a late native permission fallback discards the turn and closes the actual child", async () => {
+  for (const mode of ["fallback_item", "fallback_event"]) {
+    const f = await fixture(mode);
+    try {
+      const thread = createCodexProfileClient({
+        ...f.options,
+        requestedPermissionProfile: "synthetic_read_only",
+      }).startThread();
+      await assert.rejects(
+        thread.run("synthetic prompt", { outputSchema: { type: "object" } }),
+        /results were discarded[\s\S]*falling back from `synthetic_read_only` to required value `:workspace`\./,
+      );
+      const record = await f.record();
+      assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+      await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
     } finally {
       await f.cleanup();
     }

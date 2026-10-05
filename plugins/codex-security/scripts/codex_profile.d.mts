@@ -2,9 +2,19 @@ export function preflightProviderDefinitions(
   providers: Record<string, unknown>,
 ): Record<string, unknown>;
 
+export function isPermissionProfileFallbackWarning(
+  message: unknown,
+  profileId: string,
+): boolean;
+
+export function profileConfigOverrides(
+  config: Record<string, unknown>,
+): string[];
+
 export interface CodexProfileOptions {
   codexPathOverride: string;
   profileName: string;
+  requestedPermissionProfile?: string;
   env?: Record<string, string>;
   apiKey?: string;
   baseUrl?: string;

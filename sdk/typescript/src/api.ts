@@ -2542,9 +2542,11 @@ export class CodexSecurity {
   async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
     const authentication = await this.#authentication();
     this.#requireOpen();
+    const command = await this.#providerPreflightCommand();
+    this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
-        await this.#providerPreflightCommand(),
+        command,
         deviceCode ? ["login", "--device-auth"] : ["login"],
         authentication.environment,
         () => this.#recordLogin(authentication.codexHome, "stored_credentials"),

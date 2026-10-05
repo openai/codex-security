@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
@@ -115,6 +115,26 @@ describe("bundled plugin build", () => {
     ]);
     expect(helper.stdout).toBe("[]\n");
     expect(helper.stderr).toBe("");
+    const preflight = await execFileAsync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(process.argv[1]);
+         console.log(JSON.stringify({
+           preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
+           profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+         }));`,
+        pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
+          .href,
+      ],
+      { cwd: root },
+    );
+    expect(JSON.parse(preflight.stdout)).toEqual({
+      preflight: "function",
+      profileId: "codex_security_deep_scan_worker",
+    });
+    expect(preflight.stderr).toBe("");
   });
 
   test("builds from a source snapshot without Git metadata", async () => {
