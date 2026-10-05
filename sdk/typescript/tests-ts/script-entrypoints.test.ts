@@ -97,7 +97,7 @@ test.each([
   ]) {
     const result = await runCommand(
       "node",
-      ["--import", preload, ...invocation, ...args],
+      ["--import", pathToFileURL(preload).href, ...invocation, ...args],
       {
         env: environment,
         timeout: 30_000,
@@ -116,7 +116,7 @@ test.each([
       "node",
       [
         "--import",
-        preload,
+        pathToFileURL(preload).href,
         "--input-type=module",
         "--eval",
         `await import(${JSON.stringify(pathToFileURL(linked).href)})`,
