@@ -92,13 +92,13 @@ function extensionContext({
 }) {
   return {
     test: {
-      vars: { case_id: caseId },
       metadata: {
         ground_truth: expectedGroundTruth,
         ...(sampleWeight === undefined ? {} : { sample_weight: sampleWeight }),
       },
     },
     result: {
+      vars: { case_id: caseId },
       latencyMs: 1234,
       cost: 0.25,
       namedScores: { existing_metric: 1 },

@@ -1,7 +1,7 @@
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
-import { PLUGIN_ROOT } from "../plugin-root.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
 
 type PreparedRuntime = Awaited<
   ReturnType<
@@ -100,11 +100,7 @@ export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
   };
 }
 
-export function completedCodex(
-  root: string,
-  copyCompletedScan: (root: string) => Promise<string>,
-  threadId: string | null = null,
-) {
+export function completedCodex(root: string, threadId: string | null = null) {
   return (_options: CodexOptions) => ({
     startThread: () => ({
       id: threadId,
@@ -127,7 +123,5 @@ export function codexFactory<Run>(runStreamed: Run) {
     startThread: () => ({ id: null, runStreamed }),
   });
 }
-
-export { createApiTestFixtures } from "./temporary-directories.js";
 
 export const failedPostScanEvents = failedEvents;

@@ -2,10 +2,13 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -362,6 +365,78 @@ try {
       .content,
     content,
   );
+
+  await client.close();
+  client = await connect({
+    CODEX_SECURITY_SCAN_ROOT: path.join(stateAlias, "missing", "scans"),
+  });
+  const relocated = await save({
+    targetPath: repository,
+    storage: "persistent",
+  });
+  assert.ok(
+    relocated.directory.startsWith(
+      path.join(stateRoot, "missing", "scans") + path.sep,
+    ),
+  );
+
+  const repositoryAlias = path.join(fixture, "repository-alias");
+  await symlink(
+    repository,
+    repositoryAlias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await client.close();
+  client = await connect({
+    CODEX_SECURITY_SCAN_ROOT: path.join(repositoryAlias, "missing-scans"),
+  });
+  await assert.rejects(
+    () => save({ targetPath: repository, storage: "persistent" }),
+    /Artifact storage must be outside the target repository/,
+  );
+  await assert.rejects(stat(path.join(repository, "missing-scans")), {
+    code: "ENOENT",
+  });
+
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    const codexHome = path.join(fixture, "readonly-home");
+    const defaultState = path.join(
+      codexHome,
+      "state",
+      "plugins",
+      "codex-security",
+    );
+    await mkdir(defaultState, { recursive: true });
+    await chmod(defaultState, 0o500);
+    try {
+      await client.close();
+      client = await connect({
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        TMPDIR: repositoryAlias,
+      });
+      await assert.rejects(
+        () =>
+          save({
+            targetPath: repository,
+            storage: "persistent",
+            path: "artifacts/standalone.md",
+            content,
+          }),
+        /Artifact storage must be outside the target repository/,
+      );
+      const fallbackStates = (await readdir(repository)).filter((name) =>
+        name.startsWith("codex-security-state-"),
+      );
+      assert.equal(fallbackStates.length, 1);
+      await assert.rejects(
+        stat(path.join(repository, fallbackStates[0], "scans")),
+        { code: "ENOENT" },
+      );
+    } finally {
+      await chmod(defaultState, 0o700);
+    }
+  }
   console.log(
     "Persistent roots, temporary routing, exact file import, restart readback and artifact boundaries passed",
   );
@@ -372,7 +447,7 @@ try {
   await rm(fixture, { recursive: true, force: true });
 }
 
-async function connect(overrides = {}) {
+async function connect(overrides: NodeJS.ProcessEnv = {}) {
   const result = new Client({
     name: "artifact-storage-test",
     version: "1.0.0",
@@ -383,7 +458,8 @@ async function connect(overrides = {}) {
     CODEX_HOME: path.join(fixture, "home"),
     ...overrides,
   };
-  delete env.CODEX_SECURITY_SCAN_ROOT;
+  if (overrides.CODEX_SECURITY_SCAN_ROOT === undefined)
+    delete env.CODEX_SECURITY_SCAN_ROOT;
   await result.connect(
     new StdioClientTransport({
       command: process.execPath,
