@@ -39,11 +39,22 @@ def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
     )
 
 
-@pytest.mark.parametrize("metadata", ["severity", "confidence"])
-def test_verbose_finding_metadata_retains_diagnostics_and_report(metadata: str) -> None:
+@pytest.mark.parametrize(
+    ("metadata", "value"),
+    [
+        ("severity", {"rationale": "x" * 20_000, "level": "high"}),
+        ("confidence", {"rationale": "x" * 20_000, "level": "high"}),
+        ("identity", {"anchor": "x" * 20_000}),
+        ("ruleId", "x" * 20_000),
+        ("taxonomy", {"category": "x" * 20_000, "cwe": ["CWE-79"]}),
+    ],
+    ids=["severity", "confidence", "identity", "rule", "taxonomy"],
+)
+def test_verbose_finding_metadata_retains_diagnostics_and_report(
+    metadata: str, value: object
+) -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     finding = {
-        metadata: {"rationale": "x" * 20_000, "level": "high"},
         "identity": {"anchor": "example-finding"},
         "status": "validated",
         "writeup": {"reportPath": "findings/example/example.md"},
@@ -51,6 +62,7 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(metadata: str) 
         "validation": {"summary": "Synthetic validation"},
         "attackPath": {"summary": "Synthetic path"},
         "codeEvidence": [{"id": "source", "code": "example()"}],
+        metadata: value,
     }
 
     bounded = preview["bounded_finding_details"](finding)
@@ -58,8 +70,10 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(metadata: str) 
     assert {key: bounded[key] for key in finding if key != metadata} == {
         key: value for key, value in finding.items() if key != metadata
     }
-    assert bounded[metadata]["level"] == "high"
-    assert bounded[metadata]["rationale"]
+    assert bounded[metadata]
+    if metadata in {"severity", "confidence"}:
+        assert bounded[metadata]["level"] == "high"
+        assert bounded[metadata]["rationale"]
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode())
         <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
