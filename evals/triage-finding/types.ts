@@ -4,12 +4,11 @@ export interface AssertionContext {
 }
 
 export interface PromptfooTest {
-  vars?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
 
 export interface PromptfooRow {
-  vars?: Record<string, unknown>;
+  vars: Record<string, unknown>;
   latencyMs?: number;
   cost?: number;
   response?: {

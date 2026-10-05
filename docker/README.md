@@ -131,7 +131,12 @@ docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
 
-For unattended use, provide `OPENAI_API_KEY` or `CODEX_API_KEY` instead of login.
+The `login --device-auth` command above signs the runner in with ChatGPT and
+requires device auth to be enabled in your workspace. If device auth is
+disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
+your host shell. Compose passes the key to the runner. Use API keys for
+unattended runs too.
+
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 `CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;
 the findings service's embedding credentials are configured separately.
