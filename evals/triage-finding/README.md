@@ -8,13 +8,15 @@ The suite uses the Promptfoo Codex SDK provider because it only needs final assi
 
 Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
-The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace, independent of the SDK and MCP app packages.
+The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
 
-Install the local eval runner:
+Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and check the TypeScript tooling:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
 ```
+
+After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13.
 
 Validate the config:
 
@@ -43,16 +45,17 @@ pnpm --dir evals/triage-finding run eval --filter-metadata case_id=sarif-redirec
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
 
 - `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
-- `assertions/triage-io.js` checks input order, `input_id`, `source_type`,
+- `assertions/triage-io.mts` checks input order, `input_id`, `source_type`,
   verdicts, array fields, and `$fix-finding` handoff behavior.
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.
-- `assertions/missing-input.js` checks that bare invocation asks for a finding,
+- `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
+- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
 
 The explicit Connector case returns a three-field JSON decision for transport,
-fallback, and account/repository scope. Other intake cases use freeform answers.
+fallback, and account/repository scope. The code-scanning case returns request
+paths and query parameters as JSON. Other intake cases use freeform answers.
 
 ## Calibration Dataset
 
@@ -105,7 +108,7 @@ pnpm --dir evals/triage-finding run eval:calibration
 The calibration config is separate from the default synthetic eval:
 
 - `promptfooconfig.yaml` covers the small fixture app and GitHub intake routing.
-- `promptfooconfig.calibration.yaml` covers the OSS vulnerable/fixed commit pairs and adds `assertions/calibration-evidence.js` to check that required paths or fix commits are cited in the response.
+- `promptfooconfig.calibration.yaml` covers the OSS vulnerable/fixed commit pairs and adds `assertions/calibration-evidence.mts` to check that required paths or fix commits are cited in the response.
 - `promptfooconfig.calibration-smoke.yaml` covers a generated one-row smoke file under `artifacts/calibration-smoke.yaml`.
 
 The calibration eval uses the Codex SDK provider, which shells out to `codex exec`. Run it from a normal shell or an unsandboxed command runner so the Codex CLI can write its normal `$CODEX_HOME` state.
