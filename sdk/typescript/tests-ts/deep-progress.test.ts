@@ -29,7 +29,7 @@ describe("Deep Scan progress", () => {
           consolidating: false,
         }),
       ),
-    ).toEqual({ completed: 34, active: 2, maximum: 40 });
+    ).toEqual({ completed: 34, active: 2, maximum: 40, consolidating: false });
   });
 
   test("waits for the Deep Scan coordinator to create independent-review state", () => {
@@ -98,5 +98,23 @@ describe("Deep Scan progress", () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(aborted).toBe(true);
     expect(progress).toEqual([]);
+  });
+
+  test("reports reduction transitions when review counts remain unchanged", async () => {
+    const reads = [false, true, true, false].map((consolidating) =>
+      workbenchResult({ completed: 2, active: 2, maximum: 40, consolidating }),
+    );
+    const progress: DeepScanProgress[] = [];
+    const tracker = new DeepScanProgressTracker({
+      read: async () => reads.shift(),
+      onProgress: (update) => progress.push(update),
+    });
+    for (let index = 0; index < 4; index++) await tracker.refresh();
+    tracker.stop();
+    expect(progress.map((update) => update.consolidating)).toEqual([
+      false,
+      true,
+      false,
+    ]);
   });
 });

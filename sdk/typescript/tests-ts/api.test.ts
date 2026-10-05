@@ -2766,6 +2766,7 @@ describe("CodexSecurity orchestration", () => {
   test("forwards durable Deep Scan independent-review progress", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const updates: DeepScanProgress[] = [];
+    const observerErrors: unknown[] = [];
     const environment = { CODEX_CLI_PATH: process.execPath };
     const client = new TestClient(
       {},
@@ -2789,6 +2790,7 @@ describe("CodexSecurity orchestration", () => {
                     completed: 3,
                     active: 2,
                     maximum: 40,
+                    consolidating: true,
                   },
                 },
               },
@@ -2811,11 +2813,21 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, {
         mode: "deep",
-        onDeepProgress: (progress) => updates.push(progress),
+        onDeepProgress: (progress) => {
+          updates.push(progress);
+          throw new Error("progress presenter failed");
+        },
+        onObserverError: (observer, error) =>
+          observerErrors.push([observer, error]),
       }),
     ).rejects.toThrow("deep progress captured");
     await Bun.sleep(0);
-    expect(updates).toEqual([{ completed: 3, active: 2, maximum: 40 }]);
+    expect(updates).toEqual([
+      { completed: 3, active: 2, maximum: 40, consolidating: true },
+    ]);
+    expect(observerErrors).toEqual([
+      ["onDeepProgress", new Error("progress presenter failed")],
+    ]);
     await client.close();
   });
 
