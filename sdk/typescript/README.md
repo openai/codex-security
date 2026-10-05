@@ -4,9 +4,18 @@ Run Codex Security from TypeScript or the command line to find, validate, and fi
 security vulnerabilities in your code. The package includes the Codex runtime,
 security plugin, and TypeScript declarations. It uses ES modules.
 
-This README covers setup and common SDK tasks. For more detail, see the
-[CLI reference](docs/cli.md), [findings service guide](docs/findings-service.md),
-or [online documentation](https://learn.chatgpt.com/docs/security).
+- Scan repositories, selected paths, or Git changes. Deep scans run parallel
+  discovery workers on repositories and selected paths.
+- Validate findings, generate patches, and verify existing fixes.
+- Draft security policies and retain threat models.
+- Review saved findings, identify duplicates, classify severity, and suggest owners.
+- Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
+  findings to Linear or a findings service.
+- Automate scans across repositories and project components.
+
+See the [CLI reference](docs/cli.md),
+[findings service guide](docs/findings-service.md), or
+[online documentation](https://learn.chatgpt.com/docs/security) for setup and examples.
 
 Before version `1.0.0`, minor releases may change the public API.
 

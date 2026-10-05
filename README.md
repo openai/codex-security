@@ -1,11 +1,20 @@
 # Codex Security
 
 `@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and
-fixing security vulnerabilities in your code. It can also draft security policies
-to guide future scans.
+fixing security vulnerabilities in your code.
 
-See the [online documentation](https://learn.chatgpt.com/docs/security/cli)
-for a walkthrough.
+## Features
+
+- Scan repositories, selected paths, or Git changes. Deep scans run parallel
+  discovery workers on repositories and selected paths.
+- Validate candidate findings, generate patches, and verify existing fixes.
+- Draft `SECURITY.md` policies and save threat models for later review.
+- Browse saved scans and findings, identify duplicates, assess severity against
+  your own rubric, and suggest owners from source and Git history.
+- Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
+  findings to Linear or a findings service.
+- Automate scans across repositories or project components, including in CI and
+  containers.
 
 ## Quick start
 
@@ -25,6 +34,24 @@ allows it, or [sign in over SSH](sdk/typescript/README.md#remote-login-with-ssh-
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber) approval.
 
+### Scan options
+
+Choose a scope and scan mode:
+
+```bash
+# Scan selected paths.
+npx @openai/codex-security scan . --path src --path tests
+
+# Scan committed changes from a base revision to HEAD.
+npx @openai/codex-security scan . --diff origin/main
+
+# Run a deep scan of the repository.
+npx @openai/codex-security scan . --mode deep
+```
+
+Use `npx @openai/codex-security --help` to browse commands, or `scan --help`
+for scan options, cost limits, and patching after a scan.
+
 ## TypeScript SDK
 
 ```ts
@@ -40,48 +67,76 @@ try {
 }
 ```
 
-The [SDK guide](sdk/typescript/README.md) covers scan options, deep scans,
-and working with findings.
+The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
+validation, severity classification, owner suggestions, and result handling.
 
 ## Generate SECURITY.md
 
+Draft security guidance for a repository or one of its components:
+
 ```bash
 npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
 The command saves a draft outside the checkout. Review it before installing it
-to guide future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
-for component policies, supporting documents, and SDK usage.
+as guidance for future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
+for supporting documents and SDK usage.
 
-## Other providers
+## Save and export threat models
 
-Use [Amazon Bedrock](docs/bedrock.md) with AWS credentials, or
-[OpenRouter and Fireworks AI](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
-with the provider's API key and a supported model.
+Scans and policy generation save threat models with their results. Export a saved
+model without starting another analysis:
+
+```bash
+npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+```
+
+Omit `--scan` to use the current repository's latest completed scan. The
+[export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
+SARIF output for CI, and the offline TypeScript API.
+
+## Containerized bulk scans
+
+Scan a list of repositories with the included Docker Compose configuration,
+which keeps results and authentication between runs. See the
+[container quick start](sdk/typescript/docs/cli.md#containerized-bulk-scans).
+The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
+in containers and can connect to a separately deployed findings service.
 
 ## Findings service (preview)
 
-The findings service stores findings, shows them in a dashboard, and supports
-deduplication. Its API has no built-in authentication, and imports send complete
-finding JSON to the configured embeddings endpoint. See the
-[setup guide](sdk/typescript/docs/findings-service.md) for credentials, storage,
-and deployment.
+Store findings, browse them in a dashboard, and review potential duplicates.
+Start the local service with:
+
+```bash
+npx @openai/codex-security serve
+```
+
+Publish a completed scan with `publish scan --to custom`, then use `dedupe` to
+review potential duplicates and save accepted groups. Point both commands at the
+service with `--findings-url`. The [service guide](sdk/typescript/docs/findings-service.md)
+covers setup, publishing, deduplication, and Docker deployment.
+
+The API has no built-in authentication. Imports send complete finding JSON to
+the configured embeddings endpoint and need an embedding API key, even after
+ChatGPT login.
+
+## Other providers
+
+Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+AWS credentials and does not require a separate OpenAI login. See
+[Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
+
+For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
+for examples.
 
 ## Documentation
 
-- [CLI reference](sdk/typescript/docs/cli.md): scan options, history, validation,
-  patching, and integrations.
-- [Project configuration](docs/project-configuration.md): shared YAML or JSON
-  settings for the CLI and SDK.
-- [Exports and CI](sdk/typescript/docs/cli.md#exports-and-ci): export saved findings
-  and threat models without starting another analysis.
-- [Severity classification](sdk/typescript/docs/cli.md#classify-finding-severity):
-  assess findings against your own rubric.
-- [Owner suggestions](sdk/typescript/docs/cli.md#suggest-finding-owners): suggest
-  contributors based on source and Git history.
-- [Containerized bulk scans](sdk/typescript/docs/cli.md#containerized-bulk-scans)
-  and the [workflow runner](docker/README.md#workflow-runner): run scans and
-  individual CLI stages in containers.
-- [Examples](examples/README.md): CI workflows, custom validation, and a sample app.
+- [Online documentation](https://learn.chatgpt.com/docs/security/cli)
+- [CLI reference](sdk/typescript/docs/cli.md)
+- [Project configuration](docs/project-configuration.md)
+- [Examples](examples/README.md)
 
 To report a vulnerability privately, follow the [security policy](SECURITY.md).
