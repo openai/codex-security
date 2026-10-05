@@ -3,6 +3,7 @@ import { lstat, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
+import { configuredCodexHome } from "./auth.js";
 import {
   resolveCodexProfile,
   modelProviderConfigOverride,
@@ -14,6 +15,7 @@ import { isRecord } from "./record.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
+  acquireCodexSecurityCredentialHomeLock,
   executablePathForSpawn,
   requirePrivateCredentialHome,
   resolveCodexCommand,
@@ -128,30 +130,45 @@ export async function preflightReadOnlyProfileCodex(
     options.env === undefined
       ? undefined
       : bundledCodexSdkEnvironment(command, options.env);
-  await preflight.preflightDeepScanWorkerPermissionProfile({
-    codexPath: executablePathForSpawn(command),
-    cwd,
-    configOverrides: [
-      ...client.profileConfigOverrides(options.config ?? {}),
-      ...configOverrides,
-    ],
-    providerConfigOverrides: modelProviderConfigOverride({
-      model_providers: definitions,
-    }),
-    ...(env === undefined
-      ? {}
-      : {
-          env: {
-            ...env,
-            ...(options.apiKey === undefined
-              ? {}
-              : { CODEX_API_KEY: options.apiKey }),
-          },
-        }),
-    expectedProfile,
-    signal: signal ?? new AbortController().signal,
-    context: "helper",
-  });
+  // App-server treats concurrent cold-home SQLite initialization as fatal.
+  // Keep the lock in a private child so a readable native home stays readable.
+  const lockDirectory = join(
+    configuredCodexHome(env ?? process.env),
+    ".codex-security-preflight",
+  );
+  await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    lockDirectory,
+    signal,
+  );
+  try {
+    await preflight.preflightDeepScanWorkerPermissionProfile({
+      codexPath: executablePathForSpawn(command),
+      cwd,
+      configOverrides: [
+        ...client.profileConfigOverrides(options.config ?? {}),
+        ...configOverrides,
+      ],
+      providerConfigOverrides: modelProviderConfigOverride({
+        model_providers: definitions,
+      }),
+      ...(env === undefined
+        ? {}
+        : {
+            env: {
+              ...env,
+              ...(options.apiKey === undefined
+                ? {}
+                : { CODEX_API_KEY: options.apiKey }),
+            },
+          }),
+      expectedProfile,
+      signal: signal ?? new AbortController().signal,
+      context: "helper",
+    });
+  } finally {
+    await release();
+  }
   return { permissionProfileId, configOverrides };
 }
 

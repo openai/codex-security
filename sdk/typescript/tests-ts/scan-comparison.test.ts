@@ -2,14 +2,17 @@ import { once } from "node:events";
 import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { existsSync } from "node:fs";
 import {
   copyFile,
+  chmod,
   mkdir,
   rm,
   readFile,
   readdir,
   realpath,
   symlink,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { join, relative, win32 } from "node:path";
@@ -585,7 +588,8 @@ describe("semantic scan comparison", () => {
       await writeFile(
         executable,
         `
-        import { appendFileSync } from "node:fs";
+        import { appendFileSync, existsSync } from "node:fs";
+        import { join } from "node:path";
         import { createInterface } from "node:readline";
         const args = process.argv.slice(2);
         if (args.includes("mcp")) { console.log("[]"); process.exit(0); }
@@ -602,6 +606,7 @@ describe("semantic scan comparison", () => {
           appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
             method: request.method, args, cwd: process.cwd(),
             home: process.env.CODEX_HOME, sentinel: process.env.SYNTHETIC_PREFLIGHT_SENTINEL,
+            lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
           }) + "\\n");
           if (request.id === undefined) continue;
           const result = request.method === "config/read"
@@ -631,13 +636,18 @@ describe("semantic scan comparison", () => {
       }) as typeof originalSpawn);
       const profileClient = captureProfileClient();
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const lockPath = join(
+        home,
+        ".codex-security-preflight",
+        ".codex-security-scan.lock",
+      );
       const startThread = spyOn(
         Codex.prototype,
         "startThread",
-      ).mockImplementation(
-        (options) =>
-          codex.startThread(options!) as ReturnType<Codex["startThread"]>,
-      );
+      ).mockImplementation((options) => {
+        expect(existsSync(lockPath)).toBe(false);
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
       try {
         const matching = matchScanFindings(
           { before: [finding("before")], after: [finding("after")] },
@@ -696,7 +706,9 @@ describe("semantic scan comparison", () => {
           cwd: work,
           home,
           sentinel: "synthetic-inherited-setting",
+          lockHeld: true,
         });
+        expect(existsSync(lockPath)).toBe(false);
         const args = calls[0].args as string[];
         const overrides = args.flatMap((arg, index) =>
           arg === "--config" ? [args[index + 1]!] : [],
@@ -1023,26 +1035,7 @@ describe("semantic scan comparison", () => {
         "codex-security-automatic-matching-",
       );
       await writeFile(join(home, "config.toml"), "");
-      // Native state initialization precedes these simultaneous launches, as it
-      // does when matching follows completed scans in the shared credential home.
-      await providerProfiles.preflightReadOnlyProfileCodex(
-        {
-          codexPathOverride: resolveCodexCommand({}).command,
-          env: {
-            PATH: process.env["PATH"]!,
-            SystemRoot: process.env["SystemRoot"]!,
-            CODEX_HOME: home,
-          },
-          config: { windows: { sandbox: "unelevated" } },
-        },
-        {
-          extends: ":read-only",
-          filesystem: { ":root": "read", [home]: { ".": "deny" } },
-          network: { enabled: false },
-        },
-        {},
-        home,
-      );
+      if (process.platform !== "win32") await chmod(home, 0o755);
       const providers = [0, 1].map((index) => ({
         name: `Synthetic provider ${index}`,
         base_url: `https://provider-${index}.example.test/v1`,
@@ -1062,12 +1055,21 @@ describe("semantic scan comparison", () => {
       const captured: CodexOptions[] = [];
       const profileClient = captureProfileClient();
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const turnsStarted = Promise.withResolvers<void>();
+      let runningTurns = 0;
       const startThread = spyOn(
         Codex.prototype,
         "startThread",
       ).mockImplementation(function (this: Codex, options) {
         captured.push((this as unknown as { options: CodexOptions }).options);
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+        const thread = codex.startThread(options!);
+        return {
+          async run(...args: Parameters<typeof thread.run>) {
+            if (++runningTurns === 2) turnsStarted.resolve();
+            await turnsStarted.promise;
+            return thread.run(...args);
+          },
+        } as ReturnType<Codex["startThread"]>;
       });
       try {
         await Promise.all(
@@ -1166,6 +1168,12 @@ describe("semantic scan comparison", () => {
           }
         }
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
+        if (process.platform !== "win32") {
+          expect((await stat(home)).mode & 0o777).toBe(0o755);
+          expect(
+            (await stat(join(home, ".codex-security-preflight"))).mode & 0o777,
+          ).toBe(0o700);
+        }
       } finally {
         profileClient.spy.mockRestore();
         startThread.mockRestore();
@@ -1662,11 +1670,11 @@ describe("semantic scan comparison", () => {
       config,
       codex,
       model: "explicit-model",
-      reasoningEffort: "max",
+      reasoningEffort: "future-effort",
     });
     expect(calls.threadOptions).toMatchObject({
       model: "explicit-model",
-      modelReasoningEffort: "max",
+      modelReasoningEffort: "future-effort",
     });
   });
 

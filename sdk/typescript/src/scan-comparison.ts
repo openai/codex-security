@@ -154,8 +154,8 @@ export interface ReadOnlyCodexOptions {
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  /** Passed through to Codex; support depends on the runtime, model, and provider. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -540,9 +540,7 @@ async function startReadOnlyCodexThread(
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
-    options.reasoningEffort ??
-    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
+    options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
   const source = options.environment ?? process.env;
   const providerConfig =
     options.codex === undefined
@@ -588,6 +586,7 @@ async function startReadOnlyCodexThread(
   const threadOptions: ThreadOptions = {
     threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
     sandboxMode: "read-only",
     approvalPolicy: "never",

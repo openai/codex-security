@@ -1178,99 +1178,113 @@ async function testWorkerRuntimeSettings() {
       await mkdir(codexHome);
       await writeFile(
         path.join(codexHome, "config.toml"),
-        `model_provider = "synthetic"
+        `model = "fixture-inherited-model"
+model_reasoning_effort = "medium"
+model_provider = "synthetic"
 [model_providers.synthetic]
 name = "Synthetic gateway"
 base_url = "https://gateway.example.test/v1"
 wire_api = "responses"
 env_key = "SYNTHETIC_GATEWAY_KEY"`,
       );
-      const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
-        const parsedConfiguration = parseToml(configuration);
-        const profiles = (parsedConfiguration.profiles ?? {}) as Record<
-          string,
-          Record<string, unknown>
-        >;
-        const serviceTier =
-          index === 0 ? undefined : index === 3 ? "flex" : "fast";
-        const instructionsFile =
-          index === 0
-            ? undefined
-            : path.join(fixture.root, `instructions ${index}.md`);
-        const verbosity = [undefined, "low", "medium", "high"][index];
-        const entryPath = `${configPath}.${index}`;
-        const deepPath = `${entryPath}.deep`;
-        const nativeProfile =
-          index === 0 ? undefined : `synthetic-scan-${index}`;
-        const profilePath =
-          nativeProfile === undefined
-            ? undefined
-            : path.join(codexHome, `${nativeProfile}.config.toml`);
-        const parentSandbox = {
-          filesystemDenies: [
-            ...trustedParentSandboxWithDenials.filesystemDenies,
-          ],
-          literalFilesystemDenies: [deepPath, codexHome],
-          globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
-        };
-        const provider = index === 0 ? undefined : "synthetic.gateway";
-        const providerConfig =
-          index === 0
-            ? undefined
-            : {
-                name: `Synthetic gateway ${index}`,
-                base_url: `https://gateway-${index}.example.test/v1`,
-                wire_api: "responses",
-                ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
-                experimental_bearer_token: `synthetic-bearer-${index}`,
-                auth: {
-                  type: "command",
-                  command: "synthetic-auth",
-                  args: [String(index)],
-                  env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
-                },
-              };
-        return {
-          path: entryPath,
-          deepPath,
-          nativeProfile,
-          profilePath,
-          parentSandbox,
-          permissionProfile: {
-            ...deniedWorkerPermissionProfile,
-            filesystem: {
-              ...deniedWorkerPermissionProfile.filesystem,
-              [deepPath]: { ".": "deny" },
-              [codexHome]: { ".": "deny" },
-            },
-          },
-          provider,
-          providerConfig,
-          serviceTier,
-          instructionsFile,
-          verbosity,
-          configuration: {
-            ...parsedConfiguration,
-            ...(index === 0
-              ? {}
-              : { service_tier: index === 2 ? "flex" : serviceTier }),
-            ...(index === 2 || index === 3
-              ? {
-                  profile: "selected",
-                  profiles: {
-                    ...profiles,
-                    selected: {
-                      ...profiles.selected,
-                      ...(index === 2 ? { service_tier: serviceTier } : {}),
-                    },
-                    unselected: { service_tier: "fast" },
+      const settings = [
+        { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
+        { model: "gpt-6-astra", reasoningEffort: "ultra" },
+        { model: "gpt-6.1-sol", reasoningEffort: "max" },
+        { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        // Omitted settings preserve the model and effort in the Codex home.
+        {},
+      ];
+      const workerConfigurations = Array.from(
+        { length: settings.length },
+        (_, index) => {
+          const parsedConfiguration = parseToml(configuration);
+          const profiles = (parsedConfiguration.profiles ?? {}) as Record<
+            string,
+            Record<string, unknown>
+          >;
+          const serviceTier =
+            index === 0 ? undefined : index === 3 ? "flex" : "fast";
+          const instructionsFile =
+            index === 0
+              ? undefined
+              : path.join(fixture.root, `instructions ${index}.md`);
+          const verbosity = [undefined, "low", "medium", "high"][index];
+          const entryPath = `${configPath}.${index}`;
+          const deepPath = `${entryPath}.deep`;
+          const nativeProfile =
+            index === 0 ? undefined : `synthetic-scan-${index}`;
+          const profilePath =
+            nativeProfile === undefined
+              ? undefined
+              : path.join(codexHome, `${nativeProfile}.config.toml`);
+          const parentSandbox = {
+            filesystemDenies: [
+              ...trustedParentSandboxWithDenials.filesystemDenies,
+            ],
+            literalFilesystemDenies: [deepPath, codexHome],
+            globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
+          };
+          const provider = index === 0 ? undefined : "synthetic.gateway";
+          const providerConfig =
+            index === 0
+              ? undefined
+              : {
+                  name: `Synthetic gateway ${index}`,
+                  base_url: `https://gateway-${index}.example.test/v1`,
+                  wire_api: "responses",
+                  ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
+                  experimental_bearer_token: `synthetic-bearer-${index}`,
+                  auth: {
+                    type: "command",
+                    command: "synthetic-auth",
+                    args: [String(index)],
+                    env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                   },
-                }
-              : {}),
-            ...(provider === undefined ? {} : { model_provider: provider }),
-          },
-        };
-      });
+                };
+          return {
+            path: entryPath,
+            deepPath,
+            nativeProfile,
+            profilePath,
+            parentSandbox,
+            permissionProfile: {
+              ...deniedWorkerPermissionProfile,
+              filesystem: {
+                ...deniedWorkerPermissionProfile.filesystem,
+                [deepPath]: { ".": "deny" },
+                [codexHome]: { ".": "deny" },
+              },
+            },
+            provider,
+            providerConfig,
+            serviceTier,
+            instructionsFile,
+            verbosity,
+            configuration: {
+              ...parsedConfiguration,
+              ...(index === 0
+                ? {}
+                : { service_tier: index === 2 ? "flex" : serviceTier }),
+              ...(index === 2 || index === 3
+                ? {
+                    profile: "selected",
+                    profiles: {
+                      ...profiles,
+                      selected: {
+                        ...profiles.selected,
+                        ...(index === 2 ? { service_tier: serviceTier } : {}),
+                      },
+                      unselected: { service_tier: "fast" },
+                    },
+                  }
+                : {}),
+              ...(provider === undefined ? {} : { model_provider: provider }),
+            },
+          };
+        },
+      );
       await Promise.all(
         workerConfigurations.map((entry) =>
           Promise.all([
@@ -1345,17 +1359,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         );
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
-      const settings = [
-        { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
-        { model: "gpt-6-astra", reasoningEffort: "ultra" },
-        { model: "gpt-6.1-sol", reasoningEffort: "max" },
-        { model: "gpt-6-sol", reasoningEffort: "high" },
-      ];
-      const providerKeys = [
-        "synthetic-gateway-key-0",
-        "synthetic-gateway-key-1",
-        undefined,
-      ];
+      const providerKeys = settings.map((_, index) =>
+        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
+      );
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -1364,7 +1370,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             artifactContext: {
               pluginRoot: fixture.root,
               repoRoot: fixture.root,
-              scanId: `fixture-scan-${modelSettings.model}`,
+              scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
             },
           }),
@@ -1419,8 +1425,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(
-              ({ args }) => args[args.indexOf("--model") + 1] === model,
+            const workerLaunch = workerLaunches.find(({ args }) =>
+              model === undefined
+                ? !args.includes("--model")
+                : args[args.indexOf("--model") + 1] === model,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
             assert.equal(
@@ -1466,7 +1474,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
-              model_reasoning_effort: reasoningEffort,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
@@ -1476,7 +1483,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.cacheDirectory,
               path.join(fixture.root, `cache-${index}`),
             );
-            assertFlagPair(invocation.argv, "--model", model);
+            assert.deepEqual(
+              invocation.argv.filter((arg: string) =>
+                arg.startsWith("model_reasoning_effort="),
+              ),
+              reasoningEffort === undefined
+                ? []
+                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+            );
+            if (model === undefined) {
+              assert.equal(invocation.argv.includes("--model"), false);
+            } else {
+              assertFlagPair(invocation.argv, "--model", model);
+            }
             assert.equal(
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,

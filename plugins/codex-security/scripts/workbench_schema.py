@@ -944,9 +944,11 @@ def apply_migrations(
     migrations: tuple[tuple[int, str, str], ...],
     now: Callable[[], str],
     backfill_security_targets: Callable[[sqlite3.Connection], None],
+    *,
+    immediate: bool = False,
 ) -> None:
     connection.commit()
-    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     with connection:
         connection.execute(
             """
@@ -1123,10 +1125,7 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
-    connection.execute(
-        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
-        ("index finding identity and comparison history",),
-    )
+    move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
     move_pre_release_migration(connection, 12, 20, "phase-specific scan progress")
