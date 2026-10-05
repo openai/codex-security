@@ -7669,7 +7669,7 @@ export async function readSkillCommandOutput(
           appServer.input.end();
         } else if (value["id"] === 1 || value["id"] === "login") {
           if (value["id"] === 1) {
-            send({ method: "notifications/initialized" });
+            send({ method: "initialized" });
             if (appServer.apiKey !== undefined) {
               send({
                 id: "login",

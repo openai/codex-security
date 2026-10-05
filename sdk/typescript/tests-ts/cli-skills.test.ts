@@ -1361,6 +1361,7 @@ process.stdout.write(JSON.stringify({
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let initialized = false;
 const item = (threadId, turnId, text, phase = "final_answer") =>
   send({ method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text, phase } } });
 const complete = (threadId, id) =>
@@ -1372,7 +1373,10 @@ lines.on("line", (line) => {
   } else if (request.id === 1 && !request.method) {
     assert.equal(request.error.code, -32601);
     send({ id: 1, result: {} });
+  } else if (request.method === "initialized") {
+    initialized = true;
   } else if (request.method === "thread/start") {
+    assert.equal(initialized, true);
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
     assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
     send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });

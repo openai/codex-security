@@ -2163,7 +2163,7 @@ describe("skill authentication", () => {
       }
       expect(methods).toEqual([
         "initialize",
-        "notifications/initialized",
+        "initialized",
         ...(usesSessionKey ? ["account/login/start"] : []),
         ...(loginFailure && usesSessionKey ? [] : ["thread/start"]),
         ...(loginFailure ? [] : ["command/exec", "turn/start"]),
