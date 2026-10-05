@@ -18,6 +18,14 @@ function escapedLiteralPattern(value) {
   return new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
+function structuredAnswer(text) {
+  try {
+    return JSON.parse(text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, "$1"));
+  } catch {
+    return null;
+  }
+}
+
 function normalizesAs(text, sourceType) {
   const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)\\s*:\\s*|\x60?normalize as\\s+)`;
   const value = `(?:"${sourceType}"|'${sourceType}'|\x60${sourceType}\x60|${sourceType})`;
@@ -82,17 +90,16 @@ const checks = {
   },
 
   code_scanning: (text, context) => {
-    const hasAlerts = endpointPattern("/repos/{owner}/{repo}/code-scanning/alerts", [
-      "state=open",
-      "per_page=100",
-    ])(text, context);
-    const hasInstances = /code-scanning\/alerts\/(?:\{alert_number\}|\d+)\/instances/i.test(text);
+    const answer = structuredAnswer(text);
+    const repositories = ["{owner}/{repo}", repositoryName(context.vars.target_repo)];
+    const requestMatches = (request, suffix) => request && repositories.some((repository) =>
+      request.path === `/repos/${repository}/code-scanning/alerts${suffix}`) && [100, "100"].includes(request.parameters?.per_page);
     return [
-      ...(!hasAlerts ? ["must use code scanning alerts endpoint with state=open and per_page=100"] : []),
-      ...(!hasInstances ? ["must fetch code scanning alert instances per alert"] : []),
-      ...(!normalizesAs(text, "sarif")
-        ? ["must say code scanning normalizes as sarif"]
-        : []),
+      ...(!requestMatches(answer?.alerts, "") || answer?.alerts?.parameters?.state !== "open"
+        ? ["must describe open code scanning alerts with per_page=100"] : []),
+      ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
+        ? ["must describe per-alert instances with per_page=100"] : []),
+      ...(answer?.source_type !== "sarif" ? ["must normalize code scanning as sarif"] : []),
     ];
   },
 
@@ -120,12 +127,8 @@ const checks = {
 
   explicit_connector: (text, context) => {
     const repository = repositoryName(context.vars.target_repo);
-    let decision;
-    try {
-      decision = JSON.parse(text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, "$1"));
-    } catch {
-      return ["must return the connector decision as a JSON object"];
-    }
+    const decision = structuredAnswer(text);
+    if (!decision) return ["must return the connector decision as a JSON object"];
     const failures = [];
     if (Object.keys(decision ?? {}).length !== 3 || Object.keys(decision?.scope ?? {}).length !== 2) failures.push("must return only transport, fallback, and scope with only account and repository");
     if (decision?.transport !== "github_connector_read_only") failures.push("must retrieve findings through the requested read-only GitHub Connector");

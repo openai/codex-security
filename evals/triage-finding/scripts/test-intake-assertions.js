@@ -23,6 +23,7 @@ for (const text of [
   JSON.stringify({ example: '"schema_version": "triage-finding/v0"' }),
   JSON.stringify({ example: '"verdict": "confirmed"' }),
   '{"verdict":"unknown"}',
+  JSON.stringify({ example: '{schema_version: "triage-finding/v0"}' }),
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
   assert.equal(hasTriageJson(text), false, text);
@@ -45,6 +46,8 @@ for (const text of [
   '{"verdict":"not_actionable"}',
   "```json\n{'verdict': 'confirmed'}\n```",
   "{'schema_version': 'triage-finding/v0', 'findings': []}",
+  '{schema_version: "triage-finding/v0", findings: []}',
+  '{input_id: "synthetic", verdict: "confirmed"}',
   '{"ver\\u0064ict":"needs\\u005freview"}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
@@ -83,10 +86,33 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     expectPass(github, `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. ${sourceType}`, githubContext("dependabot_malware"));
     expectPass(github, `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage is for private vulnerability reports. ${sourceType}`, githubContext("advisories_private_reports"));
   }
-  for (const alert of ["{alert_number}", "42"]) {
-    expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances. source_type: "sarif"`, githubContext("code_scanning"));
+
+}
+const codeScanning = {
+  alerts: { path: "/repos/example/project/code-scanning/alerts", parameters: { state: "open", per_page: 100 } },
+  instances: { path: "/repos/example/project/code-scanning/alerts/{alert_number}/instances", parameters: { per_page: 100 } },
+  source_type: "sarif",
+};
+for (const repository of ["{owner}/{repo}", "example/project"]) {
+  const answer = JSON.parse(JSON.stringify(codeScanning).replaceAll("example/project", repository));
+  expectPass(github, JSON.stringify(answer).replaceAll(":100", ":\"100\""), githubContext("code_scanning"));
+  for (const text of [JSON.stringify(answer), `\`\`\`json\n${JSON.stringify(answer)}\n\`\`\``]) {
+    expectPass(github, text, githubContext("code_scanning"));
   }
 }
+for (const invalid of [
+  null, [], {},
+  { ...codeScanning, source_type: "advisory" },
+  { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
+  { ...codeScanning, instances: { ...codeScanning.instances, parameters: { per_page: 1000 } } },
+  { ...codeScanning, instances: { ...codeScanning.instances, path: "/repos/example/other/code-scanning/alerts/{alert_number}/instances" } },
+  { ...codeScanning, alerts: { ...codeScanning.alerts, parameters: { state: "closed", per_page: 100 } } },
+  { ...codeScanning, alerts: { ...codeScanning.alerts, parameters: { state: "open" } } },
+]) {
+  expectPass(github, JSON.stringify(invalid), githubContext("code_scanning"), false);
+}
+expectPass(github, "not JSON", githubContext("code_scanning"), false);
+
 expectPass(github, 'GitHub Issues require an explicit issue and are not included in all sources. source_type: "freeform"', githubContext("explicit_issue"));
 for (const text of [
   'GET /repos/example/other/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: "advisory"',
