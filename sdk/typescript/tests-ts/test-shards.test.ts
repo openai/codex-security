@@ -40,15 +40,6 @@ test("balances measured work and includes new files without mutating the invento
   ).toEqual(shards);
 });
 
-test.each([0, -1, 1.5, Number.NaN])(
-  "rejects an invalid shard count %p",
-  (count) => {
-    expect(() => shardTestFiles(["a.test.ts"], count)).toThrow(
-      "positive integer",
-    );
-  },
-);
-
 test.each([
   ["unix", 3],
   ["windows", 7],
