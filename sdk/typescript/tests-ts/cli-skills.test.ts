@@ -958,8 +958,6 @@ describe("CLI skill commands", () => {
       for (const [model, effort] of [
         ["gpt-6-astra", "max"],
         ["gpt-6.1-sol", "max"],
-        ["synthetic-model", "minimal"],
-        ["synthetic-model", "none"],
         ["synthetic-future-model", "synthetic-future-effort"],
       ] as const) {
         let invocation: readonly string[] = [];

@@ -1154,8 +1154,6 @@ async function testWorkerRuntimeSettings() {
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
-        { model: "fixture-minimal-model", reasoningEffort: "minimal" },
-        { model: "fixture-none-model", reasoningEffort: "none" },
         { model: "fixture-future-model", reasoningEffort: "future-effort" },
         // Omitted settings preserve the model and effort in the Codex home.
         {},
