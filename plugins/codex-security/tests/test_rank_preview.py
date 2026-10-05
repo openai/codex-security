@@ -551,6 +551,63 @@ def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> 
     assert "method Controller.validate" in preview
 
 
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_php_heredoc_terminator_can_continue_expression(
+    tmp_path: Path, opener: str, indent: str
+) -> None:
+    source = f"""<?php
+function before() {{}}
+
+$values = [<<<{opener}
+{indent}hello
+{indent}TXT,
+];
+
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+def test_php_heredoc_terminator_preserves_following_brace(tmp_path: Path, opener: str) -> None:
+    source = f"""<?php
+class Service {{
+  public function template() {{
+    return <<<{opener}
+hello
+TXT; }}
+  public function visible() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "Service.php", source)
+
+    assert "method Service.template" in preview
+    assert "method Service.visible" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", "'TXT'"])
+@pytest.mark.parametrize("suffix", ["_more", "2", "😀", "\u0301"])
+def test_php_heredoc_label_prefix_stays_in_body(tmp_path: Path, opener: str, suffix: str) -> None:
+    source = f"""<?php
+function before() {{}}
+$value = <<<{opener}
+TXT{suffix} {{
+TXT;
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
 def test_php_heredoc_does_not_hide_following_method(tmp_path: Path) -> None:
     source = """<?php
 class Service {

@@ -81,6 +81,7 @@
 - consolidate internal runtime helpers ([#1230](https://github.com/openai/codex-security/pull/1230))
 - share container Compose smoke checks ([#1231](https://github.com/openai/codex-security/pull/1231))
 - cancel failed embedding response bodies ([#1232](https://github.com/openai/codex-security/pull/1232))
+- recognize PHP heredoc terminators inside expressions ([#1236](https://github.com/openai/codex-security/pull/1236))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
