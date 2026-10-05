@@ -6,7 +6,6 @@ import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/index.js";
 import {
-  capture,
   dependencies,
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
@@ -14,6 +13,12 @@ import {
 } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -58,14 +63,9 @@ async function savedScansFixture() {
 
 describe("publish scan to Cloud", () => {
   test("documents the findings CSV option", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        ["publish", "scan", "--help"],
-        stdout.stream,
-        capture().stream,
-        dependencies(),
-      ),
+      await stdout.run(["publish", "scan", "--help"], dependencies()),
     ).toBe(0);
     expect(stdout.text()).toContain("--csv <file>");
     expect(stdout.text()).toContain("Findings CSV");
@@ -83,10 +83,10 @@ describe("publish scan to Cloud", () => {
       expect(options?.signal).toBeInstanceOf(AbortSignal);
       return { ...receipt, dryRun: true };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -97,8 +97,6 @@ describe("publish scan to Cloud", () => {
           "--dry-run",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -133,15 +131,8 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies();
     const publishFindingsCsvToCloud = mock(resolving(receipt));
     deps.publishFindingsCsvToCloud = publishFindingsCsvToCloud;
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", ...args],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(["publish", "scan", ...args], deps)).toBe(2);
     expect(publishFindingsCsvToCloud).toHaveBeenCalledTimes(0);
     expect(stderr.text()).toContain(message);
   });
@@ -159,10 +150,10 @@ describe("publish scan to Cloud", () => {
       calls.push(scan.scanId);
       return { ...receipt, scanId: scan.scanId, dryRun: true };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -176,8 +167,6 @@ describe("publish scan to Cloud", () => {
           "--dry-run",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -205,9 +194,9 @@ describe("publish scan to Cloud", () => {
         await rm(second!.scanDir, { recursive: true });
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           [
             "publish",
             "scan",
@@ -218,8 +207,6 @@ describe("publish scan to Cloud", () => {
             "--to",
             "cloud",
           ],
-          capture().stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -236,9 +223,9 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies({
       onWorkbench: throwing("unexpected lookup"),
     });
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         [
           "publish",
           "scan",
@@ -249,8 +236,6 @@ describe("publish scan to Cloud", () => {
           "--to",
           "cloud",
         ],
-        capture().stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -290,14 +275,9 @@ describe("publish scan to Cloud", () => {
       calls.push(options!.expectedScanId!);
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        ["publish", "scan", "--to", "cloud", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
+      await stdout.run(["publish", "scan", "--to", "cloud", "--json"], deps),
     ).toBe(0);
     expect(calls).toEqual(picks);
     expect(
@@ -326,12 +306,7 @@ describe("publish scan to Cloud", () => {
     const publishScanToCloud = mock(resolving(receipt));
     deps.publishScanToCloud = publishScanToCloud;
     expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
+      await runCapturedCli(main, ["publish", "scan", "--to", "cloud"], deps),
     ).toBe(130);
     expect(publishScanToCloud).toHaveBeenCalledTimes(0);
     expect(
@@ -355,9 +330,9 @@ describe("publish scan to Cloud", () => {
       }
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         [
           "publish",
           "scan",
@@ -366,8 +341,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(143);
@@ -393,10 +366,10 @@ describe("publish scan to Cloud", () => {
       if (uploads === scans.length) signals.emit("SIGINT");
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -405,8 +378,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -458,10 +429,10 @@ describe("publish scan to Cloud", () => {
         publishing = false;
         return result;
       };
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "publish",
             "scan",
@@ -474,8 +445,6 @@ describe("publish scan to Cloud", () => {
             "--json",
             ...(dryRun ? ["--dry-run"] : []),
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -506,10 +475,10 @@ describe("publish scan to Cloud", () => {
         scanId: directory === directories[0] ? "scan-1" : "scan-3",
       };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -518,8 +487,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -568,10 +535,10 @@ describe("publish scan to Cloud", () => {
           }
           return receipt;
         };
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
+
         expect(
-          await main(
+          await runCli(
             [
               "publish",
               "scan",
@@ -580,8 +547,6 @@ describe("publish scan to Cloud", () => {
               "cloud",
               "--json",
             ],
-            stdout.stream,
-            stderr.stream,
             deps,
           ),
         ).toBe(code);
@@ -620,10 +585,10 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies();
     const publishScan = mock(rejecting("unexpected publication"));
     deps.publishScan = publishScan;
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -636,8 +601,6 @@ describe("publish scan to Cloud", () => {
           "synthetic-team",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -678,10 +641,10 @@ describe("publish scan to Cloud", () => {
             });
             return result;
           };
-          const stdout = capture();
-          const stderr = capture();
+          const { stdout, stderr, runCli } = createCliTest(main);
+
           expect(
-            await main(
+            await runCli(
               [
                 "publish",
                 "scan",
@@ -692,8 +655,6 @@ describe("publish scan to Cloud", () => {
                 "--json",
                 ...(dryRun ? ["--dry-run"] : []),
               ],
-              stdout.stream,
-              stderr.stream,
               deps,
             ),
           ).toBe(0);
@@ -724,12 +685,10 @@ describe("publish scan to Cloud", () => {
       });
       const calls = mock(resolving<typeof receipt, [string]>(receipt));
       deps.publishScanToCloud = calls;
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           ["publish", "scan", ...inputs, "--to", "cloud", "--json"],
-          stdout.stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -763,9 +722,9 @@ describe("publish scan to Cloud", () => {
       onWorkbench: unexpectedScanHistory,
     });
     deps.publishScanToCloud = calls;
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         [
           "publish",
           "scan",
@@ -777,8 +736,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -799,15 +756,10 @@ describe("publish scan to Cloud", () => {
       const deps = dependencies();
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
-          ["publish", "scan", ...inputs, "--to", "cloud"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
+        await runCli(["publish", "scan", ...inputs, "--to", "cloud"], deps),
       ).toBe(2);
       expect(publishScanToCloud).toHaveBeenCalledTimes(0);
       expect(stdout.text()).toBe("");
@@ -852,14 +804,9 @@ describe("publish scan to Cloud", () => {
         expect(options?.expectedScanId).toBe("scan-1");
         return receipt;
       };
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
-          ["publish", "scan", "--to", "cloud", "--json"],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
+        await stdout.run(["publish", "scan", "--to", "cloud", "--json"], deps),
       ).toBe(0);
       expect(selections).toBe(1);
       expect(JSON.parse(stdout.text())).toEqual(receipt);
@@ -875,15 +822,10 @@ describe("publish scan to Cloud", () => {
       select: rejecting("unexpected picker"),
     };
     deps.publishScanToCloud = rejecting("unexpected publication");
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(["publish", "scan", "--to", "cloud"], deps)).toBe(
+      2,
+    );
     expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
     expect(stderr.text()).not.toContain("--linear-team");
   });
@@ -900,10 +842,10 @@ describe("publish scan to Cloud", () => {
       const deps = dependencies();
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "publish",
             "scan",
@@ -912,8 +854,6 @@ describe("publish scan to Cloud", () => {
             "cloud",
             ...linearOptions,
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -925,17 +865,10 @@ describe("publish scan to Cloud", () => {
 
   test("keeps the internal Cloud destination out of help and discovery", async () => {
     for (const flag of ["--help", "--schema", "--llms", "--llms-full"]) {
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       const deps = dependencies();
       deps.publishScanToCloud = rejecting("unexpected publication");
-      expect(
-        await main(
-          ["publish", "scan", flag],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await stdout.run(["publish", "scan", flag], deps)).toBe(0);
       expect(stdout.text().toLowerCase()).not.toContain("cloud");
     }
   });
@@ -945,13 +878,11 @@ describe("publish scan to Cloud", () => {
     deps.publishScanToCloud = rejecting(
       `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
     );
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["publish", "scan", "completed-scan", "--to", "cloud"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -968,13 +899,11 @@ describe("publish scan to Cloud", () => {
       signals.emit("SIGINT");
       return receipt;
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["publish", "scan", "completed-scan", "--to", "cloud", "--json"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -1009,13 +938,11 @@ describe("publish scan to Cloud", () => {
         options?.signal?.throwIfAborted();
         return receipt;
       };
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           ["publish", "scan", "completed-scan", "--to", "cloud"],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(code);

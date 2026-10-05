@@ -1,10 +1,11 @@
+import { createCliTest } from "./support/cli-run.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -44,9 +45,9 @@ test.each(["standard", "deep"])(
         args,
         input,
       );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       [
         "scan",
         repository,
@@ -58,8 +59,6 @@ test.each(["standard", "deep"])(
         promptFile,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ environment, currentDirectory: root }),
         runWorkbench: command,

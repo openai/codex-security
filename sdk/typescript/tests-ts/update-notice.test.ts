@@ -1,3 +1,4 @@
+import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { once } from "node:events";
 import { resolving } from "./support/promises.js";
 import { describe, expect, test, mock } from "bun:test";
@@ -213,8 +214,8 @@ describe("CLI update notice", () => {
   });
 
   test("prints the update banner to interactive stderr without changing JSON", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
     const notice = {
       currentVersion: "0.1.0",
       latestVersion: "0.2.0",
@@ -222,10 +223,8 @@ describe("CLI update notice", () => {
     };
 
     expect(
-      await main(
+      await runCli(
         ["info", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ onUpdateCheck: async () => notice }),
       ),
     ).toBe(0);
@@ -237,15 +236,13 @@ describe("CLI update notice", () => {
   });
 
   test("finishes the command and aborts an unfinished update check", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
     const onUpdateCheck = mock(async (_signal: AbortSignal) => {
       return await new Promise<undefined>(() => {});
     });
-    const result = await main(
+    const result = await runCli(
       ["info", "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         onUpdateCheck,
       }),
@@ -262,10 +259,9 @@ describe("CLI update notice", () => {
   test("skips checks for noninteractive output, help, dry runs, and disabled notices", async () => {
     const onUpdateCheck = mock(resolving(undefined));
 
-    await main(
+    await runCapturedCli(
+      main,
       ["info", "--json"],
-      capture().stream,
-      capture().stream,
       dependencies({ onUpdateCheck }),
     );
     for (const argv of [["--help"], ["--version"], ["scan", "--dry-run"]]) {
@@ -290,14 +286,11 @@ describe("CLI update notice", () => {
   });
 
   test("keeps commands successful when the update check fails", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 
     expect(
-      await main(
+      await runCli(
         ["info", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           onUpdateCheck: rejecting("registry unavailable"),
         }),

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 type FixtureOptions = NonNullable<Parameters<typeof dependencies>[0]>;
 const execFileAsync = promisify(execFile);
@@ -45,12 +46,10 @@ async function repositoryFixture({ initializeGit = true } = {}) {
       await rm(directory, { recursive: true, force: true });
     },
     async patch(args: string[], options: FixtureOptions = {}) {
-      const stdout = capture();
-      const stderr = capture();
-      const status = await main(
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const status = await runCli(
         ["patch", ...args, "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           currentDirectory: directory,
           environment: {
