@@ -1,3 +1,5 @@
+import * as childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -8,16 +10,66 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { PassThrough } from "node:stream";
+import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
 import {
   readThreatModelPath,
+  runArtifactHelper,
   writeThreatModel,
 } from "../src/artifact-export.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { PYTHON } from "./support/security-policy.js";
 
 describe("offline artifact export", () => {
+  test.each([0, 1])(
+    "preserves split UTF-8 diagnostics at exit %i",
+    async (exitCode) => {
+      const diagnostic = "synthetic diagnostic café 東 😀 retained\n";
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: () => true,
+      });
+      const originalSpawn = childProcess.spawn;
+      const script = join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py");
+      const spawn = spyOn(childProcess, "spawn").mockImplementation(((
+        ...args: Parameters<typeof originalSpawn>
+      ) => {
+        if (!Array.isArray(args[1]) || !args[1].includes(script)) {
+          return originalSpawn(...args);
+        }
+        queueMicrotask(() => {
+          child.stdout.end("synthetic stdout\n");
+          for (const byte of Buffer.from(diagnostic)) {
+            child.stderr.write(Buffer.from([byte]));
+          }
+          child.stderr.end();
+          child.emit("close", exitCode, null);
+        });
+        return child;
+      }) as typeof originalSpawn);
+      try {
+        const operation = runArtifactHelper([], {
+          pluginRoot: PLUGIN_ROOT,
+          pythonPath: PYTHON,
+        });
+        if (exitCode === 0) {
+          expect(await operation).toEqual({
+            stdout: "synthetic stdout\n",
+            stderr: diagnostic,
+          });
+        } else {
+          await expect(operation).rejects.toThrow(diagnostic.trim());
+        }
+      } finally {
+        spawn.mockRestore();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    },
+  );
+
   test("only exposes a document matching the current canonical model", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-current-model-"));
     const modelPath = join(root, "threatmodel.md");

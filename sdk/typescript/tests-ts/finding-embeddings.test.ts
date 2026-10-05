@@ -157,16 +157,43 @@ test("does not call the provider for empty input or missing credentials", async 
   expect(observeCalls).toHaveBeenCalledTimes(0);
 });
 
-test("reports provider failures without echoing response bodies or credentials", async () => {
-  const embedder = new OpenAiFindingEmbedder(
-    "synthetic-key",
-    async () => new Response("synthetic private body", { status: 429 }),
-  );
-  await expect(embedder.embed([example])).rejects.toMatchObject({
-    code: "embedding_failed",
-    message: "Embedding provider returned HTTP 429.",
-  });
-});
+test.each(["synthetic private body", null])(
+  "preserves the HTTP error with response body %p",
+  async (body) => {
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () => new Response(body, { status: 429 }),
+    );
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Embedding provider returned HTTP 429.",
+    });
+  },
+);
+
+test.each(["complete", "reject", "pending"])(
+  "cancels a rejected embedding response without replacing its HTTP error (%s)",
+  async (cleanup) => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      cancel() {
+        cancelled = true;
+        if (cleanup === "reject")
+          return Promise.reject(new Error("cleanup failed"));
+        if (cleanup === "pending") return new Promise<void>(() => {});
+      },
+    });
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () => new Response(body, { status: 503 }),
+    );
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Embedding provider returned HTTP 503.",
+    });
+    expect(cancelled).toBe(true);
+  },
+);
 
 test("rejects malformed vectors instead of misaligning stored findings", async () => {
   for (const data of [

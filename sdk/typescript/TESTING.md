@@ -120,13 +120,13 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mjs` assigns the longest measured files first. Its
+`scripts/run-ci-tests.mts` assigns the longest measured files first. Its
 `ci-test-durations.json` records per-file seconds from CI reports.
 Every new test file is included automatically with a one-second estimate.
 Refresh those estimates from the uploaded reports when adding or splitting
 expensive files; estimates affect scheduling, never whether a test runs.
 To reproduce one Windows shard locally after building the plugin, run
-`node scripts/run-ci-tests.mjs 3/7 --seed=12345`.
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.

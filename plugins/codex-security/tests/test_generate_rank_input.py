@@ -174,6 +174,25 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     )
 
 
+def test_make_repo_rank_input_keeps_declarations_after_cpp_raw_strings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.cpp").write_text(
+        """void before() {}
+const char* text = R"tag("{)tag";
+void after() {}
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli("make-repo-rank-input", "--repo", str(repo), "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["sample.cpp"]
+    assert rows[0]["preview"] == "function before\nfunction after"
+
+
 def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)

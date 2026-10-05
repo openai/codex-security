@@ -294,7 +294,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node scripts/run-ci-tests.mjs ${{ matrix.shard }}/3 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
+        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/3 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
         continue-on-error: true
@@ -409,7 +409,7 @@ jobs:
       - name: Install plugin dependencies
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Build and test the standalone host runtime
-        run: node --test plugins/codex-security/mcp-app/scripts/test_host_build.mjs
+        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
     name: plugin source contracts
@@ -431,6 +431,11 @@ jobs:
         with:
           setup-node: false
           compile: true
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Install plugin dependencies
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -462,11 +467,13 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
+      - name: Build SDK and type-check eval tooling
+        run: pnpm --dir sdk/typescript run build:evals
       - name: Test deterministic triage eval contracts
         working-directory: evals/triage-finding
         run: node --run test:deterministic
       - name: Test secret discovery eval contracts
-        run: node --test evals/secret-discovery/test_*.mjs
+        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 
   python-compatibility:
     name: Python ${{ matrix.python }} / ${{ matrix.os }}
@@ -599,7 +606,7 @@ jobs:
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7
+        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
