@@ -180,7 +180,7 @@ for (const formatArgs of [
               failingScan(message),
             ),
           ).toBe(2);
-          expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", "[redacted]");
+          expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
           expect(stderr.text()).toContain(message);
         },
       );

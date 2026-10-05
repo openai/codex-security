@@ -13,7 +13,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
@@ -23,13 +23,11 @@ import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 const description =
   'An imported report with a comma, a "quoted value", and Unicode: café.\n\n' +
@@ -84,7 +82,7 @@ async function fixture(format: "csv" | "json" = "csv") {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "import-scan-test-"),
   );
-  roots.push(root);
+  roots.track(root);
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const stateDirectory = join(root, "state");
@@ -122,7 +120,11 @@ async function fixture(format: "csv" | "json" = "csv") {
   return {
     root,
     stateDirectory,
-    environment,
+    dependencies: {
+      environment,
+      // Import persistence uses real Python; runtime tests cover interpreter discovery.
+      resolvePluginPython: async () => python!,
+    },
     python: python!,
     source,
     options,
@@ -168,7 +170,7 @@ test.each(["csv", "json"] as const)(
   async (format) => {
     const context = await fixture(format);
     const result = completed(
-      await importScan(context.options, { environment: context.environment }),
+      await importScan(context.options, context.dependencies),
     );
     expect(result.findings.findings).toHaveLength(2);
     expect(
@@ -279,7 +281,7 @@ test.each(["csv", "json"] as const)(
       await expect(
         importScan(
           { ...context.options, sourcePath: linked, dryRun },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must be a regular file");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -309,7 +311,7 @@ test.each(["csv", "json"] as const)(
             sourcePath: join(linked, `findings.${format}`),
             dryRun,
           },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must not traverse directory links");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -327,7 +329,7 @@ test.each(process.platform === "win32" ? ["directory"] : ["directory", "FIFO"])(
     if (kind === "directory") await mkdir(context.options.sourcePath);
     else execFileSync("mkfifo", [context.options.sourcePath]);
     await expect(
-      importScan(context.options, { environment: context.environment }),
+      importScan(context.options, context.dependencies),
     ).rejects.toThrow("Import source must be a regular file");
     await expect(stat(context.stateDirectory)).rejects.toMatchObject({
       code: "ENOENT",
@@ -348,7 +350,7 @@ test.each(["regular file", "symbolic link"])(
     const context = await fixture("json");
     const originalOpen = filesystem.open;
     let replaced = false;
-    let read = false;
+    const observeRead = mock(rejecting("Read a replaced source"));
     let restoreRead: (() => void) | undefined;
     const opening = spyOn(filesystem, "open").mockImplementation(
       async (...args: Parameters<typeof filesystem.open>) => {
@@ -365,20 +367,17 @@ test.each(["regular file", "symbolic link"])(
         }
         replaced = true;
         const file = await originalOpen(...args);
-        const reading = spyOn(file, "readFile").mockImplementation(async () => {
-          read = true;
-          throw new Error("Read a replaced source");
-        });
+        const reading = spyOn(file, "readFile").mockImplementation(observeRead);
         restoreRead = () => reading.mockRestore();
         return file;
       },
     );
     try {
       await expect(
-        importScan(context.options, { environment: context.environment }),
+        importScan(context.options, context.dependencies),
       ).rejects.toThrow();
       expect(replaced).toBe(true);
-      expect(read).toBe(false);
+      expect(observeRead).not.toHaveBeenCalled();
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -392,7 +391,7 @@ test.each(["regular file", "symbolic link"])(
 test("reimporting the retained source preserves finding identities with new scan occurrences", async () => {
   const context = await fixture();
   const first = completed(
-    await importScan(context.options, { environment: context.environment }),
+    await importScan(context.options, context.dependencies),
   );
   const recipe = await runWorkbench(context.workbenchOptions, [
     "get-scan-recipe",
@@ -409,7 +408,7 @@ test("reimporting the retained source preserves finding identities with new scan
         sourcePath: imported.sourcePath,
         parentScanId: first.manifest.scan.id,
       },
-      { environment: context.environment },
+      context.dependencies,
     ),
   );
   expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
@@ -434,13 +433,11 @@ test("reimporting the retained source preserves finding identities with new scan
 
 test("dry run validates source rows without creating database state or invoking the workbench", async () => {
   const context = await fixture();
-  const unexpected = async () => {
-    throw new Error("Dry run invoked scan persistence");
-  };
+  const unexpected = rejecting("Dry run invoked scan persistence");
   const result = await importScan(
     { ...context.options, dryRun: true },
     {
-      environment: context.environment,
+      ...context.dependencies,
       runWorkbench: unexpected,
       resolvePluginPython: unexpected,
     },
@@ -459,7 +456,7 @@ test("dry run validates source rows without creating database state or invoking 
     importScan(
       { ...context.options, dryRun: true },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: unexpected,
       },
     ),
@@ -475,20 +472,14 @@ test("imports archive prior output without replacing its saved findings", async 
     ...context.options,
     outputDir: join(context.root, "results"),
   };
-  const first = completed(
-    await importScan(options, { environment: context.environment }),
-  );
+  const first = completed(await importScan(options, context.dependencies));
   const originalManifest = await readFile(first.manifestPath, "utf8");
-  await expect(
-    importScan(options, { environment: context.environment }),
-  ).rejects.toThrow();
+  await expect(importScan(options, context.dependencies)).rejects.toThrow();
   expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
   const second = completed(
     await importScan(
       { ...options, archiveExisting: true },
-      {
-        environment: context.environment,
-      },
+      context.dependencies,
     ),
   );
   const scans = await storedScans(context);
@@ -522,7 +513,7 @@ test.each(["failure", "abort"] as const)(
     const operation = importScan(
       { ...context.options, signal: controller.signal },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: run,
       },
     );

@@ -16,7 +16,7 @@ import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
   CodexSecurityError,
   ScanInterruptedError,
-  safeErrorMessage,
+  errorMessage,
 } from "./errors.js";
 import {
   bindImportedFindings,
@@ -338,7 +338,7 @@ export async function importScan(
         "--scan-id",
         activeScan.id,
         "--message",
-        safeErrorMessage(error).slice(0, 2400),
+        errorMessage(error).slice(0, 2400),
       ]).catch(() => undefined);
     }
     if (signal?.aborted) {

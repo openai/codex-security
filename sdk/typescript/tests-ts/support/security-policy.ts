@@ -1,18 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   inspectSecurityPolicySources,
   readSecurityPolicySnapshot,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
-  type SecurityPolicyDraft,
   type SecurityPolicyOptions,
   type SecurityPolicyStage,
   type SecurityPolicyStageResult,
 } from "../../src/security-policy.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
+import {
+  createTemporaryDirectories,
+  temporaryDirectory,
+} from "./temporary-directories.js";
 
 export const POLICY =
   "# Security Policy\n\n## Security Invariants\n\nRequests must be authorized before reading another account's records.\n";
@@ -60,78 +62,82 @@ export async function addPolicySubmodule(
 
 export function stageResult(
   stage: SecurityPolicyStage,
+  policyMarkdown = POLICY,
+  policyReviewNote = "Confirm the deployment's exposure.",
 ): SecurityPolicyStageResult {
   return {
     markdown:
-      stage === "policy" ? POLICY : `# ${stage}\n\nSource: src/service.ts:1\n`,
+      stage === "policy"
+        ? policyMarkdown
+        : `# ${stage}\n\nSource: src/service.ts:1\n`,
     questions:
       stage === "architecture" ? ["Is this service internet-facing?"] : [],
-    reviewNotes:
-      stage === "policy" ? ["Confirm the deployment's exposure."] : [],
+    reviewNotes: stage === "policy" ? [policyReviewNote] : [],
     blockedReason: null,
   };
 }
 
-export async function policyFixture(): Promise<{
-  root: string;
-  repository: string;
-  outputDir: string;
-  generate(options?: {
-    path?: string;
-    pluginPath?: string;
-    run?: (
-      stage: SecurityPolicyStage,
-      prompt: string,
-    ) => Promise<SecurityPolicyStageResult>;
-    answerQuestions?: SecurityPolicyOptions["answerQuestions"];
-    signal?: AbortSignal;
-  }): Promise<SecurityPolicyDraft>;
-  cleanup(): Promise<void>;
-}> {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-policy-")),
-  );
-  const repository = join(root, "repository");
-  const outputDir = join(root, "policy");
-  await mkdir(repository);
-  await mkdir(outputDir, { mode: 0o700 });
+export function createPolicyTestFixtures() {
+  const directories = createTemporaryDirectories();
   return {
-    root,
-    repository,
-    outputDir,
-    generate: async (options = {}) => {
-      const target = await resolveSecurityPolicyTarget(
+    async fixture() {
+      const root = await temporaryDirectory("codex-security-policy-", true);
+      const repository = join(root, "repository");
+      const outputDir = join(root, "policy");
+      await mkdir(repository);
+      await mkdir(outputDir, { mode: 0o700 });
+      directories.track(root);
+      return {
+        root,
         repository,
-        options.path,
-      );
-      const sources = await inspectSecurityPolicySources(
-        target,
-        options.signal,
-      );
-      return await runSecurityPolicyStages({
-        target,
-        snapshot: await readSecurityPolicySnapshot(
-          target,
-          options.signal,
-          sources.gitMetadataPaths,
-        ),
-        policyPaths: sources.policyPaths,
-        gitMetadataPaths: sources.gitMetadataPaths,
         outputDir,
-        pluginRoot: PLUGIN_ROOT,
-        pluginPath: options.pluginPath,
-        guidance: "Synthetic inherited guidance",
-        revision: null,
-        model: "gpt-5.6-sol",
-        reasoningEffort: "high",
-        pluginVersion: "0.1.0",
-        signal: options.signal ?? new AbortController().signal,
-        run: options.run ?? (async (stage) => stageResult(stage)),
-        answerQuestions: options.answerQuestions,
-        cost: () => null,
-      });
+        generate: async (
+          options: {
+            path?: string;
+            pluginRoot?: string;
+            run?: (
+              stage: SecurityPolicyStage,
+              prompt: string,
+            ) => Promise<SecurityPolicyStageResult>;
+            answerQuestions?: SecurityPolicyOptions["answerQuestions"];
+            onWarning?: (warning: string) => void;
+            signal?: AbortSignal;
+          } = {},
+        ) => {
+          const target = await resolveSecurityPolicyTarget(
+            repository,
+            options.path,
+          );
+          const sources = await inspectSecurityPolicySources(
+            target,
+            options.signal,
+          );
+          return await runSecurityPolicyStages({
+            target,
+            snapshot: await readSecurityPolicySnapshot(
+              target,
+              options.signal,
+              sources.gitMetadataPaths,
+            ),
+            policyPaths: sources.policyPaths,
+            gitMetadataPaths: sources.gitMetadataPaths,
+            outputDir,
+            pluginRoot: options.pluginRoot ?? PLUGIN_ROOT,
+            guidance: "Synthetic inherited guidance",
+            revision: null,
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high",
+            pluginVersion: "0.1.0",
+            signal: options.signal ?? new AbortController().signal,
+            run: options.run ?? (async (stage) => stageResult(stage)),
+            answerQuestions: options.answerQuestions,
+            onWarning: options.onWarning,
+            cost: () => null,
+          });
+        },
+      };
     },
-    cleanup: async () => rm(root, { recursive: true, force: true }),
+    cleanup: directories.cleanup,
   };
 }
 
