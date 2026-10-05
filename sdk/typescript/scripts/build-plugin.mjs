@@ -11,7 +11,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");
@@ -144,11 +144,7 @@ export async function buildBundledPlugin({
   return files;
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+if (isMain(import.meta.url)) {
   buildBundledPlugin()
     .then((files) => {
       console.log(`Generated bundled plugin with ${files.length} files.`);

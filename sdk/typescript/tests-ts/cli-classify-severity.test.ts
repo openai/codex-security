@@ -15,9 +15,12 @@ const result = {
   assessments: [],
 };
 
-test.each(["latest", "scan_prefix"])(
-  "classify-severity accepts saved scan selector %s",
-  async (selector) => {
+test.each([
+  ["latest", "--finding-id"],
+  ["scan_prefix", "--findingId"],
+])(
+  "classify-severity accepts saved scan selector %s with %s",
+  async (selector, findingFlag) => {
     const deps = dependencies();
     const stdout = captureCli(main, "stdout");
     deps.classifyScanSeverity = async (scanId, options, history, surface) => {
@@ -46,9 +49,9 @@ test.each(["latest", "scan_prefix"])(
           "policy.md",
           "--knowledge-base",
           "context.md",
-          "--finding-id",
+          findingFlag,
           "finding-one",
-          "--finding-id",
+          findingFlag,
           "finding-two",
           "--model",
           "synthetic-model",
