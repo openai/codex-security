@@ -15,9 +15,7 @@ def main() -> None:
     args = parser.parse_args()
     source = args.source.expanduser().resolve(strict=True)
     destination = args.destination.expanduser().absolute()
-    # SQLite's backup API never finishes when both connections name the same
-    # database file, so reject that before opening either connection instead of
-    # hanging. Compare filesystem identity so aliases of the source still match.
+    # SQLite backup cannot make progress when both connections use the same file.
     if destination.exists() and destination.samefile(source):
         parser.error(f"Destination must not be the same file as source: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
