@@ -16,7 +16,7 @@ import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.m
 
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories({ canonical: false });
+const temporaryDirectories = createTemporaryDirectories(false);
 const execFileAsync = promisify(execFile);
 
 const temporaryDirectory = () =>
@@ -130,6 +130,7 @@ describe("bundled plugin build", () => {
     for (const script of [
       "build-plugin",
       "check-plugin-source",
+      "is-main",
       "plugin-contract",
     ]) {
       await writeFixture(

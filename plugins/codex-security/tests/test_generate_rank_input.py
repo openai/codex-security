@@ -26,7 +26,7 @@ def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 def test_cli_loads_preview_helper_with_safe_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-P", str(SCRIPT), "--help"],
+        [sys.executable, "-I", str(SCRIPT), "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -171,6 +171,25 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     assert output.read_text(encoding="utf-8") == (GOLDEN_DIR / "rank_input.jsonl").read_text(
         encoding="utf-8"
     )
+
+
+def test_make_repo_rank_input_keeps_declarations_after_cpp_raw_strings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.cpp").write_text(
+        """void before() {}
+const char* text = R"tag("{)tag";
+void after() {}
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli("make-repo-rank-input", "--repo", str(repo), "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["sample.cpp"]
+    assert rows[0]["preview"] == "function before\nfunction after"
 
 
 def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
@@ -400,6 +419,42 @@ def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
     assert read_jsonl(output) == [
         {
             "path": "contracts/Vault.sol",
+            "area": "contracts" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_vyper(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    contracts = repo / "contracts"
+    contracts.mkdir(parents=True)
+    initialize_repo(repo)
+    source = contracts / "Vault.vy"
+    source.write_text("stored: public(uint256)\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = "stored: public(uint256)\nowner: public(address)"
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "contracts/Vault.vy",
             "area": "contracts" if mode == "repo" else "diff",
             "preview": changed,
         }
