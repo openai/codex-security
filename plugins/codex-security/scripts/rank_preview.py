@@ -244,7 +244,13 @@ def python_outline(text: str) -> list[str]:
 
 def javascript_identifier_continues(masked: list[str], start: int) -> bool:
     if start > 0 and (
-        ("_" + masked[start - 1]).isidentifier() or masked[start - 1] in "$\u200c\u200d"
+        masked[start - 1].isalnum()
+        or masked[start - 1] in "_$"
+        or (
+            not masked[start - 1].isascii()
+            and not masked[start - 1].isspace()
+            and masked[start - 1] != "\ufeff"
+        )
     ):
         return True
     if start > 0 and masked[start - 1] == "}":
@@ -319,8 +325,13 @@ def javascript_regex_end(
             skipped_bangs = True
         else:
             break
-    # A comment after an object expression must not turn division into a regex.
-    if skipped_comment and previous >= 0 and text[previous] == "}" and not after_control:
+    # Newly skipped trivia after an object must not turn division into a regex.
+    if (
+        (skipped_comment or "\ufeff" in text[previous + 1 : start])
+        and previous >= 0
+        and text[previous] == "}"
+        and not after_control
+    ):
         return None
     if skipped_bangs and previous >= 0 and masked[previous] != text[previous]:
         return None

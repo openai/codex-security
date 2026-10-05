@@ -614,6 +614,8 @@ def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, a
     [
         "return /* reason */ /=>/;",
         "return /* one */ /* two */ /=>/;",
+        "return\ufeff /{/.test(input);",
+        "if (ready) {} /{/.test(input);",
         "const ratio = { valueOf() { return 12; } } /* units */ / 2;",
         "const ratio = {} /* scale */ / { valueOf() { return 12 / 2; } };",
         "const ratio = value\n/* units */ / { valueOf() { return 12 / 2; } };",
@@ -700,6 +702,8 @@ def test_typescript_postfix_assertion_preserves_division(tmp_path: Path, operand
         "while (ready)",
         "if (ready) {} else",
         "if\ufeff(ready)",
+        "if\u00a0(ready)",
+        "if\u2003(ready)",
         "if (ready)\ufeff",
     ],
 )
@@ -739,6 +743,9 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
     "expression",
     [
         "{} / [1, 2]",
+        "{}\ufeff / { valueOf() { return 12 / 2; } }",
+        "{} \ufeff \t / { valueOf() { return 12 / 2; } }",
+        "{} /* reason */ \ufeff / { valueOf() { return 12 / 2; } }",
         '"12" /* reason */ / { valueOf() { return 12 / 2; } }',
         "`12` /* reason */ / { valueOf() { return 12 / 2; } }",
         "/12/ /* reason */ / { valueOf() { return 12 / 2; } }",
@@ -755,6 +762,10 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
         "this.#if() / { valueOf() { return 12 / 2; } }",
         "this.#else / { valueOf() { return 12 / 2; } }",
         "a\u0301if() / { valueOf() { return 12 / 2; } }",
+        "a\u309bif() / { valueOf() { return 12 / 2; } }",
+        "a\u309belse / { valueOf() { return 12 / 2; } }",
+        r"a\u{309b}if() / { valueOf() { return 12 / 2; } }",
+        r"a\u309bif() / { valueOf() { return 12 / 2; } }",
         "a\u03011.if() / { valueOf() { return 12 / 2; } }",
         "a\u200d1.if() / { valueOf() { return 12 / 2; } }",
         r"a\u{301}1.if() / { valueOf() { return 12 / 2; } }",
