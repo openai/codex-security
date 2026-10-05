@@ -426,6 +426,42 @@ def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+def test_rank_input_includes_vyper(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    contracts = repo / "contracts"
+    contracts.mkdir(parents=True)
+    initialize_repo(repo)
+    source = contracts / "Vault.vy"
+    source.write_text("stored: public(uint256)\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = "stored: public(uint256)\nowner: public(address)"
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "contracts/Vault.vy",
+            "area": "contracts" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
 @pytest.mark.parametrize(
     ("filename", "content"),
     [

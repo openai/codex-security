@@ -98,10 +98,7 @@ export async function suggestOwnersInternal(
     await mergedCodexConfig(options.config ?? {}),
   );
   const model = options.model ?? configured.model;
-  const reasoningEffort = (options.reasoningEffort ??
-    configured.reasoningEffort) as NonNullable<
-    SuggestOwnersOptions["reasoningEffort"]
-  >;
+  const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
   const report: OwnerSuggestions = {
     schemaVersion: 1,
     revision: git.revision,

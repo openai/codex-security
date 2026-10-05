@@ -484,8 +484,10 @@ codex-security scan . --model gpt-6.1-sol --effort high \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
 ```
 
-Model IDs pass through to Codex; availability depends on credentials and provider.
-`--effort` accepts `minimal|low|medium|high|xhigh|max`, subject to model support.
+Model IDs and `--effort` values pass through to Codex unchanged, including values
+such as `minimal`, `none`, and `high`. Supported combinations depend on the model,
+provider, Codex version, and credentials. Codex and provider errors are reported
+without substituting another model or effort.
 The flags also work with bulk/component scans, policy, validation, patching,
 verification, owner suggestions, severity classification, and scan matching.
 Matching and severity classification default to Codex's configured model and
