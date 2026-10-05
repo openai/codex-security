@@ -80,6 +80,41 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(
     )
 
 
+@pytest.mark.parametrize("length", [2_000, 20_000])
+@pytest.mark.parametrize("extra_metadata", [False, True])
+def test_multiple_verbose_metadata_sections_each_retain_a_preview(
+    length: int, extra_metadata: bool
+) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    finding = {
+        "severity": {"level": "high", "rationale": "s" * length},
+        "confidence": {"level": "high", "rationale": "c" * length},
+        "status": "validated",
+        "writeup": {"reportPath": "findings/example/example.md"},
+        "validation": {"summary": "Synthetic validation"},
+    }
+    if extra_metadata:
+        finding.update(
+            identity={"anchor": "i" * length},
+            ruleId="r" * length,
+            taxonomy={"category": "t" * length},
+        )
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert set(bounded) == set(finding)
+    for key in ("severity", "confidence"):
+        assert bounded[key]["level"] == "high"
+        assert bounded[key]["rationale"]
+    assert bounded["status"] == finding["status"]
+    assert bounded["writeup"] == finding["writeup"]
+    assert bounded["validation"] == finding["validation"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
+
+
 def test_nested_attack_path_stays_within_its_preview_budget() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     attack_path = {

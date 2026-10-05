@@ -201,11 +201,11 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         for key in metadata_keys
         if key in prepared
     }
-    metadata = bounded_json_value(
-        dict(sorted(metadata.items(), key=lambda item: json_size(item[1]))),
-        [FINDING_SUMMARY_BYTES],
-        max_depth=5,
-    )
+    metadata = dict(sorted(metadata.items(), key=lambda item: json_size(item[1])))
+    metadata_budget = FINDING_SUMMARY_BYTES - 2 - sum(json_size(key) + 2 for key in metadata)
+    for index, (key, item) in enumerate(metadata.items()):
+        metadata[key] = bounded_json_value(item, [metadata_budget // (len(metadata) - index)])
+        metadata_budget -= json_size(metadata[key])
     diagnostics = (
         "rootCause",
         "root_cause",
