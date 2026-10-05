@@ -31,7 +31,7 @@ function exportCsv(findings: Finding[]): string {
     PYTHON,
     [
       "-c",
-      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin), {}))",
+      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), {}))",
       join(PLUGIN_ROOT, "scripts"),
     ],
     {
