@@ -11,7 +11,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([false, true])(
-  "protects provider snapshots before writing credentials (ACL failure: %s)",
+  "protects provider snapshots before writing credentials (ACL failure: %j)",
   async (failAcl) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
