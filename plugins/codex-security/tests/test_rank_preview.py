@@ -550,7 +550,9 @@ def test_javascript_regex_after_control_flow_preserves_declarations(
     assert preview.splitlines() == ["function before", "function after"]
 
 
-@pytest.mark.parametrize("number", ["1.", "1_000.", "value-1.", "value+1."])
+@pytest.mark.parametrize(
+    "number", ["1.", "1_000.", "value-1.", "value+1.", "e-1.", "E+10.", "value1e-1.", "0..e-1."]
+)
 @pytest.mark.parametrize("statement", ["return /{/.test(input)", "if (input) /{/.test(input)"])
 def test_javascript_decimal_before_keyword_preserves_the_following_method(
     tmp_path: Path, number: str, statement: str
