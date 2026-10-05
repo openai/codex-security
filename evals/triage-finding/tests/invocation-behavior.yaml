@@ -15,4 +15,4 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/missing-input.js
+      value: file://./assertions/missing-input.mts
