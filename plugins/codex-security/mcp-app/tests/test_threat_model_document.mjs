@@ -151,6 +151,34 @@ for (const complete of [true, undefined]) {
   }
 }
 
+for (const kind of ["working_tree", "commit", "range"]) {
+  test(`diff threat model includes its saved ${kind} snapshot`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "threatmodel-diff-"));
+    try {
+      const { context, draft } = draftFixture(root, "diff");
+      context.pluginRoot = pluginRoot;
+      delete context.targetContract.target.requiredSnapshotDigest;
+      context.targetContract.diffTarget.kind = kind;
+      if (kind === "working_tree")
+        context.targetContract.diffTarget.contentDigest =
+          "codex-security-snapshot/v1:sha256:" + "c".repeat(64);
+      await recordCodexSecurityScanDraft(context, { ...draft(), threatModel });
+      const manifest = JSON.parse(
+        await readFile(join(root, "scan-manifest.json"), "utf8"),
+      );
+      const digest = manifest.scan.target.snapshotDigest;
+      assert.match(
+        digest,
+        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+      );
+      const document = await readFile(join(root, "threatmodel.md"), "utf8");
+      assert.ok(document.includes(`Snapshot: ${digest}`), document);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("terminal Deep model inheritance retries a changed canonical draft", async () => {
   const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-retry-"));
   try {

@@ -8,7 +8,7 @@ Read this reference only for the `github-advisory` destination.
 - Use authenticated `gh api --hostname github.com` on every API request, and pin the selected identity and repository for the run. Never rely on ambient `GH_HOST` or inferred repository context.
 - Require a sealed `git_revision` target, its verified public canonical non-fork source repository, a default branch, and `ADMIN` viewer permission. Verify the exact revision and every selected finding path. Do not use an external tracker.
 
-Run repository metadata checks as `GH_HOST=github.com gh repo view github.com/{owner}/{repo}`. Keep `owner` and `repo` as separately validated path segments, and use their exact values in every API endpoint.
+Run repository metadata checks with `gh repo view github.com/{owner}/{repo}`, setting `GH_HOST` to `github.com` using the active shell's environment-assignment syntax. Keep `owner` and `repo` as separately validated path segments, and use their exact values in every API endpoint.
 
 Use these headers on every request:
 
