@@ -278,7 +278,6 @@ export class ScanCostTracker {
         if (worker !== undefined && this.#options.onProgress !== undefined) {
           session.progress = [];
         }
-        this.#sessions.set(path, session);
       }
       await readSessionUsage(
         path,
@@ -287,6 +286,7 @@ export class ScanCostTracker {
           ? this.#options.repository
           : undefined,
       );
+      this.#sessions.set(path, session);
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({
           threadId,

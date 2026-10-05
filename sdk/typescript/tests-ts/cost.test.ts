@@ -182,6 +182,44 @@ describe("scan cost", () => {
     }
   });
 
+  test("retries an interrupted initial replay without losing usage or events", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const events: ScanSessionEvent[] = [];
+    const errors: unknown[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onSessionEvent: (event) => events.push(event),
+      onError: (error) => errors.push(error),
+    });
+    const originalOpen = fs.open;
+    let opens = 0;
+    const failure = Object.assign(
+      new Error("Synthetic transient read failure"),
+      { code: "EIO" },
+    );
+    const opening = spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (++opens === 2) throw failure;
+      return originalOpen(...args);
+    });
+    try {
+      tracker.start("scan-thread");
+      const final = await tracker.stop();
+      expect(errors).toEqual([failure]);
+      expect(final.cost?.inputTokens).toBe(100);
+      expect(events.map(({ event }) => event["type"])).toEqual([
+        "session_meta",
+        "event_msg",
+      ]);
+    } finally {
+      opening.mockRestore();
+    }
+  });
+
   test("replays a worker after its metadata arrives across multiple reads", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
