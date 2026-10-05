@@ -30,7 +30,7 @@ def test_all_scripts_support_help() -> None:
 @pytest.mark.parametrize("name", ("workbench_publication.py", "workbench_severity.py"))
 def test_workbench_helpers_support_help_with_safe_path(name: str) -> None:
     result = subprocess.run(
-        [sys.executable, "-P", str(SCRIPT_DIR / name), "--help"],
+        [sys.executable, "-I", str(SCRIPT_DIR / name), "--help"],
         check=False,
         capture_output=True,
         text=True,
