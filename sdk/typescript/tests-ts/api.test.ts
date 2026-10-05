@@ -1657,6 +1657,9 @@ describe("CodexSecurity orchestration", () => {
         {
           environment: { AWS_PROFILE: "synthetic-bedrock" },
           ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            deepScanConfigPath: join(codexHome, "deep-scan.toml"),
+          })),
           createCodex: () => ({
             startThread: () => ({
               id: null,
@@ -1688,7 +1691,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     await mkdir(repository);
-    const scenarios: [JsonObject, string][] = [
+    const scenarios: [JsonObject, string, string?][] = [
       [{}, "none"],
       [{ model_reasoning_summary: "auto" }, "auto"],
       [
@@ -1702,10 +1705,16 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud.production",
           profiles: {
-            "cloud.production": { model_reasoning_summary: "concise" },
+            "cloud.production": {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+              model_instructions_file: "profile-instructions.md",
+              model_verbosity: "high",
+            },
           },
         },
         "concise",
+        "fast",
       ],
     ];
     let started = 0;
@@ -1718,9 +1727,15 @@ describe("CodexSecurity orchestration", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const clients = await Promise.all(
-      scenarios.map(async ([overrides, expected], index) => {
+      scenarios.map(async ([overrides, expected, expectedTier], index) => {
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
+        const instructionsFile =
+          resolveCodexProfile(overrides)["model_instructions_file"];
+        const instructions = `Synthetic instructions for scan ${index}.\n`;
+        if (typeof instructionsFile === "string") {
+          await writeFile(join(scanDir, instructionsFile), instructions);
+        }
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -1740,9 +1755,10 @@ describe("CodexSecurity orchestration", () => {
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
             createCodex: (options: CodexOptions) => ({
-              startThread: () => ({
+              startThread: (threadOptions: ThreadOptions) => ({
                 id: null,
                 async runStreamed() {
+                  expect(threadOptions.workingDirectory).toBe(scanDir);
                   if (++started === scenarios.length) allStarted.resolve();
                   await allStarted.promise;
                   const mcpEnvironment = Object.fromEntries(
@@ -1768,6 +1784,25 @@ describe("CodexSecurity orchestration", () => {
                     subagents: index,
                     stop_after_consecutive_errors: index + 2,
                   });
+                  const workerConfig = parseToml(
+                    await readFile(deepConfigPath, "utf8"),
+                  )["worker_runtime"] as JsonObject;
+                  expect(workerConfig["model_verbosity"]).toBe(
+                    resolveCodexProfile(overrides)["model_verbosity"],
+                  );
+                  expect(workerConfig["model_instructions_file"]).toBe(
+                    typeof instructionsFile === "string"
+                      ? join(scanDir, instructionsFile)
+                      : undefined,
+                  );
+                  if (typeof instructionsFile === "string") {
+                    expect(
+                      await readFile(
+                        workerConfig["model_instructions_file"] as string,
+                        "utf8",
+                      ),
+                    ).toBe(instructions);
+                  }
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;
@@ -1776,6 +1811,7 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
+                  expect(config["service_tier"]).toBe(expectedTier);
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );
@@ -3667,7 +3703,21 @@ describe("CodexSecurity orchestration", () => {
       let matched = false;
       let savedComparisonInput: string | undefined;
       const client = new TestClient(
-        {},
+        failure === "budget-context"
+          ? {
+              codexOverrides: {
+                model: "gpt-6.1-sol",
+                model_reasoning_effort: "xhigh",
+                profile: "cloud.production",
+                profiles: {
+                  "cloud.production": {
+                    model: "gpt-5.6-sol",
+                    model_reasoning_effort: "medium",
+                  },
+                },
+              },
+            }
+          : {},
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
@@ -3729,7 +3779,11 @@ describe("CodexSecurity orchestration", () => {
                 {
                   ...options,
                   codex: {
-                    startThread() {
+                    startThread(threadOptions) {
+                      expect(threadOptions).toMatchObject({
+                        model: "gpt-5.6-sol",
+                        modelReasoningEffort: "medium",
+                      });
                       return {
                         async run(_input, turnOptions) {
                           expect(turnOptions.cyberAccessProgram).toBe(

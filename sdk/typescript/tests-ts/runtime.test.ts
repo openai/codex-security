@@ -6261,7 +6261,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "discovers Python through the standard Windows py launcher",
+    "discovers Windows Python through the standard py launcher and a custom cache",
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -6304,6 +6304,48 @@ describe("runtime directories and plugin Python boundary", () => {
           protectedRoot: repository,
         }),
       ).resolves.toBe(await realpath(launcher));
+
+      const cacheDirectory = join(root, "custom-cache");
+      const managedDirectory = join(
+        cacheDirectory,
+        "codex-runtimes",
+        "codex-primary-runtime",
+        "dependencies",
+        "python",
+      );
+      const managedPython = join(root, "python.exe");
+      await copyFile(installedPython, managedPython);
+      await mkdir(dirname(managedDirectory), { recursive: true });
+      await symlink(root, managedDirectory, "junction");
+      const environment = {
+        ...process.env,
+        PYTHON: "",
+        PATH: "",
+        XDG_CACHE_HOME: cacheDirectory,
+      };
+      const selected = await resolvePluginPython({
+        environment,
+        homeDirectory: join(root, "unused-home"),
+        protectedRoot: repository,
+      });
+      expect(selected).toBe(await realpath(managedPython));
+      const child = spawnSync(
+        selected,
+        [
+          "-I",
+          "-c",
+          "import os; print(os.environ['XDG_CACHE_HOME']); print(os.environ['PYTHON'])",
+        ],
+        {
+          env: pluginExecutionEnvironment(selected, environment),
+          encoding: "utf8",
+        },
+      );
+      expect(child.status).toBe(0);
+      expect(child.stdout.trim().split(/\r?\n/u)).toEqual([
+        cacheDirectory,
+        selected,
+      ]);
     },
   );
 

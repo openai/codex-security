@@ -98,21 +98,16 @@ describe("CodexSecurity orchestration", () => {
                 id: null,
                 async runStreamed() {
                   if (!profile) {
-                    const workerConfig = parseToml(
+                    const preflightConfig = parseToml(
                       await readFile(
                         options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
                         "utf8",
                       ),
                     );
-                    expect(workerConfig["model_provider"]).toBe(
+                    expect(preflightConfig["model_provider"]).toBe(
                       "synthetic.provider",
                     );
-                    expect(workerConfig["model_providers"]).toEqual({
-                      "synthetic.provider": {
-                        ...overrides.model_providers["synthetic.provider"],
-                        auth: expectedAuth,
-                      },
-                    });
+                    expect(preflightConfig["model_providers"]).toBeUndefined();
                     if (process.platform !== "win32") {
                       expect(
                         (

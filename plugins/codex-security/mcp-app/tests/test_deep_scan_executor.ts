@@ -1107,7 +1107,7 @@ async function testWorkerRuntimeSettings() {
         GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
       };
       Object.assign(process.env, gitEnvironment);
-      const configPath = path.join(fixture.root, "active scan config.toml");
+      const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
         fixture.root,
         process.platform === "win32" ? "scan home" : "scan home ",
@@ -1124,6 +1124,27 @@ wire_api = "responses"
 env_key = "SYNTHETIC_GATEWAY_KEY"`,
       );
       const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
+        const parsedConfiguration = parseToml(configuration);
+        const profiles = (parsedConfiguration.profiles ?? {}) as Record<
+          string,
+          Record<string, unknown>
+        >;
+        const serviceTier =
+          index === 0 ? undefined : index === 3 ? "flex" : "fast";
+        const instructionsFile =
+          index === 0
+            ? undefined
+            : path.join(fixture.root, `instructions ${index}.md`);
+        const verbosity = [undefined, "low", "medium", "high"][index];
+        const entryPath = `${configPath}.${index}`;
+        const deepPath = `${entryPath}.deep`;
+        const parentSandbox = {
+          filesystemDenies: [
+            ...trustedParentSandboxWithDenials.filesystemDenies,
+          ],
+          literalFilesystemDenies: [deepPath],
+          globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
+        };
         const provider = index === 0 ? undefined : "synthetic.gateway";
         const providerConfig =
           index === 0
@@ -1142,33 +1163,70 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 },
               };
         return {
-          path: `${configPath}.${index}`,
+          path: entryPath,
+          deepPath,
+          parentSandbox,
+          permissionProfile: {
+            ...deniedWorkerPermissionProfile,
+            filesystem: {
+              ...deniedWorkerPermissionProfile.filesystem,
+              [deepPath]: { ".": "deny" },
+            },
+          },
           provider,
           providerConfig,
+          serviceTier,
+          instructionsFile,
+          verbosity,
           configuration: {
-            ...parseToml(configuration),
-            ...(provider === undefined
+            ...parsedConfiguration,
+            ...(index === 0
               ? {}
-              : {
-                  model_provider: provider,
-                  model_providers: { [provider]: providerConfig },
-                }),
+              : { service_tier: index === 2 ? "flex" : serviceTier }),
+            ...(index === 2 || index === 3
+              ? {
+                  profile: "selected",
+                  profiles: {
+                    ...profiles,
+                    selected: {
+                      ...profiles.selected,
+                      ...(index === 2 ? { service_tier: serviceTier } : {}),
+                    },
+                    unselected: { service_tier: "fast" },
+                  },
+                }
+              : {}),
+            ...(provider === undefined ? {} : { model_provider: provider }),
           },
         };
       });
       await Promise.all(
         workerConfigurations.map((entry) =>
-          writeFile(entry.path, stringifyToml(entry.configuration)),
+          Promise.all([
+            writeFile(entry.path, stringifyToml(entry.configuration)),
+            writeFile(
+              entry.deepPath,
+              stringifyToml({
+                worker_runtime:
+                  entry.provider === undefined
+                    ? {}
+                    : {
+                        model_instructions_file: entry.instructionsFile,
+                        model_verbosity: entry.verbosity,
+                        model_provider: entry.provider,
+                        model_providers: {
+                          [entry.provider]: entry.providerConfig,
+                        },
+                      },
+              }),
+            ),
+          ]),
         ),
       );
       await writeFile(promptPath, "synthetic worker configuration fixture");
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
-      process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = path.join(
-        fixture.root,
-        "deep settings.toml",
-      );
       const launches: {
         command?: string;
         args: readonly string[];
@@ -1188,6 +1246,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           ...options!.env,
           FAKE_CODEX_MARKER: markerPath,
           FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+          FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify(
+            workerConfigurations.find(
+              (entry) => entry.path === options.env?.CODEX_SECURITY_CONFIG_PATH,
+            )!.permissionProfile,
+          ),
         };
         launches.push({ command, args, environment, markerPath });
         return originalSpawn(
@@ -1212,10 +1275,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         undefined,
       ];
       const executors = settings.map(
-        (modelSettings) =>
+        (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
             ...modelSettings,
-            parentSandbox: trustedParentSandboxWithDenials,
+            parentSandbox: workerConfigurations[index].parentSandbox,
             artifactContext: {
               pluginRoot: fixture.root,
               repoRoot: fixture.root,
@@ -1233,6 +1296,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
+              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
+                workerConfigurations[index].deepPath;
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1292,11 +1357,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+              workerConfigurations[index].deepPath,
             );
-            assert.equal(
-              workerPermissionProfileOverride(workerLaunch.args),
-              'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
+                    .permissions,
+                ),
+              ),
+              {
+                codex_security_deep_scan_worker:
+                  workerConfigurations[index].permissionProfile,
+              },
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.codexHome, await realpath(codexHome));
@@ -1309,6 +1382,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
               model_reasoning_effort: reasoningEffort,
+              service_tier: workerConfigurations[index].serviceTier,
+              model_instructions_file:
+                workerConfigurations[index].instructionsFile,
+              model_verbosity: workerConfigurations[index].verbosity,
             });
             assertFlagPair(invocation.argv, "--model", model);
             assert.equal(
@@ -1368,7 +1445,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
-              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+              workerConfigurations[index].deepPath,
             );
             assertReadOnlyWorkerPolicy(invocation.argv);
             assertWorkerSubagentPolicy(invocation.argv, 0);
@@ -1385,6 +1462,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same isolated provider",
             );
+            assertConfigOverrides(preflight.argv, {
+              model_instructions_file: selectedProvider.instructionsFile,
+              model_verbosity: selectedProvider.verbosity,
+            });
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 preflight.argv.some(
@@ -1417,15 +1498,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(
               workerPermissionProfileOverride(launch.args),
-              workerPermissionProfileOverride(workerLaunches[0].args),
+              workerPermissionProfileOverride(
+                workerLaunches.find(
+                  (worker) =>
+                    worker.environment!.CODEX_SECURITY_CONFIG_PATH ===
+                    selectedProvider.path,
+                )!.args,
+              ),
             );
           }
           await Promise.all(
             workerConfigurations.map((entry) =>
-              writeFile(
-                entry.path,
-                'model_reasoning_summary = "detailed"\nmodel_provider = "changed"\n',
-              ),
+              Promise.all([
+                writeFile(
+                  entry.path,
+                  'model_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n',
+                ),
+                writeFile(
+                  entry.deepPath,
+                  '[worker_runtime]\nmodel_provider = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n',
+                ),
+              ]),
             ),
           );
         }
@@ -2263,7 +2356,7 @@ async function fakeCodexFixture(
     scriptPath,
     `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
-const preflightProfile = ${JSON.stringify(preflightProfile)};
+const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};

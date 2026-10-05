@@ -157,7 +157,7 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
 
 interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
-  "environment" | "model" | "signal"
+  "config" | "environment" | "model" | "signal"
 > {
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
@@ -548,7 +548,18 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = { ...config };
-  if (commandAuth) delete sdkConfig["model_providers"];
+  // Scan permission profiles and path keys must not replace this helper's read-only settings.
+  for (const key of [
+    "default_permissions",
+    "permissions",
+    "projects",
+    "model_providers",
+  ]) {
+    delete sdkConfig[key];
+  }
+  const providerOverrides = modelProviderConfigOverride(
+    commandAuth ? providerConfig : (config ?? {}),
+  );
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
@@ -574,8 +585,8 @@ async function startReadOnlyCodexThread(
         environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
         environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
         undefined,
-      ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(providerConfig) }
+      ...(providerOverrides.length > 0
+        ? { configOverrides: providerOverrides }
         : {}),
       config: {
         ...sdkConfig,
@@ -733,6 +744,7 @@ export async function matchCompletedScan(
   };
   const comparison = await (options.matchFindings ?? matchScanFindings)(input, {
     allowHistoricalUncertainty: true,
+    config: options.config,
     cyberAccessProgram: options.cyberAccessProgram,
     environment: options.environment,
     model: options.model,

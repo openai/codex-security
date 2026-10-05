@@ -97,6 +97,38 @@ assert.deepEqual(
   },
 );
 
+const literalPaths = ["/repo/*.env", "/repo/?.env", "/repo/[literal]"];
+assert.deepEqual(
+  resolveDeepWorkerParentSandbox(
+    restricted([
+      rootRead,
+      ...literalPaths.map((deniedPath, index) => ({
+        path: {
+          type: index === 0 ? "generated_default_path" : "path",
+          path: deniedPath,
+        },
+        access: index === 0 ? "none" : "deny",
+      })),
+    ]),
+  ),
+  { filesystemDenies: [], literalFilesystemDenies: literalPaths },
+);
+
+const collidingDenies = [
+  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
+  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
+];
+for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
+  assert.throws(
+    () => resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
+    (error: Error) =>
+      error.name === "DeepScanNonRetryableError" &&
+      /literal path and glob denials with the same key cannot be preserved/i.test(
+        error.message,
+      ),
+  );
+}
+
 assert.throws(
   () =>
     resolveDeepWorkerParentSandbox(
@@ -203,13 +235,7 @@ for (const invalid of [
       missing_path_behavior: "skip",
     },
   ]),
-  ...[
-    "",
-    "relative/private",
-    "/repo/*.env",
-    "/repo/?.env",
-    "/repo/[literal]",
-  ].map((deniedPath) =>
+  ...["", "relative/private"].map((deniedPath) =>
     restricted([
       rootRead,
       { path: { type: "path", path: deniedPath }, access: "deny" },

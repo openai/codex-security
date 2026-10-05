@@ -30,8 +30,7 @@ export async function resolvePythonCommand(
   const platform = options.platform ?? process.platform;
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
   const cacheDirectory =
-    (platform !== "win32" &&
-      (options.cacheDirectory ?? process.env.XDG_CACHE_HOME)) ||
+    (options.cacheDirectory ?? process.env.XDG_CACHE_HOME) ||
     pathImplementation.join(options.homeDirectory ?? homedir(), ".cache");
   const bundledPythonRoot = pathImplementation.join(
     cacheDirectory,

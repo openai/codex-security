@@ -89,7 +89,7 @@ async function loadWorkerSettings(root: string) {
     pathToFileURL(bundledPath).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      providerOverrides?: string[];
+      configOverrides?: string[];
     }>;
   };
 
@@ -149,11 +149,16 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   ready[index]!.resolve();
                   await ready[1]!.promise;
                   const environment = options.env!;
+                  const preflight = await readFile(
+                    environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  );
+                  expect(preflight).not.toContain("synthetic-key-");
                   const settings = await workerRuntimeSettings(environment);
                   const actual = await effectiveProvider(
                     environment,
                     repository,
-                    settings.providerOverrides ?? [],
+                    settings.configOverrides ?? [],
                   );
                   expect(actual).toMatchObject(provider);
                   expect(actual.http_headers ?? {}).toEqual(
@@ -177,9 +182,13 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
       );
     }
     // A's snapshot exists before B updates the shared credential home.
-    runs.push(clients[0]!.run(repository));
+    runs.push(clients[0]!.run(repository, { mode: "deep" }));
     await Promise.race([ready[0]!.promise, runs[0]]);
-    runs.push(clients[1]!.run(repository).finally(() => ready[1]!.resolve()));
+    runs.push(
+      clients[1]!
+        .run(repository, { mode: "deep" })
+        .finally(() => ready[1]!.resolve()),
+    );
     const outcomes = await Promise.allSettled(runs);
     for (const outcome of outcomes) {
       expect(outcome).toMatchObject({
@@ -213,9 +222,11 @@ test("workers preserve native provider inheritance without an explicit selection
     }),
   );
   const snapshot = join(root, "snapshot.toml");
+  const workerSnapshot = join(root, "worker-snapshot.toml");
   const environment = {
     CODEX_HOME: home,
     CODEX_SECURITY_CONFIG_PATH: snapshot,
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerSnapshot,
   };
   const workerRuntimeSettings = await loadWorkerSettings(root);
   for (const providers of [
@@ -227,13 +238,16 @@ test("workers preserve native provider inheritance without an explicit selection
       },
     },
   ]) {
+    await writeFile(snapshot, stringifyToml({}));
     await writeFile(
-      snapshot,
-      stringifyToml(providers ? { model_providers: providers } : {}),
+      workerSnapshot,
+      stringifyToml({
+        worker_runtime: providers ? { model_providers: providers } : {},
+      }),
     );
     const settings = await workerRuntimeSettings(environment);
     expect(
-      settings.providerOverrides?.some((value) =>
+      settings.configOverrides?.some((value) =>
         value.startsWith("model_provider="),
       ),
     ).not.toBe(true);
@@ -241,7 +255,7 @@ test("workers preserve native provider inheritance without an explicit selection
       await effectiveProvider(
         environment,
         root,
-        settings.providerOverrides ?? [],
+        settings.configOverrides ?? [],
       ),
     ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
   }
@@ -295,7 +309,7 @@ test.each(legacyProviders)(
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    delete manifest.codexSecurity;
+    manifest.codexSecurity = { workerProviderSnapshot: true };
     await writeFile(manifestPath, JSON.stringify(manifest));
     let launched = false;
     const client = new TestClient(
