@@ -30,6 +30,18 @@ export function environmentEntry(
 }
 
 /** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
   return resolve(
     expandHome(
@@ -330,7 +342,7 @@ function preferredAuthUrl(value: string): string | null {
 }
 
 function userCodeFromOutput(value: string): string | null {
-  const output = plainTerminalText(value);
+  const output = plainTerminalText(value).replace(/https?:\/\/[^\s<>"']+/g, "");
   return (
     output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
     output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??

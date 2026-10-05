@@ -8,7 +8,6 @@ permissions:
 
 jobs:
   validate:
-    if: github.repository == 'openai/codex-security'
     name: validate-linux-${{ matrix.architecture }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -29,11 +28,45 @@ jobs:
       - name: Prepare native runtime
         uses: ./.github/actions/download-native
 
+      - name: Verify customer build excludes secrets and scan data
+        shell: bash
+        run: |
+          set -euo pipefail
+          ignore_file=.dockerignore
+          if [[ -f Dockerfile.dockerignore ]]; then
+            ignore_file=Dockerfile.dockerignore
+            if ! cmp -s .dockerignore "$ignore_file"; then
+              echo "Dockerfile-specific ignore rules must match the approved customer baseline." >&2
+              exit 1
+            fi
+          fi
+
+          if grep -Fq '!' "$ignore_file"; then
+            echo "Customer Docker ignore rules must not re-include excluded files: $ignore_file" >&2
+            exit 1
+          fi
+
+          for pattern in \
+            '**/.env' \
+            '**/.env.*' \
+            '**/.npmrc' \
+            '**/node_modules' \
+            '**/*.csv' \
+            '**/repositories.csv' \
+            '**/results' \
+            '**/security-scans' \
+            '**/state'; do
+            if ! grep -Fxq -- "$pattern" "$ignore_file"; then
+              echo "Missing customer Docker build exclusion in $ignore_file: $pattern" >&2
+              exit 1
+            fi
+          done
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build native customer image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
@@ -61,7 +94,7 @@ jobs:
           docker run --rm codex-security:release-candidate info --json
           [[ "$(docker run --rm --entrypoint id codex-security:release-candidate -u)" == 10001 ]]
 
-      - name: Verify host-aware AppArmor sandbox selection
+      - name: Verify entrypoint preserves Codex sandbox settings
         shell: bash
         run: |
           set -euo pipefail
@@ -76,47 +109,30 @@ jobs:
                 /usr/local/bin/codex-security-entrypoint \
                 bulk-scan /input/repositories.csv --output-dir /output
             )"
-            restricted_user_namespaces=
-            if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-              IFS= read -r restricted_user_namespaces \
-                < /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
-            fi
-
-            apparmor_profile=
-            if [ -r /proc/self/attr/current ]; then
-              IFS= read -r apparmor_profile < /proc/self/attr/current || true
-            fi
-
-            if [ "$restricted_user_namespaces" = 1 ] &&
-              [ "$apparmor_profile" != "codex-security-container (enforce)" ]; then
-              printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true
-            elif printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true; then
-              printf "%s\\n" "Landlock must not be forced when the preferred sandbox is available." >&2
-              exit 1
-            fi
+            expected="$(printf "%s\\n" bulk-scan /input/repositories.csv --output-dir /output)"
+            test "$actual" = "$expected"
           '
 
       - name: Verify hardened Codex command sandbox
+        run: bash docker/verify-container-sandbox.sh codex-security:release-candidate
+
+      - name: Reject interactive repository discovery
         shell: bash
         run: |
           set -euo pipefail
-          command=(
-            docker run --rm
-            --cap-drop ALL
-            --security-opt no-new-privileges
-            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json"
-            --entrypoint node
-            codex-security:release-candidate
-            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js
-          )
-
-          if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
-            printf '%s\n' "$output"
-          elif grep -Eq 'bwrap: (Failed to make / slave: Permission denied|loopback: Failed RTM_NEW(ADDR|LINK): Operation not permitted|setting up uid map: Permission denied|No permissions to create a new namespace)' <<< "$output"; then
-            echo '::notice::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
-            "${command[@]}" sandbox --enable use_legacy_landlock /usr/bin/true
+          if output="$(docker run --rm -t codex-security:release-candidate bulk-scan 2>&1)"; then
+            echo "The customer container must require a repository CSV." >&2
+            exit 1
           else
-            printf 'The hardened Codex sandbox failed unexpectedly:\n%s\n' "$output" >&2
+            status=$?
+          fi
+          if [[ "$status" -ne 2 ]]; then
+            printf 'The customer container returned unexpected exit status %s:\n%s\n' "$status" "$output" >&2
+            exit 1
+          fi
+          expected='codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.'
+          if [[ "${output//$'\r'/}" != "$expected" ]]; then
+            printf 'The customer container returned an unexpected repository discovery error:\n%s\n' "$output" >&2
             exit 1
           fi
 
@@ -134,27 +150,9 @@ jobs:
         env:
           CODEX_SECURITY_IMAGE: codex-security:release-candidate
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p results state
-          chmod 700 results state
-          printf 'id,repository,revision\n' > repositories.csv
-          CODEX_SECURITY_USER="$(id -u):$(id -g)"
-          export CODEX_SECURITY_USER
-          docker compose config --quiet
-          docker compose run --rm codex-security --version
-          if output="$(docker compose run --rm codex-security 2>&1)"; then
-            echo 'An empty repository CSV must not start a security scan.' >&2
-            exit 1
-          else
-            status=$?
-          fi
-          if [[ "$status" -ne 2 ]] || ! grep -Fq 'Multiscan CSV must contain at least one repository.' <<< "$output"; then
-            printf 'Unexpected empty-repository scan behavior:\n%s\n' "$output" >&2
-            exit 1
-          fi
+        run: source docker/verify-container-compose.sh
 
-      - name: Verify optional hardened AppArmor Compose override
+      - name: Verify hardened AppArmor Compose override
         env:
           CODEX_SECURITY_IMAGE: codex-security:release-candidate
         shell: bash
@@ -178,9 +176,6 @@ jobs:
             exit 0
           fi
 
-          sudo install -m 0644 docker/codex-security.apparmor \
-            /etc/apparmor.d/codex-security-container
-          sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
           sudo grep -Fxq 'codex-security-container (enforce)' \
             /sys/kernel/security/apparmor/profiles
 

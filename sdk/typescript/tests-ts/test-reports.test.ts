@@ -18,6 +18,7 @@ import {
   test,
 } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const bash = bashCommand();
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -45,18 +46,11 @@ beforeAll(async () => {
 afterAll(async () => {
   if (buildRoot) await rm(buildRoot, { recursive: true, force: true });
 });
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const directories = createTemporaryDirectories({ canonical: false });
+afterEach(directories.cleanup);
 
 async function fixtures() {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-test-reports-"));
-  directories.push(root);
+  const root = await directories.create("codex-security-test-reports-");
   return {
     root,
     async report(
@@ -122,7 +116,7 @@ describe("JUnit inventory comparison", () => {
     const expected = [
       ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
         ["isolated", "parallel"].map(
-          (mode) => `reports/runner-${os}-${mode}.xml`,
+          (mode) => `reports/runner-${os}-${mode}*.xml`,
         ),
       ),
       "reports/runner-windows-latest-shard-*.xml",

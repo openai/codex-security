@@ -1,3 +1,4 @@
+import { pythonExecutable } from "./support/python.js";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -68,11 +69,7 @@ const validatorPath = join(
   "scripts",
   "validate_patch_risk_assessment.py",
 );
-const python =
-  process.env["PYTHON"] ??
-  Bun.which("python3") ??
-  Bun.which("python") ??
-  Bun.which("py");
+const python = pythonExecutable();
 
 function assessment(): Assessment {
   return {

@@ -1,9 +1,10 @@
+import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { resolving } from "./support/promises.js";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/config.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
@@ -13,7 +14,7 @@ import {
   runCodexCommand,
   runWorkbench,
 } from "../src/runtime.js";
-import type { Finding, ScanManifest } from "../src/models.js";
+import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import {
@@ -22,7 +23,10 @@ import {
   type DuplicateDecision,
 } from "../src/deduplication/deduplication-reviewer.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { DeduplicationReviewError } from "../src/errors.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { rejecting } from "./support/errors.js";
+import { capture } from "./cli-fixtures.js";
 
 const fixtures: Array<Awaited<ReturnType<typeof workflowFixture>>> = [];
 afterEach(async () => {
@@ -54,6 +58,26 @@ async function fixture() {
   return { ...value, history, workbenchOptions };
 }
 
+function findingFetch(document: FindingsDocument, onGroupWrite?: () => void) {
+  return async function fetch(url: URL) {
+    if (url.pathname.endsWith("/bulk/findings"))
+      return Response.json(
+        document.findings.map((finding) => finding.findingId),
+      );
+    if (onGroupWrite && url.pathname.endsWith("/dedupe-groups")) {
+      onGroupWrite();
+      return Response.json([]);
+    }
+    const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+    return Response.json({
+      finding: document.findings.find((finding) => finding.findingId === id),
+      potentialDuplicates: document.findings.filter(
+        (finding) => finding.findingId !== id,
+      ),
+    });
+  };
+}
+
 async function fixtureWithFindings(count: number) {
   const value = await fixture();
   const { scanDir, document } = value;
@@ -61,24 +85,17 @@ async function fixtureWithFindings(count: number) {
   const manifest = JSON.parse(
     await readFile(manifestPath, "utf8"),
   ) as ScanManifest;
-  const digest = (text: string) =>
-    createHash("sha256").update(text).digest("hex");
   document.findings = Array.from({ length: count }, (_value, index) => {
     const finding = structuredClone(document.findings[0]!);
     finding.identity.instance = `concurrent-${index}`;
-    const fingerprint = `codex-security/v1:sha256:${digest(
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance,
-      ].join("\0"),
-    )}`;
+    const fingerprint = findingFingerprint(
+      manifest.scan.target.targetId,
+      finding,
+    );
     return {
       ...finding,
-      findingId: `csf_${digest(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${digest([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
+      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
+      occurrenceId: `occ_${sha256([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
       fingerprints: { ...finding.fingerprints, primary: fingerprint },
       title: `Synthetic concurrent finding ${index}`,
     };
@@ -87,10 +104,72 @@ async function fixtureWithFindings(count: number) {
   await writeFile(join(scanDir, "findings.json"), content);
   manifest.scan.artifacts!.find(
     (artifact) => artifact.path === "findings.json",
-  )!.sha256 = digest(content);
+  )!.sha256 = sha256(content);
   await writeFile(manifestPath, JSON.stringify(manifest));
   return value;
 }
+
+test("completed workflows preserve refusal outcomes without caching a false verdict", async () => {
+  const { environment, document, history } = await fixtureWithFindings(2);
+  const options = {
+    workflowId: "refused-review",
+    findingsUrl: "http://synthetic.test",
+  };
+  let reviews = 0;
+  const savedStages: string[] = [];
+  const dependencies = {
+    environment,
+    runWorkbench: async (args: readonly string[], input?: string) => {
+      const payload = input ? JSON.parse(input) : {};
+      if (payload.action === "save-review")
+        savedStages.push(payload.binding.stage);
+      return await history(args, input);
+    },
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        reviews++;
+        if (review.stage === "pair-review")
+          throw new DeduplicationReviewError({
+            stage: review.stage,
+            model: review.model,
+            category: "refusal",
+            attempts: 1,
+            reason: "The model refused the deduplication review.",
+          });
+        return review.validate({
+          decisions: {
+            "pair-1": {
+              decision: "SAME",
+              rationale: "One shared correction may cover both findings.",
+            },
+          },
+        });
+      },
+    },
+    fetch: findingFetch(document),
+  };
+  const result = await deduplicateScanInternal(
+    document.scanId,
+    options,
+    dependencies,
+  );
+  expect(result).toMatchObject({
+    deduplicationStatus: "completed_with_refusals",
+    duplicateGroups: [],
+    uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+    refusals: [{ decision: "NO_DECISION", stage: "pair-review" }],
+  });
+  expect(reviews).toBe(3);
+  expect(savedStages).toEqual(["screening", "screening"]);
+  expect(
+    (await new FindingWorkflow(options.workflowId, environment).get())?.stages
+      .dedupe,
+  ).toEqual({ status: "completed", result });
+  expect(
+    await deduplicateScanInternal(document.scanId, options, dependencies),
+  ).toEqual(result);
+  expect(reviews).toBe(3);
+});
 
 async function restoreLegacyWorkflow(
   environment: NodeJS.ProcessEnv,
@@ -216,16 +295,14 @@ process.stdout.write("ready\\n");`;
       windowsHide: true,
     });
     const closed = once(child, "close");
-    let errors = "";
-    child.stderr.on("data", (chunk) => {
-      errors += String(chunk);
-    });
+    const errors = capture();
+    child.stderr.on("data", errors.stream.write);
     try {
       const ready = await Promise.race([
         once(child.stdout, "data").then(([data]) => String(data)),
         closed.then(() => {
           throw new Error(
-            errors || "Workflow child exited before the checkpoint",
+            errors.text() || "Workflow child exited before the checkpoint",
           );
         }),
       ]);
@@ -234,14 +311,11 @@ process.stdout.write("ready\\n");`;
       await closed;
       const workflow = new FindingWorkflow("interrupted", environment);
       expect((await workflow.get())?.stages.publish.status).toBe(status);
-      let attempts = 0;
-      expect(
-        await workflow.run("publish", async () => {
-          attempts++;
-          return { findingIds: [] };
-        }),
-      ).toEqual({ findingIds: [] });
-      expect(attempts).toBe(status === "running" ? 1 : 0);
+      const attempts = mock(resolving({ findingIds: [] }));
+      expect(await workflow.run("publish", attempts)).toEqual({
+        findingIds: [],
+      });
+      expect(attempts.mock.calls.length).toBe(status === "running" ? 1 : 0);
       expect(
         (await new FindingWorkflow("interrupted", environment).get())?.stages
           .publish,
@@ -313,9 +387,7 @@ test("reuses publication after dedupe failure and persists a successful empty du
     await deduplicateScanInternal(document.scanId, options, {
       environment,
       runWorkbench: history,
-      fetch: async () => {
-        throw new Error("Completed stages must not make HTTP requests");
-      },
+      fetch: rejecting("Completed stages must not make HTTP requests"),
     }),
   ).toEqual(result);
   expect(publications).toBe(1);
@@ -334,18 +406,17 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
   ) as ScanManifest;
   manifest.scan.artifacts!.find(
     (artifact) => artifact.path === "findings.json",
-  )!.sha256 = createHash("sha256").update(content).digest("hex");
+  )!.sha256 = sha256(content);
   await writeFile(manifestPath, JSON.stringify(manifest));
   const options = {
     workflowId: "empty-scan",
     findingsUrl: "http://synthetic.test",
   };
-  let requests = 0;
-  const fetch = async (_url: URL, init: RequestInit) => {
-    requests++;
+
+  const fetch = mock(async (_url: URL, init: RequestInit) => {
     expect(JSON.parse(init.body as string).findings).toEqual([]);
     return Response.json([]);
-  };
+  });
   const result = await deduplicateScanInternal(document.scanId, options, {
     environment,
     runWorkbench: history,
@@ -364,7 +435,7 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
       fetch,
     }),
   ).toEqual(result);
-  expect(requests).toBe(1);
+  expect(fetch).toHaveBeenCalledTimes(1);
   expect(
     (await new FindingWorkflow(options.workflowId, environment).get())?.stages
       .publish,
@@ -385,9 +456,7 @@ test("does not write workflow metadata into sealed artifacts", async () => {
           ...environment,
           CODEX_SECURITY_STATE_DIR: join(scanDir, "state"),
         },
-        fetch: async () => {
-          throw new Error("Must not publish");
-        },
+        fetch: rejecting("Must not publish"),
       },
     ),
   ).rejects.toThrow("outside the sealed scan artifacts");
@@ -397,6 +466,11 @@ const sameRecommendation = {
   decision: "SAME" as const,
   rationale: "REVIEW_OUTPUT_ONLY: one correction covers the supplied paths.",
 };
+
+const screeningRecommendation = (_finding: Finding, index: number) => [
+  screeningPairSlot(index),
+  { ...sameRecommendation },
+];
 
 function merged(findings: readonly Finding[]) {
   return {
@@ -461,13 +535,7 @@ test.each(["screen", "pair"])(
           stage === "screen"
             ? {
                 decisions: Object.fromEntries(
-                  originals
-                    .slice(1)
-                    .map((_finding, index) => [
-                      screeningPairSlot(index),
-                      { ...sameRecommendation },
-                    ])
-                    .reverse(),
+                  originals.slice(1).map(screeningRecommendation).reverse(),
                 ),
               }
             : originals.some(
@@ -517,9 +585,7 @@ test.each(["screen", "pair"])(
         environment,
         runWorkbench: history,
         reviewRunner,
-        fetch: async () => {
-          throw new Error("Completed workflow must use its saved result");
-        },
+        fetch: rejecting("Completed workflow must use its saved result"),
       }),
     ).toEqual(result);
     expect(calls).toHaveLength(count);
@@ -542,7 +608,7 @@ test.each(["screening", "pair-review"] as const)(
     const events: string[] = [];
     const interruptedKeys: string[] = [];
     let interrupt = true;
-    let groupWrites = 0;
+    const groupWrites = mock(() => {});
     const reviewRunner = {
       async run<T>(review: CodexReview<T>): Promise<T> {
         const originals = JSON.parse(
@@ -562,12 +628,7 @@ test.each(["screening", "pair-review"] as const)(
           review.stage === "screening"
             ? {
                 decisions: Object.fromEntries(
-                  originals
-                    .slice(1)
-                    .map((_finding, index) => [
-                      screeningPairSlot(index),
-                      { ...sameRecommendation },
-                    ]),
+                  originals.slice(1).map(screeningRecommendation),
                 ),
               }
             : merged(originals),
@@ -588,25 +649,7 @@ test.each(["screening", "pair-review"] as const)(
           events.push("checkpoint-saved");
         return response;
       },
-      fetch: async (url: URL) => {
-        if (url.pathname.endsWith("/bulk/findings"))
-          return Response.json(
-            document.findings.map((finding) => finding.findingId),
-          );
-        if (url.pathname.endsWith("/dedupe-groups")) {
-          groupWrites++;
-          return Response.json([]);
-        }
-        const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
-        return Response.json({
-          finding: document.findings.find(
-            (finding) => finding.findingId === id,
-          ),
-          potentialDuplicates: document.findings.filter(
-            (finding) => finding.findingId !== id,
-          ),
-        });
-      },
+      fetch: findingFetch(document, groupWrites),
     };
     const failure = new Error("Synthetic concurrent failure");
     const first = deduplicateScanInternal(
@@ -637,7 +680,7 @@ test.each(["screening", "pair-review"] as const)(
       "checkpoint-saved",
       "workflow-failed",
     ]);
-    expect(groupWrites).toBe(0);
+    expect(groupWrites).not.toHaveBeenCalled();
     expect(
       (await new FindingWorkflow(options.workflowId, environment).get())?.stages
         .dedupe,
@@ -652,7 +695,7 @@ test.each(["screening", "pair-review"] as const)(
     expect(result.duplicateGroups).toEqual([
       document.findings.map((finding) => finding.findingId).sort(),
     ]);
-    expect(groupWrites).toBe(1);
+    expect(groupWrites).toHaveBeenCalledTimes(1);
     expect(attempts.get(interruptedKeys[0]!)).toBe(2);
     expect(attempts.get(interruptedKeys[1]!)).toBe(1);
     expect(attempts.size).toBe(10);
@@ -680,7 +723,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
   const events: string[] = [];
   let interrupt = true;
   let failedReviewKey: string | undefined;
-  let groupWrites = 0;
+  const groupWrites = mock(() => {});
   const dependencies = {
     environment,
     reviewRunner: {
@@ -708,12 +751,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
           review.stage === "screening"
             ? {
                 decisions: Object.fromEntries(
-                  originals
-                    .slice(1)
-                    .map((_finding, index) => [
-                      screeningPairSlot(index),
-                      { ...sameRecommendation },
-                    ]),
+                  originals.slice(1).map(screeningRecommendation),
                 ),
               }
             : merged(originals),
@@ -733,29 +771,13 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
       }
       return response;
     },
-    fetch: async (url: URL) => {
-      if (url.pathname.endsWith("/bulk/findings"))
-        return Response.json(
-          document.findings.map((finding) => finding.findingId),
-        );
-      if (url.pathname.endsWith("/dedupe-groups")) {
-        groupWrites++;
-        return Response.json([]);
-      }
-      const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
-      return Response.json({
-        finding: document.findings.find((finding) => finding.findingId === id),
-        potentialDuplicates: document.findings.filter(
-          (finding) => finding.findingId !== id,
-        ),
-      });
-    },
+    fetch: findingFetch(document, groupWrites),
   };
   await expect(
     deduplicateScanInternal(document.scanId, options, dependencies),
   ).rejects.toThrow(failure.message);
   expect(events).toEqual(["luna-pending", "sol-saved", "luna-failed"]);
-  expect(groupWrites).toBe(0);
+  expect(groupWrites).not.toHaveBeenCalled();
   expect(calls.size).toBe(4);
 
   interrupt = false;
@@ -767,7 +789,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
   expect(result.duplicateGroups).toEqual([
     document.findings.map((finding) => finding.findingId).sort(),
   ]);
-  expect(groupWrites).toBe(1);
+  expect(groupWrites).toHaveBeenCalledTimes(1);
   expect(calls.size).toBe(6);
   for (const [key, count] of calls)
     expect(count).toBe(key === failedReviewKey ? 2 : 1);

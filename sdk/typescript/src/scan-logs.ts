@@ -1,6 +1,8 @@
 import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -105,7 +107,7 @@ export async function findScanSession(
 }
 
 export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, SessionLog>();
+  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(
     typeof options.codexHome === "string"
       ? [options.codexHome]
@@ -114,12 +116,14 @@ export async function readScanLogs(options: ScanLogOptions) {
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
-        if (!logs.has(session.threadId)) logs.set(session.threadId, session);
+        const copies = logs.get(session.threadId);
+        if (copies === undefined) logs.set(session.threadId, [session]);
+        else copies.push(session);
       }
     }
   }
 
-  const root = options.threadId ? logs.get(options.threadId) : undefined;
+  const root = options.threadId ? logs.get(options.threadId)?.[0] : undefined;
   if (root === undefined && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No saved session logs are available for scan ${options.scanId}.`,
@@ -134,10 +138,9 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  const pending = [...traversed];
-  for (const parentId of pending) {
-    const parent = logs.get(parentId);
-    for (const session of logs.values()) {
+  for (const parentId of traversed) {
+    const parent = logs.get(parentId)?.[0];
+    for (const [session] of logs.values()) {
       if (
         !traversed.has(session.threadId) &&
         (session.parentThreadId === parentId ||
@@ -148,14 +151,18 @@ export async function readScanLogs(options: ScanLogOptions) {
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
-        pending.push(session.threadId);
       }
     }
   }
   const sessions: SessionLog[] = [];
   for (const threadId of included) {
-    const session = logs.get(threadId);
-    if (session !== undefined) sessions.push(session);
+    const copies = logs.get(threadId);
+    if (copies === undefined) continue;
+    let session = copies[0];
+    for (const copy of copies.slice(1)) {
+      if (await extendsSessionLog(session.path, copy.path)) session = copy;
+    }
+    sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
@@ -238,6 +245,24 @@ function belongsToScan(
   return false;
 }
 
+// Prefer a longer copy only when it preserves every event in the earlier copy.
+// Identical or divergent copies keep the existing home/archive precedence.
+async function extendsSessionLog(
+  previousPath: string,
+  path: string,
+): Promise<boolean> {
+  const events = sessionEvents(path);
+  try {
+    for await (const previous of sessionEvents(previousPath)) {
+      const next = await events.next();
+      if (next.done || !isDeepStrictEqual(previous, next.value)) return false;
+    }
+    return !(await events.next()).done;
+  } finally {
+    await events.return(undefined);
+  }
+}
+
 async function* sessionEvents(
   path: string,
 ): AsyncGenerator<Record<string, unknown>> {
@@ -259,8 +284,4 @@ async function* sessionEvents(
     lines.close();
     stream.destroy();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

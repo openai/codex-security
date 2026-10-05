@@ -1,19 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectories();
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 const patchProbe = [
   "import json, sys",
@@ -35,10 +30,9 @@ const patchProbe = [
 
 describe("workbench remediation patches", () => {
   test("streams patches larger than 2 MiB without weakening digest checks", async () => {
-    const directory = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-large-patch-")),
+    const directory = await temporaryDirectories.create(
+      "codex-security-large-patch-",
     );
-    temporaryDirectories.push(directory);
     const patch = Buffer.concat([
       Buffer.from("diff --git a/src.ts b/src.ts\n+"),
       Buffer.alloc(2 * 1024 * 1024, 0x78),
@@ -48,21 +42,14 @@ describe("workbench remediation patches", () => {
     const digest = `sha256:${createHash("sha256").update(patch).digest("hex")}`;
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    if (python === null) throw new Error("A Python interpreter is required.");
 
-    const result = Bun.spawnSync(
-      [
-        python,
-        "-I",
-        "-B",
-        "-c",
-        patchProbe,
-        join(PLUGIN_ROOT, "scripts"),
-        directory,
-        digest,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = runPython(python!, [
+      "-c",
+      patchProbe,
+      join(PLUGIN_ROOT, "scripts"),
+      directory,
+      digest,
+    ]);
     expect(new TextDecoder().decode(result.stderr)).toBe("");
     expect(result.exitCode).toBe(0);
     const output = JSON.parse(new TextDecoder().decode(result.stdout)) as {

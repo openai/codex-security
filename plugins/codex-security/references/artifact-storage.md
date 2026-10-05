@@ -10,7 +10,7 @@ Keep structured outputs on their existing tools: inventories, candidate discover
 
 ## Supplemental files
 
-Use the existing plugin MCP's `save_codex_security_artifact` and `read_codex_security_artifact` for Markdown, optional finding write-ups, hardening documents/diagrams, validation evidence and retained helper output. Do not write these retained files with shell redirection, `apply_patch`, Python or other ordinary file-writing tools.
+Use the existing plugin MCP's `save_codex_security_artifact` and `read_codex_security_artifact` for standalone Markdown, optional finding write-ups, hardening documents/diagrams, validation evidence and retained helper output. The host derives a scan's root-level `threatmodel.md` from its canonical `threatModel`; submit that model through the existing semantic draft tool instead of authoring a second document. Do not write retained supplemental files with shell redirection, `apply_patch`, Python or other ordinary file-writing tools.
 
 Identify the owner with exactly one of:
 
@@ -29,12 +29,12 @@ Omit `path`, `content` and `sourcePath` to prepare the selected directory. Use t
 Example for a running scan:
 
 ```text
-save_codex_security_artifact({ scanId, handoffClaimToken?, storage: "persistent", path: "artifacts/01_context/threat_model.md", content: "<exact Markdown>" })
+read_codex_security_artifact({ scanId, handoffClaimToken?, storage: "persistent", path: "threatmodel.md" })
 save_codex_security_artifact({ scanId, handoffClaimToken?, storage: "temporary" })
 save_codex_security_artifact({ scanId, handoffClaimToken?, storage: "persistent", path: "artifacts/02_discovery/validation_artifacts/<candidate_id>/poc.bin", sourcePath: "<returned temporary directory>/poc.bin" })
 ```
 
-`path` is a portable relative filename under `artifacts/`, `findings/` or `hardening/`; `report_validation.md` is also supported. Standalone collections additionally support `threat_model.md`. Use the existing relative artifact layouts for each phase. The tool returns the physical `path`, canonical `relativePath` and content digest. Use the persistent relative path in scan evidence references. Read with the same identity, `storage` and relative `path`; request `encoding: "base64"` only for binary content.
+`path` is a portable relative filename under `artifacts/`, `findings/` or `hardening/`; `report_validation.md` is also supported. Standalone collections additionally support saving `threatmodel.md`; the former `threat_model.md` remains readable. Running scans can read the host-generated `threatmodel.md`, but cannot replace it through the supplemental save tool. Use the existing relative artifact layouts for each phase. The tool returns the physical `path`, canonical `relativePath` and content digest. Use persistent evidence paths in scan evidence references; the derived threat-model document is not a coverage receipt. Read with the same identity, `storage` and relative `path`; request `encoding: "base64"` only for binary content.
 
 Source/configuration edits and external-publication request bodies are separate from scan artifacts and retain their existing tools and authorization. Explicit user instructions still take precedence. If a required output destination cannot be represented by managed storage, explain that limitation instead of silently substituting a different destination or claiming it was written.
 
@@ -46,7 +46,7 @@ For standalone/legacy mutable ledgers, use the save tool to replace their comple
 
 ## Threat-model cache and completed results
 
-For the shared repository threat model, use `targetPath: <repo_root>`, `storage: "persistent"`, `path: "threat_model.md"`. Read that collection's cached file only when the threat-model workflow allows cache reuse and its exact repository/version footer matches. Save the exact selected text into `artifacts/01_context/threat_model.md` with the running scan's `scanId`. Preserve the workflow's conditions that forbid reading or replacing the shared cache; the storage tool does not authorize a cache update.
+For a standalone repository threat model, use `targetPath: <repo_root>`, `storage: "persistent"`, `path: "threatmodel.md"`. Read a shared cached file only when the threat-model workflow allows cache reuse and its exact repository/version footer matches; if the new filename is absent, the legacy `threat_model.md` may be read under the same rules. For a running scan, retain the selected text as `{ "format": "markdown", "content": "<exact Markdown>" }` in its canonical `threatModel`, using an early `complete: false` semantic checkpoint with partial coverage. The host writes `<scan_dir>/threatmodel.md` from that content. Preserve the workflow's conditions that forbid reading or replacing the shared cache; saving or exporting a scan's model does not authorize a cache update.
 
 End each shared threat model with these two lines:
 

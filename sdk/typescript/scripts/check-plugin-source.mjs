@@ -1,11 +1,10 @@
 import { execFile } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const defaultPackageRoot = resolve(scriptDirectory, "..");
+const defaultPackageRoot = resolve(import.meta.dirname, "..");
 
 export async function assertGeneratedPluginUntracked({
   packageRoot = defaultPackageRoot,

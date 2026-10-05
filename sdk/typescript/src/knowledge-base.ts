@@ -92,15 +92,15 @@ export async function prepareKnowledgeBase(
           `Knowledge base document contains no extractable text: ${document}`,
         );
       }
-      await writeFile(
-        join(path, `${index++}-${basename(document)}.txt`),
-        text,
-        {
-          encoding: "utf8",
-          mode: 0o600,
-          signal,
-        },
-      );
+      const name = `${index}-${basename(document)}.txt`;
+      // The prefix and suffix can exceed the filesystem's 255-byte name limit.
+      const filename = Buffer.byteLength(name) > 255 ? `${index}.txt` : name;
+      await writeFile(join(path, filename), text, {
+        encoding: "utf8",
+        mode: 0o600,
+        signal,
+      });
+      index++;
     }
   } catch (error) {
     await rm(path, { recursive: true, force: true });
@@ -125,7 +125,6 @@ async function discover(
   for (const entry of entries) {
     signal?.throwIfAborted();
     const path = join(directory, entry.name);
-    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);

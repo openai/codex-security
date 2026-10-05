@@ -1,7 +1,8 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
+import { canonicalConfigPath } from "./runtime.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -163,25 +164,6 @@ async function runtimeConfigPath(path: string): Promise<string> {
     // A stale cyclic file link is replaced by writeCodexConfig's atomic rename.
     // Errors resolving its parent (or the ambient source) still fail the write.
     return join(await canonicalConfigPath(dirname(path)), basename(path));
-  }
-}
-
-async function canonicalConfigPath(path: string): Promise<string> {
-  let existing = resolve(path);
-  const missing: string[] = [];
-  while (true) {
-    try {
-      return join(await realpath(existing), ...missing);
-    } catch (error) {
-      const parent = dirname(existing);
-      if (
-        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
-        parent === existing
-      )
-        throw error;
-      missing.unshift(basename(existing));
-      existing = parent;
-    }
   }
 }
 

@@ -6,9 +6,8 @@ import uuid
 from pathlib import Path
 
 from workbench_test_support import (
-    create_saved_workspace,
     run_workbench,
-    start_delivered_scan,
+    start_saved_scan,
     write_completed_contract,
 )
 
@@ -19,16 +18,7 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     target.mkdir()
     source = target / "source.txt"
     source.write_text("vulnerable\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])

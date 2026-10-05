@@ -46,7 +46,6 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
           modelSettings: {
             artifactContext: {
               pluginRoot: PLUGIN_ROOT,
-              scanRoot,
               repoRoot,
               scanId: "test-scan",
             },
@@ -137,6 +136,7 @@ test("classifies owned worker tool failures without exposing their contents", as
       bundledFunction(runtime, recordHelper!),
       bundledFunction(runtime, "isSandboxNamespaceExhaustion"),
       bundledFunction(runtime, "appendUniqueDiagnostic"),
+      bundledFunction(runtime, "appendCodeModeFrameDiagnostic"),
       diagnosticSource,
       "return appendSafeItemDiagnostic;",
     ].join("\n"),
@@ -197,24 +197,14 @@ test("classifies owned worker tool failures without exposing their contents", as
   expect(unrelatedDiagnostics).toEqual([]);
 });
 
-test("does not retry textual missing-path worker failures", async () => {
+test("keeps textual missing-path worker failures retryable", async () => {
   const runtime = await loadBundledRuntime();
-  const errorClass =
-    /var DeepScanNonRetryableError = class extends Error \{[\s\S]*?\n\};/u.exec(
-      runtime,
-    )?.[0];
-  expect(errorClass).toBeDefined();
   const classify = new Function(
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_PATTERN",
-    "REMOTE_PLUGIN_AUTH_WARNING_PATTERN",
-    "isCodexCybersecurityPolicyRefusal",
     [
-      errorClass!,
       bundledFunction(runtime, "classifyCodexWorkerError"),
-      bundledFunction(runtime, "isCodexConfigurationFailure"),
       "return classifyCodexWorkerError;",
     ].join("\n"),
-  )(/$^/u, /$^/u, () => false) as (error: Error) => Error;
+  )() as (error: Error) => Error;
 
   for (const diagnostic of [
     "Error: No such file or directory (os error 2)",
@@ -224,8 +214,7 @@ test("does not retry textual missing-path worker failures", async () => {
       ["Codex Exec exited with code 1:", diagnostic].join("\n"),
     );
     const classified = classify(original);
-    expect(classified.name).toBe("DeepScanNonRetryableError");
-    expect(classified.cause).toBe(original);
+    expect(classified).toBe(original);
   }
 });
 
@@ -278,7 +267,11 @@ test("resumes only when the exact Standard worker or reducer result is missing",
   expect(standardContinuation(1)).toMatch(/retry.*until it succeeds/iu);
 
   const continuation = new Function(
-    `${bundledFunction(runtime, "reducerCompletionContinuation")}\nreturn reducerCompletionContinuation;`,
+    [
+      bundledFunction(runtime, "reducerInputRecoveryInstructions"),
+      bundledFunction(runtime, "reducerCompletionContinuation"),
+      "return reducerCompletionContinuation;",
+    ].join("\n"),
   )() as (attempt: number) => string;
   expect(continuation(1)).toContain("record_codex_security_deep_reduction");
   expect(continuation(1)).toMatch(/retry.*until it succeeds/iu);

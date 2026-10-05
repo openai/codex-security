@@ -22,9 +22,5 @@ def stored_filesystem_identity_matches(stored: object, current: int) -> bool:
     return stored == serialize_filesystem_identity(current)
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

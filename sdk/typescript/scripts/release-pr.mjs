@@ -1,5 +1,6 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -114,10 +115,6 @@ function findSection(notes, id) {
   return { start, end, text: notes.slice(start, end) };
 }
 
-function hash(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 export function updateReleaseNotes(
   version,
   generated,
@@ -129,7 +126,10 @@ export function updateReleaseNotes(
   if (previousSections === undefined) {
     const blocks = sectionIds.map((id) => {
       const block = sectionBlock(id, generated[id]);
-      sections[id] = { generatedHash: hash(block), humanOwned: false };
+      sections[id] = {
+        generatedHash: hash("sha256", block),
+        humanOwned: false,
+      };
       return block;
     });
     return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
@@ -148,7 +148,7 @@ export function updateReleaseNotes(
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||
-        hash(block.text) !== previous.generatedHash);
+        hash("sha256", block.text) !== previous.generatedHash);
     if (humanOwned) {
       sections[id] = {
         generatedHash: previous?.generatedHash ?? null,
@@ -162,7 +162,7 @@ export function updateReleaseNotes(
     } else {
       notes = notes.slice(0, block.start) + next + notes.slice(block.end);
     }
-    sections[id] = { generatedHash: hash(next), humanOwned: false };
+    sections[id] = { generatedHash: hash("sha256", next), humanOwned: false };
   }
   return { notes, sections };
 }
@@ -224,11 +224,7 @@ export function createReleasePlan(history, previous = null) {
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -475,8 +471,8 @@ async function ensurePullRequest(
     };
   }
   const marker = `<!-- release-pr-head: ${headSha} -->`;
-  const proposalMarker = `<!-- release-pr-proposal: ${hash(JSON.stringify(plan.files))} -->`;
-  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash(JSON.stringify(plan.generated))} -->`;
+  const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
+  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
   const comments = await github.list(
     `issues/${current.number}/comments?per_page=100`,
   );
