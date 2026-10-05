@@ -8314,6 +8314,7 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsage: (usage) => dashboard?.setUsage(usage),
       onCost: (cost, limit = maxCostUsd) => {
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);

@@ -53,6 +53,57 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each([false, true])(
+    "shows unpriced token updates for component view %p",
+    (component) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(stderr.stream, {
+        model: { model: "synthetic-unpriced-model", reasoningEffort: "high" },
+        input,
+        showCost: true,
+        ...(component ? { presentation: "components" as const } : {}),
+      });
+      const frame = () =>
+        stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+      dashboard.start();
+      if (component) {
+        dashboard.setComponents([
+          {
+            id: "component-1",
+            name: "Synthetic",
+            paths: ["src"],
+            status: "started",
+            outputDir: "/synthetic/output",
+          },
+        ]);
+        input.emit("data", "\r");
+      }
+      expect(frame()).toContain("waiting for usage");
+      for (const count of [100, 200]) {
+        const usage = {
+          input_tokens: count,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: count + 10,
+        };
+        if (component)
+          dashboard.recordComponentEvent({
+            componentId: "component-1",
+            type: "usage",
+            value: usage,
+          });
+        else dashboard.setUsage(usage);
+        expect(frame()).toContain(`${count + 10} total`);
+        expect(frame()).not.toContain("waiting for usage");
+        expect(frame()).toContain("unavailable (model pricing missing)");
+      }
+      dashboard.stop();
+    },
+  );
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
     const dashboard = createDashboard(

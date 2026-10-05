@@ -1163,6 +1163,11 @@ answers are ignored. Invalid increases or failures to save them leave the
 existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
 the current limit, including after an approved increase.
 
+`onUsage(usage)` reports measured scan token totals as `ScanTokenUsage`,
+independently of model pricing. The live dashboard displays these totals even
+when a cost estimate is unavailable. Component scan observers receive the same
+totals in `usage` events. Missing prices do not become zero-dollar estimates.
+
 These amounts estimate API-equivalent model usage, not ChatGPT subscription
 allowance. Post-scan prompts run after scan cost tracking ends and are outside
 this limit.

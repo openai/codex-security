@@ -72,6 +72,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ScanTokenUsage,
   type ScanSessionEvent,
 } from "./cost.js";
 import {
@@ -293,6 +294,8 @@ export interface ScanOptions extends ScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  /** Measured scan token usage, including models without known prices. */
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onBudgetApproaching?: (
     budget: ScanBudget,
   ) => number | undefined | Promise<number | undefined>;
@@ -391,6 +394,7 @@ export interface ScanBudget {
 type ScanObserverName =
   | "onAuthentication"
   | "onCost"
+  | "onUsage"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
@@ -1478,6 +1482,16 @@ export class CodexSecurity {
                 ),
         onProgress:
           options.onProgress === undefined ? undefined : reportProgress,
+        onUsage:
+          options.onUsage === undefined
+            ? undefined
+            : (usage) =>
+                notifyObserver(
+                  "onUsage",
+                  options.onUsage,
+                  options.onObserverError,
+                  usage,
+                ),
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined

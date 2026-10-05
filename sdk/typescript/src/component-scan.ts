@@ -18,7 +18,7 @@ import {
   scanModelProvider,
   type CodexSecurityConfig,
 } from "./config.js";
-import type { ScanCost, ScanSessionEvent } from "./cost.js";
+import type { ScanCost, ScanSessionEvent, ScanTokenUsage } from "./cost.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import { errorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
@@ -79,6 +79,7 @@ type ComponentScanUpdate =
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
+  | { type: "usage"; value: Readonly<ScanTokenUsage> }
   | { type: "workers"; value: ScanWorkerStatus }
   | { type: "warning"; value: string };
 
@@ -207,6 +208,7 @@ export async function runComponentScans(
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
+                  onUsage: (value) => emit({ type: "usage", value }),
                   onWorkerStatus: (value) => emit({ type: "workers", value }),
                   onWarning: (value) => emit({ type: "warning", value }),
                 };

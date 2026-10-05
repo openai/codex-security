@@ -9,6 +9,29 @@ const result = fakeResult([], "complete", {
   output_tokens: 30,
 });
 
+test("shows measured usage in the live dashboard when model pricing is unavailable", async () => {
+  const { stderr, runCli } = createCliTest(main, { stderr: true });
+  const usage = {
+    input_tokens: 1250,
+    cached_input_tokens: 200,
+    cache_write_input_tokens: 0,
+    output_tokens: 30,
+    reasoning_output_tokens: 0,
+    total_tokens: 1280,
+  };
+  expect(
+    await runCli(
+      ["scan", ".", "--model", "synthetic-unpriced-model", "--show-cost"],
+      dependencies({
+        onTurn: (_repository, options) => options.onUsage?.(usage),
+      }),
+    ),
+  ).toBe(0);
+  const progress = stderr.text().split("REPORT")[0]!;
+  expect(progress).toContain("1,280 total");
+  expect(progress).toContain("unavailable (model pricing missing)");
+});
+
 test.each([false, true])("scan cost visibility with TTY %p", async (tty) => {
   for (const costFlags of [
     [],

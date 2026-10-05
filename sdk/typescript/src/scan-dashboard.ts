@@ -15,6 +15,8 @@ import {
   formatScanCost,
   formatScanCosts,
   formatScanCostTokens,
+  formatTokenUsage,
+  type ScanTokenUsage,
 } from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
@@ -136,6 +138,7 @@ export class ScanDashboard {
   #files: ScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
+  #usage: Readonly<ScanTokenUsage> | null = null;
   #budget: {
     request: ScanBudget;
     input: string;
@@ -374,6 +377,9 @@ export class ScanDashboard {
       case "session":
         dashboard.recordDetails(event.value);
         break;
+      case "usage":
+        dashboard.setUsage(event.value);
+        break;
       case "cost":
         dashboard.setCost(event.value);
         break;
@@ -411,6 +417,11 @@ export class ScanDashboard {
 
   public setPublicationProgress(completed: number, total: number): void {
     this.#publicationProgress = { completed, total };
+    this.#refresh();
+  }
+
+  public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#usage = usage;
     this.#refresh();
   }
 
@@ -831,9 +842,10 @@ export class ScanDashboard {
 
   #tokenLines(): string[] {
     const tokens =
-      this.#cost === null
+      formatTokenUsage(this.#usage) ??
+      (this.#cost === null
         ? "waiting for usage"
-        : formatScanCostTokens(this.#cost);
+        : formatScanCostTokens(this.#cost));
     return wrapActivity("  TOKENS   ", tokens, this.#width());
   }
 

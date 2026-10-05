@@ -3858,6 +3858,44 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test.each([false, true])(
+    "reports unpriced usage with observer failure %p",
+    async (throwObserver) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const usages: unknown[] = [];
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const client = new TestClient(
+        { codexOverrides: { model: "synthetic-unpriced-model" } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          createCodex: completedCodex(root, copyCompletedScan),
+        },
+      );
+      try {
+        const result = await client.run(repository, {
+          onUsage: (usage) => {
+            usages.push(usage);
+            if (throwObserver) throw new Error("usage observer exploded");
+          },
+          onObserverError: collectObserverErrors(observerErrors),
+        });
+        expect(result.cost).toBeNull();
+        expect(usages).toEqual([
+          expect.objectContaining({
+            input_tokens: 10,
+            output_tokens: 3,
+            total_tokens: 13,
+          }),
+        ]);
+        expect(observerErrors).toEqual(
+          throwObserver ? [["onUsage", "usage observer exploded"]] : [],
+        );
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   const pricedModels = [
     "gpt-5.5",
     "gpt-6-astra",

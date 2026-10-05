@@ -432,13 +432,50 @@ describe("live scan cost tracking", () => {
     );
   });
 
+  test.each([false, true])(
+    "reports measured unpriced usage with cost observer %p",
+    async (observeCost) => {
+      const home = await codexHome();
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      await writeSession(home, "worker-thread", usage, {
+        parent: "scan-thread",
+      });
+      const usages: unknown[] = [];
+      const costs: unknown[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "synthetic-unpriced-model",
+        onUsage: (usage) => usages.push(usage),
+        onCost: observeCost ? (cost) => costs.push(cost) : undefined,
+      });
+      tracker.start("scan-thread");
+      try {
+        await waitFor(() => usages.length > 0);
+        const snapshot = await tracker.refresh();
+        await tracker.refresh();
+        expect(snapshot.cost).toBeNull();
+        expect(snapshot.usage).toMatchObject({
+          input_tokens: 200,
+          total_tokens: 220,
+        });
+        expect(usages).toEqual([snapshot.usage]);
+        expect(costs).toEqual([]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("reports newly available cache writes even when the dollar amount is unchanged", async () => {
     const home = await codexHome();
     const updates: unknown[] = [];
+    const usages: unknown[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.5",
       onCost: (cost) => updates.push(cost),
+      onUsage: (usage) => usages.push(usage),
     });
     tracker.start("scan-thread");
     tracker.recordUsage(
@@ -451,6 +488,12 @@ describe("live scan cost tracking", () => {
       "scan-thread",
     );
     await tracker.stop();
+    expect(usages).toHaveLength(2);
+    expect(usages[0]).toHaveProperty(
+      "cache_write_input_tokens_reported",
+      false,
+    );
+    expect(usages[1]).not.toHaveProperty("cache_write_input_tokens_reported");
     expect(updates).toHaveLength(2);
     expect(updates[0]).toHaveProperty("cacheWriteInputTokensReported", false);
     expect(updates[1]).not.toHaveProperty("cacheWriteInputTokensReported");
@@ -559,12 +602,9 @@ describe("live scan cost tracking", () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
     await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      { parent: "scan-thread" },
-    );
+    const worker = await writeSession(home, "worker-thread", usage, {
+      parent: "scan-thread",
+    });
     const first = `${"x".repeat(4_096)} first`;
     const second = `${"x".repeat(4_096)} second`;
     const distinct = [
