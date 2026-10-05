@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
-    environment: invoice-desk-inference
+    environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     cache-mode: read
@@ -165,7 +165,7 @@ jobs:
           CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
         run: |
           if [[ -z "$OPENAI_API_KEY" ]]; then
-            echo "::error::Configure OPENAI_API_KEY in the protected invoice-desk-inference environment."
+            echo "::error::Configure OPENAI_API_KEY in the protected codex-security-smoke-test environment."
             echo "exit-code=2" >> "$GITHUB_OUTPUT"
             echo "elapsed-seconds=0" >> "$GITHUB_OUTPUT"
             exit 2

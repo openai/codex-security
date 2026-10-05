@@ -58,7 +58,7 @@ environment approval. Failed behavior tests do not suppress a scan.
 ### Setup
 
 Both workflows must be on `main` before automatic scans can run. Configure the
-`invoice-desk-inference` environment with required reviewers and a deployment
+`codex-security-smoke-test` environment with required reviewers and a deployment
 branch rule allowing only protected `main`. Store a dedicated service-account
 key in its `OPENAI_API_KEY` environment secret, with access to `gpt-5.6-sol` and
 permission to use the API from the selected runner's network. Creating a service
