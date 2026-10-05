@@ -8,7 +8,7 @@ providers:
   - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding"
     config:
-      working_dir: "{{env.TRIAGE_RUNTIME_ROOT}}"
+      working_dir: "{{triage_runtime_root}}"
       skip_git_repo_check: true
       approval_policy: never
       cli_config:
@@ -33,6 +33,8 @@ evaluateOptions:
   maxConcurrency: 1
 
 defaultTest:
+  options:
+    transformVars: file://./scripts/runtime-vars.js
   vars:
     invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security findings."
     eval_instructions: |-

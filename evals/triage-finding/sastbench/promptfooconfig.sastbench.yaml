@@ -12,7 +12,7 @@ providers:
     config:
       # The runner stages only the skill runtime here. The label-bearing
       # dataset and Promptfoo harness stay outside this tree.
-      working_dir: "{{env.SASTBENCH_RUNTIME_ROOT}}"
+      working_dir: "{{triage_runtime_root}}"
       # Target worktrees and their label-free Git cache are the only
       # additional readable workspace roots.
       additional_directories:
@@ -46,6 +46,8 @@ extensions:
   - file://./assertions/sastbench-metrics.js:afterEach
 
 defaultTest:
+  options:
+    transformVars: file://../scripts/runtime-vars.js
   assert:
     - type: contains-json
       value: file://../schemas/triage-result-v0.schema.json

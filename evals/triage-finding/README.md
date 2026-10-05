@@ -10,11 +10,16 @@ Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the re
 
 The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace, independent of the SDK and MCP app packages.
 
-Install the local eval runner:
+Install the local eval runner and build the checkout's policy helper:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
+
+Rebuild after changing helper source. The host build requires the pinned Rust toolchain described in [`native/README.md`](../../plugins/codex-security/native/README.md).
 
 Validate the config:
 

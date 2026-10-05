@@ -420,7 +420,7 @@ jobs:
 
   plugin-source:
     name: plugin source contracts
-    needs: validate-title
+    needs: [validate-title, native]
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -469,6 +469,12 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
+      - name: Prepare native runtime for deterministic eval tests
+        uses: ./.github/actions/download-native
+      - name: Build policy helper for deterministic eval tests
+        run: |
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+          node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp
       - name: Test deterministic triage eval contracts
         working-directory: evals/triage-finding
         run: node --run test:deterministic
