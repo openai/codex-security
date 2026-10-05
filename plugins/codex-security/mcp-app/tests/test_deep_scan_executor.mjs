@@ -1108,6 +1108,8 @@ async function testWorkerRuntimeSettings() {
       await writeFile(
         path.join(codexHome, "config.toml"),
         [
+          'model = "fixture-inherited-model"',
+          'model_reasoning_effort = "medium"',
           'model_provider = "synthetic"',
           "[model_providers.synthetic]",
           'name = "Synthetic gateway"',
@@ -1152,12 +1154,15 @@ async function testWorkerRuntimeSettings() {
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "fixture-minimal-model", reasoningEffort: "minimal" },
+        { model: "fixture-none-model", reasoningEffort: "none" },
+        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        // Omitted settings preserve the model and effort in the Codex home.
+        {},
       ];
-      const providerKeys = [
-        "synthetic-gateway-key-0",
-        "synthetic-gateway-key-1",
-        undefined,
-      ];
+      const providerKeys = settings.map((_, index) =>
+        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
+      );
       const executors = settings.map(
         (modelSettings) =>
           new CodexSdkWorkerExecutor({
@@ -1166,7 +1171,7 @@ async function testWorkerRuntimeSettings() {
             artifactContext: {
               pluginRoot: fixture.root,
               repoRoot: fixture.root,
-              scanId: `fixture-scan-${modelSettings.model}`,
+              scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
             },
           }),
@@ -1213,8 +1218,10 @@ async function testWorkerRuntimeSettings() {
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(
-              ({ args }) => args[args.indexOf("--model") + 1] === model,
+            const workerLaunch = workerLaunches.find(({ args }) =>
+              model === undefined
+                ? !args.includes("--model")
+                : args[args.indexOf("--model") + 1] === model,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
             assert.equal(
@@ -1267,13 +1274,19 @@ async function testWorkerRuntimeSettings() {
                 true,
               );
             }
-            assert.equal(
-              invocation.argv.includes(
-                `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+            assert.deepEqual(
+              invocation.argv.filter((arg) =>
+                arg.startsWith("model_reasoning_effort="),
               ),
-              true,
+              reasoningEffort === undefined
+                ? []
+                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
             );
-            assertFlagPair(invocation.argv, "--model", model);
+            if (model === undefined) {
+              assert.equal(invocation.argv.includes("--model"), false);
+            } else {
+              assertFlagPair(invocation.argv, "--model", model);
+            }
             assert.equal(
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,

@@ -87,46 +87,51 @@ test("without a rubric reuses severity without authentication or a model call", 
   ).toEqual(result);
 });
 
-test("supplies complete evidence and separate policy/context to a restricted structured Codex turn", async () => {
-  const rubricPath = await document(
-    "Assign MEDIUM to bounded unauthorized metadata reads.",
-  );
-  const knowledge = await document("The counters contain no customer data.");
-  const { codex, calls } = fakeCodex(assessed);
-  const signal = new AbortController().signal;
-  const result = await classifySeverity([finding], {
-    rubricPath,
-    knowledgeBasePaths: [knowledge],
-    codex,
-    signal,
-    model: "synthetic-model",
-    reasoningEffort: "high",
-  });
-  expect(result.assessments[0]).toMatchObject({
-    ...assessed,
-    source: "rubric",
-  });
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(calls).toHaveLength(1);
-  expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
-  expect(calls[0]!.prompt).toContain("The counters contain no customer data.");
-  expect(calls[0]!.thread).toMatchObject({
-    threadSource: "security_severity_classification",
-    model: "synthetic-model",
-    modelReasoningEffort: "high",
-    sandboxMode: "read-only",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-  });
-  expect(calls[0]!.turn.signal).toBe(signal);
-  expect(calls[0]!.turn.outputSchema).toMatchObject({
-    type: "object",
-    additionalProperties: false,
-  });
-  expect(finding.severity!.level).toBe("high");
-});
+test.each(["high", "none", "future-effort"])(
+  "supplies complete evidence and separate policy/context to a restricted structured Codex turn with %s effort",
+  async (reasoningEffort) => {
+    const rubricPath = await document(
+      "Assign MEDIUM to bounded unauthorized metadata reads.",
+    );
+    const knowledge = await document("The counters contain no customer data.");
+    const { codex, calls } = fakeCodex(assessed);
+    const signal = new AbortController().signal;
+    const result = await classifySeverity([finding], {
+      rubricPath,
+      knowledgeBasePaths: [knowledge],
+      codex,
+      signal,
+      model: "synthetic-model",
+      reasoningEffort,
+    });
+    expect(result.assessments[0]).toMatchObject({
+      ...assessed,
+      source: "rubric",
+    });
+    expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
+    expect(calls[0]!.prompt).toContain(
+      "The counters contain no customer data.",
+    );
+    expect(calls[0]!.thread).toMatchObject({
+      threadSource: "security_severity_classification",
+      model: "synthetic-model",
+      modelReasoningEffort: reasoningEffort,
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+    });
+    expect(calls[0]!.turn.signal).toBe(signal);
+    expect(calls[0]!.turn.outputSchema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+    });
+    expect(finding.severity!.level).toBe("high");
+  },
+);
 
 test("represents policy exclusions independently from Low", async () => {
   const rubricPath = await document("Exclude administrative records.");

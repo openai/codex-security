@@ -254,60 +254,63 @@ test.each([
   expect(calls).toHaveLength(1);
 });
 
-test("combines source, affected-line authorship, and history through the restricted model runner", async () => {
-  const repo = await repository();
-  const dirty = "uncommitted source must remain untouched\n";
-  await writeFile(join(repo.path, "handler.ts"), dirty);
-  await writeFile(
-    join(repo.path, ".mailmap"),
-    "Imposter <imposter@example.test> Alex Example <alex@example.test>\n",
-  );
-  const input = structuredClone(finding);
-  const { codex, calls } = fakeCodex();
-  const signal = new AbortController().signal;
-  const report = await suggestOwners(repo.path, [input], {
-    codex,
-    signal,
-    model: "synthetic-model",
-    reasoningEffort: "high",
-  });
-  expect(report).toMatchObject({
-    revision: repo.revision,
-    model: "synthetic-model",
-    reasoningEffort: "high",
-    results: [
-      {
-        findingId: finding.findingId,
-        status: "identified",
-        owner: { name: "Alex Example", email: "alex@example.test" },
-      },
-    ],
-  });
-  expect(
-    report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
-  ).toMatchObject({
-    path: "handler.ts",
-    commit: repo.revision,
-    startLine: 2,
-    endLine: 3,
-  });
-  expect(
-    calls[0]!.context.evidence.find(({ kind }) => kind === "source")!.content,
-  ).toContain("return records[id]");
-  expect(calls[0]!.context.identities).toHaveLength(2);
-  expect(calls[0]!.thread).toMatchObject({
-    threadSource: "security_suggest_owners",
-    model: "synthetic-model",
-    modelReasoningEffort: "high",
-    sandboxMode: "read-only",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-  });
-  expect(calls[0]!.turn.signal).toBe(signal);
-  expect(await readFile(join(repo.path, "handler.ts"), "utf8")).toBe(dirty);
-  expect(input).toEqual(finding);
-});
+test.each(["high", "none", "future-effort"])(
+  "combines source, affected-line authorship, and history through the restricted model runner with %s effort",
+  async (reasoningEffort) => {
+    const repo = await repository();
+    const dirty = "uncommitted source must remain untouched\n";
+    await writeFile(join(repo.path, "handler.ts"), dirty);
+    await writeFile(
+      join(repo.path, ".mailmap"),
+      "Imposter <imposter@example.test> Alex Example <alex@example.test>\n",
+    );
+    const input = structuredClone(finding);
+    const { codex, calls } = fakeCodex();
+    const signal = new AbortController().signal;
+    const report = await suggestOwners(repo.path, [input], {
+      codex,
+      signal,
+      model: "synthetic-model",
+      reasoningEffort,
+    });
+    expect(report).toMatchObject({
+      revision: repo.revision,
+      model: "synthetic-model",
+      reasoningEffort,
+      results: [
+        {
+          findingId: finding.findingId,
+          status: "identified",
+          owner: { name: "Alex Example", email: "alex@example.test" },
+        },
+      ],
+    });
+    expect(
+      report.results[0]!.evidence.find(({ kind }) => kind === "blame"),
+    ).toMatchObject({
+      path: "handler.ts",
+      commit: repo.revision,
+      startLine: 2,
+      endLine: 3,
+    });
+    expect(
+      calls[0]!.context.evidence.find(({ kind }) => kind === "source")!.content,
+    ).toContain("return records[id]");
+    expect(calls[0]!.context.identities).toHaveLength(2);
+    expect(calls[0]!.thread).toMatchObject({
+      threadSource: "security_suggest_owners",
+      model: "synthetic-model",
+      modelReasoningEffort: reasoningEffort,
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+    });
+    expect(calls[0]!.turn.signal).toBe(signal);
+    expect(await readFile(join(repo.path, "handler.ts"), "utf8")).toBe(dirty);
+    expect(input).toEqual(finding);
+  },
+);
 
 test("abstains without a model call when locations do not identify committed regular source", async () => {
   const repo = await repository();

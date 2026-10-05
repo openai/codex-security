@@ -852,16 +852,46 @@ describe("semantic scan comparison", () => {
       sandboxMode: "read-only",
       networkAccessEnabled: false,
     });
-    await matchScanFindings(input, {
-      config,
-      codex,
-      model: "explicit-model",
-      reasoningEffort: "max",
-    });
+    for (const reasoningEffort of ["max", "minimal", "none", "future-effort"]) {
+      await matchScanFindings(input, {
+        config,
+        codex,
+        model: "future-model",
+        reasoningEffort,
+      });
+      expect(calls.threadOptions).toMatchObject({
+        model: "future-model",
+        modelReasoningEffort: reasoningEffort,
+      });
+    }
+  });
+
+  test("preserves effort defaults, profile selection, and explicit precedence", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const input = { before: [finding("before")], after: [finding("after")] };
+    await matchScanFindings(input, { codex });
+    expect(calls.threadOptions?.modelReasoningEffort).toBe("medium");
+    await matchScanFindings(input, { codex, config: {} });
+    expect(calls.threadOptions?.modelReasoningEffort).toBe("xhigh");
+    const config = {
+      codexOverrides: {
+        model_reasoning_effort: "low",
+        profile: "review",
+        profiles: {
+          review: {
+            model: "future-model",
+            model_reasoning_effort: "future-effort",
+          },
+        },
+      },
+    };
+    await matchScanFindings(input, { codex, config });
     expect(calls.threadOptions).toMatchObject({
-      model: "explicit-model",
-      modelReasoningEffort: "max",
+      model: "future-model",
+      modelReasoningEffort: "future-effort",
     });
+    await matchScanFindings(input, { codex, config, reasoningEffort: "none" });
+    expect(calls.threadOptions).toMatchObject({ modelReasoningEffort: "none" });
   });
 
   test("rejects a confirmed match with conflicting same-scan uncertainty", async () => {
