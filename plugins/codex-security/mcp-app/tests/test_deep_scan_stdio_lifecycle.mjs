@@ -1,44 +1,30 @@
+import { assertNoError, assertFlagPair } from "./assertions.mjs";
+import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { build } from "esbuild";
+import { pathToFileURL } from "node:url";
+
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.mjs";
+import * as streams from "./support/streams.mjs";
 
 const execFileAsync = promisify(execFile);
-const mcpAppRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-const parentSandboxState = {
-  permissionProfile: {
-    type: "managed",
-    file_system: {
-      type: "restricted",
-      entries: [
-        {
-          path: { type: "special", value: { kind: "root" } },
-          access: "read",
-        },
-      ],
-    },
-    network: "restricted",
-  },
-  sandboxCwd: pathToFileURL(pluginRoot).href,
-};
+const parentSandboxState = readOnlyParentSandboxState(pluginRoot);
 
 if (process.platform === "win32") {
   console.log(
@@ -49,9 +35,7 @@ if (process.platform === "win32") {
 }
 
 async function testDeepScanStdioLifecycle() {
-  const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-security-deep-stdio-"),
-  );
+  const fixtureRoot = await temporaryDirectory("codex-security-deep-stdio-");
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
@@ -115,7 +99,7 @@ async function testDeepScanStdioLifecycle() {
     ].join("\n"),
   );
   await writePythonWrapper(pythonWrapperPath);
-  await bundleServer(serverBundlePath);
+  await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
     ...process.env,
@@ -257,6 +241,12 @@ async function testDeepScanStdioLifecycle() {
       true,
     );
     assertReadOnlyWorkerInvocation(startedWorker.argv);
+    assert.equal(
+      startedWorker.argv.includes(
+        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
+      ),
+      true,
+    );
 
     // Discovery progress is admitted once the first complete Standard worker is active.
     const discoveryProgress = await server.request(
@@ -844,10 +834,40 @@ async function testDeepScanStdioLifecycle() {
         ).findings,
         [],
       );
+      const completion = await restartedServer.request(
+        3,
+        "tools/call",
+        toolCall(
+          "complete_codex_security_scan",
+          {
+            scanId: resumed.result.structuredContent.scanId,
+            handoffClaimToken,
+          },
+          resumedThreadId,
+        ),
+      );
+      assertNoError(completion);
+      const completedScan = resumed.result.structuredContent;
+      const sealedManifest = JSON.parse(
+        await readFile(completedScan.manifestPath, "utf8"),
+      );
+      assert.equal(sealedManifest.scan.status, "completed");
+      assert.ok(sealedManifest.scan.sealedAt);
+      const report = await readFile(
+        path.join(completedScan.scanDir, "report.md"),
+        "utf8",
+      );
+      assert.ok(report.length > 0);
       const executions = (await readJsonLines(startLogPath)).slice(
         restartStartIndex,
       );
       for (const execution of executions) {
+        assert.equal(
+          execution.argv.includes(
+            `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
+          ),
+          true,
+        );
         assert.equal(
           execution.argv.includes('model_reasoning_summary="none"'),
           true,
@@ -874,105 +894,16 @@ async function testDeepScanStdioLifecycle() {
   }
 }
 
-async function bundleServer(outfile) {
-  await build({
-    bundle: true,
-    define: { "import.meta.url": "__filename" },
-    entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    outfile,
-    platform: "node",
-    target: "node20",
-  });
-}
-
 function startServer(serverPath, env) {
-  const child = spawn(process.execPath, [serverPath, "--stdio"], {
+  return streams.startServer(serverPath, env, {
     cwd: pluginRoot,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
+    component: "codex_security_deep_scan",
+    withTimeout,
+    responseLabel: "JSON-RPC response",
+    // Non-structured diagnostics remain available in the child process on test failure.
+    stderrLines: [],
+    checkSignalCode: true,
   });
-  const responses = new Map();
-  const waiters = new Map();
-  const stderrEvents = [];
-  const stderrLines = [];
-  let stdoutBuffer = "";
-  let stderrBuffer = "";
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk;
-    stdoutBuffer = consumeLines(stdoutBuffer, (line) => {
-      const response = JSON.parse(line);
-      responses.set(response.id, response);
-      waiters.get(response.id)?.(response);
-      waiters.delete(response.id);
-    });
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderrBuffer += chunk;
-    stderrBuffer = consumeLines(stderrBuffer, (line) => {
-      stderrLines.push(line);
-      try {
-        const event = JSON.parse(line);
-        if (event.component === "codex_security_deep_scan")
-          stderrEvents.push(event);
-      } catch {
-        // Non-structured diagnostics remain available in the child process on test failure.
-      }
-    });
-  });
-
-  return {
-    pid: child.pid,
-    notify(method, params = {}) {
-      child.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`,
-      );
-    },
-    sendRequest(id, method, params = {}) {
-      child.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
-    },
-    request(id, method, params = {}) {
-      this.sendRequest(id, method, params);
-      return this.waitForResponse(id);
-    },
-    waitForResponse(id, timeoutMs = 15_000) {
-      const existing = responses.get(id);
-      if (existing) return Promise.resolve(existing);
-      return withTimeout(
-        new Promise((resolve) => waiters.set(id, resolve)),
-        timeoutMs,
-        `JSON-RPC response ${id}`,
-      );
-    },
-    stderrEvents() {
-      return [...stderrEvents];
-    },
-    stderrText() {
-      return stderrLines.join("\n");
-    },
-    response(id) {
-      return responses.get(id);
-    },
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.stdin.end();
-      const exited = new Promise((resolve) => child.once("exit", resolve));
-      const graceful = await Promise.race([
-        exited.then(() => true),
-        delay(2_000).then(() => false),
-      ]);
-      if (!graceful && child.exitCode === null) child.kill("SIGKILL");
-      await exited;
-    },
-  };
 }
 
 function toolCall(
@@ -991,12 +922,6 @@ function toolCall(
       ...(turnMetadata ? { "x-codex-turn-metadata": turnMetadata } : {}),
     },
   };
-}
-
-function assertFlagPair(args, flag, value) {
-  const index = args.indexOf(flag);
-  assert.notEqual(index, -1, `missing ${flag}`);
-  assert.equal(args[index + 1], value);
 }
 
 function assertReadOnlyWorkerInvocation(args) {
@@ -1201,15 +1126,6 @@ async function writePythonWrapper(executablePath) {
   await chmod(executablePath, 0o755);
 }
 
-function assertNoError(response) {
-  assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(
-    response.result?.isError,
-    undefined,
-    response.result?.content?.map((item) => item.text).join(" "),
-  );
-}
-
 function assertCanceled(response, scanId, scanDir) {
   assertNoError(response);
   const instructions = response.result.structuredContent.instructions;
@@ -1287,19 +1203,4 @@ async function withTimeout(promise, timeoutMs, label) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-function consumeLines(buffer, consume) {
-  let newlineIndex = buffer.indexOf("\n");
-  while (newlineIndex >= 0) {
-    const line = buffer.slice(0, newlineIndex).trim();
-    buffer = buffer.slice(newlineIndex + 1);
-    if (line) consume(line);
-    newlineIndex = buffer.indexOf("\n");
-  }
-  return buffer;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -13,18 +13,16 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { setTimeout as delay } from "node:timers/promises";
+
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.mjs";
+import * as streams from "./support/streams.mjs";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
 }
 
 async function testWorkbenchStateFallback() {
-  const mcpAppRoot = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "..",
-  );
   const pluginRoot = path.resolve(mcpAppRoot, "..");
   const fixtureRoot = await realpath(
     await mkdtemp(path.join(tmpdir(), "codex-security-state-fallback-")),
@@ -49,18 +47,7 @@ async function testWorkbenchStateFallback() {
   await mkdir(targetPath, { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFakePython(fakePythonPath);
-  await build({
-    bundle: true,
-    define: { "import.meta.url": "__filename" },
-    entryPoints: [path.join(mcpAppRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    outfile: serverBundlePath,
-    platform: "node",
-    target: "node20",
-  });
+  await buildServer(serverBundlePath, { target: "node20" });
 
   try {
     if (process.getuid?.() !== 0) {
@@ -92,7 +79,7 @@ async function testWorkbenchStateFallback() {
           const standaloneInput = {
             targetPath,
             storage: "persistent",
-            path: "threat_model.md",
+            path: "threatmodel.md",
             content: "retained context\n",
           };
           if (firstOperation === "standalone") {
@@ -201,7 +188,7 @@ async function testWorkbenchStateFallback() {
         const artifact = {
           targetPath,
           storage: "persistent",
-          path: "threat_model.md",
+          path: "threatmodel.md",
         };
         const saved = await readFirstServer.request(2, "tools/call", {
           name: "save_codex_security_artifact",
@@ -543,66 +530,18 @@ async function writeFakePython(executablePath) {
 }
 
 function startServer(serverPath, env) {
-  const child = spawn(process.execPath, [serverPath, "--stdio"], {
+  const server = streams.startServer(serverPath, env, {
     cwd: path.dirname(path.dirname(serverPath)),
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const responses = new Map();
-  const waiters = new Map();
-  const stderrEvents = [];
-  let stdout = "";
-  let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-    stdout = consumeLines(stdout, (line) => {
-      const response = JSON.parse(line);
-      responses.set(response.id, response);
-      waiters.get(response.id)?.(response);
-      waiters.delete(response.id);
-    });
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-    stderr = consumeLines(stderr, (line) => {
-      try {
-        const event = JSON.parse(line);
-        if (event.component === "codex_security_workbench")
-          stderrEvents.push(event);
-      } catch {
-        // Tool errors are asserted from MCP responses; only structured diagnostics matter here.
-      }
-    });
+    component: "codex_security_workbench",
+    withTimeout,
+    responseLabel: "response",
+    // Tool errors are asserted from MCP responses; only structured diagnostics matter here.
+    checkSignalCode: false,
   });
   return {
-    request(id, method, params = {}) {
-      child.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
-      const existing = responses.get(id);
-      if (existing) return Promise.resolve(existing);
-      return withTimeout(
-        new Promise((resolve) => waiters.set(id, resolve)),
-        15_000,
-        `response ${id}`,
-      );
-    },
-    stderrEvents() {
-      return [...stderrEvents];
-    },
-    async stop() {
-      if (child.exitCode !== null) return;
-      child.stdin.end();
-      const exited = new Promise((resolve) => child.once("exit", resolve));
-      const graceful = await Promise.race([
-        exited.then(() => true),
-        delay(2_000).then(() => false),
-      ]);
-      if (!graceful && child.exitCode === null) child.kill("SIGKILL");
-      await exited;
-    },
+    request: server.request.bind(server),
+    stderrEvents: server.stderrEvents,
+    stop: server.stop,
   };
 }
 
@@ -690,10 +629,7 @@ function assertToolError(response, pattern) {
 
 async function readJsonLines(filePath) {
   const content = await readFile(filePath, "utf8");
-  return content
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  return content.split(/\r?\n/).filter(Boolean).map(JSON.parse);
 }
 
 async function pathExists(filePath) {
@@ -706,17 +642,6 @@ async function pathExists(filePath) {
   }
 }
 
-function consumeLines(buffer, consume) {
-  let newline = buffer.indexOf("\n");
-  while (newline >= 0) {
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (line) consume(line);
-    newline = buffer.indexOf("\n");
-  }
-  return buffer;
-}
-
 function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
@@ -724,10 +649,6 @@ function withTimeout(promise, timeoutMs, label) {
       throw new Error(`Timed out waiting for ${label}`);
     }),
   ]);
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function escapeRegex(value) {

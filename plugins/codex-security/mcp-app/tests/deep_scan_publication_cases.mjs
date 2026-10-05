@@ -6,9 +6,7 @@ export async function testDeepScanPublication({
   fixtureRun,
   FakeStore,
   FakeExecutor,
-  DeepScanCoordinator,
-  deferred,
-  immediateClock,
+  createCoordinator,
   eventually,
 }) {
   async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
@@ -19,9 +17,9 @@ export async function testDeepScanPublication({
       maxDiscoveryRuns: 3,
     });
     const store = new FakeStore(fixture.run);
-    const releaseLateWorker = deferred();
-    const lateAcceptance = deferred();
-    const releaseAcceptance = deferred();
+    const releaseLateWorker = Promise.withResolvers();
+    const lateAcceptance = Promise.withResolvers();
+    const releaseAcceptance = Promise.withResolvers();
     const updateWorker = store.updateWorker.bind(store);
     let acceptedLateWorker;
     store.updateWorker = async (update) => {
@@ -45,16 +43,11 @@ export async function testDeepScanPublication({
       discoveryCandidates: { "discovery-0003": "late-accepted-finding" },
     });
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
-    await executor.dedupStarted;
+    await executor.dedupStarted.promise;
     releaseLateWorker.resolve();
     await lateAcceptance.promise;
     executor.releaseDedup();
@@ -120,12 +113,7 @@ export async function testDeepScanPublication({
       return outcome;
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
@@ -173,16 +161,11 @@ export async function testDeepScanPublication({
       return updateWorker(update);
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
+    const coordinator = createCoordinator(fixture, store, executor, {
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
-    await executor.dedupStarted;
+    await executor.dedupStarted.promise;
     await eventually(
       () => executor.discoveryCalls === 4 && executor.runningDiscovery === 2,
     );
@@ -196,7 +179,7 @@ export async function testDeepScanPublication({
     );
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(terminal.terminalReason, "saturated");
-    assert.equal(store.failCalls, 0);
+    assert.equal(store.failureInputs.length, 0);
     assert.equal(store.finishCalls.length, 1);
     assert.equal(store.finishCalls[0].reason, "saturated");
     assert.equal(
@@ -247,14 +230,12 @@ export async function testDeepScanPublication({
       return structuredClone(store.run);
     };
     const completed = [];
-    const coordinator = new DeepScanCoordinator({
-      run: fixture.run,
+    const coordinator = createCoordinator(
+      fixture,
       store,
-      executor: new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
-      onComplete: async (draft) => completed.push(structuredClone(draft)),
-    });
+      new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
+      { onComplete: async (draft) => completed.push(structuredClone(draft)) },
+    );
     coordinator.start();
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);

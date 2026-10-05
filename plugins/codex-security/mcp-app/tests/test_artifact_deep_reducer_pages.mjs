@@ -1,18 +1,16 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { build } from "esbuild";
+import { importModule } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
+const {
+  deepReducerInputsInputSchema,
+  deepReducerPageResponse,
+  getCodexSecurityDeepReducerInputs,
+  getCodexSecurityDeepReducerInputsPage,
+  recordCodexSecurityDeepReduction,
+} = await importModule({
   stdin: {
     contents: `
       export * from "./artifact-deep-reducer-pages.ts";
@@ -20,20 +18,7 @@ const bundle = await build({
     `,
     resolveDir: new URL("../src/", import.meta.url).pathname,
   },
-  format: "esm",
-  platform: "node",
-  write: false,
 });
-const {
-  deepReducerInputsInputSchema,
-  deepReducerPageResponse,
-  getCodexSecurityDeepReducerInputs,
-  getCodexSecurityDeepReducerInputsPage,
-  recordCodexSecurityDeepReduction,
-} = await import(
-  "data:text/javascript;base64," +
-    Buffer.from(bundle.outputFiles[0].contents).toString("base64")
-);
 
 for (const maxBytes of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
   assert.equal(
@@ -53,9 +38,7 @@ assert.equal(
 );
 
 const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
-const root = await realpath(
-  await mkdtemp(path.join(tmpdir(), "reducer-pages-")),
-);
+const root = await temporaryDirectory("reducer-pages-", true);
 try {
   const scanRoot = path.join(root, "scan");
   const workerRoot = path.join(

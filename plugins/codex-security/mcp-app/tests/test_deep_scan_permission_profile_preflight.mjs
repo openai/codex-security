@@ -1,10 +1,10 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import {
   chmod,
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -15,31 +15,21 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importSource } from "./import-module.mjs";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    fileURLToPath(
-      new URL(
-        "../src/deep-scan/permission-profile-preflight.ts",
-        import.meta.url,
-      ),
-    ),
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 const {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: profileId,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+} = await importSource(
+  fileURLToPath(
+    new URL(
+      "../src/deep-scan/permission-profile-preflight.ts",
+      import.meta.url,
+    ),
+  ),
 );
 
-const profileId = DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
 const expectedProfile = {
   description: "Generated Deep Scan worker profile.",
   filesystem: {
@@ -52,6 +42,10 @@ const rawOverrides = [
   `default_permissions="${profileId}"`,
   `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny"},network={enabled=false}}`,
 ];
+
+const unsupportedConfiguration = (error) =>
+  error?.name === "Error" &&
+  error.message.includes("with this Codex configuration");
 
 await testAllowedProfileAndRawArgv();
 await testPreflightStartsInWorkerCwd();
@@ -187,7 +181,6 @@ async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
         const result = await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd,
-          profileId,
           configOverrides: rawOverrides,
           expectedProfile,
           allowOpenAiApiKeyFallback: true,
@@ -292,9 +285,7 @@ async function testMalformedStreamFailsClosed() {
       async ({ codexPath, cwd, terminatedPath, children }) => {
         await assert.rejects(
           preflight(codexPath, cwd),
-          (error) =>
-            error?.name === "Error" &&
-            error.message.includes("with this Codex configuration"),
+          unsupportedConfiguration,
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -312,12 +303,7 @@ async function testRepeatedCatalogCursorFailsClosed() {
       ],
     },
     async ({ codexPath, cwd, callsPath }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration"),
-      );
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
       const calls = await readJsonLines(callsPath);
       assert.equal(
         calls.filter((call) => call.method === "permissionProfile/list").length,
@@ -452,8 +438,7 @@ async function testSelectedProfileClassificationRequiresVerifiedString() {
           selected === ":read-only"
             ? error?.name === "DeepScanNonRetryableError" &&
               error.message.includes("did not select the required")
-            : error?.name === "Error" &&
-              error.message.includes("with this Codex configuration"),
+            : unsupportedConfiguration(error),
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -473,12 +458,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       ],
     },
     async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration"),
-      );
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
     },
   );
 
@@ -493,8 +473,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration") &&
+          unsupportedConfiguration(error) &&
           !error.message.includes("does not support"),
       );
     },
@@ -661,7 +640,7 @@ async function testMissingWorkerDirectoryRemainsRetryable() {
 
 async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
-  const error = deepScanPermissionProfileFallbackError(warning, profileId);
+  const error = deepScanPermissionProfileFallbackError(warning);
   assert.equal(error?.name, "DeepScanNonRetryableError");
   assert.equal(
     error?.message.includes(
@@ -672,26 +651,24 @@ async function testRuntimeFallbackWarningClassification() {
   assert.equal(error?.message.includes("existing allowlist"), true);
   assert.equal(error?.message.includes("Deep Scan did not run."), false);
   assert.equal(
-    deepScanPermissionProfileFallbackError(`prefix ${warning}`, profileId),
+    deepScanPermissionProfileFallbackError(`prefix ${warning}`),
     undefined,
   );
   assert.equal(
     deepScanPermissionProfileFallbackError(
       warning.replace(profileId, "different-profile"),
-      profileId,
     ),
     undefined,
   );
   const unusualDestination = "\n`quoted destination`\n";
   const unusualWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`${unusualDestination}\`.`;
   assert.equal(
-    deepScanPermissionProfileFallbackError(unusualWarning, profileId)?.name,
+    deepScanPermissionProfileFallbackError(unusualWarning)?.name,
     "DeepScanNonRetryableError",
   );
   const emptyDestinationWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`\`.`;
   assert.equal(
-    deepScanPermissionProfileFallbackError(emptyDestinationWarning, profileId)
-      ?.name,
+    deepScanPermissionProfileFallbackError(emptyDestinationWarning)?.name,
     "DeepScanNonRetryableError",
   );
 }
@@ -706,7 +683,6 @@ async function testAbortKillsPreflightChild() {
       const running = preflightDeepScanWorkerPermissionProfile({
         codexPath,
         cwd,
-        profileId,
         configOverrides: rawOverrides,
         expectedProfile,
         signal: controller.signal,
@@ -736,7 +712,6 @@ function preflight(codexPath, cwd, env) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
-    profileId,
     configOverrides: rawOverrides,
     expectedProfile,
     ...(env === undefined ? {} : { env }),
@@ -773,9 +748,7 @@ async function withFakeCodex(
   callback,
   { longExecutable = false } = {},
 ) {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "deep-scan-profile-preflight-"),
-  );
+  const root = await temporaryDirectory("deep-scan-profile-preflight-");
   const scriptPath = path.join(root, "fake-codex.mjs");
   let codexPath = scriptPath;
   const argvPath = path.join(root, "argv.json");
@@ -949,11 +922,7 @@ function send(id, result, error) {
 
 async function readJsonLines(file) {
   const content = await readFile(file, "utf8");
-  return content
-    .trim()
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  return content.trim().split(/\r?\n/u).filter(Boolean).map(JSON.parse);
 }
 
 async function waitForFile(file) {

@@ -1,4 +1,5 @@
 import { isLinearIssueIdentifier, linearIssueReference } from "./linear.js";
+import { isRecord } from "./record.js";
 import {
   linearPublicationArguments,
   type PreparedPublicationIssue,
@@ -145,48 +146,27 @@ export function resolvePublicationClaims(value: unknown): ClaimResolution {
 export function resolveClaims(
   claims: readonly PublicationClaim[],
 ): ClaimResolution {
-  const seen = new Set<string>();
-  const normalized = claims.flatMap<PublicationClaim>((claim) => {
+  const normalized = new Map<string, PublicationClaim>();
+  claims.forEach((claim) => {
     const trimmed = claim.value.trim();
-    if (trimmed.length === 0) return [];
+    if (trimmed.length === 0) return;
     const value = isCanonicalUuid(trimmed) ? trimmed.toLowerCase() : trimmed;
-    return [{ kind: claim.kind, value }];
+    const kind = claim.kind;
+    normalized.set(`${kind}\0${value}`, { kind, value });
   });
-  const retained = normalized
-    .filter((claim) => {
-      const key = `${claim.kind}\0${claim.value}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort(compareClaims);
-  const identifiers = new Set(
-    retained
-      .filter((claim) => claim.kind === "identifier")
-      .map((claim) => claim.value),
-  );
-  const entityIds = new Set(
-    retained
-      .filter((claim) => claim.kind === "entityId")
-      .map((claim) => claim.value),
-  );
-  const urls = new Set(
-    retained
-      .filter((claim) => claim.kind === "url")
-      .map((claim) => claim.value),
-  );
+  const retained = [...normalized.values()].sort(compareClaims);
+  const identifiers = new Set<string>();
+  const entityIds = new Set<string>();
+  const urls = new Set<string>();
+  const byKind = { identifier: identifiers, entityId: entityIds, url: urls };
+  for (const { kind, value } of retained) byKind[kind]?.add?.(value);
   const canonicalUrls = new Set([...urls].map(canonicalPublicationUrlClaim));
   const urlContradictsIdentifier =
     identifiers.size > 0 &&
-    [...urls]
-      .map(linearIssueReferenceFromUrl)
-      .some(
-        (reference) =>
-          reference !== undefined && !identifiers.has(reference.id),
-      );
-  const overlappingIdentity = [...identifiers].some((identifier) =>
-    entityIds.has(identifier),
-  );
+    Array.from(urls, linearIssueReferenceFromUrl).some(
+      (reference) => reference !== undefined && !identifiers.has(reference.id),
+    );
+  const overlappingIdentity = !identifiers.isDisjointFrom(entityIds);
   if (
     identifiers.size > 1 ||
     entityIds.size > 1 ||
@@ -360,8 +340,4 @@ function normalizeNonemptyString(value: unknown): string | undefined {
 function containsIdentifier(value: string, identifier: string): boolean {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "u").test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

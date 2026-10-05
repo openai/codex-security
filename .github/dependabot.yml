@@ -4,7 +4,7 @@ updates:
     directories:
       - /sdk/typescript
       - /plugins/codex-security/mcp-app
-      - /plugins/codex-security/skills/triage-finding/evals
+      - /evals/triage-finding
     schedule:
       interval: cron
       cronjob: "0 9 * * *"

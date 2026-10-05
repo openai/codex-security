@@ -1,8 +1,8 @@
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -11,18 +11,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { build } from "esbuild";
 
-const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-const fixture = await realpath(
-  await mkdtemp(path.join(tmpdir(), "codex-security-storage-test-")),
-);
+import { applicationRoot, buildServer } from "./build-server.mjs";
+
+const fixture = await temporaryDirectory("codex-security-storage-test-", true);
 const stateRoot = path.join(fixture, "state");
 const repository = path.join(fixture, "repository");
 const bundle = path.join(fixture, "server.cjs");
@@ -32,19 +27,11 @@ let client;
 try {
   await mkdir(repository);
   await writeFile(path.join(repository, "example.py"), "value = 1\n");
-  await build({
-    bundle: true,
+  await buildServer(bundle, {
     define: {
       __dirname: JSON.stringify(applicationRoot),
       "import.meta.url": "__filename",
     },
-    entryPoints: [path.join(applicationRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    outfile: bundle,
-    platform: "node",
   });
   client = await connect();
   const started = await call("start_codex_security_standard_scan", {
@@ -155,6 +142,7 @@ try {
     "findings.json",
     "coverage.json",
     "report.md",
+    "threatmodel.md",
     "drafts/checkpoint.json",
     "artifacts/deep_discovery/result.json",
     "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -200,7 +188,7 @@ try {
   const standalone = await save({
     targetPath: repository,
     storage: "persistent",
-    path: "threat_model.md",
+    path: "threatmodel.md",
     content,
   });
   assert.ok(
@@ -212,10 +200,25 @@ try {
       await read({
         targetPath: repository,
         storage: "persistent",
-        path: "threat_model.md",
+        path: "threatmodel.md",
       })
     ).content,
     content,
+  );
+  const legacyModel = "# Retained legacy model\n\nKeep this unchanged.\n";
+  await writeFile(
+    path.join(standalone.directory, "threat_model.md"),
+    legacyModel,
+  );
+  assert.equal(
+    (
+      await read({
+        targetPath: repository,
+        storage: "persistent",
+        path: "threat_model.md",
+      })
+    ).content,
+    legacyModel,
   );
   await rejected(() =>
     save({
@@ -253,8 +256,50 @@ try {
 
   await call("record_codex_security_scan_draft", {
     ...identity,
+    complete: false,
     findings: [],
-    threatModel: { summary: content },
+    threatModel: { format: "markdown", content, origin: "provided" },
+    coverage: {
+      completeness: "partial",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  const provisionalModel = await read({
+    ...identity,
+    storage: "persistent",
+    path: "threatmodel.md",
+  });
+  assert.equal(provisionalModel.content.slice(0, content.length), content);
+  const exportedModel = await call("export_codex_security_findings", {
+    scanId,
+    artifact: "threat-model",
+  });
+  assert.equal(exportedModel.export.format, "md");
+  assert.equal(
+    exportedModel.export.path,
+    path.join(scanDir, "exports", "threatmodel.md"),
+  );
+  assert.equal(
+    (await readFile(exportedModel.export.path, "utf8")).slice(
+      0,
+      content.length,
+    ),
+    content,
+  );
+  await rejected(() =>
+    call("export_codex_security_findings", {
+      scanId,
+      artifact: "threat-model",
+      format: "sarif",
+    }),
+  );
+
+  await call("record_codex_security_scan_draft", {
+    ...identity,
+    findings: [],
+    threatModel: { format: "markdown", content, origin: "provided" },
     coverage: {
       completeness: "complete",
       surfaces: [
@@ -269,6 +314,12 @@ try {
       deferred: [],
     },
   });
+  const projectedModel = await read({
+    ...identity,
+    storage: "persistent",
+    path: "threatmodel.md",
+  });
+  assert.equal(projectedModel.content.slice(0, content.length), content);
   execFileSync(
     process.env.PYTHON || "python3",
     [

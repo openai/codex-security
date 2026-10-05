@@ -6,11 +6,11 @@ import test from "node:test";
 import {
   gradeReducerPagingTrace,
   runReducerPagingEval,
-} from "../evals/deep-reducer-paging.mjs";
+} from "./support/reducer-paging/deep-reducer-paging.mjs";
 import {
   createReducerPagingFixture,
   gradeReducerPagingResult,
-} from "../evals/deep-reducer-paging-fixture.mjs";
+} from "./support/reducer-paging/deep-reducer-paging-fixture.mjs";
 
 test("a reducer recovers from the real IPC frame limit and records all sources", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "deep-reducer-ipc-eval-"));

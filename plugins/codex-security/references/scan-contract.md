@@ -65,7 +65,7 @@ A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDig
 
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
 
-For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive it from the exact authoritative diff kind and immutable base/head revisions. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
+For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive `snapshotDigest` from the authoritative diff kind and immutable base/head revisions. The workbench supplies it during finalization, so workbench-backed unsealed drafts may omit it. Previously sealed manifests retain their recorded digest. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
 
 ## Finding Identity
 
@@ -169,7 +169,7 @@ The three canonical JSON files are also the only semantic inputs to final report
 Record report-specific semantics without duplicating data already represented elsewhere:
 
 - `scan.scope`: optional narrative `summary`, reviewed artifact names, runtime/test status, validation mode, scan context, and limitations. Include/exclude paths remain the authoritative scope boundaries.
-- `scan.threatModel`: concise summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions.
+- `scan.threatModel`: structured summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions, or `{ "format": "markdown", "content": "<exact model text>" }` for a retained document. Optional model `scope` and `origin` identify the modeled paths and source separately from the scan's scope. The host derives `<scan_dir>/threatmodel.md` from this content; it is an exportable projection, not an independently authored input.
 - finding `validation`: validation method, direct evidence, counterevidence, and the conclusion used by the report.
 - finding `codeEvidence`: stable, exact source snippets with labels, locations, language, and explanations; `rootCause`, `validation`, and `attackPath` select the snippets they need through `evidenceRefs`.
 - finding `rootCause`: the violated invariant and the code that breaks it. Do not substitute a path/line restatement for the explanation.

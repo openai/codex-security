@@ -686,9 +686,5 @@ def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
             _mark_handle_for_deletion(handle.value)
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

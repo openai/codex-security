@@ -1,27 +1,16 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { writeJsonLines } from "./support/json.js";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readSavedScanLogs, readScanLogs } from "../src/scan-logs.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
+  "codex-security-scan-logs-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -33,39 +22,26 @@ async function writeSession(
 ): Promise<void> {
   const directory = join(home, "sessions", "2026", "08", "11");
   await mkdir(directory, { recursive: true });
-  await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
-    [
-      {
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(startedAt === undefined ? {} : { timestamp: startedAt }),
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(parentThreadId === undefined
-            ? {}
-            : {
-                source: {
-                  subagent: {
-                    thread_spawn: { parent_thread_id: parentThreadId },
-                  },
+  await writeJsonLines(join(directory, `rollout-${threadId}.jsonl`), [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        ...(startedAt === undefined ? {} : { timestamp: startedAt }),
+        ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+        ...(parentThreadId === undefined
+          ? {}
+          : {
+              source: {
+                subagent: {
+                  thread_spawn: { parent_thread_id: parentThreadId },
                 },
-              }),
-        },
+              },
+            }),
       },
-      ...events,
-    ]
-      .map((event) => JSON.stringify(event))
-      .join("\n"),
-  );
-}
-
-async function temporaryHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-scan-logs-")),
-  );
-  directories.push(directory);
-  return directory;
+    },
+    ...events,
+  ]);
 }
 
 function commandEvent(command: string, id: string, timestamp?: string) {
@@ -220,9 +196,12 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).not.toContain("unrelated");
   });
 
-  test.each([undefined, "missing-owner"])(
-    "feedback collects known worker descendants without the owner log with continuation %s",
-    async (continuationThreadId) => {
+  test.each([
+    ["omitted", undefined],
+    ["recorded", "missing-owner"],
+  ] as const)(
+    "feedback collects known worker descendants without the owner log with %s continuation",
+    async (_label, continuationThreadId) => {
       const home = await temporaryHome();
       await writeSession(home, "owner-child", [], "missing-owner");
       await writeSession(home, "worker", [

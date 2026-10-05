@@ -23,3 +23,8 @@ export function paginated<Value>(values: Value[]) {
     );
   return { connection: page(0), cursors };
 }
+
+export const emptyPage = async () => ({
+  nodes: [],
+  pageInfo: { hasNextPage: false },
+});
