@@ -92,6 +92,9 @@
 - preserve saved results with non-UTF-8 artifact names ([#1289](https://github.com/openai/codex-security/pull/1289))
 - preserve scan service tier for inline patches ([#1274](https://github.com/openai/codex-security/pull/1274))
 - document SSH login fallback ([#1294](https://github.com/openai/codex-security/pull/1294))
+- cover container and native dependencies ([#1246](https://github.com/openai/codex-security/pull/1246))
+- exclude Git metadata from document discovery ([#1273](https://github.com/openai/codex-security/pull/1273))
+- verify calibration checkout roots before hydration ([#1250](https://github.com/openai/codex-security/pull/1250))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
