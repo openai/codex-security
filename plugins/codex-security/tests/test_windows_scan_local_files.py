@@ -46,6 +46,13 @@ def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path
     with os.fdopen(descriptor, "rb") as handle:
         assert handle.read() == b"first"
 
+    descriptor, filename = WINDOWS_FILES.open_read_fd_with_path(
+        scan_dir, "exports/RESULTS.sarif", "native Windows spelling test"
+    )
+    with os.fdopen(descriptor, "rb") as handle:
+        assert handle.read() == b"first"
+    assert filename == "exports/results.sarif"
+
     WINDOWS_FILES.atomic_write(scan_dir, "exports/results.sarif", b"replacement")
     assert (scan_dir / "exports" / "results.sarif").read_bytes() == b"replacement"
 

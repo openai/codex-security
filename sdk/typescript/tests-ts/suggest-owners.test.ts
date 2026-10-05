@@ -269,12 +269,12 @@ test("combines source, affected-line authorship, and history through the restric
     codex,
     signal,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
   });
   expect(report).toMatchObject({
     revision: repo.revision,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
     results: [
       {
         findingId: finding.findingId,
@@ -298,7 +298,7 @@ test("combines source, affected-line authorship, and history through the restric
   expect(calls[0]!.thread).toMatchObject({
     threadSource: "security_suggest_owners",
     model: "synthetic-model",
-    modelReasoningEffort: "high",
+    modelReasoningEffort: "future-effort",
     sandboxMode: "read-only",
     approvalPolicy: "never",
     networkAccessEnabled: false,
