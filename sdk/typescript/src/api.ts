@@ -1319,17 +1319,6 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      if (deepScanConfiguration !== undefined) {
-        await writeDeepScanConfig(
-          runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml"),
-          deepScanConfiguration,
-          runtime.deepScanConfigPath === undefined
-            ? undefined
-            : selectedWorkerRuntimeConfig(effectiveConfig, modelProvider),
-        );
-      }
-      checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
@@ -1365,6 +1354,24 @@ export class CodexSecurity {
         options.onObserverError,
         scanDir,
       );
+      checkOpen();
+
+      const workerRuntimeConfig = selectedWorkerRuntimeConfig(
+        effectiveConfig,
+        modelProvider,
+        scanDir,
+        runtime.environment,
+      );
+      if (deepScanConfiguration !== undefined) {
+        await writeDeepScanConfig(
+          runtime.deepScanConfigPath ??
+            join(runtimeHome, "codex-security", "config.toml"),
+          deepScanConfiguration,
+          runtime.deepScanConfigPath === undefined
+            ? undefined
+            : workerRuntimeConfig,
+        );
+      }
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -2287,11 +2294,10 @@ export class CodexSecurity {
             environment,
             config: {
               codexOverrides: {
-                ...session.preflightConfig,
-                ...selectedWorkerRuntimeConfig(
-                  session.sessionConfig,
-                  modelProvider,
+                ...scanPreflightCodexConfig(
+                  resolveCodexProfile(session.sessionConfig),
                 ),
+                ...workerRuntimeConfig,
               },
             },
             model,
@@ -4832,11 +4838,20 @@ async function pluginSupportsWorkerProviderSnapshot(
 function selectedWorkerRuntimeConfig(
   config: JsonObject,
   selectedProvider: unknown,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   const providers = config["model_providers"];
+  const instructionsFile = resolved["model_instructions_file"];
+  if (typeof instructionsFile === "string") {
+    resolved["model_instructions_file"] = resolve(
+      workingDirectory,
+      expandHome(instructionsFile, environment),
+    );
+  }
   return {
     ...Object.fromEntries(
       ["model_instructions_file", "model_verbosity"]
