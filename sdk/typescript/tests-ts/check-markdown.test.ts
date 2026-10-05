@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitText, runCommand } from "./support/shell.js";
 
-test("checks tracked Markdown across the repository and skips deleted, untracked, and linked files", async () => {
+test("checks tracked Markdown including leading-dash paths and skips deleted, untracked, and linked files", async () => {
   const root = await mkdtemp(join(tmpdir(), "markdown checks "));
   const sdk = join(root, "sdk", "typescript");
   const script = join(sdk, "scripts", "check-markdown.mjs");
@@ -31,6 +31,7 @@ test("checks tracked Markdown across the repository and skips deleted, untracked
     );
     await writeFile(join(root, ".gitignore"), "node_modules/\n");
     await writeFile(join(root, "README.md"), "# Readme\n");
+    await writeFile(join(root, "--plugin=fixture.md"), "# Markdown fixture\n");
     await writeFile(guide, invalid);
     await writeFile(join(root, "deleted.md"), invalid);
     if (process.platform !== "win32")

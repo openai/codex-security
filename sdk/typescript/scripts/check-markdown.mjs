@@ -20,6 +20,7 @@ if (files.length > 0) {
     [
       fileURLToPath(import.meta.resolve("prettier/bin/prettier.cjs")),
       "--check",
+      "--",
       ...files,
     ],
     { cwd: root, stdio: "inherit" },
