@@ -77,7 +77,7 @@ const githubContext = (behavior) => ({
   vars: { expected_github_rest_behavior: behavior, target_repo: "https://github.com/example/project" },
 });
 for (const repository of ["{owner}/{repo}", "example/project"]) {
-  for (const sourceType of ["source_type: advisory", '`source_type: "advisory"`', '"source_type": "advisory"', "normalize as `advisory`"]) {
+  for (const sourceType of ["source_type: advisory", '`source_type: "advisory"`', '"source_type": "advisory"', "normalize as `advisory`", '(source_type: advisory)', '[source_type: advisory]', 'source_type: advisory\n', 'source_type: advisory.', 'source_type: advisory!']) {
     expectPass(github, `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. ${sourceType}`, githubContext("dependabot_malware"));
     expectPass(github, `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage is for private vulnerability reports. ${sourceType}`, githubContext("advisories_private_reports"));
   }
@@ -90,8 +90,22 @@ for (const text of [
   'GET /repos/example/other/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: "advisory"',
   'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: "sarif"',
   'GET /repos/example/project/dependabot/alerts?classification=malware&state=open. source_type: "advisory"',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"incorrect_source_type":"advisory"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"incorrect source_type":"advisory"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type":"advisory-other"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type":"advisory/other"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type":"advisory other"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type_suffix":"advisory"}',
+  'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: advisory_other',
 ]) {
   expectPass(github, text, githubContext("dependabot_malware"), false);
+}
+
+for (const emphasis of ["**", "*", "__", "_", "***"]) {
+  for (const normalization of ["source_type: advisory", "source_type: `advisory`", '"source_type": "advisory"', "normalize as advisory", "normalize as `advisory`", "`source_type: advisory`", "`normalize as advisory`"]) {
+    expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}${normalization}${emphasis}.`, githubContext("dependabot_malware"));
+  }
+  expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}source_type: advisory_other${emphasis}`, githubContext("dependabot_malware"), false);
 }
 
 const decision = {
@@ -110,6 +124,8 @@ for (const invalid of [
   ...["automatic_rest", "stop", "unknown"].map((fallback) => ({ ...decision, fallback })),
   { ...decision, scope: { ...decision.scope, account: "any" } },
   { ...decision, scope: { ...decision.scope, repository: "example/other" } },
+  { ...decision, explanation: "additional field" },
+  { ...decision, scope: { ...decision.scope, extra: true } },
 ]) {
   expectPass(github, JSON.stringify(invalid), githubContext("explicit_connector"), false);
 }
@@ -118,6 +134,18 @@ for (const text of ["not JSON", `\`\`\`json\n${connectorJson}\n\`\`\`\n\`\`\`jso
 }
 for (const behavior of ["", "code_scaning", "constructor"]) {
   expectPass(github, "arbitrary text", githubContext(behavior), false);
+}
+
+for (const repository of [
+  "example/project", "https://github.com/example/project/",
+  "https://github.com/example/project.git", "git@github.com:example/project.git",
+  "ssh://git@github.com/example/project.git",
+]) {
+  const context = githubContext("explicit_connector");
+  context.vars.target_repo = repository;
+  expectPass(github, connectorJson, context);
+  context.vars.expected_github_rest_behavior = "dependabot_malware";
+  expectPass(github, 'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type":"advisory"}', context);
 }
 
 console.log("intake assertion tests passed");
