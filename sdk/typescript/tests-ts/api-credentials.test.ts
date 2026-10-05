@@ -47,7 +47,12 @@ describe("CodexSecurity orchestration", () => {
         ...(profile
           ? {
               profile: "review",
-              profiles: { review: { model_provider: "synthetic.provider" } },
+              profiles: {
+                review: {
+                  model_provider: "synthetic.provider",
+                  service_tier: "fast",
+                },
+              },
             }
           : { model_provider: "synthetic.provider" }),
         model_providers: {
@@ -65,7 +70,7 @@ describe("CodexSecurity orchestration", () => {
         ...(auth.args === null ? {} : { args: auth.args }),
         cwd: profile ? join(home, "helpers") : home,
       };
-      let captured: CodexOptions | undefined;
+      let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
         {
@@ -142,14 +147,24 @@ describe("CodexSecurity orchestration", () => {
           ...overrides.model_providers["synthetic.provider"],
           auth: expectedAuth,
         };
-        expect(parseToml(captured!.configOverrides![0]!)).toEqual({
+        expect(captured!.configOverrides).toBeUndefined();
+        expect(
+          parseToml(
+            await readFile(
+              join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          ),
+        ).toEqual({
           model_providers: { "synthetic.provider": provider },
         });
         if (profile) {
-          expect(captured?.config?.["profile"]).toBe("review");
-          expect(captured?.config?.["profiles"]).toEqual({
-            review: { model_provider: "synthetic.provider" },
-          });
+          expect(captured?.config?.["profile"]).toBeUndefined();
+          expect(captured?.config?.["profiles"]).toBeUndefined();
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config?.["service_tier"]).toBe("fast");
         } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
@@ -245,7 +260,7 @@ describe("CodexSecurity orchestration", () => {
                         "plugins",
                         "codex-security",
                         "codex-home",
-                      )]: "read",
+                      )]: { ".": "deny" },
                     },
                   },
                 },
@@ -545,8 +560,15 @@ describe("CodexSecurity orchestration", () => {
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
-          model_provider: "openai",
-          model_providers: { openai: { auth: null } },
+          model_provider: "synthetic.account",
+          model_providers: {
+            "synthetic.account": {
+              name: "Synthetic account provider",
+              wire_api: "responses",
+              requires_openai_auth: true,
+              auth: null,
+            },
+          },
         },
       },
       {

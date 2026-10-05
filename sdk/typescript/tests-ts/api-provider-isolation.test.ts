@@ -20,10 +20,27 @@ async function effectiveProvider(
   environment: Record<string, string>,
   cwd: string,
   overrides: string[],
+  nativeProfile?: string,
 ) {
+  const privateConfig =
+    nativeProfile === undefined
+      ? undefined
+      : parseToml(
+          await readFile(
+            join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
+            "utf8",
+          ),
+        );
   const child = spawn(
     executablePathForSpawn(resolveCodexCommand({}).command),
-    [...overrides.flatMap((value) => ["-c", value]), "app-server", "--stdio"],
+    [
+      ...(privateConfig === undefined ? overrides : []).flatMap((value) => [
+        "-c",
+        value,
+      ]),
+      "app-server",
+      "--stdio",
+    ],
     {
       cwd,
       env: { PATH: process.env["PATH"], ...environment },
@@ -45,9 +62,24 @@ async function effectiveProvider(
     for await (const line of lines) {
       const response = JSON.parse(line);
       if (response.error) throw new Error(JSON.stringify(response.error));
-      if (response.id === 1)
-        send(2, "config/read", { cwd, includeLayers: false });
+      if (response.id === 1) {
+        if (privateConfig === undefined)
+          send(2, "config/read", { cwd, includeLayers: false });
+        else
+          send(2, "thread/start", {
+            cwd,
+            ephemeral: true,
+            // This no-turn configuration check never executes model commands.
+            sandbox: "danger-full-access",
+            threadSource: "security_scan",
+            config: { ...privateConfig, ...parseToml(overrides.join("\n")) },
+          });
+      }
       if (response.id === 2) {
+        if (privateConfig !== undefined)
+          return (
+            privateConfig["model_providers"] as Record<string, unknown>
+          )?.[response.result.modelProvider];
         const config = response.result.config;
         return config.model_providers?.[config.model_provider];
       }
@@ -90,6 +122,7 @@ async function loadWorkerSettings(root: string) {
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
       configOverrides?: string[];
+      nativeProfile?: string;
     }>;
   };
 
@@ -159,6 +192,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                     environment,
                     repository,
                     settings.configOverrides ?? [],
+                    settings.nativeProfile,
                   );
                   expect(actual).toMatchObject(provider);
                   expect(actual.http_headers ?? {}).toEqual(
@@ -239,10 +273,15 @@ test("workers preserve native provider inheritance without an explicit selection
     },
   ]) {
     await writeFile(snapshot, stringifyToml({}));
+    if (providers)
+      await writeFile(
+        join(home, "synthetic.config.toml"),
+        stringifyToml({ model_providers: providers }),
+      );
     await writeFile(
       workerSnapshot,
       stringifyToml({
-        worker_runtime: providers ? { model_providers: providers } : {},
+        worker_runtime: providers ? { native_profile: "synthetic" } : {},
       }),
     );
     const settings = await workerRuntimeSettings(environment);
@@ -256,6 +295,7 @@ test("workers preserve native provider inheritance without an explicit selection
         environment,
         root,
         settings.configOverrides ?? [],
+        settings.nativeProfile,
       ),
     ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
   }
@@ -288,10 +328,9 @@ const legacyProviders: Array<[string, JsonObject]> = [
     "inherited provider definition",
     {
       model_providers: {
-        openai: {
-          name: "Synthetic OpenAI gateway",
+        "amazon-bedrock": {
+          aws: { region: "us-east-1" },
           base_url: "https://gateway.example.test/v1",
-          wire_api: "responses",
         },
       },
     },

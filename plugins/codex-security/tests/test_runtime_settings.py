@@ -9,7 +9,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
-@pytest.mark.parametrize("configured", [None, "", "  ", "explicit", "explicit padded"])
+@pytest.mark.parametrize("configured", [None, "", "  ", "explicit"])
 def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, configured):
     home = tmp_path / "user"
     home.mkdir()
@@ -21,11 +21,8 @@ def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, conf
     if configured is None:
         monkeypatch.delenv("CODEX_HOME", raising=False)
     else:
-        if configured in {"explicit", "explicit padded"}:
-            configured = str(
-                tmp_path
-                / ("selected codex " if configured == "explicit padded" else "selected codex")
-            )
+        if configured == "explicit":
+            configured = str(tmp_path / "selected codex")
             expected = Path(configured)
         monkeypatch.setenv("CODEX_HOME", configured)
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
@@ -65,19 +62,29 @@ def test_count_validation_still_rejects_nonintegers(value):
 
 
 @pytest.mark.parametrize("absolute", [False, True])
-def test_nonblank_home_preserves_literal_spaces(tmp_path, monkeypatch, absolute):
+def test_config_and_storage_preserve_literal_home_spaces(tmp_path, monkeypatch, absolute):
     monkeypatch.chdir(tmp_path)
-    home = tmp_path / ("configured home" if sys.platform == "win32" else " selected home ")
-    home.mkdir()
-    (tmp_path / "selected home").mkdir()
-    (home / "config.toml").write_text("# selected configuration\n", encoding="utf-8")
+    home = tmp_path / (" selected home" if sys.platform == "win32" else " selected home ")
+    state = home / "state" / "plugins" / "codex-security"
+    state.mkdir(parents=True)
+    (state / "existing-state.txt").write_text("selected state\n", encoding="utf-8")
+    (home / "codex-security").mkdir()
+    (home / "codex-security" / "config.toml").write_text(
+        "[deep_scan]\nworkers = 7\nmax_time_hours = 0.25\n", encoding="utf-8"
+    )
+    (home / "config.toml").write_text('model = "synthetic"\n', encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(home) if absolute else home.name)
     monkeypatch.delenv("CODEX_SECURITY_STATE_DIR", raising=False)
     monkeypatch.delenv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", raising=False)
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
-    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
-    storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
     assert deep["config_path"]().resolve() == home / "codex-security" / "config.toml"
+    settings = deep["resolve_deep_scan_config"](8)
+    assert settings["workers"] == 7
+    assert settings["maxTimeHours"] == 0.25
+    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
     assert preflight["DEFAULT_CONFIG"].resolve() == home / "config.toml"
-    assert preflight["DEFAULT_CONFIG"].read_text(encoding="utf-8") == "# selected configuration\n"
-    assert storage["state_dir"]() == home / "state" / "plugins" / "codex-security"
+    assert preflight["DEFAULT_CONFIG"].read_text(encoding="utf-8") == 'model = "synthetic"\n'
+    storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
+    selected_state = storage["state_dir"]()
+    assert selected_state == state
+    assert (selected_state / "existing-state.txt").read_text(encoding="utf-8") == "selected state\n"

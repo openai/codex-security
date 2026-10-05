@@ -111,11 +111,15 @@ export class CodexLoginHandle {
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(executablePathForSpawn(command.command), [...args], {
-      env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    this.#child = spawn(
+      executablePathForSpawn(command.command),
+      [...(command.args ?? []), ...args],
+      {
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
     this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");

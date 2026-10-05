@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
+  cp,
   mkdir,
   readFile,
   realpath,
@@ -26,7 +27,7 @@ const execFileAsync = promisify(execFile);
 
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-const parentSandboxState = readOnlyParentSandboxState(pluginRoot);
+let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
 if (process.platform === "win32") {
   console.log(
@@ -41,7 +42,8 @@ async function testDeepScanStdioLifecycle() {
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
-  const codexHome = path.join(fixtureRoot, "codex-home");
+  const codexHome = path.join(fixtureRoot, "codex [home]");
+  const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
   const exitLogPath = path.join(fixtureRoot, "fake-codex-exited.jsonl");
@@ -61,7 +63,7 @@ async function testDeepScanStdioLifecycle() {
   );
   const cancelLogPath = path.join(fixtureRoot, "cancel-scan-calls.jsonl");
   const serverBundlePath = path.join(
-    pluginRoot,
+    installedPluginRoot,
     "mcp",
     `.deep-scan-stdio-test-${randomUUID()}.cjs`,
   );
@@ -70,6 +72,32 @@ async function testDeepScanStdioLifecycle() {
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
+  for (const directory of [
+    "scripts",
+    "references",
+    "schemas",
+    ".codex-plugin",
+  ]) {
+    await cp(
+      path.join(pluginRoot, directory),
+      path.join(installedPluginRoot, directory),
+      { recursive: true },
+    );
+  }
+  const parentSandbox = readOnlyParentSandboxState(pluginRoot);
+  parentSandboxState = {
+    ...parentSandbox,
+    permissionProfile: {
+      ...parentSandbox.permissionProfile,
+      file_system: {
+        ...parentSandbox.permissionProfile.file_system,
+        entries: [
+          ...parentSandbox.permissionProfile.file_system.entries,
+          { path: { type: "path", path: codexHome }, access: "deny" },
+        ],
+      },
+    },
+  };
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFile(
     path.join(failedTargetPath, "fixture.py"),
@@ -103,6 +131,7 @@ model_reasoning_summary = "none"
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
+    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
@@ -113,6 +142,7 @@ model_reasoning_summary = "none"
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
     FAKE_CODEX_START_LOG: startLogPath,
+    FAKE_CODEX_DENIED_HOME: codexHome,
   };
   const server = startServer(serverBundlePath, environment);
 
@@ -206,6 +236,7 @@ model_reasoning_summary = "none"
     )?.artifactDir;
     assert.equal(typeof startedArtifactRoot, "string");
     assert.equal(workerContext.pluginRoot, pluginRoot);
+    assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));
     assert.equal(workerContext.scope, ".");
     assert.equal(workerContext.scanId, scanId);
@@ -237,7 +268,13 @@ model_reasoning_summary = "none"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker.argv);
+    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
+    assert.equal(
+      startedWorker.argv.includes(
+        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT=${JSON.stringify(pluginRoot)}`,
+      ),
+      true,
+    );
     assert.equal(
       startedWorker.argv.includes(
         `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
@@ -470,6 +507,7 @@ model_reasoning_summary = "none"
     )?.artifactDir;
     assert.equal(typeof failedArtifactRoot, "string");
     assert.equal(failedWorkerContext.pluginRoot, pluginRoot);
+    assert.equal(failedWorker.readCoreScanReference, true);
     assert.equal(
       failedWorkerContext.targetPath,
       await realpath(failedTargetPath),
@@ -492,7 +530,7 @@ model_reasoning_summary = "none"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker.argv);
+    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
     assert.equal(
       activeFailureState.workers.some(
         (worker: PersistedDeepScanWorker) => worker.kind === "setup",
@@ -887,6 +925,16 @@ model_reasoning_summary = "none"
       );
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
+        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
+        assert.equal(execution.readCoreScanReference, true);
+        const context = discoveryPromptContext(execution.stdin);
+        if (context.workerLabel) assert.equal(context.pluginRoot, pluginRoot);
+        assert.equal(
+          execution.argv.includes(
+            `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT=${JSON.stringify(pluginRoot)}`,
+          ),
+          true,
+        );
         assertFlagPair(
           execution.argv,
           "--model",
@@ -926,6 +974,7 @@ model_reasoning_summary = "none"
     await server.stop();
     await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+    parentSandboxState = readOnlyParentSandboxState(pluginRoot);
   }
 }
 
@@ -955,7 +1004,7 @@ function toolCall(
   };
 }
 
-function assertReadOnlyWorkerInvocation(args: string[]) {
+function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -980,7 +1029,7 @@ function assertReadOnlyWorkerInvocation(args: string[]) {
     arg.startsWith("permissions.codex_security_deep_scan_worker="),
   );
   assert.deepEqual(overrides, [
-    'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read"},network={enabled=false}}',
+    `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
   ]);
 }
 
@@ -1087,7 +1136,7 @@ if (process.argv.includes('app-server')) {
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read' }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -1104,7 +1153,8 @@ if (process.argv.includes('app-server')) {
 const stdin = (await process.stdin.toArray()).join('');
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
-appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
+const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');

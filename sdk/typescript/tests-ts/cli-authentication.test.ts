@@ -1269,7 +1269,7 @@ describe("skill authentication", () => {
   }: {
     command?: "validate" | "patch" | "verify-fix";
     auth?: "auto" | "chatgpt" | "api-key";
-    overrides: readonly string[];
+    overrides: readonly string[] | JsonObject;
     environment?: NodeJS.ProcessEnv;
     ambientConfig?: string;
     storedCredentials?: boolean;
@@ -1300,7 +1300,9 @@ describe("skill authentication", () => {
         "Synthetic issue",
         "--auth",
         auth,
-        ...overrides.flatMap((value) => ["--codex", value]),
+        ...(Array.isArray(overrides)
+          ? overrides.flatMap((value) => ["--codex", value])
+          : []),
       ],
       dependencies({
         currentDirectory: repository,
@@ -1311,6 +1313,8 @@ describe("skill authentication", () => {
           SYNTHETIC_SKILL_COMMAND: command,
         },
         onCodex: async (args, output, environment, input) => {
+          if (!Array.isArray(overrides) && output !== undefined)
+            output = { ...output, codexOverrides: overrides as JsonObject };
           const originalOverrides = structuredClone(output?.codexOverrides);
           const result = await runCodexSkillCommand(
             [
@@ -1342,6 +1346,30 @@ describe("skill authentication", () => {
       requests: records.slice(1),
     };
   }
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s inherits ambient command authentication through a null optional override",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: { model_providers: { gateway: { auth: null } } },
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          "[model_providers.gateway.auth]",
+          'command="synthetic-auth"',
+        ].join("\n"),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch).toBeDefined();
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
 
   test.each([
     ["validate", "auto", "gateway"],

@@ -1821,9 +1821,7 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
-                  expect(resolveCodexProfile(config)["service_tier"]).toBe(
-                    expectedTier,
-                  );
+                  expect(config["service_tier"]).toBe(expectedTier);
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );
@@ -5129,6 +5127,22 @@ describe("CodexSecurity orchestration", () => {
   test.each([
     ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
+    [
+      "managed custom",
+      "synthetic.gateway",
+      "OPENAI_API_KEY",
+      "gpt-5.6-sol",
+      {
+        name: "Synthetic",
+        wire_api: "responses",
+        requires_openai_auth: false,
+        http_headers: { "X-Synthetic-Key": "synthetic-provider-secret" },
+        auth: {
+          command: "synthetic-auth",
+          args: ["synthetic-command-secret"] as string[],
+        },
+      },
+    ],
   ] as const)(
     "retains %s scan sessions in the managed Codex home",
     async (_name, provider, apiKey, model, providerConfig) => {
@@ -5170,6 +5184,30 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          probeCodexSandbox: async (command) => {
+            if (provider === undefined) {
+              expect(command.args).toBeUndefined();
+            } else {
+              expect(command.args?.[0]).toBe("-c");
+              expect(parseToml(command.args![1]!)).toEqual({
+                model_providers: {
+                  [provider]: {
+                    name: providerConfig!.name,
+                    wire_api: providerConfig!.wire_api,
+                    ...(provider === "synthetic.gateway"
+                      ? { requires_openai_auth: false }
+                      : {}),
+                  },
+                },
+              });
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-provider-secret",
+              );
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-command-secret",
+              );
+            }
+          },
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
@@ -5191,6 +5229,9 @@ describe("CodexSecurity orchestration", () => {
       );
 
       try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "persistent session recorded",
+        );
         await expect(client.run(repository)).rejects.toThrow(
           "persistent session recorded",
         );
@@ -5264,7 +5305,9 @@ describe("CodexSecurity orchestration", () => {
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
-            createCodex: (options: CodexOptions) => {
+            createCodex: async (
+              options: CodexOptions & { nativeProfile?: string },
+            ) => {
               expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
               expect(options.config).toMatchObject({
                 model,
@@ -5276,7 +5319,14 @@ describe("CodexSecurity orchestration", () => {
               });
               expect(options.config?.["model_providers"]).toBeUndefined();
               if (provider !== undefined) {
-                expect(parseToml(options.configOverrides![0]!)).toEqual({
+                expect(
+                  parseToml(
+                    await readFile(
+                      join(codexHome, `${options.nativeProfile}.config.toml`),
+                      "utf8",
+                    ),
+                  ),
+                ).toEqual({
                   model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
                 });
               }
