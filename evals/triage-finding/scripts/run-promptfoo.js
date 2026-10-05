@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const EVAL_ROOT = path.resolve(__dirname, "..", "..");
+const EVAL_ROOT = path.resolve(__dirname, "..");
 const PLUGIN_ROOT = path.resolve(EVAL_ROOT, "..", "..", "plugins", "codex-security");
 const TRIAGE_SKILL_ROOT = path.join(PLUGIN_ROOT, "skills", "triage-finding");
 const DEFAULT_TARGET_ROOT = path.join(EVAL_ROOT, "artifacts", "sastbench-targets");
@@ -33,12 +33,12 @@ function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
 }
 
 /**
- * Give Codex a throwaway working directory that contains only the skill files
- * it needs. The label-bearing dataset and Promptfoo harness stay in EVAL_ROOT.
+ * Give Codex a throwaway working directory containing the checkout skill and
+ * synthetic fixture. The label-bearing dataset and harness stay in EVAL_ROOT.
  */
 function stageSkillRuntime() {
   const runtimeRoot = fs.mkdtempSync(
-    path.join(os.tmpdir(), "codex-security-triage-finding-sastbench-"),
+    path.join(os.tmpdir(), "codex-security-triage-finding-"),
   );
   const stagedPluginRoot = path.join(runtimeRoot, "plugins", "codex-security");
   copyDirectory(
@@ -52,6 +52,10 @@ function stageSkillRuntime() {
       copyDirectory(sourcePath, path.join(stagedPluginRoot, sharedDirectory));
     }
   }
+  copyDirectory(
+    path.join(EVAL_ROOT, "fixtures", "repo"),
+    path.join(runtimeRoot, "evals", "triage-finding", "fixtures", "repo"),
+  );
   return runtimeRoot;
 }
 
@@ -59,6 +63,8 @@ function runPromptfoo(promptfooArgs) {
   const runtimeRoot = stageSkillRuntime();
   const env = {
     ...process.env,
+    TRIAGE_RUNTIME_ROOT: runtimeRoot,
+    CALIBRATION_TARGET_ROOT: path.join(EVAL_ROOT, "artifacts", "calibration-repos"),
     SASTBENCH_RUNTIME_ROOT: runtimeRoot,
     SASTBENCH_TARGET_ROOT: DEFAULT_TARGET_ROOT,
     SASTBENCH_GIT_CACHE_ROOT: DEFAULT_GIT_CACHE_ROOT,

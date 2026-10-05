@@ -4,7 +4,7 @@ This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the 
 JSON result shape. It also covers bare skill invocation with no supplied finding,
 which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub REST intake cases cover the repository-source control flow, endpoint selection, and connector auth-only rule without querying live GitHub during the eval.
 
-The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
+The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The shared runner stages the checkout's triage skill and references in a temporary runtime, selects that source explicitly, and disables ambient plugins and memory. The default lane can read the staged synthetic fixture; each calibration case can read only its own hydrated checkout in addition to the runtime. Dataset labels, assertions, and sibling checkouts stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
 Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
@@ -53,7 +53,7 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 
 ## Calibration Dataset
 
-`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`.
+`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Re-run `calibration:hydrate` after upgrading from the older named checkout layout.
 
 ELI5: the dataset says "this exact old commit should be affected" and "this exact fixed commit should not be affected." The generator turns those rows into Promptfoo test prompts. The hydrator downloads the exact repo commits so Codex can inspect real code instead of synthetic snippets.
 

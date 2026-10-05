@@ -1,7 +1,9 @@
+Read and follow plugins/codex-security/skills/triage-finding/SKILL.md from this checkout for the following request.
+
 {{invocation_preamble}}
 
 Repository path to inspect:
-{{target_repo}}
+{% if calibration_repo %}{{calibration_repo_root or env.CALIBRATION_TARGET_ROOT}}/{{calibration_repo}}{% else %}{{target_repo}}{% endif %}
 
 Input type under test:
 {{source_type_under_test}}

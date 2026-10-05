@@ -74,7 +74,7 @@ assert.match(
 assert.doesNotMatch(sampleConfig, /providers:/);
 assert.doesNotMatch(sampleConfig, /derivedMetrics:/);
 
-assert.match(packageJson.scripts["eval:sastbench"], /run-sastbench-promptfoo\.js eval/);
+assert.match(packageJson.scripts["eval:sastbench"], /run-promptfoo\.js eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-share/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--filter-range/);
@@ -84,17 +84,17 @@ assert.equal("report:sastbench" in packageJson.scripts, false);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /PROMPTFOO_FAILED_TEST_EXIT_CODE/);
 assert.match(
   packageJson.scripts["validate:sastbench:sample"],
-  /run-sastbench-promptfoo\.js validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.js validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(
   packageJson.scripts["eval:sastbench:sample"],
-  /run-sastbench-promptfoo\.js eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.js eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-share/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--max-concurrency 32/);
 assert.equal("sastbench:generate" in packageJson.scripts, false);
-assert.equal(fs.existsSync(path.join(__dirname, "run-sastbench-promptfoo.js")), true);
+assert.equal(fs.existsSync(path.join(evalRoot, "scripts", "run-promptfoo.js")), true);
 assert.equal(
   fs.existsSync(path.join(sastbenchRoot, "docs", "2026-06-22-sastbench-triage-finding-eval.md")),
   false,

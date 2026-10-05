@@ -3,6 +3,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { variantCaseId } = require("./calibration-identity");
 
 const DEFAULT_DATASET = path.join(__dirname, "..", "datasets", "triage-calibration-seed.json");
 const DEFAULT_OUTPUT = path.join(__dirname, "..", "tests", "calibration-oss.yaml");
@@ -54,27 +55,10 @@ function indentedBlock(value, spaces) {
     .join("\n");
 }
 
-function variantCaseId(testCase, variant) {
-  return `${testCase.case_id}-${variant.variant_id}`;
-}
-
-function inputId(testCase, variant) {
-  const base = testCase.finding.input_id || testCase.finding.input_id_base || testCase.case_id;
-  return `${base}-${variant.variant_id}`;
-}
-
-function targetRepoPath(repoRoot, testCase, variant) {
-  return path.posix.join(repoRoot, testCase.case_id, variant.variant_id);
-}
-
-function evidenceTerms(testCase, variant) {
+function evidenceTerms(testCase) {
   const terms = [];
   for (const location of testCase.finding.anchor_locations || []) {
     terms.push(location.path);
-  }
-  if (variant.variant_id === "fixed" && testCase.finding.fix_patch_ref) {
-    const fixCommit = variant.checkout_ref;
-    terms.push(fixCommit);
   }
   return [...new Set(terms)];
 }
@@ -83,7 +67,7 @@ function findingInput(testCase, variant) {
   const finding = testCase.finding;
   const lines = [
     `Source type: ${testCase.source_type}`,
-    `1. input_id: ${inputId(testCase, variant)}`,
+    `1. input_id: ${variantCaseId(testCase, variant)}`,
     `   title: ${finding.title}`,
   ];
 
@@ -105,19 +89,13 @@ function findingInput(testCase, variant) {
       .join(", ");
     lines.push(`   anchor locations: ${anchors}`);
   }
-  if (finding.fix_patch_ref) {
-    lines.push(`   fix evidence: ${finding.fix_patch_ref}`);
-  }
-  lines.push(
-    `   repository state: checked out at ${variant.checkout_ref}. Triage whether the original finding affects this exact state.`,
-  );
 
   return lines.join("\n");
 }
 
 function testYaml(testCase, variant, args) {
   const generatedCaseId = variantCaseId(testCase, variant);
-  const terms = evidenceTerms(testCase, variant);
+  const terms = evidenceTerms(testCase);
   const lines = [
     `- description: ${quote(`calibration ${variant.variant_id}: ${testCase.case_id}`)}`,
     "  metadata:",
@@ -129,9 +107,10 @@ function testYaml(testCase, variant, args) {
     `    expected_binary_label: ${variant.expected_binary_label}`,
     "  vars:",
     `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${targetRepoPath(args.repoRoot, testCase, variant)}`,
+    `    calibration_repo: ${generatedCaseId}`,
+    `    calibration_repo_root: ${quote(args.repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(__dirname, "../../..", args.repoRoot))}`,
     `    source_type_under_test: ${testCase.source_type}`,
-    `    expected_ids: ${inputId(testCase, variant)}`,
+    `    expected_ids: ${variantCaseId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,
     `    expected_verdicts: ${variant.expected_verdict}`,
     `    expected_binary_label: ${variant.expected_binary_label}`,
@@ -142,7 +121,7 @@ function testYaml(testCase, variant, args) {
     indentedBlock(
       [
         "This is an automated OSS calibration eval. Do not ask follow-up questions.",
-        "Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.",
+        "Inspect only the supplied repository checkout, the named anchor locations and the smallest related static evidence needed for the verdict.",
         "Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.",
         "Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.",
         'The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.',
@@ -201,8 +180,7 @@ if (require.main === module) {
 
 module.exports = {
   generate,
-  inputId,
+  findingInput,
   selectedVariants,
-  targetRepoPath,
   variantCaseId,
 };

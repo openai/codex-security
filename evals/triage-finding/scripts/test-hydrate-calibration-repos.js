@@ -9,6 +9,7 @@ const path = require("node:path");
 
 const evalDir = path.join(__dirname, "..");
 const scriptPath = path.join(evalDir, "scripts", "hydrate-calibration-repos.js");
+const { plannedJobs } = require(scriptPath);
 
 function runHydrator(args) {
   return childProcess.execFileSync(process.execPath, [scriptPath, ...args], {
@@ -49,9 +50,10 @@ try {
   const originalOrigin = git(parent, "remote", "get-url", "origin");
   const expectedHead = git(source, "rev-parse", "HEAD");
   const dataset = path.join(temporary, "dataset.json");
-  fs.writeFileSync(dataset, JSON.stringify({ cases: [{ case_id: "case", repo: { url: source }, variants: [{ variant_id: "variant", checkout_ref: expectedHead }] }] }));
+  const fixture = { cases: [{ case_id: "case", repo: { url: source }, variants: [{ variant_id: "variant", checkout_ref: expectedHead }] }] };
+  fs.writeFileSync(dataset, JSON.stringify(fixture));
   const repoRoot = path.join(parent, "checkouts");
-  const target = path.join(repoRoot, "case", "variant");
+  const target = plannedJobs(fixture, { repoRoot })[0].targetDir;
   fs.mkdirSync(path.join(target, ".git"), { recursive: true });
   const rejected = childProcess.spawnSync(process.execPath, [scriptPath, "--dataset", dataset, "--repo-root", repoRoot], { encoding: "utf8" });
   assert.equal(git(parent, "remote", "get-url", "origin"), originalOrigin);

@@ -8,10 +8,23 @@ providers:
   - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding calibration"
     config:
-      working_dir: ../..
-      sandbox_mode: read-only
+      working_dir: "{{env.TRIAGE_RUNTIME_ROOT}}"
+      skip_git_repo_check: true
       approval_policy: never
-      network_access_enabled: false
+      additional_directories:
+        - "{{calibration_repo_root or env.CALIBRATION_TARGET_ROOT}}/{{calibration_repo}}"
+      cli_config:
+        default_permissions: triage_runtime_only
+        permissions:
+          triage_runtime_only:
+            filesystem:
+              ":minimal": read
+              ":workspace_roots": read
+            network:
+              enabled: false
+        features:
+          memories: false
+          plugins: false
       cli_env:
         HTTP_PROXY: "{{env.HTTP_PROXY}}"
         HTTPS_PROXY: "{{env.HTTPS_PROXY}}"

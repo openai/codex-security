@@ -4,6 +4,7 @@
 const { runGit } = require("../sastbench/scripts/hydrate-sastbench-repos");
 const fs = require("node:fs");
 const path = require("node:path");
+const { variantCaseId } = require("./calibration-identity");
 
 const DEFAULT_DATASET = path.join(__dirname, "..", "datasets", "triage-calibration-seed.json");
 const DEFAULT_REPO_ROOT = path.join(__dirname, "..", "artifacts", "calibration-repos");
@@ -59,7 +60,7 @@ function plannedJobs(dataset, args) {
         variantId: variant.variant_id,
         repoUrl: testCase.repo.url,
         checkoutRef: variant.checkout_ref,
-        targetDir: path.join(args.repoRoot, testCase.case_id, variant.variant_id),
+        targetDir: path.join(args.repoRoot, variantCaseId(testCase, variant)),
       });
     }
   }
