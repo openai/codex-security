@@ -73,7 +73,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.2",
-    "@linear/sdk": "96.0.0",
+    "@linear/sdk": "97.0.0",
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.162.0-alpha.14",
     "@openai/codex-sdk": "0.162.0-alpha.14",
