@@ -22,9 +22,10 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import { readThreatModelPath } from "./artifact-export.js";
 import {
   OutputDirectoryNotEmptyError,
-  safeErrorMessage,
+  errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
@@ -65,6 +66,7 @@ interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  threatModelPath?: string;
   coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
@@ -184,10 +186,7 @@ export async function runMultiscan(
   const requestedOutput = resolve(options.outputDir);
   if (options.recoverScan !== undefined) {
     const manifest = await lstat(join(requestedOutput, "manifest.json")).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
@@ -314,9 +313,8 @@ async function runCampaign(
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
         for (const name of await readdir(artifactRoot)) {
-          const match = /^attempt-([1-9][0-9]*)$/u.exec(name);
-          if (match && Number.isSafeInteger(Number(match[1])))
-            attempt = Math.max(attempt, Number(match[1]));
+          const prior = Number(/^attempt-([1-9][0-9]*)$/u.exec(name)?.[1]);
+          if (Number.isSafeInteger(prior)) attempt = Math.max(attempt, prior);
         }
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
@@ -324,27 +322,39 @@ async function runCampaign(
         if (options.recoverScan === undefined) attempt += 1;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
+        let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
         let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined;
+            | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
+                Partial<Pick<ScanResult, "threatModelPath">>)
+            | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
-            const existing = await lstat(scanDir).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code !== "ENOENT") throw error;
-                return undefined;
-              },
-            );
+            const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
+              const retainedCheckout = join(
+                output,
+                "recovery-checkouts",
+                task.id,
+                `attempt-${attempt}`,
+              );
+              const retained = await lstat(retainedCheckout).catch(
+                (error: NodeJS.ErrnoException) => {
+                  if (error.code !== "ENOENT") throw error;
+                  return undefined;
+                },
+              );
+              if (retained !== undefined) protectedRoot = retainedCheckout;
               attemptedResume = true;
               notifyProgress(options, {
                 repository: task.id,
@@ -381,6 +391,7 @@ async function runCampaign(
               await rm(checkout, { recursive: true, force: true });
               await mkdir(checkout, { mode: 0o700 });
             }
+            protectedRoot = checkout;
             await checkoutRevision(
               task,
               checkout,
@@ -431,6 +442,7 @@ async function runCampaign(
                 : { signal: options.signal }),
             });
           }
+          threatModelPath = result.threatModelPath;
           cost = result.cost;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
@@ -455,10 +467,8 @@ async function runCampaign(
           }
           requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
           failure = requiresRecovery
-            ? safeErrorMessage(
-                `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`,
-              )
-            : safeErrorMessage(error);
+            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
+            : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
             await rm(checkout, { recursive: true, force: true });
@@ -470,6 +480,12 @@ async function runCampaign(
             : warning === undefined
               ? "completed"
               : "completed_with_incomplete_coverage";
+        if (threatModelPath === undefined)
+          threatModelPath = await readThreatModelPath(scanDir, {
+            pythonPath: options.config.pythonPath,
+            protectedRoot,
+            signal: options.signal,
+          });
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -477,6 +493,7 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(threatModelPath === null ? {} : { threatModelPath }),
             ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
@@ -551,10 +568,7 @@ function notifyProgress(
 
 async function ensureOutputDirectory(path: string): Promise<string> {
   const metadata = await lstat(path, { bigint: true }).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return undefined;
-    },
+    undefinedIfMissingFile,
   );
   if (metadata?.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
@@ -647,10 +661,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
   } catch (error) {
     const currentLock = await lstat(path, { bigint: true }).catch(
-      (cleanup: NodeJS.ErrnoException) => {
-        if (cleanup.code !== "ENOENT") throw cleanup;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (
       currentLock?.dev === createdLock.dev &&
@@ -685,10 +696,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     clearInterval(timer);
     await heartbeat;
     const current = await readFile(ownerPath, "utf8").catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      },
+      undefinedIfMissingFile,
     );
     if (current === owner) await rm(path, { recursive: true });
   };
@@ -1114,4 +1122,9 @@ export function buildGitHubCredentialArgs(host: string | undefined): string[] {
   }
   const key = `credential.${url.origin}.helper`;
   return ["-c", `${key}=`, "-c", `${key}=!gh auth git-credential`];
+}
+
+function undefinedIfMissingFile(error: NodeJS.ErrnoException): undefined {
+  if (error.code !== "ENOENT") throw error;
+  return undefined;
 }

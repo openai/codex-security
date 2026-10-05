@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -18,25 +17,13 @@ from test_workbench_prompt_only_scan import start_headless_standard_scan, start_
 from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    run_workbench,
     stable_target_id,
     write_completed_contract,
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
-
-
-def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        check=check,
-        capture_output=True,
-        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
-        text=True,
-    )
-    if not check:
-        return {"returncode": completed.returncode, "stderr": completed.stderr}
-    return json.loads(completed.stdout)
 
 
 def compare_scan_pair(

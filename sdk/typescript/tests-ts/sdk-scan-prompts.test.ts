@@ -1,18 +1,16 @@
+import { captureCli } from "./support/cli-run.js";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedCodex, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([
@@ -47,15 +45,7 @@ test.each([
             recipe = JSON.parse(input!).recipe;
           return mockWorkbench(args, input);
         },
-        createCodex: () => ({
-          startThread: () => ({
-            id: "thread-1",
-            async runStreamed() {
-              await copyCompletedScan(root);
-              return { events: completedEvents() };
-            },
-          }),
-        }),
+        createCodex: completedCodex(root, "thread-1"),
       },
     );
     await client.run(
@@ -64,22 +54,18 @@ test.each([
     );
     expect(recipe).toBeDefined();
     const requiresInstructions = scenario === "instructions";
-    let reran = false;
-    const stderr = capture();
-    const exit = await main(
+    const onRun = mock();
+    const stderr = captureCli(main, "stderr");
+    const exit = await stderr.run(
       ["scans", "rerun", "saved", "--json"],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: repository,
         onWorkbench: async () => ({ recipe: recipe! }),
-        onRun: () => {
-          reran = true;
-        },
+        onRun,
       }),
     );
     expect(exit).toBe(requiresInstructions ? 2 : 0);
-    expect(reran).toBe(!requiresInstructions);
+    expect(onRun.mock.calls.length > 0).toBe(!requiresInstructions);
     expect(recipe?.["requiresScanPrompt"]).toBe(
       requiresInstructions ? true : undefined,
     );
@@ -112,9 +98,7 @@ test.each([
       {},
       {
         environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-        prepareRuntime: async () => {
-          throw new Error("Runtime must not start");
-        },
+        prepareRuntime: rejecting("Runtime must not start"),
       },
     );
     for (const operation of ["preflight", "run"] as const) {

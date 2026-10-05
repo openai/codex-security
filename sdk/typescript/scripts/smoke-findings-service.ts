@@ -1,3 +1,4 @@
+import { parseJsonLines } from "../tests-ts/support/json.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -298,21 +299,15 @@ async function checkStoredGroups(): Promise<FindingDedupeGroup[]> {
 }
 
 async function checkReviews(): Promise<void> {
-  const calls = (
+  const calls = parseJsonLines<{
+    stage: string;
+    findingIds: string[];
+  }>(
     await readFile(
       join(runnerRoot, "results/.codex-security-state/review-calls.jsonl"),
       "utf8",
-    )
-  )
-    .trim()
-    .split("\n")
-    .map(
-      (line) =>
-        JSON.parse(line) as {
-          stage: string;
-          findingIds: string[];
-        },
-    );
+    ),
+  );
   for (const stage of ["screen", "pair"]) {
     assert.ok(
       calls.some((call) => call.stage === stage),

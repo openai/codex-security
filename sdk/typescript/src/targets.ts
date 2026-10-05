@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -12,7 +13,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
+import { InvalidTargetError, abortReason } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
@@ -65,13 +66,10 @@ export class DiffTarget {
         `Unsupported diff target kind: ${String(this.kind)}`,
       );
     }
-    if (typeof this.base !== "string" || this.base.length === 0) {
+    if (!isNonEmptyString(this.base)) {
       throw new InvalidTargetError("The diff base ref must be non-empty.");
     }
-    if (
-      this.kind === "refs" &&
-      (typeof this.head !== "string" || this.head.length === 0)
-    ) {
+    if (this.kind === "refs" && !isNonEmptyString(this.head)) {
       throw new InvalidTargetError(
         "Git diff refs must include a non-empty head ref.",
       );
@@ -235,10 +233,7 @@ export async function isGitMetadataDirectory(
 ): Promise<boolean> {
   const metadata = async (name: string, followLinks = false) =>
     await (followLinks ? stat : lstat)(join(repository, name)).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
+      nullIfMissingPath,
     );
   const head = await metadata("HEAD");
   if (head === null) {
@@ -399,10 +394,7 @@ export async function gitObjectDirectories(
     visited.add(directory);
     const contents = await readFile(join(directory, "info", "alternates"), {
       signal,
-    }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    }).catch(nullIfMissingPath);
     if (contents === null) continue;
     for (const path of gitAlternatePaths(contents)) {
       throwIfAborted(signal);
@@ -533,7 +525,7 @@ export async function normalizeTarget(
     const base = await resolveGitRef(root, target.base, signal);
     if (target.kind === "refs") {
       const head = target.head;
-      if (typeof head !== "string" || head.length === 0) {
+      if (!isNonEmptyString(head)) {
         throw new InvalidTargetError(
           "Git diff refs must include a non-empty head ref.",
         );
@@ -753,12 +745,15 @@ async function gitOutput(
   return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
-async function gitMarkerRoot(
+export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let current = repository;
+  const canonical = await abortable(() => realpath(repository), signal);
+  let current = (await lstat(canonical)).isDirectory()
+    ? canonical
+    : dirname(canonical);
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -821,13 +816,6 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw abortReason(signal);
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
-}
-
 function expandHome(value: string): string {
   if (value === "~") {
     return homedir();
@@ -836,4 +824,16 @@ function expandHome(value: string): string {
     return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
   }
   return value;
+}
+
+/** @internal */
+export function nullIfMissingFile(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT") return null;
+  throw error;
+}
+
+/** @internal */
+export function nullIfMissingPath(error: NodeJS.ErrnoException): null {
+  if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+  throw error;
 }

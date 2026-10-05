@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -138,8 +139,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  const pending = [...traversed];
-  for (const parentId of pending) {
+  for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
     for (const [session] of logs.values()) {
       if (
@@ -152,7 +152,6 @@ export async function readScanLogs(options: ScanLogOptions) {
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
-        pending.push(session.threadId);
       }
     }
   }
@@ -284,8 +283,4 @@ async function* sessionEvents(
     lines.close();
     stream.destroy();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

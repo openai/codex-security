@@ -16,3 +16,14 @@ def state_dir() -> Path:
 
 def resolve_scan_root(scan_root: str | None) -> Path:
     return Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
+
+
+def create_private_directory(path: Path) -> None:
+    """Create missing directories privately without changing existing permissions."""
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+    except FileNotFoundError:
+        if path.parent == path:
+            raise
+        create_private_directory(path.parent)
+        path.mkdir(mode=0o700, exist_ok=True)
