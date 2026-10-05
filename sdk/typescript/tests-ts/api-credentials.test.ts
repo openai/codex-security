@@ -19,7 +19,7 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile", "null optional args"])(
+  test.each(["direct", "profile", "null optional args", "null optional cwd"])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
       const profile = selection === "profile";
@@ -38,7 +38,11 @@ describe("CodexSecurity orchestration", () => {
         command: "./synthetic-auth",
         args: selection === "null optional args" ? null : ["token"],
         refresh_interval_ms: 1000,
-        ...(profile ? { cwd: "helpers" } : {}),
+        ...(profile
+          ? { cwd: "helpers" }
+          : selection === "null optional cwd"
+            ? { cwd: null }
+            : {}),
       };
       const overrides = {
         ...(profile
@@ -544,7 +548,13 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
     const runs: Array<{ home: string; apiKey?: string }> = [];
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          model_provider: "openai",
+          model_providers: { openai: { auth: null } },
+        },
+      },
       {
         environment: {
           CODEX_HOME: ambientHome,

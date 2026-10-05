@@ -947,6 +947,12 @@ async function testOpenAiCredentialsReachWorker() {
   const cases = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
     {
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+      // Optional null auth is omitted from the SDK's private TOML snapshot.
+      configuration: 'model_provider = "openai"\n[model_providers.openai]\n',
+    },
+    {
       openai: "  synthetic-openai-key  ",
       codex: " ",
       expected: "synthetic-openai-key",
@@ -979,9 +985,13 @@ async function testOpenAiCredentialsReachWorker() {
       entry.accountResult ?? noAccount,
     );
     const previousEnvironment = Object.fromEntries(
-      ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_CLI_PATH", "CODEX_HOME"].map(
-        (name) => [name, process.env[name]],
-      ),
+      [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CODEX_CLI_PATH",
+        "CODEX_HOME",
+        "CODEX_SECURITY_CONFIG_PATH",
+      ].map((name) => [name, process.env[name]]),
     );
     const originalSpawn = childProcess.spawn;
     try {
@@ -989,6 +999,9 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      const configPath = path.join(fixture.root, "scan-settings.toml");
+      await writeFile(configPath, entry.configuration ?? "");
+      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       childProcess.spawn = (command, args, options) =>
         originalSpawn(
           command,
@@ -1130,6 +1143,7 @@ async function testWorkerRuntimeSettings() {
                 auth: {
                   type: "command",
                   command: "synthetic-auth",
+                  cwd: path.join(fixture.root, `selected helper home ${index}`),
                   args: [String(index)],
                   env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                 },

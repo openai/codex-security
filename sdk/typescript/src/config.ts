@@ -124,7 +124,7 @@ export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
     typeof selected === "string" && isObject(providers)
       ? providers[selected]
       : undefined;
-  return isObject(provider) && provider["auth"] !== undefined;
+  return isObject(provider) && provider["auth"] != null;
 }
 
 /** @internal Keep host-side helpers independent of the source checkout. */
@@ -140,7 +140,7 @@ export function resolveCommandAuthConfig(
       const auth = provider["auth"];
       const cwd = auth["cwd"];
       if (
-        cwd === undefined ||
+        cwd == null ||
         (typeof cwd === "string" && !/^~(?:[/\\]|$)/u.test(cwd))
       ) {
         auth["cwd"] = resolve(home, cwd ?? ".");
