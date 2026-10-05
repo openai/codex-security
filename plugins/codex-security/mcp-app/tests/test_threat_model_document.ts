@@ -54,7 +54,11 @@ for (const complete of [true, undefined]) {
       try {
         const { context, draft } = draftFixture(root, "deep");
         context.pluginRoot = pluginRoot;
-        context.targetContract.target.requiredSnapshotDigest =
+        const target = context.targetContract!.target as Record<
+          string,
+          unknown
+        >;
+        target.requiredSnapshotDigest =
           "codex-security-snapshot/v1:sha256:" + "a".repeat(64);
         await recordCodexSecurityScanDraft(context, {
           ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
@@ -62,7 +66,7 @@ for (const complete of [true, undefined]) {
         });
         assert.ok(
           (await readFile(join(root, "threatmodel.md"), "utf8")).includes(
-            `Snapshot: ${context.targetContract.target.requiredSnapshotDigest}`,
+            `Snapshot: ${target.requiredSnapshotDigest}`,
           ),
         );
         // A final Deep result replaces old review documents without parsing them.
