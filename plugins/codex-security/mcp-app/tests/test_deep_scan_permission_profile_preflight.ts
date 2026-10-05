@@ -73,7 +73,7 @@ await testMalformedAndUnsupportedResponsesFailClosed();
 await testEarlyExecutableExitIsNotVersionError();
 await testUnexpectedTerminationRemainsRetryable();
 await testStdioFailuresRemainRetryable();
-await testUnknownJsonRpcFailuresRemainRetryableAndSafe();
+await testUnknownJsonRpcFailuresPreserveNativeDiagnostics();
 await testRuntimeFallbackWarningClassification();
 await testSpawnErrorFailsClosed();
 await testMissingWorkerDirectoryRemainsRetryable();
@@ -109,13 +109,29 @@ async function testAllowedProfileAndRawArgv() {
       ],
     },
     async ({ codexPath, cwd, argvPath, callsPath }) => {
-      await preflight(codexPath, cwd);
+      await preflightDeepScanWorkerPermissionProfile({
+        codexPath,
+        cwd,
+        configOverrides: [
+          ...rawOverrides,
+          'model_provider="synthetic.gateway"',
+        ],
+        providerConfigOverrides: [
+          'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        ],
+        expectedProfile,
+        signal: new AbortController().signal,
+      });
 
       assert.deepEqual(await readJson(argvPath), [
         "--config",
         rawOverrides[0],
         "--config",
         rawOverrides[1],
+        "--config",
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        "--config",
+        'model_provider="openai"',
         "app-server",
         "--stdio",
       ]);
@@ -344,7 +360,7 @@ async function testDisallowedProfileGivesAdminGuidance() {
           error.message.includes("existing allowlist") &&
           error.message.includes(`${profileId} = true`) &&
           error.message.includes("Deep Scan did not run.") &&
-          !error.message.includes("SECRET_REPOSITORY_PATH"),
+          error.message.includes("SECRET_REPOSITORY_PATH"),
       );
       const calls = await readJsonLines(callsPath);
       assert.deepEqual(
@@ -582,7 +598,7 @@ async function testStdioFailuresRemainRetryable() {
             error.message.includes(
               "could not exchange app-server JSON-RPC over stdio",
             ) &&
-            !error.message.includes("SECRET_REPOSITORY_PATH"),
+            error.message.includes("SECRET_REPOSITORY_PATH"),
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -590,7 +606,7 @@ async function testStdioFailuresRemainRetryable() {
   }
 }
 
-async function testUnknownJsonRpcFailuresRemainRetryableAndSafe() {
+async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
   for (const code of [-32603, -32602, -32000, undefined]) {
     await withFakeCodex(
       {
@@ -611,7 +627,7 @@ async function testUnknownJsonRpcFailuresRemainRetryableAndSafe() {
             (code === undefined
               ? !error.message.includes("JSON-RPC code")
               : error.message.includes(`JSON-RPC code ${code}`)) &&
-            !error.message.includes("SECRET_REPOSITORY_PATH") &&
+            error.message.includes("SECRET_REPOSITORY_PATH") &&
             !error.message.includes("does not support"),
         );
         await assertPreflightStopped(children, terminatedPath);
@@ -652,6 +668,7 @@ async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
   const error = deepScanPermissionProfileFallbackError(warning);
   assert.equal(error?.name, "DeepScanNonRetryableError");
+  assert.equal(error?.message.includes(warning), true);
   assert.equal(
     error?.message.includes(
       "worker was stopped and its results were discarded",

@@ -19,9 +19,8 @@ from workbench_constants import positive_int
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = PLUGIN_ROOT / "preflight" / "capability-profiles.toml"
-configured_codex_home = os.environ.get("CODEX_HOME", "")
 DEFAULT_CODEX_HOME = Path(
-    configured_codex_home if configured_codex_home.strip() else "~/.codex"
+    os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
 ).expanduser()
 
 

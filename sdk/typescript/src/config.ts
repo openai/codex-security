@@ -157,9 +157,9 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
-/** @internal Literal-key tables use generated TOML or raw overrides. */
+/** @internal Resolve settings; literal-key tables use native file layers. */
 export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
-  const structured = { ...config };
+  const structured = resolveCodexProfile(config);
   delete structured["projects"];
   delete structured["permissions"];
   delete structured["model_providers"];
