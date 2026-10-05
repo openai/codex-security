@@ -949,17 +949,7 @@ describe("multiscan", () => {
       ),
     );
 
-    expect(resumed).toMatchObject({
-      completed: 1,
-      skipped: 1,
-      failed: 0,
-      warnings: [
-        {
-          repository: "follow-up-warning",
-          warnings,
-        },
-      ],
-    });
+    expect(resumed).toEqual({ ...summary, skipped: 1 });
     for (const warning of warnings) {
       expect(resumedProgress).toContainEqual({
         repository: "follow-up-warning",
@@ -1976,6 +1966,7 @@ describe("multiscan", () => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
           if (attempts === 1) {
+            scanOptions.onWarning?.("Warning from the failed attempt.");
             throw new Error(failure);
           }
           return await completedScan(scanOptions.outputDir!);
@@ -1986,8 +1977,15 @@ describe("multiscan", () => {
 
     expect(attempts).toBe(2);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
+    expect(summary).not.toHaveProperty("warnings");
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "retry", status: "failed", attempt: 1, error: failure },
+      {
+        id: "retry",
+        status: "failed",
+        attempt: 1,
+        error: failure,
+        warnings: ["Warning from the failed attempt."],
+      },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
   });

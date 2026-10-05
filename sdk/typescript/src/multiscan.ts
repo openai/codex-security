@@ -223,7 +223,7 @@ async function runCampaign(
   let completed = 0;
   let incomplete = 0;
   let policyFailed = false;
-  const campaignWarnings = new Map<string, string[]>();
+  const warnings: NonNullable<MultiscanResult["warnings"]> = [];
   const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
     (settings) => settings.failureSeverity !== undefined,
   );
@@ -261,12 +261,9 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
-      if (receipt.status !== "failed") {
-        const warnings = receipt.warnings ?? [];
-        if (warnings.length > 0) {
-          campaignWarnings.set(task.id, [...warnings]);
-        }
-        for (const warning of warnings) {
+      if (receipt.status !== "failed" && receipt.warnings?.length) {
+        warnings.push({ repository: task.id, warnings: receipt.warnings });
+        for (const warning of receipt.warnings) {
           notifyProgress(options, {
             repository: task.id,
             status: receipt.status,
@@ -304,15 +301,7 @@ async function runCampaign(
     pending.push(task);
   }
   const skipped = completed + incomplete + untouched;
-  const campaignWarningSummary = () =>
-    tasks.flatMap((task) => {
-      const warnings = campaignWarnings.get(task.id);
-      return warnings === undefined || warnings.length === 0
-        ? []
-        : [{ repository: task.id, warnings }];
-    });
   if (pending.length === 0) {
-    const warnings = campaignWarningSummary();
     return {
       total: tasks.length,
       completed,
@@ -550,7 +539,7 @@ async function runCampaign(
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
           if (runWarnings.length > 0) {
-            campaignWarnings.set(task.id, [...runWarnings]);
+            warnings.push({ repository: task.id, warnings: runWarnings });
           }
           if (warning === undefined) completed += 1;
           else incomplete += 1;
@@ -579,7 +568,6 @@ async function runCampaign(
   );
   const rejection = results.find((result) => result.status === "rejected");
   if (rejection?.status === "rejected") throw rejection.reason;
-  const warnings = campaignWarningSummary();
   return {
     total: tasks.length,
     completed,
