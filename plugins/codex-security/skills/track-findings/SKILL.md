@@ -1,6 +1,6 @@
 ---
 name: track-findings
-description: Track validated Codex Security findings in Linear, Jira, GitHub issues, or draft GitHub security advisories. Use it for one finding or an explicitly selected batch of up to 25 findings tracked as Linear, Jira, or GitHub issues. Includes duplicate checks, exact previews, approval-gated writes, and readback. Do not use it for scans or fixes.
+description: Track validated Codex Security findings in Linear, Jira, GitHub issues, or draft GitHub security advisories. Use it for one finding or an explicitly selected batch of up to 25 findings tracked as Linear, Jira, or GitHub issues. Includes duplicate checks, reviewed writes, and provider receipts. Do not use it for scans or fixes.
 ---
 
 # Track Findings
@@ -11,7 +11,7 @@ Track findings from one sealed Codex Security scan as Linear issues, Jira issues
 
 GitHub advisory mode creates one private draft in the verified public canonical source repository through authenticated `gh api --hostname github.com`. Read `references/github-security-advisories.md` in full before advisory work.
 
-Jira mode uses Atlassian Rovo to create, reuse, or update one Jira Cloud issue per selected finding. Use it for one finding or an explicitly selected batch of up to 25. Read `references/jira.md` in full before Jira work.
+Jira mode uses Atlassian to create, reuse, or update one Jira Cloud issue per selected finding. Use it for one finding or an explicitly selected batch of up to 25. Read `references/jira.md` in full before Jira work.
 
 ## Resources
 
@@ -31,7 +31,7 @@ Jira mode is defined in:
 
 Linear requires the native [$linear](app://asdk_app_69a089a326dc8191b32a3f2553f5be2c) app. Stop if it is unavailable or disconnected.
 
-Jira requires the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Reuse requires read and search access; create and update also require write access. Stop if the app is unavailable, disconnected, or lacks access to the destination. Use only this app for Jira tracking.
+Jira requires the native [Atlassian](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Use the access needed for the selected operation: reads for duplicate comparison and reuse, writes for create or update. Follow the Jira reference for tool discovery and receipts.
 
 For GitHub, prefer the native [$github](app://connector_76869538009648d5b282a4bb21c3d157) app. The app is optional. Authenticated GitHub CLI (`gh`) access is also allowed, but only when the user explicitly chooses the current CLI identity and exact destination.
 
@@ -126,7 +126,7 @@ For GitHub advisories, use the private duplicate check in `references/github-sec
 Treat failed requests, incomplete exact-identifier searches, unread plausible matches, or uncertain comparisons as ambiguous. Choose one outcome per finding:
 
 - `create`: exact identifier searches are complete and no reviewed semantic match has the same source, control, and sink
-- `reuse`: one verified issue or advisory already carries the finding id and fingerprint; GitHub advisory reuse is allowed only for one exact `draft` or `published` match
+- `reuse`: one issue already tracks the same finding, established by a current read or this run's successful create receipt; compare bindings when present, otherwise use the affected code, root cause, and source context. GitHub advisory reuse still requires one exact `draft` or `published` match
 - `update`: one verified issue should receive the reviewed binding or content; never use this outcome for GitHub advisories
 - `blocked`: routing, visibility, capability, or duplicate ambiguity remains
 
@@ -166,25 +166,19 @@ For a batch, show every item in execution order and ask for one approval coverin
 
 Never include credentials, signed URLs, local file URLs, or unreviewed links. A public GitHub issue requires an explicit public-repository choice, a prominent warning, and approval of the complete public title and body. Do not include internal evidence, attack paths, exploit detail, or private source links in a public issue.
 
-### 5. Recheck After Approval
+### 5. Apply The Approved Plan
 
-Immediately before each create, update, or reuse:
+Reuse the validated source, identity, destination, visibility, source links, and field metadata from this run. Refresh them after an interruption or when a tool response or changed source calls them into question. A read-only reuse needs no write permission or mutation approval.
 
-1. rerun `validate_tracking_source.py` with the exact finding id
-2. reread provider access, destination identity, and visibility; for GitHub, recheck the transport and authenticated account
-3. reverify every repository, revision, and path used by an approved source link; for Linear, Jira, and GitHub issue runs, return to preview with the plain-path fallback if a link no longer verifies; for GitHub advisory runs, any failed source revalidation blocks the run
-4. repeat the duplicate search and read back any selected existing item
-5. confirm the exact approved payload is unchanged
+Before an approved create, refresh duplicate results to catch a ticket created while awaiting approval. For an update, use the selected item already read during this run, or the item returned by a successful create with the approved payload. Refresh an existing item when needed to preserve fields you are changing; do not fetch unrelated fields again.
 
-If any result changed, stop and present a new preview. Reuse requires the same fresh checks as a write.
-
-For CLI runs, rerun the same host-pinned `gh auth status` and `gh repo view` commands used during preview. Stop if the account, hostname, repository identity, visibility, or permission changed. For issue runs, also stop if issue availability changed.
+Use the approval already given for the same payload and destination. Present a new preview only when the proposed write or disclosure changes. GitHub advisory runs must also follow the reference's source and access revalidation requirements.
 
 ### 6. Execute Serially And Verify
 
-Process one finding at a time. For a batch, preserve the approved order and stop on the first failed or uncertain result.
+Process one finding at a time. For a batch, preserve the approved order and stop on a failed or uncertain mutation or an unresolved duplicate.
 
-Use the selected provider transport with the exact approved payload. Do not retry a create when the result may have succeeded; search by finding id and fingerprint first. After create, update, or reuse, read the exact provider object back through the same transport and verify its provider, destination, title, body, binding identifiers, every included source field, role-aware locations, and important metadata.
+Use the selected provider transport with the exact approved payload. Do not retry a create when the result may have succeeded; search by finding id and fingerprint first. Use successful provider responses as evidence of the requested write. Read the returned object through the same transport when possible to check its identity and the fields changed. Compare content semantically, allowing provider formatting. Reuse the current read for an unchanged existing item.
 
 Keep the GitHub issue body out of shell source. Put the exact approved body in a mode-`0600` temporary file outside the repository and scan bundle, then pass that file to `gh`. Set up cleanup before the command, remove the file on every exit, and never print its contents.
 
@@ -192,33 +186,14 @@ For GitHub issues, run exactly one `gh issue create` or `gh issue edit`, capture
 
 For GitHub advisories, follow the reference's one-shot create and readback flow. Send the approved mode-`0600` JSON file with `gh api --hostname github.com --input`, and stop on uncertainty.
 
-For each Jira item, invoke exactly one `createJiraIssue` or `editJiraIssue` mutation. Then read the exact issue through `getJiraIssue` as defined in the reference before continuing. Do not retry an uncertain create.
+For Jira, follow the reference for create and edit receipts. A successful create returning an issue identity establishes creation even if a later read fails. Report a failed read separately and keep the returned identity; never create a replacement just because the issue is unreadable.
 
-Report a write as complete only after verified readback. If readback cannot determine whether a mutation succeeded, report it as uncertain and stop.
+If the mutation itself fails or times out and may have succeeded, reconcile it through provider reads before any retry. If it cannot be reconciled, report it as uncertain and stop.
 
-If a batch is interrupted, reconstruct completed work from provider readback, rerun source and duplicate checks, and preview the remaining items again. Do not resume from conversation memory alone.
+If a batch is interrupted, use the recorded provider receipts and current reads to reconcile completed work. Validate the source and check duplicates for the remaining items. Keep the existing approval when the remaining writes and destination are unchanged.
 
 ### 7. Report The Result
 
-Summarize completed, reused, blocked, failed, uncertain, and unprocessed findings in ordinary prose or a table. Include canonical issue or advisory URLs only after readback. Keep mutable tracking state outside the sealed scan bundle.
+Summarize completed, reused, blocked, failed, uncertain, and unprocessed findings in ordinary prose or a table. Include canonical issue URLs from successful provider receipts or reads; include advisory URLs after the reference's required readback. Keep mutable tracking state outside the sealed scan bundle.
 
 After successful readback, optionally offer to remember only a non-sensitive routing preference. Never store finding content, permissions, disclosure approval, duplicate state, or issue bindings in memory.
-
-## Hard Rules
-
-- Validate the sealed source before provider or memory work.
-- Use one provider and one destination per run.
-- Require explicit selection for Linear, Jira, or GitHub issue batches and never exceed 25 findings; GitHub advisories are single-finding only.
-- Require exact payload review and explicit approval before writes.
-- Never switch GitHub transports silently. CLI use requires a current, explicit user choice of account and destination.
-- Pin one GitHub transport, account, hostname, and tracking repository from duplicate checks through readback.
-- Recheck source, access, destination, and duplicates after approval.
-- For Linear, Jira, and GitHub issue runs, try to add source details without requiring them for tracking; for GitHub advisories, require a fully verified `git_revision` source.
-- For Linear, Jira, and GitHub issue runs, include commit-pinned source links only for a verified `git_revision`; otherwise use canonical role-aware path-and-line locations. GitHub advisory runs require the verified `git_revision` path.
-- Follow `references/github-security-advisories.md` in full for advisory mode; never update or publish an advisory.
-- Follow `references/jira.md` in full for Jira mode; use only Atlassian Rovo and pin one identity, site, project, and issue type through readback.
-- Default sensitive content to private destinations.
-- Resolve plausible duplicates before proposing a create, and include both binding identifiers in every create or update body.
-- Never silently turn private reporting or an advisory route into an issue.
-- Execute serially, do not retry uncertain creates, and stop on uncertainty.
-- Require exact provider readback before claiming completion.

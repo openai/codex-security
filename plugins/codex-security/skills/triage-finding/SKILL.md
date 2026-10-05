@@ -1,6 +1,6 @@
 ---
 name: triage-finding
-description: "Use when the user supplies or imports existing security findings, vulnerability reports, or security/vulnerability Jira/Linear tickets from scanners, advisories, GitHub, Atlassian Rovo, Linear, or similar backlog sources and wants static repo-impact triage. Do not use for discovery, duplicate-bug triage, validation, or fixes."
+description: "Use when the user supplies or imports existing security findings, vulnerability reports, or security/vulnerability Jira/Linear tickets from scanners, advisories, GitHub, Atlassian, Linear, or similar backlog sources and wants static repo-impact triage. Do not use for discovery, duplicate-bug triage, validation, or fixes."
 ---
 
 # Triage Finding
@@ -43,8 +43,7 @@ the first-pass no-runtime constraint, and the output contract.
 
 ## Routing and Connector Use
 
-Use this skill for security or vulnerability Jira/Linear tickets, even when the user mentions `@atlassian-rovo`, `@linear`, Jira, Linear, JQL, project keys,
-ticket URLs, or ticket search phrases. Treat Atlassian Rovo and Linear mentions as connector hints for importing ticket content, not as a reason to switch to Atlassian Rovo's `triage-issue` skill or another generic ticket workflow.
+Use this skill for security or vulnerability Jira/Linear tickets, even when the user mentions `@atlassian`, `@atlassian-rovo`, `@linear`, Jira, Linear, JQL, project keys, ticket URLs, or ticket search phrases. Treat Atlassian and Linear mentions as connector hints for importing ticket content, not as a reason to switch to a generic ticket workflow.
 
 Do not run duplicate-bug triage instead of security-impact triage. Generic Jira duplicate triage answers "is this already filed?" This skill answers "does this existing security claim affect this repository, and how should it rank for backlog burn-down?"
 

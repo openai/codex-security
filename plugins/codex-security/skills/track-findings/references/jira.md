@@ -1,76 +1,40 @@
 # Jira Issues
 
-Use this reference only when the destination is `jira`.
-
-## Contract
-
-- Track one validated finding or an explicitly selected batch of up to 25. Use one Jira Cloud issue per finding.
-- Use only the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. Reuse requires read and search access; create and update also require write access. Stop if the app is unavailable, disconnected, or lacks access to the destination.
-- Pin one authenticated Atlassian identity, site and `cloudId`, project key, and issue type from duplicate checks through readback. Use the same destination and issue type for every item in a batch. Start a separate run for work that needs another site, project, or issue type.
-- Require the user to explicitly confirm that the project audience is approved to see the finding details. One confirmation may cover an exact reviewed batch. Jira create permission does not prove who can read the issues.
-
-## Tool Discovery
-
-Use the app's live input schemas. For deferred operations, use `discover` and the returned execution tool, such as `executeRead`. Resolve the required operations before previewing a write. If an operation is unavailable, stop and report what is missing. Writes through `executeWrite` require the same preview and approval as direct write tools.
+Use this reference when the destination is `jira`. Use only the native [Atlassian](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app and its live input schemas. Discover deferred operations with `discover` and call the returned execution tool. Write tools require the same reviewed payload and approval as direct mutations.
 
 ## Destination And Fields
 
-Call the Rovo tools in this order:
+Resolve the current identity with `atlassianUserInfo` and the selected site with `getAccessibleAtlassianResources`. Keep that identity, site and `cloudId`, project, and issue type for the run. Choose from the user's current request or unambiguous live results. Follow the main skill's audience confirmation and batch selection rules.
 
-1. Resolve the exact site with `getAccessibleAtlassianResources` and the current identity with `atlassianUserInfo`.
-2. Resolve the selected project with `listJiraProjects`. Confirm the intended create, edit, or browse access using the operation filter or permission information exposed by its live schema and results. A visible project alone does not prove write access.
-3. Resolve the selected issue type with `listJiraProjectIssueTypesMetadata`.
-4. Fetch its current fields with `getJiraIssueTypeMetaWithFields`.
+Use `listJiraProjects` to resolve the project. For a new issue, confirm browse and create access using its live filters or equivalent permission data. For an existing issue, a successful read establishes read access. An empty JQL result or project visibility alone does not establish issue access. Check edit access when proposing an update.
 
-Select the site, project, and issue type from an explicit choice in the current request or one unambiguous live result. Stop on ambiguity. Fetch every page when results are paginated. For a batch, confirm each operation required by its proposed `create`, `update`, or `reuse` outcome. Keep the destination pinned.
+For a create, resolve the issue type with `listJiraProjectIssueTypesMetadata` and required fields with `getJiraIssueTypeMetaWithFields`. Fetch additional pages only as needed to resolve the selected value or complete a search. Reuse this metadata during the run; a reuse or summary-only edit does not need create-field discovery.
 
-Build each `createJiraIssue` payload from its live schema using the pinned site, project, issue type, summary, approved description, and any approved optional fields.
+Build `createJiraIssue` with the selected project and type, approved summary and description, and required fields. Use Markdown explicitly when supported. Include the finding id and fingerprint as labeled text, and the main skill's source details or role-aware plain locations. Verify optional field keys and values against live metadata. Do not guess custom field ids, severity-to-priority mappings, assignees, or labels.
 
-Use Markdown when supported and select that format explicitly when the schema offers a choice. Put priority, components, labels, and custom fields in the container specified by the schema, such as `additional_fields`. Include every required field from the issue-type metadata. Verify each optional field's key or id and value against live metadata before asking for approval. Build `editJiraIssue` payloads from its live schema with only the approved changes.
-
-Never:
-
-- guess a custom field id
-- map finding severity to Jira priority
-- infer an assignee
-- invent a label as an idempotency key
-
-Include the canonical finding id and primary fingerprint as labeled text in the description. Add the approved finding details, remediation, and the source block or role-aware plain locations required by the main skill. Include only content approved for the confirmed project audience.
+Build `editJiraIssue` with only the approved changes. Preserve unowned fields and existing rich content; a summary-only edit does not need the description resent.
 
 ## Duplicates
 
-For every selected finding, use `searchJiraIssuesUsingJql`. Use project-scoped JQL for the finding id and fingerprint, but search each value separately. Do not combine bindings from several findings in one query. Escape scan-derived values as JQL data, exhaust pagination using the live schema and returned continuation tokens, and search all statuses. Do not print unrelated issue descriptions.
+Use project-scoped `searchJiraIssuesUsingJql` for the finding id and fingerprint separately, across all statuses. Escape values as JQL data and follow returned continuation tokens until complete. Read plausible candidates with `getJiraIssue`; search tokenization alone does not prove a match. Use narrow semantic terms when needed and safe for the confirmed audience.
 
-JQL tokenization does not prove an exact match. Read every plausible candidate with `getJiraIssue`. Compare its labeled bindings, affected area, root cause, and source context. After the exact-binding searches, use narrow semantic terms only when the confirmed audience is safe for them.
+Use model judgment to compare the affected code, root cause, and source context, with binding identifiers when present:
 
-- `create`: both searches are complete and no reviewed candidate is the same finding.
-- `reuse`: one issue carries both exact bindings and its approved content is already current.
-- `update`: one issue is clearly the same finding and the exact proposed field changes have been previewed.
-- `blocked`: candidates are unreadable, bindings point to different or multiple issues, or semantic ambiguity remains.
+- `create`: searches are complete and no candidate tracks the same finding.
+- `reuse`: one issue already tracks the finding, established by a read or this run's successful create receipt. It does not need identical wording or newly added bindings.
+- `update`: one issue tracks the finding and the user approved specific changes.
+- `blocked`: an unreadable candidate or conflicting evidence prevents deciding whether a duplicate exists.
 
-An update may change only the approved fields. Preserve unowned fields. Do not transition the issue or add a comment as part of tracking.
+Reuse is read-only. Do not add bindings or rewrite an existing issue merely to reuse it.
 
-## Preview, Write, And Verify
+## Write And Report
 
-Before any mutation, preview:
+Follow the main skill's preview and approval flow. Keep successful reads and metadata from this run; refresh when there is evidence of change or after an interruption. Do not repeat identity, issue-type, and field lookups before every item.
 
-- the authenticated identity
-- the site URL and `cloudId`
-- the project key and issue type
-- the audience confirmation and duplicate outcome
-- the exact summary and Markdown description
-- every additional field
+Call `createJiraIssue` or `editJiraIssue` once with the approved payload. Trust a successful create response returning an issue key or id as evidence of creation. Use that returned identity for an already approved follow-up edit; do not require a separate read to rediscover the payload just sent.
 
-For a batch, show every item in execution order and get one explicit approval covering that exact list.
+When possible, read the result with `getJiraIssue` to check the destination and changed fields. Compare descriptions by meaning, structure, and links rather than byte-identical Markdown. Report a failed follow-up read separately from an accepted write, including the returned issue identity. A read failure does not authorize another create. If the mutation itself is uncertain, reconcile through binding searches or an exact read, then stop if its outcome remains unknown.
 
-Immediately before each create, update, or reuse, rerun source validation with that finding's exact id. Then recheck the identity, site, intended operation access, project, issue type metadata, audience confirmation, and duplicate results. If anything changes, preview again.
+Construct the issue URL from the pinned site and returned key. Distinguish an accepted write, a verified read, and an access failure in the result; live QA must report which operations actually passed.
 
-Process a batch serially in its approved order. For each `create`, call `createJiraIssue` exactly once. For each `update`, call `editJiraIssue` exactly once with only the approved fields. Never retry when a mutation may have succeeded. If a create does not return one issue key, search the exact bindings and stop as uncertain.
-
-Read the resulting key with `getJiraIssue` before continuing to the next item. Verify the site, project, issue type, summary, description, both bindings, source context, and approved metadata. Jira may return the description as rendered content or a document; compare its text, structure, and links semantically instead of requiring byte-identical Markdown. Stop the batch on the first failed or uncertain result. Report success and construct the canonical site URL only after readback passes.
-
-If a batch stops early, reconstruct completed items from exact provider readback and binding searches. Rerun source and duplicate checks. Then preview the remaining items again before resuming.
-
-## Non-Goals
-
-Do not add comments, transition issues, log work, attach files, or link issues. Do not manage watchers, create projects or users, change project settings, or perform Jira Service Management request actions. Do not use one approved item as permission for a second mutation or an unpreviewed finding.
+Do not add comments, transition issues, attach files, manage watchers, create projects or users, or change project settings as part of tracking.

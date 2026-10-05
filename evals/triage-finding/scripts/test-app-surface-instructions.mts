@@ -22,14 +22,11 @@ const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
 
 assert.match(skill, /## Jira and Linear Intake/);
 assert.match(skill, /references\/ticket-intake\.md/);
-assert.match(ticketIntake, /Atlassian Rovo[\s\S]*JQL/);
+assert.match(ticketIntake, /Atlassian[\s\S]*JQL/);
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
 assert.match(skill, /security or vulnerability Jira\/Linear tickets/);
-assert.match(skill, /Atlassian Rovo and Linear mentions\s+as connector hints/);
-assert.match(
-  skill,
-  /not as a reason to switch to\s+Atlassian Rovo's `triage-issue` skill/,
-);
+assert.match(skill, /Atlassian and Linear mentions\s+as connector hints/);
+assert.match(skill, /not as a reason to switch to a generic ticket workflow/);
 assert.match(
   skill,
   /Do not run duplicate-bug triage instead of security-impact triage/,

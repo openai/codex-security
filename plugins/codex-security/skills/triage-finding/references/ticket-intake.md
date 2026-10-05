@@ -4,7 +4,7 @@ Use this reference whenever `$triage-finding` imports Jira or Linear issues. Ret
 
 ## Source Retrieval
 
-For Jira, use only the native [Atlassian Rovo](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. If it is unavailable or disconnected, follow Connector Failure Handling below.
+For Jira, use only the native [Atlassian](app://asdk_app_6a83901dde988191b3f3cefdcc19acfa) app. If it is unavailable or disconnected, follow Connector Failure Handling below.
 
 - Resolve the authenticated identity and site with `atlassianUserInfo` and `getAccessibleAtlassianResources`. Keep that connection and site for the selected issue set; ask when the destination is ambiguous.
 - Use the app's live tool schemas. Read exact issues with `getJiraIssue` and collections with `searchJiraIssuesUsingJql`; follow every returned page. For deferred metadata operations, use the app's `discover` and `executeRead` tools. Do not invoke write tools for intake.
