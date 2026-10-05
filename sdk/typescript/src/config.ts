@@ -152,7 +152,7 @@ export function resolveCommandAuthConfig(
 
 /** @internal CLI dotted keys cannot represent provider IDs containing dots. */
 export function modelProviderConfigOverride(config: JsonObject): string[] {
-  return config["model_providers"] === undefined
+  return config["model_providers"] == null
     ? []
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
@@ -166,6 +166,7 @@ export function inlineToml(value: JsonValue): string {
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
+      .filter(([, item]) => item !== null)
       .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
       .join(",")}}`;
   }

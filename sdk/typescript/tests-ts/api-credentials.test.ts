@@ -19,7 +19,7 @@ const { cleanup, copyCompletedScan, temporaryDirectory } =
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile"])(
+  test.each(["direct", "profile", "null optional args"])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
       const profile = selection === "profile";
@@ -36,7 +36,7 @@ describe("CodexSecurity orchestration", () => {
       await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
       const auth = {
         command: "./synthetic-auth",
-        args: ["token"],
+        args: selection === "null optional args" ? null : ["token"],
         refresh_interval_ms: 1000,
         ...(profile ? { cwd: "helpers" } : {}),
       };
@@ -55,6 +55,12 @@ describe("CodexSecurity orchestration", () => {
             auth,
           },
         },
+      };
+      const expectedAuth = {
+        command: auth.command,
+        refresh_interval_ms: auth.refresh_interval_ms,
+        ...(auth.args === null ? {} : { args: auth.args }),
+        cwd: profile ? join(home, "helpers") : home,
       };
       let captured: CodexOptions | undefined;
       const client = new TestClient(
@@ -100,7 +106,7 @@ describe("CodexSecurity orchestration", () => {
                     expect(workerConfig["model_providers"]).toEqual({
                       "synthetic.provider": {
                         ...overrides.model_providers["synthetic.provider"],
-                        auth: { ...auth, cwd: home },
+                        auth: expectedAuth,
                       },
                     });
                     if (process.platform !== "win32") {
@@ -136,7 +142,7 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
           ...overrides.model_providers["synthetic.provider"],
-          auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
+          auth: expectedAuth,
         };
         expect(parseToml(captured!.configOverrides![0]!)).toEqual({
           model_providers: { "synthetic.provider": provider },

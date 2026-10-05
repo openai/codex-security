@@ -6,6 +6,7 @@ import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
   inlineToml,
+  modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -31,13 +32,29 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
-test("inline Codex overrides reject null values instead of emitting invalid TOML", () => {
-  for (const value of [null, { args: null }, { args: ["fixture", null] }]) {
+test("inline Codex overrides omit optional null fields like the file writer", async () => {
+  for (const value of [null, { args: ["fixture", null] }]) {
     expect(() => inlineToml(value)).toThrow(ConfigurationError);
   }
-  const provider = { fixture: { args: ["fixture", 4], enabled: true } };
-  expect(parse(`model_providers = ${inlineToml(provider)}`)).toEqual({
-    model_providers: provider,
+  expect(modelProviderConfigOverride({ model_providers: null })).toEqual([]);
+  const provider = {
+    fixture: {
+      auth: { command: "synthetic-helper", args: null },
+      enabled: true,
+    },
+  };
+  const root = await temporaryDirectory();
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_providers: provider },
+  });
+  const path = join(root, "config.toml");
+  await writeCodexConfig(path, config);
+  const written = parse(await readFile(path, "utf8"));
+  expect(
+    parse(`model_providers = ${inlineToml(provider)}`)["model_providers"],
+  ).toEqual(written["model_providers"]);
+  expect(written["model_providers"]).toEqual({
+    fixture: { auth: { command: "synthetic-helper" }, enabled: true },
   });
 });
 

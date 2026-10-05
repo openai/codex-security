@@ -34,7 +34,9 @@ CONFIG_KEYS = {
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", "").strip() or "~/.codex").expanduser()
+    return Path(
+        os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
+    ).expanduser()
 
 
 def config_path() -> Path:
