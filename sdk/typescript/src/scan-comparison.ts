@@ -169,8 +169,10 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
 
 interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
-  "config" | "environment" | "model" | "nativeProfile" | "signal"
+  "config" | "environment" | "model" | "signal"
 > {
+  /** @internal Private native profile owned by the calling scan. */
+  nativeProfile?: ReadOnlyCodexOptions["nativeProfile"];
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
   scanId: string;
