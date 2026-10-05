@@ -243,7 +243,8 @@ def connect() -> sqlite3.Connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
-            apply_migrations(connection)
+            # Writer admission on retries lets real upgrades wait on the busy timeout.
+            apply_migrations(connection, immediate=attempt > 0)
             connection.execute("PRAGMA journal_mode = WAL")
             path.chmod(0o600)
             return connection
@@ -255,8 +256,10 @@ def connect() -> sqlite3.Connection:
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
 
 
-def apply_migrations(connection: sqlite3.Connection) -> None:
-    apply_schema_migrations(connection, MIGRATIONS, now, backfill_security_targets)
+def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False) -> None:
+    apply_schema_migrations(
+        connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
+    )
 
 
 def require_target(value: str) -> Path:

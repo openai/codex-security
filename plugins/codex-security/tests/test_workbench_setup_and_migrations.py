@@ -433,8 +433,21 @@ def test_workbench_defaults_to_persistent_codex_home_state(tmp_path: Path) -> No
     }
 
 
-def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: bool) -> None:
     state_dir = tmp_path / "state"
+    if upgrade:
+        state_dir.mkdir()
+        namespace = runpy.run_path(str(SCRIPT), run_name="concurrent_migration_upgrade")
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            namespace["apply_schema_migrations"](
+                connection,
+                tuple(migration for migration in namespace["MIGRATIONS"] if migration[0] <= 32),
+                namespace["now"],
+                namespace["backfill_security_targets"],
+            )
+            connection.execute("PRAGMA journal_mode=WAL")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: run_workbench(state_dir, "database-info"), range(2)))
     assert results == [
