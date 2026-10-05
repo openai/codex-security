@@ -253,7 +253,7 @@ def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> b
             escape -= 1
         if "".join(masked[max(0, escape - 3) : escape]) == "\\u{":
             return True
-    while start > 0 and masked[start - 1].isspace():
+    while start > 0 and (masked[start - 1].isspace() or masked[start - 1] == "\ufeff"):
         start -= 1
     if start == 0 or masked[start - 1] not in ".#":
         return False
@@ -293,14 +293,16 @@ def javascript_regex_end(
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
     previous = start - 1
-    while previous >= 0 and text[previous] in " \t\r":
+    while previous >= 0 and text[previous] in " \t\r\ufeff":
         previous -= 1
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
         keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
         if keyword is None:
             return None
-        if javascript_keyword_has_identifier_prefix(masked, previous + 1 - len(keyword.group())):
+        if keyword.group() != "=>" and javascript_keyword_has_identifier_prefix(
+            masked, previous + 1 - len(keyword.group())
+        ):
             return None
 
     index = start + 1
@@ -500,7 +502,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
         if suffix in JAVASCRIPT_EXTENSIONS:
             if char == "(":
                 end = len(masked)
-                while end > 0 and masked[end - 1].isspace():
+                while end > 0 and (masked[end - 1].isspace() or masked[end - 1] == "\ufeff"):
                     end -= 1
                 start = end
                 while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$"):
@@ -512,7 +514,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 )
             if char == ")":
                 after_control = bool(control_parentheses) and control_parentheses.pop()
-            elif not char.isspace():
+            elif not char.isspace() and char != "\ufeff":
                 after_control = False
         if char in {'"', "'", "`"}:
             quote = char

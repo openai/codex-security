@@ -590,11 +590,12 @@ def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Pa
     assert "method Service.visible" in preview
 
 
-def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path) -> None:
-    source = """class Service {
-  makeMatcher() { const matcher = () => /if(enabled)/; } // note
-  authorize(request) {}
-}
+@pytest.mark.parametrize("arrow", ["() => ", "input=>", "input => ", "input=>\ufeff"])
+def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, arrow: str) -> None:
+    source = f"""class Service {{
+  makeMatcher() {{ const matcher = {arrow}/if(enabled)/; }} // note
+  authorize(request) {{}}
+}}
 """
 
     preview = generate_preview(tmp_path, "service.js", source)
@@ -608,7 +609,14 @@ def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path) -
 
 @pytest.mark.parametrize(
     "condition",
-    ["if (ready)", "if /* condition */ (check(value))", "while (ready)", "if (ready) {} else"],
+    [
+        "if (ready)",
+        "if /* condition */ (check(value))",
+        "while (ready)",
+        "if (ready) {} else",
+        "if\ufeff(ready)",
+        "if (ready)\ufeff",
+    ],
 )
 def test_javascript_regex_after_control_flow_preserves_declarations(
     tmp_path: Path, condition: str
@@ -647,7 +655,9 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
     [
         "{} / [1, 2]",
         "object.if(ready) / { value: count / total }",
+        "object.\ufeffif(ready) / { value: count / total }",
         "object.else / { value: count / total }",
+        "object.\ufeffelse / { value: count / total }",
         "object. else / { value: count / total }",
         "object./* member */else / { value: count / total }",
         "object1.\nreturn / { value: count / total }",
