@@ -1,3 +1,4 @@
+import { writeJsonLines } from "./support/json.js";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,8 @@ import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function fixture() {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
@@ -27,19 +30,14 @@ async function fixture() {
       },
     },
   ];
-  await writeFile(
-    join(home, "sessions", "rollout.jsonl"),
-    events.map((event) => JSON.stringify(event)).join("\n"),
-  );
+  await writeJsonLines(join(home, "sessions", "rollout.jsonl"), events);
   const scan = { scanId: "scan-1", continuationThreadId: "thread-1" };
   const logs = await readSavedScanLogs(scan, home);
   const deps = dependencies({
     environment: { CODEX_SECURITY_STATE_DIR: state },
     onWorkbench: () => ({ scan }),
   });
-  deps.createSecurity = () => {
-    throw new Error("Reading logs must not start Codex");
-  };
+  deps.createSecurity = throwing("Reading logs must not start Codex");
   return { state, logs, deps };
 }
 
@@ -105,16 +103,11 @@ describe("saved logs JSON output", () => {
         ["--format", "json"],
         ["--format=json"],
       ]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            ["scans", "logs", "scan-1", ...args],
-            stdout.stream,
-            stderr.stream,
-            f.deps,
-          ),
-        ).toBe(0);
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+          0,
+        );
         const expected = await referenceOutput(["--json"], f.logs);
         expect(Object.keys(JSON.parse(expected))).toEqual([
           "scanId",
@@ -160,16 +153,11 @@ describe("saved logs JSON output", () => {
   )("preserves Incur output for %j", async (args) => {
     const f = await fixture();
     try {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["scans", "logs", "scan-1", ...args],
-          stdout.stream,
-          stderr.stream,
-          f.deps,
-        ),
-      ).toBe(0);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+        0,
+      );
       const expected = await referenceOutput(
         args.flatMap((arg) =>
           arg === "--format=json" ? ["--format", "json"] : [arg],
@@ -198,15 +186,10 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output"],
     ].map((args) => [args]),
   )("preserves invalid-option failure for %j", async (args) => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scans", "logs", "scan-1", ...args],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scans", "logs", "scan-1", ...args], dependencies()),
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).not.toBe("");

@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { expect } from "bun:test";
@@ -124,4 +125,68 @@ export function readPythonRolloutUsage(
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as unknown;
+}
+
+export const parentFields = [
+  "source",
+  "parent_thread_id",
+  "forked_from_id",
+] as const;
+type SessionParentField = (typeof parentFields)[number];
+
+export function parentMetadata(
+  parentThreadId: string,
+  field: SessionParentField,
+) {
+  return field === "source"
+    ? {
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
+        },
+      }
+    : { [field]: parentThreadId };
+}
+
+export async function writeSession(
+  home: string,
+  threadId: string,
+  usage: Record<string, number>,
+  {
+    parent,
+    cwd,
+    timestamp,
+    parentField = "source",
+  }: {
+    parent?: string;
+    cwd?: string;
+    timestamp?: string;
+    parentField?: SessionParentField;
+  } = {},
+): Promise<string> {
+  const directory = join(home, "sessions", "2026", "07", "26");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `rollout-${threadId}.jsonl`);
+  await writeFile(
+    path,
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          ...(cwd === undefined ? {} : { cwd }),
+          ...(timestamp === undefined ? {} : { timestamp }),
+          ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: usage },
+        },
+      }),
+      "",
+    ].join("\n"),
+  );
+  return path;
 }

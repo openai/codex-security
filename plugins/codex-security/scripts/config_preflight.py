@@ -17,6 +17,10 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_constants import positive_int
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = PLUGIN_ROOT / "preflight" / "capability-profiles.toml"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
@@ -145,13 +149,6 @@ def parse_bool(value: str) -> bool:
     if normalized == "false":
         return False
     raise ValueError(f"expected true or false, got {value!r}")
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
 
 
 def parse_assignment(raw: str) -> tuple[str, str]:
@@ -865,7 +862,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if path in project_config_paths_set:
             # Codex strips project-local profile selection and definitions before
             # resolving the merged config. Mirror that denylist here.
-            config = dict(config)
             config.pop("profile", None)
             config.pop("profiles", None)
         config_layers.append((path, config))

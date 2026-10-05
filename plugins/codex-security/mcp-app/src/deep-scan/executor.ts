@@ -15,7 +15,7 @@ import {
   resolve,
   win32,
 } from "node:path";
-import { Codex } from "@openai/codex-sdk";
+import { Codex, type CyberAccessProgram } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -45,15 +45,24 @@ export interface CodexSdkWorkerModelSettings {
 /** The coordinator supplies scan identity; worker tools never choose paths. */
 export interface CodexSdkWorkerArtifactContext {
   pluginRoot: string;
-  scanRoot: string;
   repoRoot: string;
   scanId: string;
   scope?: string;
   pythonCommand?: string;
 }
 
+interface CodexSdkWorkerRuntimeSettings {
+  reasoningSummary?: string;
+  serviceTier?: string;
+  cyberAccessProgram?: CyberAccessProgram;
+  features?: {
+    api_key_cyber_access_programs?: boolean;
+    api_key_model_discovery?: boolean;
+  };
+}
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
-  private runtimeReasoningSummary?: Promise<string | undefined>;
+  private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
@@ -73,8 +82,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const reasoningSummary = await (this.runtimeReasoningSummary ??=
-        workerReasoningSummary(childEnv));
+      const runtimeSettings = await (this.runtimeSettings ??=
+        workerRuntimeSettings(childEnv));
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -95,7 +104,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await preflightDeepScanWorkerPermissionProfile({
           codexPath,
           cwd: request.workingDirectory,
-          profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
           configOverrides,
           expectedProfile: workerProfile,
           env: childEnv,
@@ -110,9 +118,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
-          ...(reasoningSummary === undefined
+          ...(runtimeSettings.reasoningSummary === undefined
             ? {}
-            : { model_reasoning_summary: reasoningSummary }),
+            : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
+          ...(runtimeSettings.serviceTier === undefined
+            ? {}
+            : { service_tier: runtimeSettings.serviceTier }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -123,7 +134,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             "codex-security": { command: "node", enabled: false },
             ...this.compactArtifactServer(request),
           },
-          ...workerSubagentConfig(request.subagents),
+          ...workerSubagentConfig(request.subagents, runtimeSettings.features),
         },
         // Structured SDK config cannot preserve literal filesystem keys such as
         // ":root" or "/repo/.env"; raw overrides keep this inline TOML intact.
@@ -155,30 +166,28 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
+          cyberAccessProgram: runtimeSettings.cyberAccessProgram,
         });
-        let finalResponse = "";
         let threadId: string | undefined;
         let turnCompleted = false;
         let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
         for await (const event of events) {
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            const fallbackError =
-              event.item.type === "error"
-                ? deepScanPermissionProfileFallbackError(event.item.message)
-                : undefined;
+          const item = event.type === "item.completed" ? event.item : event;
+          if (item.type === "error") {
+            const fallbackError = deepScanPermissionProfileFallbackError(
+              item.message,
+            );
             if (fallbackError) {
               controller.abort(fallbackError);
               throw fallbackError;
             }
-            if (event.item.type === "agent_message") {
-              finalResponse = event.item.text;
-            } else {
-              appendSafeItemDiagnostic(diagnostics, event.item);
-            }
+          }
+          if (event.type === "thread.started") {
+            threadId = event.thread_id;
+            await request.onThreadStarted?.(threadId);
+          } else if (event.type === "item.completed") {
+            appendSafeItemDiagnostic(diagnostics, event.item);
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
             request.signal.removeEventListener("abort", forwardAbort);
@@ -186,13 +195,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           } else if (event.type === "turn.failed") {
             throw new Error(event.error.message);
           } else if (event.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(
-              event.message,
-            );
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
             // Codex exec currently emits retry-in-progress notifications as error events.
             lastStreamError = event.message;
             appendCodeModeFrameDiagnostic(diagnostics, event.message);
@@ -205,7 +207,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           );
         }
         return {
-          finalResponse,
           threadId: threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
@@ -289,13 +290,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerSubagentConfig(subagents: number) {
+function workerSubagentConfig(
+  subagents: number,
+  inheritedFeatures: CodexSdkWorkerRuntimeSettings["features"],
+) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
     ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
     features: {
+      ...inheritedFeatures,
       multi_agent_v2: {
         enabled: false,
         max_concurrent_threads_per_session: subagents + 1,
@@ -315,24 +320,17 @@ type TomlValue = string | number | boolean | TomlObject;
 type TomlObject = { [key: string]: TomlValue };
 
 function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
-  const filesystemEntries: Array<[string, TomlValue]> = [[":root", "read"]];
-  const seenFilesystemKeys = new Set<string>();
-
-  for (const key of sandbox.filesystemDenies) {
-    if (seenFilesystemKeys.has(key)) continue;
-    seenFilesystemKeys.add(key);
-    filesystemEntries.push([key, "deny"]);
-  }
-
-  if (sandbox.globScanMaxDepth !== undefined) {
-    filesystemEntries.push(["glob_scan_max_depth", sandbox.globScanMaxDepth]);
-  }
-
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries(filesystemEntries) as TomlObject,
+    filesystem: Object.fromEntries([
+      [":root", "read"],
+      ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
+      ...(sandbox.globScanMaxDepth === undefined
+        ? []
+        : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
+    ]),
     network: { enabled: false },
   };
 }
@@ -473,15 +471,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function workerReasoningSummary(
+async function workerRuntimeSettings(
   environment: Record<string, string>,
-): Promise<string | undefined> {
+): Promise<CodexSdkWorkerRuntimeSettings> {
   const configPath = environmentVariable(
     environment,
     "CODEX_SECURITY_CONFIG_PATH",
     process.platform,
   );
-  if (!configPath) return undefined;
+  if (!configPath) return {};
   const config = parseToml(await fs.readFile(configPath, "utf8"));
   const profiles = config.profiles;
   const profile =
@@ -492,7 +490,32 @@ async function workerReasoningSummary(
     isRecord(profile) && profile.model_reasoning_summary !== undefined
       ? profile.model_reasoning_summary
       : config.model_reasoning_summary;
-  return typeof summary === "string" ? summary : undefined;
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
+  const settings: CodexSdkWorkerRuntimeSettings = {
+    ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
+    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
+  };
+  const security = config.codex_security;
+  if (isRecord(security) && typeof security.cyber_access_program === "string") {
+    settings.cyberAccessProgram =
+      security.cyber_access_program as CyberAccessProgram;
+  }
+  const features = config.features;
+  if (isRecord(features)) {
+    for (const name of [
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ] as const) {
+      const value = features[name];
+      if (typeof value === "boolean") {
+        (settings.features ??= {})[name] = value;
+      }
+    }
+  }
+  return settings;
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
@@ -644,10 +667,7 @@ function resolveFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = join(resolve(originalCwd, directory), executableName);
     if (isExecutableFile(candidate)) return candidate;
   }
   return undefined;
@@ -659,10 +679,7 @@ function resolveWindowsDirectFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = join(resolve(originalCwd, directory), executableName);
     if (!isWindowsAppsPath(candidate) && existsSync(candidate))
       return candidate;
   }
@@ -675,7 +692,7 @@ function resolveWindowsCodexFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const absoluteDirectory = absoluteSearchDirectory(directory, originalCwd);
+    const absoluteDirectory = resolve(originalCwd, directory);
     const directBinary = join(absoluteDirectory, "codex.exe");
     if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
       return directBinary;
@@ -743,13 +760,6 @@ function isExecutableFile(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function absoluteSearchDirectory(
-  directory: string,
-  originalCwd: string,
-): string {
-  return resolve(originalCwd, directory || ".");
 }
 
 function absoluteCodexPath(

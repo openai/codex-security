@@ -1,6 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
+import { throwing, rejecting } from "./support/errors.js";
+
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 const args = [
   "dedupe",
@@ -31,13 +38,10 @@ test.each([false, true])(
       ],
     };
     deps.deduplicateScan = async () => result;
-    const stdout = capture();
-    const stderr = capture();
-    if (brokenLog)
-      stderr.stream.write = () => {
-        throw new Error("Synthetic logging failure");
-      };
-    expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(0);
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    if (brokenLog) stderr.stream.write = throwing("Synthetic logging failure");
+    expect(await runCli(args, deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result);
     if (!brokenLog) {
       expect(stderr.text()).toContain("pair-review refused by gpt-5.6-sol");
@@ -48,7 +52,10 @@ test.each([false, true])(
   },
 );
 
-test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the SDK", async () => {
+test.each([
+  ["--workflow-id", "--findings-url"],
+  ["--workflowId", "--findingsUrl"],
+])("dedupe accepts %s and %s", async (workflowFlag, findingsFlag) => {
   const deps = dependencies();
   deps.runWorkbench = async (args, input) => {
     expect(args).toEqual(["finding-workflow"]);
@@ -74,19 +81,17 @@ test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the
       deduplicationStatus: "completed",
     };
   };
-  const stdout = capture();
+  const stdout = captureCli(main, "stdout");
   expect(
-    await main(
+    await stdout.run(
       [
         "dedupe",
-        "--workflow-id",
+        workflowFlag,
         "workflow-example",
-        "--findings-url",
+        findingsFlag,
         "http://localhost:3000",
         "--json",
       ],
-      stdout.stream,
-      capture().stream,
       deps,
     ),
   ).toBe(0);
@@ -101,8 +106,8 @@ test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the
 test.each([false, true])(
   "dedupe passes the scan selector, URL, and all-repository scope %j to the SDK",
   async (allRepositories) => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     const result = {
       scanId: "scan-example",
@@ -122,10 +127,8 @@ test.each([false, true])(
       return result;
     };
     expect(
-      await main(
+      await runCli(
         [...args, ...(allRepositories ? ["--all-repositories"] : [])],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -151,9 +154,7 @@ test.each([
       deduplicationStatus: "completed",
     };
   };
-  expect(
-    await main([...args, ...flags], capture().stream, capture().stream, deps),
-  ).toBe(0);
+  expect(await runCapturedCli(main, [...args, ...flags], deps)).toBe(0);
   expect(called).toBe(true);
 });
 
@@ -161,57 +162,33 @@ test.each(["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"])(
   "dedupe rejects invalid concurrency %s before calling the SDK",
   async (value) => {
     const deps = dependencies();
-    let called = false;
-    deps.deduplicateScan = async () => {
-      called = true;
-      throw new Error("Invalid concurrency must not reach the SDK");
-    };
-    const stderr = capture();
-    expect(
-      await main(
-        [...args, "--concurrency", value],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const deduplicateScan = mock(
+      rejecting("Invalid concurrency must not reach the SDK"),
+    );
+    deps.deduplicateScan = deduplicateScan;
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run([...args, "--concurrency", value], deps)).toBe(2);
     expect(stderr.text()).toContain("concurrency");
-    expect(called).toBe(false);
+    expect(deduplicateScan).not.toHaveBeenCalled();
   },
 );
 
 test("dedupe requires a value for concurrency", async () => {
-  const stderr = capture();
-  expect(
-    await main(
-      [...args, "--concurrency"],
-      capture().stream,
-      stderr.stream,
-      dependencies(),
-    ),
-  ).toBe(2);
+  const stderr = captureCli(main, "stderr");
+  expect(await stderr.run([...args, "--concurrency"], dependencies())).toBe(2);
   expect(stderr.text()).toContain("Missing value for flag: --concurrency");
 });
 
 test("dedupe help and schema expose concurrency and its default", async () => {
-  const help = capture();
-  expect(
-    await main(
-      ["dedupe", "--help"],
-      help.stream,
-      capture().stream,
-      dependencies(),
-    ),
-  ).toBe(0);
+  const help = captureCli(main, "stdout");
+  expect(await help.run(["dedupe", "--help"], dependencies())).toBe(0);
   expect(help.text()).toContain("--concurrency");
   expect(help.text()).toContain("serial execution");
 
-  const schema = capture();
+  const schema = captureCli(main, "stdout");
   expect(
-    await main(
+    await schema.run(
       ["dedupe", "--schema", "--format", "json"],
-      schema.stream,
-      capture().stream,
       dependencies(),
     ),
   ).toBe(0);
@@ -225,31 +202,21 @@ test("dedupe help and schema expose concurrency and its default", async () => {
 
 test("dedupe requires both explicit inputs and reports SDK failures", async () => {
   const deps = dependencies();
-  let called = false;
-  deps.deduplicateScan = async () => {
-    called = true;
-    throw new Error("Finding has not been indexed");
-  };
+  const deduplicateScan = mock(rejecting("Finding has not been indexed"));
+  deps.deduplicateScan = deduplicateScan;
   for (const flags of [
     [],
     ["--scan", "latest"],
     ["--findings-url", "http://127.0.0.1:3000"],
   ]) {
-    expect(
-      await main(
-        ["dedupe", ...flags],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).not.toBe(0);
+    expect(await runCapturedCli(main, ["dedupe", ...flags], deps)).not.toBe(0);
   }
-  expect(called).toBe(false);
-  const stdout = capture();
-  const stderr = capture();
-  expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
+  expect(deduplicateScan).not.toHaveBeenCalled();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  expect(await runCli(args, deps)).toBe(2);
   expect(stdout.text()).toBe("");
-  expect(stderr.text()).toContain("Finding has not been indexed");
+  expect(stderr.text()).toBe("codex-security: Finding has not been indexed\n");
 });
 
 test("dedupe forwards cancellation and removes signal handlers", async () => {
@@ -267,11 +234,9 @@ test("dedupe forwards cancellation and removes signal handlers", async () => {
       options.signal!.throwIfAborted();
       throw new Error("Cancellation must throw");
     };
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(
-      expectedCode,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(await runCli(args, deps)).toBe(expectedCode);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Deduplication canceled");
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);

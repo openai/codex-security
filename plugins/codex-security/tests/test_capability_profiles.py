@@ -10,6 +10,8 @@ import sys
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
@@ -52,7 +54,14 @@ def test_preflight_matches_windows_project_path_aliases(monkeypatch) -> None:
     assert trust_level(layers, root) == "untrusted"
 
 
-def test_preflight_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("script", "run_name"),
+    [
+        (PREFLIGHT_SCRIPT, "config_preflight_test"),
+        (DEEP_SCAN_CONFIG_SCRIPT, "deep_scan_config_test"),
+    ],
+)
+def test_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch, script, run_name) -> None:
     real_import = builtins.__import__
     monkeypatch.setitem(sys.modules, "tomli", tomllib)
 
@@ -63,23 +72,7 @@ def test_preflight_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> No
 
     monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
 
-    namespace = runpy.run_path(str(PREFLIGHT_SCRIPT), run_name="config_preflight_test")
-
-    assert namespace["tomllib"] is tomllib
-
-
-def test_deep_scan_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch) -> None:
-    real_import = builtins.__import__
-    monkeypatch.setitem(sys.modules, "tomli", tomllib)
-
-    def import_without_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "tomllib":
-            raise ModuleNotFoundError("No module named 'tomllib'", name="tomllib")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
-
-    namespace = runpy.run_path(str(DEEP_SCAN_CONFIG_SCRIPT), run_name="deep_scan_config_test")
+    namespace = runpy.run_path(str(script), run_name=run_name)
 
     assert namespace["tomllib"] is tomllib
 

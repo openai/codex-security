@@ -30,18 +30,17 @@ export async function reviewSettingsDigest(
     ),
     codexSecurityCredentialHome(environment),
   ]);
-  const configs = await Promise.all(
-    [...homes].map(async (home) => {
-      try {
-        return await readFile(join(home, "config.toml"), "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    }),
-  );
   return workflowDigest({
-    configs,
+    configs: await Promise.all(
+      [...homes].map(async (home) => {
+        try {
+          return await readFile(join(home, "config.toml"), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      }),
+    ),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
   });

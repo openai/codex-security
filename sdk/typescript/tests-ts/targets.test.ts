@@ -23,7 +23,8 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
-import { enclosingGitWorktreeRoot } from "../src/targets.js";
+import { enclosingGitWorktreeRoot, gitMarkerRoot } from "../src/targets.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -33,21 +34,13 @@ const structurallyInvalidTarget: ScanTarget = {
 };
 void structurallyInvalidTarget;
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-targets-");
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function repository(name = "repo"): Promise<string> {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-targets-")),
-  );
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectory();
   const repo = join(root, name);
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
@@ -134,10 +127,7 @@ describe("scan target normalization", () => {
   test.skipIf(process.platform !== "win32")(
     "rejects Windows repository roots that alias across runtimes",
     async () => {
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-repository-alias-")),
-      );
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-repository-alias-");
       const repository = join(root, "repository");
       const ambiguous = join(root, "repository.");
       const linked = join(root, "linked-repository");
@@ -207,15 +197,14 @@ describe("scan target normalization", () => {
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();
     const script = `
-      import { mock } from "bun:test";
+      import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
       import { rmSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
       const [repo, targets] = process.argv.slice(1);
       const target = join(repo, "src", "app.ts");
       const actualRealpath = original.realpath;
-      mock.module("node:fs/promises", () => ({
-        ...original,
+      mockFs(() => ({
         realpath: async (path, ...args) => {
           if (path === target) rmSync(target);
           return await actualRealpath(path, ...args);
@@ -677,7 +666,7 @@ describe("scan target normalization", () => {
 
   test("keeps repeated home separators anchored under the home directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-home-"));
-    temporaryDirectories.push(root);
+    temporaryDirectories.track(root);
     const project = join(await realpath(root), "project");
     await mkdir(project);
     const script = `
@@ -706,4 +695,23 @@ describe("scan target normalization", () => {
       canonicalProject,
     ]);
   });
+});
+
+test("finds Git boundaries through directory aliases and file inputs", async () => {
+  const repo = await repository();
+  const nested = join(repo, "nested");
+  await mkdir(join(nested, ".git"), { recursive: true });
+  const document = join(nested, "context.md");
+  await writeFile(document, "Synthetic context.\n");
+  const alias = join(repo, "..", "nested-alias");
+  await symlink(
+    nested,
+    alias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  expect(await gitMarkerRoot(alias, undefined, "nearest")).toBe(nested);
+  expect(await gitMarkerRoot(alias, undefined, "outermost")).toBe(repo);
+  expect(
+    await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
+  ).toBe(repo);
 });
