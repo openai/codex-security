@@ -76,7 +76,8 @@ function gitOutput(args, cwd) {
 }
 
 function isGitCheckout(directory) {
-  return fs.existsSync(path.join(directory, ".git"));
+  return fs.existsSync(path.join(directory, ".git")) &&
+    gitOutput(["rev-parse", "--show-prefix"], directory) === "";
 }
 
 function ensureGitCheckout(job) {
