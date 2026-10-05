@@ -151,6 +151,7 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
         features: { plugins: true },
         empty: {},
         values: [1, { "dotted.key": "value" }],
+        mcp_servers: { "synthetic.server": { enabled: false } },
       },
       configOverrides: ["features.plugins=false"],
     });
@@ -205,6 +206,8 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       "--config",
       'values=[1, {"dotted.key" = "value"}]',
       "--config",
+      'mcp_servers={"synthetic.server" = {enabled = false}}',
+      "--config",
       "features.plugins=false",
       "--config",
       'openai_base_url="https://provider.example.test/v1"',
@@ -248,6 +251,11 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
     const second = await f.record();
     assert.ok(!second.args.includes("--thread-source"));
     assert.deepEqual(second.args.slice(-2), ["resume", "fixture-thread"]);
+    assert.ok(
+      second.args.includes(
+        'mcp_servers={"synthetic.server" = {enabled = false}}',
+      ),
+    );
     const resumed = client.resumeThread("existing-fixture", {
       webSearchEnabled: false,
     });
@@ -260,6 +268,11 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       "existing-fixture",
     ]);
     assert.equal(resumed.id, "existing-fixture");
+    assert.ok(
+      third.args.includes(
+        'mcp_servers={"synthetic.server" = {enabled = false}}',
+      ),
+    );
   } finally {
     if (previousEnvironment === undefined)
       delete process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK;

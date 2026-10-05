@@ -17,11 +17,60 @@ import {
 import { CodexLoginHandle } from "../src/auth.js";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-provider-profile-",
 );
 afterEach(cleanup);
+
+test("private native profiles disable inherited literal MCP server names", async () => {
+  const home = await temporaryDirectory();
+  const sharedConfig =
+    '[mcp_servers."synthetic.server"]\ncommand = "synthetic-never-run"\n';
+  await writeFile(join(home, "config.toml"), sharedConfig);
+  const profile = await createProviderProfile(home, config);
+  try {
+    const command = resolveCodexCommand({});
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+    };
+    const inherited = await runCodexCommand(
+      command,
+      ["mcp", "list", "--json"],
+      environment,
+    );
+    expect(inherited.success, inherited.stderr).toBe(true);
+    expect(JSON.parse(inherited.stdout)).toMatchObject([
+      { name: "synthetic.server", enabled: true },
+    ]);
+    const result = await runCodexCommand(
+      command,
+      [
+        "--profile",
+        profile.name,
+        ...profileConfigOverrides({
+          mcp_servers: { "synthetic.server": { enabled: false } },
+        }).flatMap((value) => ["-c", value]),
+        "mcp",
+        "list",
+        "--json",
+      ],
+      environment,
+    );
+    expect(result.success, result.stderr).toBe(true);
+    expect(JSON.parse(result.stdout)).toMatchObject([
+      { name: "synthetic.server", enabled: false },
+    ]);
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      sharedConfig,
+    );
+  } finally {
+    await profile.cleanup();
+  }
+});
 
 const provider = {
   name: "Synthetic",

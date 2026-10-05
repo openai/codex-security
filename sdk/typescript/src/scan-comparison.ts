@@ -33,6 +33,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -640,9 +641,11 @@ async function startReadOnlyCodexThread(
       },
     } as NonNullable<CodexOptions["config"]>,
   };
+  const providers = resolveCodexProfile(providerSettings)["model_providers"];
   const ownProfile =
     options.nativeProfile === undefined &&
-    resolveCodexProfile(providerSettings)["model_providers"] !== undefined
+    isRecord(providers) &&
+    Object.keys(providers).length > 0
       ? await createProviderProfile(
           configuredCodexHome(environment!),
           providerSettings,

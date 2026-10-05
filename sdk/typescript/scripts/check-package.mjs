@@ -170,6 +170,7 @@ const allowedFiles = new Set([
     "deep-scan-defaults",
     "project-config",
     "project-config-schema",
+    "provider-profile",
     "prompt-files",
     "scan-modes",
     "scan-settings",

@@ -181,6 +181,12 @@ function nativeArguments(options, thread, id, turn, schemaPath) {
 }
 
 function flattenConfig(object, prefix, add) {
+  // Native CLI override paths split on dots, including inside quoted keys.
+  // An inline table retains literal names from the inherited configuration.
+  if (prefix && Object.keys(object).some((key) => key.includes("."))) {
+    add(prefix, object);
+    return;
+  }
   for (const [key, value] of Object.entries(object)) {
     if (value === undefined) continue;
     const path = prefix ? `${prefix}.${key}` : key;
