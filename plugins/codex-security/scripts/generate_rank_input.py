@@ -32,18 +32,19 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, KeysView
 from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from generate_in_scope_files import windows_stream_component
 from rank_preview import (
     DEFAULT_PREVIEW_BYTES,
     TEXT_CODE_EXTENSIONS,
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_directory_snapshot_paths
+from workbench_target import git_blob_bytes, git_command, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -129,7 +130,6 @@ RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
-RankWorkerAssignment = tuple[int, list[str], list[str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -299,17 +299,6 @@ def path_is_diff_excluded(path: Path) -> bool:
     return path_is_excluded(path)
 
 
-def windows_stream_component(path: Path) -> str | None:
-    """Return the first NTFS alternate-data-stream component."""
-
-    if os.name != "nt":
-        return None
-    return next(
-        (component for component in path.parts if component != path.anchor and ":" in component),
-        None,
-    )
-
-
 def resolve_scope(
     repo: Path,
     scope: str,
@@ -394,12 +383,11 @@ def load_jsonl(path: Path, label: str, validator: RowValidator) -> list[JsonRow]
             if not raw_line.strip():
                 raise SystemExit(f"{path}:{line_number}: blank JSONL rows are not allowed")
             try:
-                parsed: object = json.loads(raw_line)
+                row: object = json.loads(raw_line)
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-            if not isinstance(parsed, dict):
+            if not isinstance(row, dict):
                 raise SystemExit(f"{path}:{line_number}: expected a JSON object")
-            row = {str(key): value for key, value in parsed.items()}
             validator(row, path, line_number)
             rows.append(row)
     return rows
@@ -448,16 +436,12 @@ def validate_rank_output_row(row: JsonRow, path: Path, line_number: int) -> None
     require_string(row, "reason", path, line_number, allow_empty=False)
 
 
-def require_unique_paths(rows: list[JsonRow], label: str) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for row in rows:
-        path = str(row["path"])
-        if path in seen:
-            duplicates.add(path)
-        seen.add(path)
-    if duplicates:
-        raise SystemExit(f"{label} contains duplicate paths: {sorted(duplicates)}")
+def require_unique_paths(rows: list[JsonRow], label: str) -> KeysView[str]:
+    counts = Counter(str(row["path"]) for row in rows)
+    if len(counts) < len(rows):
+        duplicates = sorted(path for path, count in counts.items() if count > 1)
+        raise SystemExit(f"{label} contains duplicate paths: {duplicates}")
+    return counts.keys()
 
 
 def make_repo_rank_input(args: argparse.Namespace) -> None:
@@ -542,8 +526,11 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--hidden",
                     "--no-require-git",
                     "--null",
+                    # Also exclude descendants when the scope starts inside .git.
                     "--glob",
-                    "!.git/**",
+                    "!**/.git",
+                    "--glob",
+                    "!**/.git/**",
                     "--",
                     str(scope_path.relative_to(repo)),
                 ]
@@ -624,20 +611,16 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "diff",
-            "--name-status",
-            "-z",
-            "--diff-filter=ACMRD",
-            *diff_args,
-        ],
-        check=True,
-        capture_output=True,
+    result = git_command(
+        repo,
+        "diff",
+        "--name-status",
+        "-z",
+        "--diff-filter=ACMRD",
+        *diff_args,
+        text=False,
     )
+    result.check_returncode()
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
@@ -661,11 +644,15 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
-        untracked = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
-            capture_output=True,
-            check=True,
+        untracked = git_command(
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            text=False,
         )
+        untracked.check_returncode()
         combined = dict(staged)
         combined.update(unstaged)
         combined.update(
@@ -707,9 +694,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     for path, status in changed:
         rel = path.relative_to(repo)
 
-        if status == "D":
-            preview = ""
-        elif args.mode == "revisions":
+        preview = ""
+        if status != "D" and args.mode == "revisions":
             content = revision_blobs[rel]
             if content is None:
                 raise SystemExit(
@@ -718,9 +704,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
             if is_binary:
                 continue
-        elif path.is_symlink():
-            preview = ""
-        elif path.is_file():
+        elif status != "D" and not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
@@ -729,8 +713,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview, is_binary = preview_for(path, args.preview_bytes)
                 if is_binary:
                     continue
-        else:
-            preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
@@ -754,8 +736,7 @@ def make_rank_shards(args: argparse.Namespace) -> None:
         raise SystemExit(f"Rank shard directory already contains shard files: {output_dir}")
 
     shard_count = 0
-    for start in range(0, len(rows), args.max_rows):
-        shard_count += 1
+    for shard_count, start in enumerate(range(0, len(rows), args.max_rows), start=1):
         shard_path = output_dir / f"rank-shard-{shard_count:04d}.input.jsonl"
         write_jsonl(shard_path, rows[start : start + args.max_rows])
 
@@ -855,7 +836,7 @@ def load_rank_pool_plan(plan_path: Path) -> tuple[dict[str, object], bytes]:
         raise SystemExit(f"{plan_path}: invalid JSON: {exc.msg}") from exc
     if not isinstance(payload, dict):
         raise SystemExit(f"{plan_path}: expected a JSON object")
-    return {str(key): value for key, value in payload.items()}, plan_bytes
+    return payload, plan_bytes
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
@@ -872,24 +853,13 @@ def require_string_list(value: object, label: str) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
-def assignment_differences(
-    assigned_names: list[str], expected_names: list[str]
-) -> tuple[list[str], list[str], list[str]]:
-    counts = Counter(assigned_names)
-    duplicates = sorted(name for name, count in counts.items() if count > 1)
-    assigned = set(assigned_names)
-    expected = set(expected_names)
-    return sorted(expected - assigned), duplicates, sorted(assigned - expected)
-
-
 def validate_rank_pool_plan(
     plan_path: Path, shard_dir: Path
-) -> tuple[list[Path], list[str], list[RankWorkerAssignment], bytes]:
+) -> tuple[list[Path], list[tuple[list[str], list[str]]], bytes]:
     require_plan_shard_dir(plan_path, shard_dir)
     require_no_misplaced_rank_shards(plan_path)
     input_shards = discover_input_shards(shard_dir)
     input_names = [path.name for path in input_shards]
-    output_names = [output_name_for(name) for name in input_names]
     plan, plan_bytes = load_rank_pool_plan(plan_path)
     expected_fields = {
         "schema_version",
@@ -937,15 +907,13 @@ def validate_rank_pool_plan(
             f"{plan_path}: workers must contain exactly {worker_count} worker assignments"
         )
 
-    assigned_inputs: list[str] = []
-    assigned_outputs: list[str] = []
-    parsed_workers: list[RankWorkerAssignment] = []
+    counts: Counter[str] = Counter()
+    parsed_workers: list[tuple[list[str], list[str]]] = []
     worker_fields = {"slot", "input_shards", "output_shards"}
-    for worker_index, raw_worker in enumerate(workers):
+    for worker_index, worker in enumerate(workers):
         label = f"{plan_path}: workers[{worker_index}]"
-        if not isinstance(raw_worker, dict):
+        if not isinstance(worker, dict):
             raise SystemExit(f"{label} must be a JSON object")
-        worker = {str(key): value for key, value in raw_worker.items()}
         if set(worker) != worker_fields:
             raise SystemExit(
                 f"{label} fields do not match schema; "
@@ -962,47 +930,40 @@ def validate_rank_pool_plan(
         expected_worker_outputs = [output_name_for(name) for name in worker_inputs]
         if worker_outputs != expected_worker_outputs:
             raise SystemExit(f"{label}.output_shards do not match its input_shards")
-        assigned_inputs.extend(worker_inputs)
-        assigned_outputs.extend(worker_outputs)
-        parsed_workers.append((slot, worker_inputs, worker_outputs))
+        counts.update(worker_inputs)
+        parsed_workers.append((worker_inputs, worker_outputs))
 
-    missing, duplicates, unexpected = assignment_differences(assigned_inputs, input_names)
+    # Canonical input names map one-to-one to the per-worker outputs checked above.
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    expected = set(input_names)
+    missing = sorted(expected - counts.keys())
+    unexpected = sorted(counts.keys() - expected)
     if missing or duplicates or unexpected:
         raise SystemExit(
             f"{plan_path}: pool plan must assign each input shard exactly once; "
             f"missing={missing}; duplicates={duplicates}; unexpected={unexpected}"
         )
-    missing, duplicates, unexpected = assignment_differences(assigned_outputs, output_names)
-    if missing or duplicates or unexpected:
-        raise SystemExit(
-            f"{plan_path}: pool plan must assign each output shard exactly once; "
-            f"missing={missing}; duplicates={duplicates}; unexpected={unexpected}"
-        )
-
-    for worker_index, (_, worker_inputs, worker_outputs) in enumerate(parsed_workers):
+    for worker_index, (worker_inputs, _) in enumerate(parsed_workers):
         expected_inputs = input_names[worker_index::worker_count]
-        expected_outputs = output_names[worker_index::worker_count]
-        if worker_inputs != expected_inputs or worker_outputs != expected_outputs:
+        if worker_inputs != expected_inputs:
             raise SystemExit(
                 f"{plan_path}: worker slot {worker_index + 1} does not match the deterministic "
                 f"{RANK_POOL_STRATEGY} assignment"
             )
-    return input_shards, output_names, parsed_workers, plan_bytes
+    return input_shards, parsed_workers, plan_bytes
 
 
 def validate_rank_worker_command(args: argparse.Namespace) -> None:
     plan_path = Path(args.plan).expanduser()
     shard_dir = Path(args.shard_dir).expanduser()
-    _, _, workers, plan_bytes = validate_rank_pool_plan(plan_path, shard_dir)
+    _, workers, plan_bytes = validate_rank_pool_plan(plan_path, shard_dir)
 
     slot = require_integer(args.slot, "--slot", minimum=1)
     worker_count = len(workers)
     if slot > worker_count:
         raise SystemExit(f"--slot must be at most {worker_count}")
 
-    assigned_slot, input_names, output_names = workers[slot - 1]
-    if assigned_slot != slot:
-        raise SystemExit(f"{plan_path}: worker assignment for slot {slot} is inconsistent")
+    input_names, output_names = workers[slot - 1]
 
     row_count = 0
     outputs_digest = hashlib.sha256()
@@ -1033,10 +994,10 @@ def validate_rank_worker_command(args: argparse.Namespace) -> None:
 def validate_rank_pool_command(args: argparse.Namespace) -> None:
     plan_path = Path(args.plan).expanduser()
     shard_dir = Path(args.shard_dir).expanduser()
-    input_shards, expected_output_names, workers, _ = validate_rank_pool_plan(plan_path, shard_dir)
+    input_shards, workers, _ = validate_rank_pool_plan(plan_path, shard_dir)
 
     actual_output_names = {path.name for path in shard_dir.glob(SHARD_OUTPUT_GLOB)}
-    expected_outputs = set(expected_output_names)
+    expected_outputs = {output_name_for(path.name) for path in input_shards}
     if actual_output_names != expected_outputs:
         missing = sorted(expected_outputs - actual_output_names)
         unexpected = sorted(actual_output_names - expected_outputs)
@@ -1060,12 +1021,10 @@ def validate_rank_shard(
     input_shard: Path, output_shard: Path
 ) -> tuple[list[JsonRow], list[JsonRow]]:
     shard_inputs = load_jsonl(input_shard, "Rank input shard", validate_rank_input_row)
-    require_unique_paths(shard_inputs, f"Rank input shard {input_shard.name}")
+    expected_paths = require_unique_paths(shard_inputs, f"Rank input shard {input_shard.name}")
     shard_outputs = load_jsonl(output_shard, "Rank output shard", validate_rank_output_row)
-    require_unique_paths(shard_outputs, f"Rank output shard {output_shard.name}")
+    actual_paths = require_unique_paths(shard_outputs, f"Rank output shard {output_shard.name}")
 
-    expected_paths = {str(row["path"]) for row in shard_inputs}
-    actual_paths = {str(row["path"]) for row in shard_outputs}
     if expected_paths != actual_paths:
         missing = sorted(expected_paths - actual_paths)
         unknown = sorted(actual_paths - expected_paths)

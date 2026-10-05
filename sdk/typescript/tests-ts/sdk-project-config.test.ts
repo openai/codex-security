@@ -1,3 +1,4 @@
+import { createCliTest } from "./support/cli-run.js";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -11,9 +12,10 @@ import {
   type ScanSettings,
 } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -82,9 +84,7 @@ test.each(["standard", "deep"] as const)(
     };
     const clientDependencies = {
       environment,
-      prepareRuntime: async () => {
-        throw new Error("Preflight must not initialize a runtime");
-      },
+      prepareRuntime: rejecting("Preflight must not initialize a runtime"),
     };
     await using direct = new TestClient(
       { codexOverrides: input.codex },
@@ -159,8 +159,8 @@ test.each(["standard", "deep"] as const)(
         : []),
     ]);
     for (const command of commands) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, runCli } = createCliTest(main);
+
       const deps = dependencies({ currentDirectory: root, environment });
       let selected: ScanOptions | undefined;
       deps.createSecurity = (config) => {
@@ -174,14 +174,7 @@ test.each(["standard", "deep"] as const)(
           },
         };
       };
-      expect(
-        await main(
-          [...command, "--dry-run", "--json"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli([...command, "--dry-run", "--json"], deps)).toBe(0);
       expect(selected).toMatchObject({
         failureSeverity: "high",
         scanPrompt: "Synthetic instructions.",

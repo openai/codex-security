@@ -15,6 +15,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { createCliTest } from "./support/cli-run.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
@@ -90,10 +91,8 @@ for (const [name, args, port, customEmbeddings] of [
       timeout: 20_000,
     });
     const exited = once(child, "exit");
-    let stderr = "";
-    child.stderr.setEncoding("utf8").on("data", (chunk) => {
-      stderr += chunk;
-    });
+    const stderr = capture();
+    child.stderr.setEncoding("utf8").on("data", stderr.stream.write);
     try {
       let base: string | undefined;
       for await (const line of createInterface({ input: child.stdout })) {
@@ -105,7 +104,7 @@ for (const [name, args, port, customEmbeddings] of [
           break;
         }
       }
-      expect(base, stderr).toBeDefined();
+      expect(base, stderr.text()).toBeDefined();
       const response = await fetch(`${base}/v1/findings`);
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ findings: [], total: 0 });
@@ -139,7 +138,7 @@ for (const [name, args, port, customEmbeddings] of [
       const [code] = await exited;
       // Windows terminates child processes instead of delivering SIGTERM.
       if (process.platform !== "win32") expect(code).toBe(0);
-      expect(stderr).toBe("");
+      expect(stderr.text()).toBe("");
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");
@@ -181,11 +180,9 @@ test("serve exposes help and schema without starting the service", async () => {
     ["serve", "--help"],
     ["serve", "--schema", "--json"],
   ]) {
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      0,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(await runCli(args, dependencies())).toBe(0);
     if (args.includes("--schema")) {
       expect(JSON.parse(stdout.text())).toMatchObject({
         options: {
@@ -206,11 +203,9 @@ test("serve rejects positional arguments and JSON output", async () => {
     ["serve", "repository"],
     ["serve", "--json"],
   ]) {
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      2,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("serve");
   }
@@ -218,12 +213,10 @@ test("serve rejects positional arguments and JSON output", async () => {
 
 test("serve rejects missing or invalid ports", async () => {
   for (const value of [undefined, "invalid", "-1", "65536", "1.5"]) {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const args = ["serve", "--port", ...(value === undefined ? [] : [value])];
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      2,
-    );
+    expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("port");
   }

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import type { OwnerFinding } from "./suggest-owners.js";
 import {
+  nullIfMissingFile,
   enclosingGitWorktreeRoot,
   gitMetadataDirectories,
   normalizeRepository,
@@ -124,10 +125,7 @@ async function requireBoundMetadata(
     const path = pending.pop()!;
     if (visited.has(path)) continue;
     visited.add(path);
-    const entry = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
+    const entry = await lstat(path).catch(nullIfMissingFile);
     if (entry?.isSymbolicLink()) {
       const destination = await realpath(path);
       if (

@@ -25,7 +25,7 @@ import { VERSION } from "../version.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
-  safeErrorMessage,
+  errorMessage,
 } from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import {
@@ -50,6 +50,8 @@ export interface CodexReview<T> extends Pick<
   DeduplicationReviewRequest,
   "stage" | "model" | "effort" | "prompt" | "schema"
 > {
+  /** Exact comparison participants, supplied by the structured reviewer. */
+  findingIds?: readonly string[];
   validate(value: unknown): T;
 }
 
@@ -163,14 +165,14 @@ export class CodexReviewRunner {
         error instanceof ReviewAttemptError
           ? error.supportReason
           : "Codex review transport failed.";
-      const displayReason = safeErrorMessage(error);
+      const displayReason = errorMessage(error);
       throw new DeduplicationReviewError(
         {
           stage: review.stage,
           model: review.model,
           category,
           attempts: state.attempts,
-          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+          reason: supportReason,
         },
         displayReason,
       );
