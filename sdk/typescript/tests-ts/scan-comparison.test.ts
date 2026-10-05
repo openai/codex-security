@@ -18,6 +18,7 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
+import { mergedCodexConfig, resolveCommandAuthConfig } from "../src/config.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
@@ -368,6 +369,102 @@ describe("semantic scan comparison", () => {
       }
     },
   );
+
+  test("automatic matching keeps concurrent provider configurations isolated", async () => {
+    const home = await temporaryDirectory("codex-security-automatic-matching-");
+    await writeFile(join(home, "config.toml"), "");
+    const providers = [0, 1].map((index) => ({
+      name: `Synthetic provider ${index}`,
+      base_url: `https://provider-${index}.example.test/v1`,
+      wire_api: "responses",
+      auth: {
+        command: `synthetic-auth-${index}`,
+        cwd: join(home, `native-${index}`, "helpers"),
+      },
+    }));
+    const captured: CodexOptions[] = [];
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      captured.push((this as unknown as { options: CodexOptions }).options);
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await Promise.all(
+        providers.map(async (provider, index) => {
+          const before = finding(`before-${index}`);
+          const after = finding(`after-${index}`);
+          const scanId = `current-${index}`;
+          const codexConfig = resolveCommandAuthConfig(
+            await mergedCodexConfig({
+              codexOverrides: {
+                model_provider: "synthetic.provider",
+                model_providers: {
+                  "synthetic.provider": {
+                    ...provider,
+                    auth: { ...provider.auth, cwd: "helpers" },
+                  },
+                },
+              },
+            }),
+            join(home, `native-${index}`),
+          );
+          await matchCompletedScan({
+            scanId,
+            repository: home,
+            previousFindings: [before],
+            falsePositives: [],
+            findings: [after],
+            matchFindings: (input, options) => {
+              return matchScanFindingsInternal(input, options, {
+                surface: "sdk",
+                codexConfig,
+              });
+            },
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_SCAN_ID: scanId,
+              OPENAI_API_KEY: "synthetic-ambient-key",
+            },
+            async workbench(args) {
+              return args[0] === "list-unmatched-scan-pairs"
+                ? {
+                    batches: [
+                      {
+                        afterScanId: scanId,
+                        afterFindings: [after],
+                        beforeScans: [
+                          { scanId: `prior-${index}`, findings: [before] },
+                        ],
+                      },
+                    ],
+                  }
+                : {};
+            },
+          });
+        }),
+      );
+      expect(captured).toHaveLength(2);
+      for (const [index, provider] of providers.entries()) {
+        const options = captured.find(
+          ({ env }) => env?.["CODEX_SECURITY_SCAN_ID"] === `current-${index}`,
+        );
+        expect(options?.config?.["model_provider"]).toBe("synthetic.provider");
+        expect(parse(options!.configOverrides![0]!)).toEqual({
+          model_providers: { "synthetic.provider": provider },
+        });
+        expect(options?.apiKey).toBeUndefined();
+        expect(options?.env).not.toHaveProperty("OPENAI_API_KEY");
+      }
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
+    } finally {
+      startThread.mockRestore();
+    }
+  });
 
   test("does not substitute managed login for an explicitly configured command provider", async () => {
     const home = await temporaryDirectory("codex-security-command-login-");

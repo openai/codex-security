@@ -2267,6 +2267,7 @@ export class CodexSecurity {
                 {
                   surface: this.#surface,
                   singleTurn: options.maxCostUsd !== undefined,
+                  codexConfig: effectiveConfig,
                 },
               ),
             environment,

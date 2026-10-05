@@ -3666,8 +3666,19 @@ describe("CodexSecurity orchestration", () => {
       let observedSingleTurn: boolean | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
+      const providerConfig = {
+        model_provider: "synthetic.provider",
+        model_providers: {
+          "synthetic.provider": {
+            name: "Synthetic provider",
+            base_url: "https://provider.example.test/v1",
+            wire_api: "responses",
+            auth: { command: "synthetic-auth" },
+          },
+        },
+      };
       const client = new TestClient(
-        {},
+        { codexOverrides: providerConfig },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
@@ -3720,6 +3731,7 @@ describe("CodexSecurity orchestration", () => {
           },
           async matchFindings(input, options, runtimeOptions) {
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+            expect(runtimeOptions.codexConfig).toMatchObject(providerConfig);
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");

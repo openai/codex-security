@@ -258,7 +258,11 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    codexConfig?: JsonObject;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -512,12 +516,15 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+    codexConfig?: JsonObject;
+  },
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
   const config =
-    options.config === undefined
+    runtimeOptions.codexConfig ??
+    (options.config === undefined
       ? undefined
-      : await mergedCodexConfig(options.config);
+      : await mergedCodexConfig(options.config));
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
