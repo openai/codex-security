@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   Codex,
@@ -42,7 +41,6 @@ import {
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
-  expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
@@ -1146,11 +1144,7 @@ export async function comparisonEnvironment(
     );
     if (status.authenticated) return storedEnvironment;
   }
-  const configuredHome = environmentEntry(environment, "CODEX_HOME")?.trim();
-  const codexHome = configuredHome
-    ? expandHome(configuredHome, environment)
-    : join(homedir(), ".codex");
-  if (existsSync(join(codexHome, "auth.json"))) {
+  if (existsSync(join(home, "auth.json"))) {
     return withoutOpenAiApiKeys(environment);
   }
   return environment;

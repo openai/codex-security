@@ -1116,7 +1116,10 @@ async function testWorkerRuntimeSettings() {
       };
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active scan config.toml");
-      const codexHome = path.join(fixture.root, "scan home");
+      const codexHome = path.join(
+        fixture.root,
+        process.platform === "win32" ? "scan home" : "scan home ",
+      );
       const promptPath = path.join(fixture.root, "prompt.md");
       await mkdir(codexHome);
       await writeFile(
@@ -1299,6 +1302,7 @@ async function testWorkerRuntimeSettings() {
             const invocation = JSON.parse(
               await readFile(workerLaunch.markerPath, "utf8"),
             );
+            assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(workerLaunch.environment.CODEX_API_KEY, undefined);
             assert.equal(
