@@ -13,11 +13,12 @@ providers:
       # The runner stages only the skill runtime here. The label-bearing
       # dataset and Promptfoo harness stay outside this tree.
       working_dir: "{{triage_runtime_root}}"
-      # Target worktrees and their label-free Git cache are the only
-      # additional readable workspace roots.
+      # Target worktrees, their label-free Git cache, and the helper
+      # executable directory are the additional readable roots.
       additional_directories:
         - "{{env.SASTBENCH_TARGET_ROOT}}"
         - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
+        - "{{triage_node_root}}"
       skip_git_repo_check: true
       approval_policy: never
       # Pin a value supported by the eval's Codex SDK instead of inheriting a
@@ -41,13 +42,15 @@ providers:
         features:
           memories: false
           plugins: false
+      cli_env:
+        CODEX_MCP_NODE_PATH: "{{triage_node_path}}"
 
 extensions:
   - file://./assertions/sastbench-metrics.js:afterEach
 
 defaultTest:
   options:
-    transformVars: file://../scripts/runtime-vars.js
+    transformVars: process.mainModule.require(process.cwd() + '/scripts/runtime-vars.js')(vars)
   assert:
     - type: contains-json
       value: file://../schemas/triage-result-v0.schema.json

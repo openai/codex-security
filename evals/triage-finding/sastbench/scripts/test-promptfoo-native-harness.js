@@ -63,6 +63,21 @@ for (const metric of [
 }
 assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY/);
 assert.doesNotMatch(config, /maxConcurrency/);
+assert.match(config, /- "\{\{triage_node_root\}\}"/);
+assert.match(config, /CODEX_MCP_NODE_PATH: "\{\{triage_node_path\}\}"/);
+
+const transform = config.match(/^\s+transformVars: (.+)$/m)[1];
+for (const runtime of ["initial runtime", "resumed runtime"]) {
+  const transformed = childProcess.execFileSync(process.execPath, ["-e",
+    `const processShim = new Proxy(process, { get: (target, key) => key === "mainModule" ? { require } : target[key] });
+     console.log(JSON.stringify(new Function("vars", "process", "return " + process.argv[1])({}, processShim)));`,
+    transform,
+  ], { encoding: "utf8", cwd: evalRoot, env: { ...process.env, TRIAGE_RUNTIME_ROOT: runtime } });
+  const vars = JSON.parse(transformed);
+  assert.equal(vars.triage_runtime_root, runtime);
+  assert.equal(vars.triage_node_path, fs.realpathSync(process.execPath));
+}
+
 assert.doesNotMatch(config, /__count/);
 assert.match(
   config,
