@@ -9,6 +9,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { capture } from "./cli-fixtures.js";
 
 interface WorkflowStep {
   name?: string;
@@ -38,22 +39,6 @@ async function workflow(name: string) {
     on: Record<string, unknown>;
     env?: Record<string, unknown>;
     jobs: Record<string, WorkflowJob>;
-  };
-}
-
-function capture(): {
-  stream: Pick<NodeJS.WriteStream, "write">;
-  text: () => string;
-} {
-  let value = "";
-  return {
-    stream: {
-      write(chunk: string | Uint8Array): boolean {
-        value += chunk.toString();
-        return true;
-      },
-    },
-    text: () => value,
   };
 }
 
@@ -191,6 +176,7 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
+      "workflow-quality",
       "static-checks",
       "package",
       "test",
@@ -198,6 +184,7 @@ describe("TypeScript package skeleton", () => {
       "mcp",
       "plugin-host",
       "plugin-source",
+      "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
@@ -233,7 +220,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
   });
@@ -466,7 +453,7 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("keeps production dependency audits non-blocking in CI and releases", async () => {
+  test("blocks CI and releases when the production dependency audit fails", async () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
       const { jobs } = await workflow(workflowName);
       const audits = Object.values(jobs)
@@ -474,7 +461,7 @@ describe("TypeScript package skeleton", () => {
         .filter((step) => step.name === "Audit production dependencies");
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {
-        expect(audit["continue-on-error"]).toBe(true);
+        expect(audit).not.toHaveProperty("continue-on-error");
         expect(audit.run).toMatch(
           /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
         );
@@ -499,20 +486,20 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("provides executable help and version behavior", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const stdout = capture(null);
+    const stderr = capture(null);
     expect(await main([], stdout.stream, stderr.stream)).toBe(0);
     expect(stdout.text()).toContain("Usage: codex-security <command>");
     expect(stdout.text()).toContain("Integrations:");
     expect(stderr.text()).toBe("");
 
-    const versionOutput = capture();
+    const versionOutput = capture(null);
     expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
       0,
     );
     expect(versionOutput.text()).toBe(`${VERSION}\n`);
 
-    const scanHelpOutput = capture();
+    const scanHelpOutput = capture(null);
     expect(
       await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
     ).toBe(0);

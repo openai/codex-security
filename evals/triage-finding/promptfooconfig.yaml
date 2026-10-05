@@ -41,7 +41,7 @@ defaultTest:
     - type: contains-json
       value: file://./schemas/triage-result-v0.schema.json
     - type: javascript
-      value: file://./assertions/triage-io.js
+      value: file://./assertions/triage-io.mts
 
 tests:
   - file://./tests/input-types.yaml

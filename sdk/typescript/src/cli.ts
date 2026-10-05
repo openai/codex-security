@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isNonEmptyString } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -41,11 +42,22 @@ import {
 import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
+import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
+import {
+  ARTIFACT_EXPORT_FILENAMES,
+  exportEnvironment,
+  resolveArtifactFormat,
+  resolveArtifactExportOutput,
+  resolveSavedArtifactDirectory,
+  runArtifactExport,
+  writeArtifactOutput as writeCliOutput,
+  type ArtifactExportArguments,
+} from "./artifact-export.js";
+export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
@@ -70,9 +82,11 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
+  environmentEntry,
   readCodexHomeConfig,
 } from "./auth.js";
-import { loadContract } from "./contract.js";
+import { loadContract, sha256Text } from "./contract.js";
+import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -95,12 +109,14 @@ import {
 } from "./cloud-publish.js";
 import {
   createBulkScanDiscoveryDependencies,
+  createTerminalPrompt,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -108,6 +124,7 @@ import {
   inlineToml,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
+  resolveCodexProfile,
   mergedCodexConfig,
   scanModel,
   scanModelConfiguration,
@@ -124,11 +141,7 @@ import {
   formatScanCostTokens,
   formatTokenUsage,
 } from "./cost-model.js";
-import {
-  isOutsidePath,
-  readRegularInputFile,
-  resolveScanPrompts,
-} from "./prompt-files.js";
+import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
   CodexSecurityError,
   AuthenticationRequiredError,
@@ -138,7 +151,6 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   errorMessage,
-  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -180,7 +192,6 @@ import {
   executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
-  pythonUtf8Environment,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
@@ -230,6 +241,7 @@ import {
   DiffTarget,
   enclosingGitWorktreeRoots,
   type ScanTarget,
+  relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
@@ -295,7 +307,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 
-const DISPLAY_SEVERITIES: readonly SeverityLevel[] = SCAN_SEVERITIES;
 const MODEL_REASONING_EFFORTS = [
   "minimal",
   "low",
@@ -304,25 +315,51 @@ const MODEL_REASONING_EFFORTS = [
   "xhigh",
   "max",
 ] as const;
-type ScanReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+const MODEL_OPTIONS = modelOptions();
+type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
+const MATCHING_MODEL_OPTIONS = modelOptions(
+  "Model for finding matching (default: Codex's configured model).",
+  "Matching reasoning effort (default: medium).",
+);
+const SKILL_CODEX_OVERRIDE_DESCRIPTION =
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
+const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
+  codex: z
+    .array(optionValue("--codex"))
+    .default([])
+    .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
+});
+type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
 const CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
 const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
   "Python interpreter (default: PYTHON or automatic discovery).";
+const RUNTIME_OPTION_SCHEMAS = {
+  pluginPath: optionValue("--plugin-path")
+    .optional()
+    .describe(PLUGIN_PATH_DESCRIPTION),
+  python: optionValue("--python").optional().describe(PYTHON_PATH_DESCRIPTION),
+  codex: z
+    .array(optionValue("--codex"))
+    .default([])
+    .describe(CODEX_OVERRIDE_DESCRIPTION),
+};
+const SKILL_AUTH_OPTION = z
+  .enum(SCAN_AUTH_MODES)
+  .default("auto")
+  .describe(
+    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+  );
 const PROJECT_CONFIG_OPTION = optionValue("--config")
   .optional()
   .describe(
     "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
   );
-const EXPORT_DEFAULT_OUTPUTS = {
-  csv: "findings.csv",
-  json: "findings.json",
-  sarif: "results.sarif",
-} as const;
+const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const VALUE_OPTIONS = new Set([
   "--config",
   "-c",
@@ -331,6 +368,7 @@ const VALUE_OPTIONS = new Set([
   "--concurrency",
   "--auth",
   "--safety-identifier",
+  "--cyber-access-program",
   "--path",
   "--component",
   "--components-file",
@@ -371,6 +409,7 @@ const VALUE_OPTIONS = new Set([
   "--max-time-hours",
   "--max-attempts",
   "--export-format",
+  "--artifact",
   "--csv",
   "--output",
   "--source-root",
@@ -546,8 +585,7 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
     value === undefined ||
     value !== value.trim() ||
     value !== stripVTControlCharacters(value) ||
-    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u.test(value) ||
-    safeErrorMessage(value) !== value
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u.test(value)
   ) {
     return undefined;
   }
@@ -591,7 +629,7 @@ function renderPublicationSummary(
 
   for (const issue of result.created.slice(0, 5)) {
     const identifier =
-      stripVTControlCharacters(safeErrorMessage(issue.issueIdentifier))
+      stripVTControlCharacters(issue.issueIdentifier)
         .replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ")
         .replace(/\s+/gu, " ")
         .trim() || "Unknown Linear issue";
@@ -645,7 +683,6 @@ class PublicationProgressPresenter {
       presentation: "publication",
       clock: this.#dependencies,
       color: this.#dependencies.environment["NO_COLOR"] === undefined,
-      sanitize: safeErrorMessage,
     });
     dashboard.setStage("Connecting to Linear");
     try {
@@ -692,10 +729,7 @@ class PublicationProgressPresenter {
         this.#repository,
       )) {
         const item = (event.event as Record<string, unknown>)["item"];
-        const tool =
-          typeof item === "object" && item !== null && !Array.isArray(item)
-            ? (item as Record<string, unknown>)["tool"]
-            : undefined;
+        const tool = isJsonObject(item) ? item["tool"] : undefined;
         const hidesShellCommand =
           activity.kind === "command" ||
           (activity.kind === "tool" &&
@@ -765,7 +799,7 @@ class PublicationProgressPresenter {
   }
 
   #write(message: string, compact = false): void {
-    const sanitized = diagnosticValue(safeErrorMessage(message));
+    const sanitized = diagnosticValue(message);
     if (!compact) {
       this.#stream.write(`${sanitized}\n`);
       return;
@@ -816,7 +850,6 @@ class FindingProgressPresenter {
         presentation: "verification",
         clock: this.#dependencies,
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
       });
       dashboard.setPublicationProgress(0, this.#total);
       dashboard.setStage(`Verifying findings · 0/${this.#total}`);
@@ -849,19 +882,14 @@ class FindingProgressPresenter {
   public observe(event: Readonly<Record<string, unknown>>): void {
     const method = event["method"];
     const params = event["params"];
-    if (
-      typeof params !== "object" ||
-      params === null ||
-      Array.isArray(params)
-    ) {
+    if (!isJsonObject(params)) {
       return;
     }
-    const values = params as Record<string, unknown>;
     let normalized: Record<string, unknown>;
 
     if (method === "item/reasoning/summaryTextDelta") {
-      const id = values["itemId"];
-      const delta = values["delta"];
+      const id = params["itemId"];
+      const delta = params["delta"];
       if (typeof id !== "string" || typeof delta !== "string") return;
       if (this.#dashboard === null) return;
       const text = `${this.#reasoning.get(id) ?? ""}${delta}`;
@@ -871,29 +899,28 @@ class FindingProgressPresenter {
         item: { id, type: "reasoning", text },
       };
     } else if (method === "item/started" || method === "item/completed") {
-      const item = values["item"];
-      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      const item = params["item"];
+      if (!isJsonObject(item)) {
         return;
       }
-      const current = item as Record<string, unknown>;
-      const type = current["type"];
+      const type = item["type"];
       let converted: Record<string, unknown>;
       if (type === "commandExecution") {
-        converted = { ...current, type: "command_execution" };
+        converted = { ...item, type: "command_execution" };
       } else if (type === "mcpToolCall") {
-        converted = { ...current, type: "mcp_tool_call" };
+        converted = { ...item, type: "mcp_tool_call" };
       } else if (type === "agentMessage") {
-        if (current["phase"] !== "commentary") return;
-        converted = { ...current, type: "agent_message" };
+        if (item["phase"] !== "commentary") return;
+        converted = { ...item, type: "agent_message" };
       } else if (type === "reasoning") {
-        const summary = current["summary"];
+        const summary = item["summary"];
         const text = Array.isArray(summary)
           ? summary
               .filter((entry): entry is string => typeof entry === "string")
               .join("\n")
-          : current["text"];
+          : item["text"];
         if (typeof text !== "string") return;
-        converted = { ...current, text };
+        converted = { ...item, text };
       } else {
         return;
       }
@@ -952,15 +979,19 @@ class FindingProgressPresenter {
   }
 }
 
-function effortOption() {
-  return z
-    .enum(MODEL_REASONING_EFFORTS, {
-      error: "--effort must be minimal, low, medium, high, xhigh, or max.",
-    })
-    .optional()
-    .describe(
-      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
-    );
+function modelOptions(
+  modelDescription = `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+  effortDescription = `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+) {
+  return z.object({
+    model: optionValue("--model").optional().describe(modelDescription),
+    effort: z
+      .enum(MODEL_REASONING_EFFORTS, {
+        error: "--effort must be minimal, low, medium, high, xhigh, or max.",
+      })
+      .optional()
+      .describe(effortDescription),
+  });
 }
 
 type DeepCliOptionName = Extract<
@@ -968,10 +999,9 @@ type DeepCliOptionName = Extract<
   readonly [string, string, string, string]
 >[0];
 const DEEP_SCAN_OPTION_SCHEMAS = Object.fromEntries(
-  DEEP_SCAN_SETTINGS.filter(([, , , flag]) => flag !== null).map(([name]) => [
-    name,
-    DeepScanSettingsSchema.shape[name],
-  ]),
+  DEEP_SCAN_SETTINGS.flatMap(([name, , , flag]) =>
+    flag !== null ? [[name, DeepScanSettingsSchema.shape[name]]] : [],
+  ),
 ) as Pick<typeof DeepScanSettingsSchema.shape, DeepCliOptionName>;
 
 export function resolveCliPath(directory: string, value: string): AbsolutePath {
@@ -1017,13 +1047,7 @@ const scanOutputSchema = z
   ])
   .optional();
 
-interface ExportArguments {
-  scanDir: string;
-  format: keyof typeof EXPORT_DEFAULT_OUTPUTS;
-  output: string;
-  sourceRoot?: string;
-  pythonPath?: string;
-}
+type ExportArguments = ArtifactExportArguments;
 
 type MatchingPlan = JsonObject & {
   repository: string;
@@ -1043,7 +1067,7 @@ interface SkillCommandOutput {
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
-  readonly providerConfiguration?: JsonObject;
+  readonly codexOverrides?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1123,8 +1147,7 @@ interface PatchRiskRequest {
   repository: string;
   base: string;
   files?: readonly string[];
-  codexOverrides: readonly string[];
-  effort: ScanReasoningEffort | undefined;
+  configuration: SkillConfiguration;
 }
 
 interface PatchRiskReport {
@@ -1201,6 +1224,7 @@ interface CliDependencies {
     args: readonly string[],
     input?: string,
     signal?: AbortSignal,
+    pythonPath?: string,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1285,79 +1309,19 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     });
     return options?.trim === false ? stdout : stdout.trim();
   },
-  exportFindings: async (arguments_, output) => {
-    const environment = exportEnvironment();
-    const python = await resolvePluginPython({
-      configuredPath: arguments_.pythonPath,
-      environment,
-    });
-    const plugin = await bundledPluginRoot();
-    const invocation = spawn(
-      python,
-      [
-        "-I",
-        "-X",
-        "utf8",
-        join(plugin, "scripts", "finalize_scan_contract.py"),
-        "--scan-dir",
-        arguments_.scanDir,
-        "--export-format",
-        arguments_.format,
-        ...(arguments_.output === "-"
-          ? []
-          : ["--export-output", arguments_.output]),
-        ...(arguments_.sourceRoot === undefined
-          ? []
-          : ["--source-root", arguments_.sourceRoot]),
-      ],
-      {
-        env: environment,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      },
-    );
-    let stderr = "";
-    invocation.stderr.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-64 * 1024);
-    });
-    const forwarded =
-      arguments_.output === "-" && output !== undefined
-        ? writeCliOutput(output, invocation.stdout)
-        : Promise.resolve(invocation.stdout.resume());
-    let status: number;
-    try {
-      [status] = await Promise.all([
-        new Promise<number>((resolve, reject) => {
-          invocation.once("error", reject);
-          invocation.once("close", (code, signal) =>
-            resolve(signal === null ? (code ?? 1) : 1),
-          );
-        }),
-        forwarded,
-      ]);
-    } catch (error) {
-      invocation.stdout.destroy();
-      invocation.kill();
-      throw error;
-    }
-    if (status !== 0) {
-      const detail = stderr.trim().split("\n").at(-1);
-      throw new CodexSecurityError(
-        detail?.replace(/^finalize_scan_contract\.py: error: /, "") ||
-          `Could not export Codex Security findings as ${arguments_.format.toUpperCase()}.`,
-      );
-    }
-    return undefined;
-  },
-  runWorkbench: async (args, input, signal) => {
+  exportFindings: runArtifactExport,
+  runWorkbench: async (args, input, signal, pythonPath) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
-    const python = await resolvePluginPython({ environment, signal });
     return await runWorkbench(
       {
-        python,
+        python: await resolvePluginPython({
+          configuredPath: pythonPath,
+          environment,
+          signal,
+        }),
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,
@@ -1370,6 +1334,16 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   matchFindings: (input, options) =>
     matchScanFindingsInternal(input, options, { surface: "cli" }),
 };
+
+function signalHandlers(
+  dependencies: CliDependencies,
+  operation: "add" | "remove",
+  interrupt: () => void,
+  terminate: () => void,
+): void {
+  dependencies[`${operation}SignalListener`]("SIGINT", interrupt);
+  dependencies[`${operation}SignalListener`]("SIGTERM", terminate);
+}
 
 export async function runCodexSkillCommand(
   args: readonly string[],
@@ -1385,48 +1359,71 @@ export async function runCodexSkillCommand(
     let modelProvider: string | undefined;
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
-      const config =
-        output.modelProvider !== undefined
-          ? {
-              model_provider: output.modelProvider,
-              ...(output.providerConfiguration === undefined
-                ? {}
-                : {
-                    model_providers: {
-                      [output.modelProvider]: output.providerConfiguration,
-                    },
-                  }),
-            }
-          : output.appServer === undefined
-            ? {}
-            : await readCodexHomeConfig(processEnvironment);
-      const provider = scanModelProvider(config);
+      const ambientConfig =
+        output.appServer === undefined
+          ? {}
+          : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
+      const overrides = structuredClone(output.codexOverrides ?? {});
+      const config = deepMerge(ambientConfig, overrides);
+      const provider = output.modelProvider ?? scanModelProvider(config);
+      // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
-        typeof provider === "string"
+        typeof provider === "string" &&
+        !["openai", "ollama", "lmstudio"].includes(provider)
           ? (
               config["model_providers"] as
                 Record<string, JsonObject> | undefined
             )?.[provider]
           : undefined;
+      const providerEnvKey =
+        typeof providerConfiguration?.["env_key"] === "string"
+          ? providerConfiguration["env_key"]
+          : undefined;
+      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const explicitChatgpt =
+        output.auth === "chatgpt" && !isExternalModelProvider(provider);
+      const providerBearer =
+        typeof providerConfiguration?.["experimental_bearer_token"] ===
+        "string";
+      const providerKeyConfigured =
+        providerEnvKey !== undefined || providerBearer;
       const requiresOpenAiAuth =
-        provider === undefined ||
-        provider === "openai" ||
-        providerConfiguration?.["requires_openai_auth"] === true;
+        !commandAuth &&
+        (explicitChatgpt || !providerKeyConfigured) &&
+        (provider === undefined ||
+          provider === "openai" ||
+          providerConfiguration?.["requires_openai_auth"] === true ||
+          (explicitChatgpt && providerKeyConfigured));
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      authentication = scanAuthentication(
-        processEnvironment,
-        output.auth,
-        provider,
-        hasCommandAuth(config),
-      );
+      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
+        const key = environmentEntry(
+          processEnvironment,
+          providerEnvKey,
+        )?.trim();
+        if (!key && output.auth === "api-key") {
+          throw new AuthenticationRequiredError(
+            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
+          );
+        }
+        authentication = key
+          ? { method: "api_key", source: providerEnvKey, verified: false }
+          : { method: "stored_credentials", verified: false };
+      } else {
+        authentication = scanAuthentication(
+          processEnvironment,
+          output.auth,
+          provider,
+          commandAuth,
+        );
+      }
       if (
         authentication.method === "stored_credentials" &&
         isExternalModelProvider(provider)
       ) {
         const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
         throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
+          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
         );
       }
       let selected = selectedScanEnvironment(
@@ -1434,6 +1431,47 @@ export async function runCodexSkillCommand(
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
       );
+      if (
+        explicitChatgpt &&
+        !commandAuth &&
+        providerConfiguration !== undefined &&
+        providerKeyConfigured
+      ) {
+        if (providerEnvKey !== undefined) {
+          selected = Object.fromEntries(
+            Object.entries(selected).filter(([name]) =>
+              process.platform === "win32"
+                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
+                : name !== providerEnvKey,
+            ),
+          );
+        }
+        // Native provider keys take precedence over stored authentication.
+        // Apply explicit ChatGPT selection to the home and CLI configuration.
+        const providerOverrides =
+          typeof provider === "string"
+            ? (
+                overrides["model_providers"] as
+                  Record<string, JsonObject> | undefined
+              )?.[provider]
+            : undefined;
+        for (const selectedConfig of [
+          providerConfiguration,
+          providerOverrides,
+        ]) {
+          if (selectedConfig === undefined) continue;
+          delete selectedConfig["env_key"];
+          delete selectedConfig["experimental_bearer_token"];
+          selectedConfig["requires_openai_auth"] = true;
+        }
+        args = [
+          ...args,
+          ...modelProviderConfigOverride(overrides).flatMap((value) => [
+            "--config",
+            value,
+          ]),
+        ];
+      }
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -1517,6 +1555,15 @@ export async function runCodexSkillCommand(
             "--config",
             'cli_auth_credentials_store="ephemeral"',
           ];
+        }
+      }
+      if (authentication.method === "api_key" && providerEnvKey !== undefined) {
+        const providerKey = environmentEntry(
+          processEnvironment,
+          providerEnvKey,
+        );
+        if (providerKey !== undefined) {
+          selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
       if (output.appServer === undefined) {
@@ -1708,73 +1755,6 @@ export async function runCodexSkillCommand(
   }
 }
 
-async function writeCliOutput(
-  output: Writable,
-  value: string | Uint8Array | AsyncIterable<Uint8Array>,
-): Promise<void> {
-  const destination = new NodeWritable({
-    write(chunk, _encoding, callback) {
-      try {
-        if (output instanceof NodeWritable) {
-          output.write(chunk, callback);
-        } else if (output.write(chunk)) {
-          callback();
-        } else {
-          callback(
-            new CodexSecurityError(
-              "The export stdout stream cannot report backpressure safely.",
-            ),
-          );
-        }
-      } catch (error) {
-        callback(error instanceof Error ? error : new Error(String(error)));
-      }
-    },
-  });
-  const forwardError = (error: Error): void => {
-    destination.destroy(error);
-  };
-  if (output instanceof NodeWritable) output.once("error", forwardError);
-  try {
-    await pipeline(
-      typeof value === "string" || value instanceof Uint8Array
-        ? [value]
-        : value,
-      destination,
-    );
-  } finally {
-    if (output instanceof NodeWritable) {
-      output.removeListener("error", forwardError);
-    }
-  }
-}
-
-export function exportEnvironment(
-  environment: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  return pythonUtf8Environment(
-    Object.fromEntries(
-      [
-        "PATH",
-        "Path",
-        "PATHEXT",
-        "SystemRoot",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TMP",
-        "TEMP",
-        "TMPDIR",
-        "PYTHON",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-      ]
-        .filter((key) => environment[key] !== undefined)
-        .map((key) => [key, environment[key]]),
-    ),
-  );
-}
-
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
@@ -1795,10 +1775,7 @@ export async function main(
       return 2;
     }
     const controller = new AbortController();
-    const interrupt = () => controller.abort("SIGINT");
-    const terminate = () => controller.abort("SIGTERM");
-    dependencies.addSignalListener("SIGINT", interrupt);
-    dependencies.addSignalListener("SIGTERM", terminate);
+    const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
       const code = await runRecordsProtocol(
@@ -1813,8 +1790,7 @@ export async function main(
             ? 143
             : code;
     } finally {
-      dependencies.removeSignalListener("SIGINT", interrupt);
-      dependencies.removeSignalListener("SIGTERM", terminate);
+      removeSignals();
     }
     // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
     if (output === process.stdout) process.exit(exitCode);
@@ -1852,7 +1828,7 @@ export async function main(
       : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
-  let frameworkOutput = "";
+  const frameworkCapture = captureOutput();
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
@@ -1866,9 +1842,12 @@ export async function main(
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
+    pythonPath?: string,
   ): Promise<JsonObject> => {
     try {
-      return await select(await dependencies.runWorkbench(args));
+      return await select(
+        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+      );
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
@@ -1878,6 +1857,7 @@ export async function main(
   const latestScans = async (
     count = 1,
     status: "complete" | "any" = "complete",
+    pythonPath?: string,
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       [
@@ -1899,11 +1879,14 @@ export async function main(
         }
         return value;
       },
+      pythonPath,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  type MatchingCliOptions = ModelCliOptions & { force?: boolean };
   const runMatching = async (
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
+    selection: MatchingCliOptions,
   ): Promise<JsonObject> => {
     const controller = new AbortController();
     let firstSignalAt = 0;
@@ -1925,14 +1908,16 @@ export async function main(
     const onInterrupt = (): void => cancel("SIGINT");
     const onTerminate = (): void => cancel("SIGTERM");
     const removeListeners = (): void => {
-      dependencies.removeSignalListener("SIGINT", onInterrupt);
-      dependencies.removeSignalListener("SIGTERM", onTerminate);
+      signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
     };
-    dependencies.addSignalListener("SIGINT", onInterrupt);
-    dependencies.addSignalListener("SIGTERM", onTerminate);
+    signalHandlers(dependencies, "add", onInterrupt, onTerminate);
     let previousProgress = "";
     try {
       const result = await operation({
+        ...(selection.model === undefined ? {} : { model: selection.model }),
+        ...(selection.effort === undefined
+          ? {}
+          : { reasoningEffort: selection.effort }),
         environment: dependencies.environment,
         workingDirectory: dependencies.currentDirectory(),
         signal: controller.signal,
@@ -1952,8 +1937,7 @@ export async function main(
       return result;
     } catch (error) {
       const interrupted = controller.signal.reason;
-      exitCode =
-        interrupted === "SIGINT" ? 130 : interrupted === "SIGTERM" ? 143 : 2;
+      exitCode = interruptedExitCode(controller.signal) ?? 2;
       const message =
         interrupted === "SIGINT"
           ? "Finding matching canceled by Ctrl-C. Saved comparisons are preserved."
@@ -1969,7 +1953,7 @@ export async function main(
   const matchScanPair = async (
     beforeId: string,
     afterId: string,
-    force = false,
+    selection: MatchingCliOptions,
   ): Promise<JsonObject> =>
     runMatching(async (options) => {
       const { matchingCached, matchingInputs, ...comparison } =
@@ -1985,7 +1969,7 @@ export async function main(
           undefined,
           options.signal,
         );
-      if (matchingCached && !force) return comparison;
+      if (matchingCached && !selection.force) return comparison;
       const input = matchingInputs as JsonObject & ScanComparisonInput;
       const matching = await dependencies.matchFindings(input, options);
       options.signal?.throwIfAborted();
@@ -2001,7 +1985,7 @@ export async function main(
         JSON.stringify(matching),
         options.signal,
       );
-    });
+    }, selection);
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -2033,7 +2017,7 @@ export async function main(
     return result;
   };
   const findingFeedback = Cli.create("findings", {
-    description: "Review and manage saved Codex Security findings.",
+    description: "Review saved findings (default: list).",
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
@@ -2108,8 +2092,7 @@ export async function main(
     },
   });
   const scanHistory = Cli.create("scans", {
-    description:
-      "List, inspect, rerun, match, and compare saved Codex Security scans.",
+    description: "Review saved scans (default: list).",
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
@@ -2172,6 +2155,13 @@ export async function main(
           .default(false)
           .describe("Show findings linked across previous scans."),
       }),
+      examples: [
+        { args: {}, description: "Show the latest completed scan." },
+        {
+          args: { scanId: "scan_abc123" },
+          description: "Show a saved scan by ID or unique prefix.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
@@ -2201,6 +2191,13 @@ export async function main(
           .optional()
           .describe("Scan identifier or unique prefix (default: latest)."),
       }),
+      examples: [
+        { args: {}, description: "Show activity from the latest scan." },
+        {
+          args: { scanId: "scan_abc123" },
+          description: "Show activity from a saved scan.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         const scanId =
@@ -2242,7 +2239,7 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe("Print additional scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, options }) {
@@ -2330,7 +2327,7 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe("Print scan diagnostics to stderr."),
+          .describe("Print additional scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -2351,7 +2348,6 @@ export async function main(
             scanId,
           ]);
           if (
-            recipe !== undefined &&
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
             isJsonObject(recipe["import"])
@@ -2372,8 +2368,7 @@ export async function main(
             const sourcePath = imported["sourcePath"];
             const format = imported["format"];
             if (
-              typeof sourcePath !== "string" ||
-              sourcePath.length === 0 ||
+              !isNonEmptyString(sourcePath) ||
               (format !== "csv" && format !== "json")
             ) {
               throw new CodexSecurityError(
@@ -2470,20 +2465,23 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Recompute an existing semantic finding comparison."),
+        ...MATCHING_MODEL_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         if (options.all) {
           return presentHistory(
-            await runMatching((matchingOptions) =>
-              matchAllScans(dependencies, options.force, matchingOptions),
+            await runMatching(
+              (matchingOptions) =>
+                matchAllScans(dependencies, options.force, matchingOptions),
+              options,
             ),
             "match-all",
             format,
           );
         }
         return presentHistory(
-          await matchScanPair(args.beforeId!, args.afterId!, options.force),
+          await matchScanPair(args.beforeId!, args.afterId!, options),
           "compare",
           format,
         );
@@ -2505,8 +2503,9 @@ export async function main(
           .optional()
           .describe("Later saved scan identifier (default: latest completed)."),
       }),
+      options: MATCHING_MODEL_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format }) {
+      async run({ args, format, options }) {
         let { beforeId, afterId } = args;
         if (beforeId === undefined) {
           const scans = await latestScans(2);
@@ -2518,7 +2517,7 @@ export async function main(
           if (afterId === undefined) return;
         }
         return presentHistory(
-          await matchScanPair(beforeId, afterId),
+          await matchScanPair(beforeId, afterId, options),
           "compare",
           format,
         );
@@ -2530,8 +2529,7 @@ export async function main(
         signal === "SIGINT"
           ? "Publication canceled by Ctrl-C."
           : "Publication terminated by SIGTERM.";
-      const recovery =
-        error === signal ? "" : ` ${diagnosticValue(safeErrorMessage(error))}`;
+      const recovery = error === signal ? "" : ` ${diagnosticValue(error)}`;
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
@@ -2542,7 +2540,12 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish findings from a completed scan or CSV.",
+    description:
+      "Publish findings from a completed scan, or a CSV for internal publication.",
+    hint:
+      "Examples:\n" +
+      "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
+      "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -2586,7 +2589,7 @@ export async function main(
               "Unsupported publication destination. Use --to linear or --to custom.",
           },
         )
-        .describe("Publication destination (linear or custom)."),
+        .describe("Required publication destination: linear or custom."),
       findingsUrl: optionValue("--findings-url")
         .url()
         .optional()
@@ -2599,7 +2602,9 @@ export async function main(
         .describe("Preview the findings without publishing them."),
       csv: optionValue("--csv")
         .optional()
-        .describe("Findings CSV to publish instead of a completed scan."),
+        .describe(
+          "Findings CSV for internal publication; not supported with linear or custom.",
+        ),
       skipExisting: z
         .boolean()
         .default(false)
@@ -2655,7 +2660,7 @@ export async function main(
         const recovery =
           error === undefined || error === signal
             ? ""
-            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+            : ` ${diagnosticValue(error)}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -2664,8 +2669,7 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       const removeSignalListeners = (): void => {
         if (!observingSignals) return;
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
         observingSignals = false;
       };
       try {
@@ -2755,8 +2759,7 @@ export async function main(
               )
             : undefined;
         if (options.to !== "linear") {
-          dependencies.addSignalListener("SIGINT", onInterrupt);
-          dependencies.addSignalListener("SIGTERM", onTerminate);
+          signalHandlers(dependencies, "add", onInterrupt, onTerminate);
           observingSignals = true;
         }
         if (csvPath !== undefined) {
@@ -2788,12 +2791,7 @@ export async function main(
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
           const prompt =
-            dependencies.publishPrompt ??
-            createBulkScanDiscoveryDependencies({
-              output: errorOutput,
-              now: dependencies.now,
-              currentDirectory: dependencies.currentDirectory,
-            }).prompt;
+            dependencies.publishPrompt ?? createTerminalPrompt(errorOutput);
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
@@ -2815,16 +2813,13 @@ export async function main(
               listedScans.map(async (scan) => {
                 if (!isJsonObject(scan)) return undefined;
                 const directory = scan["scanDir"];
-                if (typeof directory !== "string" || directory.length === 0) {
+                if (!isNonEmptyString(directory)) {
                   return undefined;
                 }
                 const metadata = await lstat(
                   resolveCliPath(currentDirectory, directory),
                 ).catch(() => undefined);
-                return metadata?.isDirectory() === true &&
-                  !metadata.isSymbolicLink()
-                  ? scan
-                  : undefined;
+                return metadata?.isDirectory() === true ? scan : undefined;
               }),
             )
           ).filter((scan): scan is JsonObject => scan !== undefined);
@@ -2844,11 +2839,8 @@ export async function main(
             const scanId = scan["scanId"];
             const directory = scan["scanDir"];
             if (
-              typeof scanId !== "string" ||
-              scanId.length === 0 ||
-              typeof directory !== "string" ||
-              directory.length === 0 ||
-              progress === undefined ||
+              !isNonEmptyString(scanId) ||
+              !isNonEmptyString(directory) ||
               !isJsonObject(progress) ||
               progress["status"] !== "complete"
             ) {
@@ -3020,7 +3012,7 @@ export async function main(
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = safeErrorMessage(error);
+                const message = errorMessage(error);
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),
@@ -3029,7 +3021,7 @@ export async function main(
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(safeErrorMessage(scanId ?? directory))}: ${diagnosticValue(message)}\n`,
+                  `codex-security: ${diagnosticValue(scanId ?? directory)}: ${diagnosticValue(message)}\n`,
                 );
               }
             }
@@ -3072,8 +3064,7 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         observingSignals = true;
         if (!options.dryRun) {
           progress.start();
@@ -3109,9 +3100,7 @@ export async function main(
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
-            errorOutput.write(
-              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
-            );
+            errorOutput.write(`codex-security: ${diagnosticValue(warning)}\n`);
           }
         }
         if (
@@ -3130,9 +3119,7 @@ export async function main(
         return { ...result };
       } catch (error) {
         if (!finishCancellation(error)) {
-          errorOutput.write(
-            `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
-          );
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           exitCode = 2;
         }
         return cloudBatch;
@@ -3152,10 +3139,7 @@ export async function main(
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = (): void => controller.abort("SIGINT");
-      const onTerminate = (): void => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
@@ -3169,15 +3153,15 @@ export async function main(
         reportPublicationError(error, controller.signal.reason);
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
   const imports = Cli.create("import", {
-    description: "Read upstream findings for local validation or triage.",
+    description: "Read GitHub code scanning alerts.",
   }).command("github", {
-    description: "Import GitHub code scanning alerts without changing GitHub.",
+    description: "Read GitHub code scanning alerts without changing GitHub.",
+    hint: "To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
     mcp: false,
     args: z.object({
@@ -3221,10 +3205,7 @@ export async function main(
       .optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = () => controller.abort("SIGINT");
-      const onTerminate = () => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         return await (
           dependencies.importGitHubAlerts ?? importGitHubCodeScanningAlerts
@@ -3250,18 +3231,16 @@ export async function main(
           );
         } else {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
   const cli = Cli.create("codex-security", {
-    description:
-      "Draft security policies; run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
+    description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3271,8 +3250,7 @@ export async function main(
     },
   })
     .command("policy", {
-      description:
-        "Draft SECURITY.md guidance for future scans and owner review.",
+      description: "Draft SECURITY.md guidance for review.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3311,13 +3289,10 @@ export async function main(
         auth: z
           .enum(["auto", "chatgpt", "api-key"])
           .default("auto")
-          .describe("Select ChatGPT, API-key, or automatic authentication."),
-        model: optionValue("--model")
-          .optional()
           .describe(
-            `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
           ),
-        effort: effortOption(),
+        ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
           "Inference provider for policy generation.",
         ),
@@ -3328,16 +3303,7 @@ export async function main(
           .describe(
             "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
           ),
-        pluginPath: optionValue("--plugin-path")
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: optionValue("--python")
-          .optional()
-          .describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
+        ...RUNTIME_OPTION_SCHEMAS,
       }),
       examples: [
         { args: { repository: "." } },
@@ -3423,11 +3389,7 @@ export async function main(
                   ),
                 prompt:
                   dependencies.policyPrompt ??
-                  createBulkScanDiscoveryDependencies({
-                    output: errorOutput,
-                    now: dependencies.now,
-                    currentDirectory: dependencies.currentDirectory,
-                  }).prompt,
+                  createTerminalPrompt(errorOutput),
                 environment: dependencies.environment,
                 errorOutput,
                 now: dependencies.now,
@@ -3455,17 +3417,23 @@ export async function main(
               ? policyDisplayData(outcome.data)
               : outcome.data;
         } catch (error) {
-          const message = safeErrorMessage(error);
+          const message = errorMessage(error);
           try {
-            errorOutput.write(`codex-security: ${message}\n`);
+            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           } catch {}
           return fail(message, 2);
         }
       },
     })
     .command("scan", {
-      description: "Run a Codex Security scan.",
+      description: "Scan a repository, selected paths, or Git changes.",
       hint:
+        "Examples:\n" +
+        "  codex-security scan .\n" +
+        "  codex-security scan . --path src --path tests\n" +
+        "  codex-security scan . --working-tree\n" +
+        "  codex-security scan . --diff origin/main\n" +
+        "  codex-security scan . --mode deep\n\n" +
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
@@ -3487,13 +3455,14 @@ export async function main(
             .describe(
               "Reuse completed work in the named local findings workflow.",
             ),
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           verbose: z
             .boolean()
             .default(false)
-            .describe("Print scan diagnostics to stderr."),
+            .describe("Print additional scan diagnostics to stderr."),
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
@@ -3542,12 +3511,9 @@ export async function main(
             "Scan mode (default: standard); deep supports repository and path targets.",
           ),
           ...DEEP_SCAN_OPTION_SCHEMAS,
-          model: optionValue("--model")
-            .optional()
-            .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-            ),
-          effort: effortOption(),
+          ...modelOptions(
+            `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+          ).shape,
           provider: PROVIDER_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
@@ -3558,16 +3524,7 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
+          ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
           ),
@@ -3579,7 +3536,9 @@ export async function main(
             .enum(REPORTABLE_SEVERITIES)
             .optional()
             .describe("Patch findings at or above LEVEL; requires --patch."),
-          createPr: CREATE_PR_OPTION,
+          createPr: CREATE_PR_OPTION.describe(
+            "Create a draft pull request or merge request after verified patches; requires --patch.",
+          ),
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
@@ -3619,28 +3578,6 @@ export async function main(
             message: "--mock cannot be combined with --dry-run or --patch.",
           },
         ),
-      examples: [
-        { args: { repository: "." } },
-        {
-          args: { repository: "." },
-          options: { config: "codex-security.yaml" },
-        },
-        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
-        {
-          args: { repository: "." },
-          options: { model: "gpt-5.6-terra", effort: "high" },
-        },
-        { args: { repository: "." }, options: { path: ["src"] } },
-        { args: { repository: "." }, options: { diff: "origin/main" } },
-        {
-          args: { repository: "." },
-          options: {
-            codex: [
-              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
-            ],
-          },
-        },
-      ],
       output: scanOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
@@ -3671,19 +3608,9 @@ export async function main(
           } = resolveScanSettings(
             project,
             {
-              auth: options.auth,
+              ...pickScanSettings(options),
               target: scope.target,
               knowledgeBasePaths: options.knowledgeBase,
-              scanPromptFile: options.scanPromptFile,
-              validationPromptFile: options.validationPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
-              mode: options.mode,
-              workers: options.workers,
-              subagents: options.subagents,
-              stopAfterNoNew: options.stopAfterNoNew,
-              maxDiscoveryRuns: options.maxDiscoveryRuns,
-              maxTimeHours: options.maxTimeHours,
-              outputDir: options.outputDir,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
               codexOverrides: parseCodexOverrides(
@@ -3734,7 +3661,7 @@ export async function main(
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           if (format === "json" || format === "jsonl") {
-            const message = safeErrorMessage(outcome.error);
+            const message = errorMessage(outcome.error);
             if (!argv.includes("--full-output"))
               return { status: "failed", code: "SCAN_FAILED", message };
             // Incur would wrap returned data in an ok: true envelope.
@@ -3758,8 +3685,8 @@ export async function main(
       },
     })
     .command("install-hook", {
-      description:
-        "Install an advisory local Git pre-commit check. Require a passing scan in CI.",
+      description: "Install an advisory Git pre-commit check.",
+      hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3834,8 +3761,7 @@ export async function main(
     .command(findingFeedback)
     .command(publication)
     .command("suggest-owners", {
-      description:
-        "Suggest finding owners from committed source and Git history.",
+      description: "Suggest finding owners from source and Git history.",
       destructive: false,
       mcp: false,
       args: z.object({
@@ -3850,22 +3776,15 @@ export async function main(
           .describe(
             "Local Git repository (default: current directory); analyzes committed HEAD.",
           ),
-        model: optionValue("--model")
-          .optional()
-          .describe(
-            "Model for owner suggestions (default: Codex Security model).",
-          ),
-        effort: effortOption().describe(
+        ...modelOptions(
+          "Model for owner suggestions (default: Codex Security model).",
           "Reasoning effort (default: Codex Security effort).",
-        ),
+        ).shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(
@@ -3899,19 +3818,18 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
     .command("classify-severity", {
-      description:
-        "Classify saved findings using an optional rubric and save a separate severity assessment.",
+      description: "Assess severity for saved findings.",
+      hint: "Use --rubric to classify findings with a policy. The assessment is saved separately.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -3944,20 +3862,15 @@ export async function main(
           .describe(
             "Classify only this finding ID; repeat to select deduplicated findings.",
           ),
-        model: optionValue("--model")
-          .optional()
-          .describe("Model for rubric classification."),
-        effort: effortOption().describe(
+        ...modelOptions(
+          "Model for rubric classification.",
           "Classification reasoning effort (default: medium).",
-        ),
+        ).shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (
             (options.scan === undefined) ===
@@ -4003,19 +3916,18 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : safeErrorMessage(error)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
     .command("dedupe", {
-      description:
-        "Dedupe a saved scan, or use --records for host-provided reviews over JSON-RPC.",
+      description: "Identify duplicate findings in a saved scan.",
+      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4078,10 +3990,7 @@ export async function main(
         if (options.records)
           throw new CodexSecurityError("Use dedupe --records alone.");
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (options.findingsUrl === undefined)
             throw new CodexSecurityError(
@@ -4132,21 +4041,19 @@ export async function main(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
                 ? "Deduplication canceled. Findings are unchanged."
-                : safeErrorMessage(error)
+                : diagnosticValue(error)
             }\n`,
           );
-          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
     .command(imports)
     .command("scan-components", {
-      description:
-        "Run standard scans for project components and combine the results.",
+      description: "Scan project components and combine results.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -4160,8 +4067,9 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           component: z
             .array(optionValue("--component"))
@@ -4208,10 +4116,7 @@ export async function main(
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
             .describe("Run FILE after each scan, including failures."),
-          model: optionValue("--model")
-            .optional()
-            .describe("Model for planning and component scans."),
-          effort: effortOption(),
+          ...modelOptions("Model for planning and component scans.").shape,
           provider: PROVIDER_OPTION,
           maxCost: z
             .number()
@@ -4221,16 +4126,7 @@ export async function main(
               "Stop each component scan if estimated USD cost exceeds AMOUNT.",
             ),
           showCost: SHOW_COST_OPTION,
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
+          ...RUNTIME_OPTION_SCHEMAS,
         })
         .refine(
           (options) =>
@@ -4255,14 +4151,7 @@ export async function main(
         };
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(directory, args.repository ?? ".");
@@ -4273,11 +4162,8 @@ export async function main(
           const resolved = resolveScanSettings(
             project,
             {
-              auth: options.auth,
-              outputDir: options.outputDir,
+              ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
-              scanPromptFile: options.scanPromptFile,
-              postScanPromptFile: options.postScanPromptFile,
               maxCostUsd: options.maxCost,
               codexOverrides: parseCodexOverrides(
                 options.codex,
@@ -4326,7 +4212,6 @@ export async function main(
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
-              sanitize: safeErrorMessage,
               input: process.stdin,
               onInterrupt,
             });
@@ -4389,7 +4274,7 @@ export async function main(
               if (dashboard !== null) dashboard.updateComponent(component);
               else
                 errorOutput.write(
-                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
+                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
             },
             onComplete: (result) => {
@@ -4405,7 +4290,7 @@ export async function main(
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed ||
             result.incomplete ||
             result.deduplication?.status === "incomplete"
@@ -4416,18 +4301,16 @@ export async function main(
           return { ...result };
         } catch (error) {
           stopDashboard();
-          exitCode = interruptedExitCode() ?? 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
           stopDashboard();
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
         }
       },
     })
     .command("bulk-scan", {
-      description:
-        "Discover repositories and run resumable bulk security scans.",
+      description: "Discover and scan multiple repositories.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
@@ -4482,12 +4365,9 @@ export async function main(
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
           .describe("Run FILE after each scan, including failures."),
-        model: optionValue("--model")
-          .optional()
-          .describe(
-            `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-          ),
-        effort: effortOption(),
+        ...modelOptions(
+          `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+        ).shape,
         provider: PROVIDER_OPTION,
         maxAttempts: z
           .number()
@@ -4527,16 +4407,8 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = (): void => controller.abort("SIGINT");
-        const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (options.recover && args.input === undefined) {
@@ -4549,12 +4421,8 @@ export async function main(
             dependencies,
           );
           const overrides = {
-            mode: options.mode,
-            outputDir: options.outputDir,
+            ...pickScanSettings({ ...options, workers: undefined }),
             knowledgeBasePaths: options.knowledgeBase,
-            scanPromptFile: options.scanPromptFile,
-            validationPromptFile: options.validationPromptFile,
-            postScanPromptFile: options.postScanPromptFile,
             maxCostUsd: options.maxCost,
           };
           const resolved = resolveScanSettings(
@@ -4736,12 +4604,12 @@ export async function main(
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${errorMessage(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed > 0 || result.incomplete > 0
               ? 2
               : result.policyFailed
@@ -4750,38 +4618,56 @@ export async function main(
           return { ...result };
         } catch (error) {
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
     .command("export", {
       description:
-        "Export findings from a completed scan as CSV, JSON, or SARIF.",
+        "Export saved findings or a threat model without running an analysis.",
+      hint:
+        "Examples:\n" +
+        "  codex-security export\n" +
+        "  codex-security export --export-format json --output -\n" +
+        "  codex-security export ../scan-results --export-format csv\n" +
+        "  codex-security export --artifact threat-model --output -\n\n" +
+        "Use --export-format for artifact format. The global --format option controls\n" +
+        "framework output such as --schema; it does not change exported files.",
       destructive: true,
       mcp: false,
       args: z.object({
         scanDir: z
           .string()
           .optional()
-          .describe("Completed scan directory (default: latest completed)."),
+          .describe("Saved result directory (default: latest completed scan)."),
       }),
       options: z
         .object({
+          artifact: z
+            .enum(["findings", "threat-model"])
+            .default("findings")
+            .describe("Saved artifact to export."),
+          scan: optionValue("--scan")
+            .optional()
+            .describe(
+              "Saved scan ID or unique prefix; cannot be combined with a result directory.",
+            ),
           exportFormat: z
-            .enum(["csv", "json", "sarif"])
-            .default("sarif")
-            .describe("Artifact format to export from the completed scan."),
+            .enum(["csv", "json", "sarif", "md"])
+            .optional()
+            .describe(
+              "Findings: csv, json, or sarif (default); threat-model: md (default).",
+            ),
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, or findings.csv).",
+              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, or threatmodel.md).",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -4795,38 +4681,73 @@ export async function main(
         .refine(
           (options) =>
             options.sourceRoot === undefined ||
-            options.exportFormat === "sarif",
+            (options.artifact === "findings" &&
+              (options.exportFormat === undefined ||
+                options.exportFormat === "sarif")),
           {
             message:
               "--source-root is only supported with --export-format sarif",
           },
         ),
       async run({ args, options }) {
-        const currentDirectory = dependencies.currentDirectory();
-        const scanDir = args.scanDir ?? (await latestScans())?.[0]?.scanDir;
-        if (scanDir === undefined) return;
-        exitCode = await runExport(
-          {
-            scanDir: resolveCliPath(currentDirectory, scanDir),
-            format: options.exportFormat,
-            output:
-              options.output === "-"
-                ? "-"
-                : resolveCliPath(
-                    currentDirectory,
-                    options.output ??
-                      EXPORT_DEFAULT_OUTPUTS[options.exportFormat],
-                  ),
-            sourceRoot:
-              options.sourceRoot === undefined
-                ? undefined
-                : resolveCliPath(currentDirectory, options.sourceRoot),
-            pythonPath: options.python,
-          },
-          output,
-          errorOutput,
-          dependencies,
-        );
+        try {
+          const currentDirectory = dependencies.currentDirectory();
+          if (args.scanDir !== undefined && options.scan !== undefined) {
+            throw new CodexSecurityError(
+              "--scan cannot be combined with a result directory.",
+            );
+          }
+          const format = resolveArtifactFormat(
+            options.artifact,
+            options.exportFormat,
+          );
+          let scanDir = args.scanDir;
+          if (scanDir === undefined) {
+            const scanId =
+              options.scan ??
+              (await latestScans(1, "complete", options.python))?.[0]?.scanId;
+            if (scanId === undefined) return;
+            scanDir = await resolveSavedArtifactDirectory(
+              scanId,
+              options.artifact,
+              format,
+              (args) =>
+                dependencies.runWorkbench(
+                  args,
+                  undefined,
+                  undefined,
+                  options.python,
+                ),
+            );
+          }
+          exitCode = await runExport(
+            {
+              scanDir: resolveCliPath(currentDirectory, scanDir),
+              artifact: options.artifact,
+              format,
+              output:
+                options.output === "-"
+                  ? "-"
+                  : resolveCliPath(
+                      currentDirectory,
+                      options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
+                    ),
+              sourceRoot:
+                options.sourceRoot === undefined
+                  ? undefined
+                  : resolveCliPath(currentDirectory, options.sourceRoot),
+              pythonPath: options.python,
+            },
+            output,
+            errorOutput,
+            dependencies,
+          );
+        } catch (error) {
+          if (exitCode !== 2) {
+            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          }
+          exitCode = 2;
+        }
       },
     })
     .command("validate", {
@@ -4840,25 +4761,15 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
-        effort: effortOption(),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+        auth: SKILL_AUTH_OPTION,
+        ...SKILL_CONFIG_OPTIONS.shape,
       }),
       async run({ options }) {
         try {
           exitCode = await runSkill(
             "validation",
             positionals,
-            options.codex,
-            options.effort,
+            options,
             output,
             errorOutput,
             dependencies,
@@ -4883,14 +4794,13 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
-        effort: effortOption(),
+        auth: SKILL_AUTH_OPTION,
+        ...MODEL_OPTIONS.shape,
         scan: optionValue("--scan")
           .optional()
-          .describe("Verify open findings from a saved scan."),
+          .describe(
+            "Verify open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -4906,13 +4816,18 @@ export async function main(
           .optional()
           .describe("JSON Linear issue filter for --linear-project."),
         linearApiKey: linearApiKeyOption(),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+        codex: SKILL_CONFIG_OPTIONS.shape.codex,
       }),
+      examples: [
+        {
+          options: { scan: "latest" },
+          description: "Verify fixes for the latest completed scan.",
+        },
+        {
+          args: { "findings...": "finding.md" },
+          description: "Verify a fix described in a file.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
@@ -4991,21 +4906,8 @@ export async function main(
             const environment =
               imports.length === 0
                 ? undefined
-                : Object.fromEntries(
-                    Object.entries(dependencies.environment).filter(
-                      ([name]) =>
-                        !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
-                          name,
-                        ),
-                    ),
-                  );
-            let response = "";
-            const verificationOutput: Writable = {
-              write(value: string | Uint8Array): boolean {
-                response += value.toString();
-                return true;
-              },
-            };
+                : withoutLinearCredentials(dependencies.environment);
+            const response = captureOutput();
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
@@ -5017,9 +4919,8 @@ export async function main(
               exitCode = await runSkill(
                 "verify-fix",
                 selected === undefined ? [...positionals, ...imports] : [],
-                options.codex,
-                options.effort,
-                verificationOutput,
+                options,
+                response.stream,
                 errorOutput,
                 dependencies,
                 {
@@ -5040,7 +4941,7 @@ export async function main(
 
               let reported: unknown;
               try {
-                reported = JSON.parse(response);
+                reported = JSON.parse(response.text());
               } catch {
                 throw new CodexSecurityError(
                   "Verification results were not valid JSON.",
@@ -5087,7 +4988,7 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           return undefined;
         }
       },
@@ -5101,14 +5002,11 @@ export async function main(
           .string()
           .min(1, "An issue must not be empty.")
           .optional()
-          .describe("Issue text or a file containing issues."),
+          .describe("Issue text, a file, or a saved finding identifier."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe("Credential source: auto, chatgpt, or api-key."),
-        effort: effortOption(),
+        auth: SKILL_AUTH_OPTION,
+        ...MODEL_OPTIONS.shape,
         externalSandbox: z
           .boolean()
           .default(false)
@@ -5117,7 +5015,9 @@ export async function main(
           ),
         scan: optionValue("--scan")
           .optional()
-          .describe("Patch open findings from a saved scan."),
+          .describe(
+            "Patch open findings from a saved scan ID or the latest completed scan.",
+          ),
         severity: z
           .enum(REPORTABLE_SEVERITIES)
           .optional()
@@ -5145,13 +5045,19 @@ export async function main(
           .describe(
             "Resume publication of a saved patch branch without patching again.",
           ),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(
-            'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", or analytics.enabled=false.',
-          ),
+        codex: SKILL_CONFIG_OPTIONS.shape.codex,
       }),
+      examples: [
+        {
+          options: { scan: "latest", severity: "high" },
+          description:
+            "Patch high and critical findings from the latest completed scan.",
+        },
+        {
+          args: { "issues...": "finding.md" },
+          description: "Patch a finding described in a file.",
+        },
+      ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: commandError }) {
         const jsonOutput = format === "json" || format === "jsonl";
@@ -5177,6 +5083,7 @@ export async function main(
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
+              options.model !== undefined ||
               options.effort !== undefined ||
               options.auth !== "auto" ||
               options.codex.length > 0
@@ -5244,8 +5151,7 @@ export async function main(
               (await snapshotPatchState(selected.repository, dependencies));
             const patches = await runFindingPatches(
               selected,
-              options.codex,
-              options.effort,
+              options,
               errorOutput,
               dependencies,
               {
@@ -5286,8 +5192,7 @@ export async function main(
                     repository: selected.repository,
                     base: patchRiskBase,
                     files,
-                    codexOverrides: options.codex,
-                    effort: options.effort,
+                    configuration: options,
                     auth: options.auth,
                   },
                   errorOutput,
@@ -5345,14 +5250,7 @@ export async function main(
           const environment =
             imports.length === 0
               ? undefined
-              : Object.fromEntries(
-                  Object.entries(dependencies.environment).filter(
-                    ([name]) =>
-                      !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
-                        name,
-                      ),
-                  ),
-                );
+              : withoutLinearCredentials(dependencies.environment);
           const patchGitBase =
             options.assessPatchRisk || options.createPr
               ? await snapshotPatchTree(repository, dependencies)
@@ -5367,18 +5265,12 @@ export async function main(
               dependencies,
             );
           }
-          let report = "";
+          const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
-            options.codex,
-            options.effort,
-            {
-              write: (value) => {
-                report += value.toString();
-                return true;
-              },
-            },
+            options,
+            report.stream,
             errorOutput,
             dependencies,
             {
@@ -5388,7 +5280,7 @@ export async function main(
               validationPrompt,
             },
           );
-          if (!jsonOutput) output.write(report);
+          if (!jsonOutput) output.write(report.text());
           const files = await changedPatchFiles(
             repository,
             patchBase,
@@ -5420,8 +5312,7 @@ export async function main(
                   environment,
                   base: patchGitBase!,
                   files,
-                  codexOverrides: options.codex,
-                  effort: options.effort,
+                  configuration: options,
                   auth: options.auth,
                 },
                 errorOutput,
@@ -5445,12 +5336,12 @@ export async function main(
           if (structuredOutput)
             return {
               ...patchResult,
-              ...(jsonOutput ? { report } : {}),
+              ...(jsonOutput ? { report: report.text() } : {}),
             };
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
-          const message = safeErrorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           if (!structuredOutput) return;
           patchStructuredError = true;
           const failure = {
@@ -5475,7 +5366,10 @@ export async function main(
       destructive: true,
       mcp: false,
       args: z.object({
-        action: z.enum(["status"]).optional().describe("Show login status."),
+        action: z
+          .enum(["status"])
+          .optional()
+          .describe("Use status to inspect credentials; omit to sign in."),
       }),
       options: z.object({
         deviceAuth: z
@@ -5491,6 +5385,10 @@ export async function main(
           .default(false)
           .describe("Read an access token from stdin."),
       }),
+      examples: [
+        { args: {}, description: "Sign in with ChatGPT." },
+        { args: { action: "status" }, description: "Check authentication." },
+      ],
       async run({ args, options }) {
         const credentialHome =
           dependencies.prepareAuthenticationHome !== undefined
@@ -5551,14 +5449,13 @@ export async function main(
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
-            )
-              .filter(
-                ([name, value]) =>
-                  value?.trim() &&
-                  (name.toUpperCase() === "OPENAI_API_KEY" ||
-                    name.toUpperCase() === "CODEX_API_KEY"),
-              )
-              .map(([name]) => name);
+            ).flatMap(([name, value]) =>
+              value?.trim() &&
+              (name.toUpperCase() === "OPENAI_API_KEY" ||
+                name.toUpperCase() === "CODEX_API_KEY")
+                ? name
+                : [],
+            );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
               : "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
@@ -5606,8 +5503,11 @@ export async function main(
       },
     })
     .command("serve", {
-      description:
-        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
+      description: "Start the local findings HTTP service.",
+      hint:
+        "Environment: HOST=127.0.0.1, PORT=3000.\n" +
+        "CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint\n" +
+        "(default: https://api.openai.com/v1/embeddings).",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -5637,8 +5537,8 @@ export async function main(
       },
     })
     .command("init", {
-      description:
-        "Write a starter project configuration without overwriting an existing file.",
+      description: "Create a starter project configuration.",
+      hint: "Existing files are never overwritten.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5717,10 +5617,7 @@ export async function main(
                 "scan"
               ] as ScanLogSource);
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           return await (dependencies.sendFeedback ?? sendFeedback)({
             ...options,
@@ -5736,14 +5633,12 @@ export async function main(
           }
           throw error;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
     .command("info", {
-      description:
-        "Show SDK metadata and resolved configuration without preparing a scan.",
+      description: "Show SDK metadata and resolved configuration.",
       alias: { config: "c" },
       options: z.object({ config: PROJECT_CONFIG_OPTION }),
       mcp: {
@@ -5905,9 +5800,7 @@ export async function main(
           : [argument],
       ),
       {
-        stdout: (value) => {
-          frameworkOutput += value;
-        },
+        stdout: frameworkCapture.stream.write,
         exit: (code) => {
           frameworkExit = code;
         },
@@ -5919,6 +5812,7 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  const frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
     if (policyFullOutput || patchStructuredError || scanStructuredError) {
@@ -5949,7 +5843,7 @@ export async function main(
         renderedPatch ??
         renderedPublication ??
         renderedHistory ??
-        frameworkOutput,
+        formatCliHelp(frameworkOutput, output.columns),
     );
     return exitCode;
   } catch (error) {
@@ -5964,10 +5858,7 @@ async function runScanImport(
   dependencies: CliDependencies,
 ): Promise<ScanOutcome> {
   const controller = new AbortController();
-  const onInterrupt = () => controller.abort("SIGINT");
-  const onTerminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  const removeSignals = listenForAbort(dependencies, controller);
   try {
     const result = await (dependencies.importScan ?? importScan)(
       { ...options, signal: controller.signal },
@@ -5986,15 +5877,14 @@ async function runScanImport(
     const message =
       signal === "SIGINT" || signal === "SIGTERM"
         ? "Scan import canceled."
-        : safeErrorMessage(error);
-    errorOutput.write(`codex-security: ${message}\n`);
+        : errorMessage(error);
+    errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
     return {
-      exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
+      exitCode: interruptedExitCode(controller.signal) ?? 2,
       error: message,
     };
   } finally {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
+    removeSignals();
   }
 }
 
@@ -6091,7 +5981,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const repository = recipe["repository"];
-  if (typeof repository !== "string" || repository.length === 0) {
+  if (!isNonEmptyString(repository)) {
     throw new CodexSecurityError(
       "The saved scan recipe does not contain a repository.",
     );
@@ -6101,12 +5991,7 @@ async function prepareScanArgumentsFromRecipe(
     throw new CodexSecurityError("The saved scan recipe contains no target.");
   }
   const paths = target["paths"];
-  if (
-    !Array.isArray(paths) ||
-    !paths.every(
-      (path): path is string => typeof path === "string" && path.length > 0,
-    )
-  ) {
+  if (!Array.isArray(paths) || !paths.every(isNonEmptyString)) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid paths.",
     );
@@ -6114,9 +5999,7 @@ async function prepareScanArgumentsFromRecipe(
   const knowledgeBasePaths = recipe["knowledgeBasePaths"] ?? [];
   if (
     !Array.isArray(knowledgeBasePaths) ||
-    !knowledgeBasePaths.every(
-      (path): path is string => typeof path === "string" && path.length > 0,
-    )
+    !knowledgeBasePaths.every(isNonEmptyString)
   ) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid knowledge base paths.",
@@ -6155,7 +6038,7 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const head = target["headRef"];
-  if (head !== undefined && (typeof head !== "string" || head.length === 0)) {
+  if (head !== undefined && !isNonEmptyString(head)) {
     throw new CodexSecurityError(
       "The saved scan recipe has an invalid Git head.",
     );
@@ -6198,6 +6081,15 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
+  const cyberAccessProgram =
+    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
+      recipe["cyberAccessProgram"],
+    );
+  if (!cyberAccessProgram.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid Cyber access program.",
+    );
+  }
   if (!auth.success)
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid authentication choice.",
@@ -6234,6 +6126,7 @@ async function prepareScanArgumentsFromRecipe(
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: cyberAccessProgram.data,
     target:
       paths.length > 0
         ? paths
@@ -6333,6 +6226,24 @@ function validateCliArguments(
     )
   ) {
     return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+  }
+  if (
+    command === "export" &&
+    structuredOutput &&
+    argv.some(
+      (value, index) =>
+        value === "--output=-" ||
+        (value === "--output" && argv[index + 1] === "-"),
+    ) &&
+    argv.some(
+      (value, index) =>
+        value === "--artifact=threat-model" ||
+        (value === "--artifact" && argv[index + 1] === "threat-model") ||
+        value === "--export-format=md" ||
+        (value === "--export-format" && argv[index + 1] === "md"),
+    )
+  ) {
+    return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
   }
   if (command === "scan" && !argv.includes("--schema")) {
     if (
@@ -6667,9 +6578,8 @@ async function selectSavedFindings(
   }
 
   const selected = findings.filter((finding) => {
-    const triage = finding["triage"] as JsonObject | undefined;
     return (
-      triage?.["status"] !== "closed" &&
+      (finding["triage"] as JsonObject | undefined)?.["status"] !== "closed" &&
       (identifiers.length === 0 ||
         identifiers.includes(finding.occurrenceId) ||
         identifiers.includes(finding.findingId)) &&
@@ -6744,10 +6654,9 @@ function directPatchDigest(
   positionals: readonly string[],
   imports: readonly ImportedIssue[],
 ): string {
-  return `issues-${createHash("sha256")
-    .update(JSON.stringify([...positionals, ...imports.map(({ id }) => id)]))
-    .digest("hex")
-    .slice(0, 12)}`;
+  return `issues-${sha256Text(
+    JSON.stringify([...positionals, ...imports.map(({ id }) => id)]),
+  ).slice(0, 12)}`;
 }
 
 async function publishPatchBranch(
@@ -7048,7 +6957,7 @@ async function snapshotPatchDirectory(
 }
 
 function safePatchText(value: string): string {
-  return stripVTControlCharacters(safeErrorMessage(value)).replaceAll(
+  return stripVTControlCharacters(value).replaceAll(
     /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
     " ",
   );
@@ -7159,19 +7068,12 @@ async function assessPatchRisk(
     for await (const chunk of createReadStream(patchPath)) {
       digest.update(chunk);
     }
-    let report = "";
-    const stdout: Writable = {
-      write(value: string | Uint8Array): boolean {
-        report += value.toString();
-        return true;
-      },
-    };
+    const report = captureOutput();
     const status = await runSkill(
       "assess-patch-risk",
       [],
-      request.codexOverrides,
-      request.effort,
-      stdout,
+      request.configuration,
+      report.stream,
       stderr,
       dependencies,
       {
@@ -7194,7 +7096,7 @@ async function assessPatchRisk(
         `Patch risk assessment exited with status ${status}.`,
       );
     }
-    return { report: report.trim() };
+    return { report: report.text().trim() };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -7241,8 +7143,7 @@ async function resolvePatchValidationPrompt(
 
 async function runFindingPatches(
   selected: SelectedFindings,
-  codexOverrides: readonly string[],
-  effort: ScanReasoningEffort | undefined,
+  configuration: SkillConfiguration,
   stderr: Writable,
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
@@ -7258,13 +7159,7 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   for (const finding of selected.findings) {
-    let response = "";
-    const stdout: Writable = {
-      write(value: string | Uint8Array): boolean {
-        response += value.toString();
-        return true;
-      },
-    };
+    const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
       stderr,
@@ -7287,9 +7182,8 @@ async function runFindingPatches(
       status = await runSkill(
         "fix-finding",
         [],
-        codexOverrides,
-        effort,
-        stdout,
+        configuration,
+        response.stream,
         patchErrors,
         dependencies,
         {
@@ -7325,7 +7219,7 @@ async function runFindingPatches(
       patch = failed(`Patch command exited with status ${status}.`);
     } else {
       try {
-        const reported = JSON.parse(response) as { patches?: unknown };
+        const reported = JSON.parse(response.text()) as { patches?: unknown };
         const entries = Array.isArray(reported?.patches)
           ? reported.patches
           : [];
@@ -7373,22 +7267,37 @@ async function runFindingPatches(
   return patches;
 }
 
+function captureOutput() {
+  let text = "";
+  return {
+    stream: {
+      write(value: string | Uint8Array): boolean {
+        text += value.toString();
+        return true;
+      },
+    },
+    text: () => text,
+  };
+}
+
 async function runSkill(
   skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
   inputs: readonly (string | ImportedIssue)[],
-  codexOverrides: readonly string[],
-  effort: ScanReasoningEffort | undefined,
+  configuration: SkillConfiguration,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
   options: SkillRunOptions = {},
 ): Promise<number> {
-  const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
+  const { codex, model: selectedModel, effort } = configuration;
+  const overrides = parseCodexOverrides(codex, selectedModel, effort);
   if (
     Object.entries(overrides).some(
       ([key, value]) =>
         key !== "model" &&
         key !== "model_reasoning_effort" &&
+        key !== "model_provider" &&
+        key !== "model_providers" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7397,11 +7306,37 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
     );
   }
   const { model, reasoningEffort } = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
+  );
+  const provider =
+    options.provider ?? (overrides["model_provider"] as string | undefined);
+  const providerConfiguration =
+    options.providerConfiguration ??
+    (provider === undefined
+      ? undefined
+      : ((
+          overrides["model_providers"] as Record<string, JsonObject> | undefined
+        )?.[provider] ??
+        (isExternalModelProvider(provider)
+          ? EXTERNAL_CODEX_PROVIDERS[provider]
+          : undefined)));
+  const effectiveOverrides = resolveCommandAuthConfig(
+    mergeCodexOverrides(
+      overrides,
+      provider === undefined
+        ? {}
+        : {
+            model_provider: provider,
+            ...(providerConfiguration === undefined
+              ? {}
+              : { model_providers: { [provider]: providerConfiguration } }),
+          },
+    ),
+    configuredCodexHome(options.environment ?? dependencies.environment),
   );
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
@@ -7559,30 +7494,19 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
-      ...codexOverrides
+      ...codex
         .filter(
           (value) =>
             value.startsWith("analytics.") || value.startsWith("analytics="),
         )
         .flatMap((value) => ["--config", value]),
-      ...(options.provider === undefined
+      ...(provider === undefined
         ? []
-        : ["--config", `model_provider=${JSON.stringify(options.provider)}`]),
-      ...(options.provider === undefined ||
-      options.providerConfiguration === undefined
-        ? []
-        : modelProviderConfigOverride(
-            resolveCommandAuthConfig(
-              {
-                model_providers: {
-                  [options.provider]: options.providerConfiguration,
-                },
-              },
-              configuredCodexHome(
-                options.environment ?? dependencies.environment,
-              ),
-            ),
-          ).flatMap((value) => ["--config", value])),
+        : ["--config", `model_provider=${JSON.stringify(provider)}`]),
+      ...modelProviderConfigOverride(effectiveOverrides).flatMap((value) => [
+        "--config",
+        value,
+      ]),
       "--config",
       verify || assess
         ? 'approval_policy="on-request"'
@@ -7613,8 +7537,8 @@ async function runSkill(
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
       auth: options.auth ?? "auto",
       directory,
-      modelProvider: options.provider,
-      providerConfiguration: options.providerConfiguration,
+      modelProvider: provider,
+      codexOverrides: effectiveOverrides,
       stdout,
       stderr,
       ...(appServer
@@ -7654,13 +7578,11 @@ export async function readSkillCommandOutput(
 ): Promise<{
   message?: string;
   error?: string;
-  malformed: boolean;
   completed?: boolean;
   sandboxUnavailable?: boolean;
 }> {
   let message: string | undefined;
   let error: string | undefined;
-  let malformed = false;
   let threadId: string | undefined;
   let turnId: string | undefined;
   let completed = false;
@@ -7715,11 +7637,9 @@ export async function readSkillCommandOutput(
     try {
       event = JSON.parse(line);
     } catch {
-      malformed = true;
       continue;
     }
     if (typeof event !== "object" || event === null) {
-      malformed = true;
       continue;
     }
     const value = event as Record<string, unknown>;
@@ -7939,7 +7859,6 @@ export async function readSkillCommandOutput(
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
-    malformed,
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
   };
@@ -7998,62 +7917,11 @@ async function runExport(
   dependencies: CliDependencies,
 ): Promise<number> {
   try {
-    const canonicalScan = await realpath(arguments_.scanDir).catch(
-      () => arguments_.scanDir,
+    const prepared = await resolveArtifactExportOutput(
+      arguments_,
+      dependencies.currentDirectory(),
     );
-    const scanRelativeOutput = relative(arguments_.scanDir, arguments_.output);
-    const scanLocalOutput = join(
-      "exports",
-      EXPORT_DEFAULT_OUTPUTS[arguments_.format],
-    );
-    if (
-      arguments_.output !== "-" &&
-      !isOutsidePath(scanRelativeOutput) &&
-      scanRelativeOutput !== scanLocalOutput
-    ) {
-      throw new CodexSecurityError(
-        "The export output path cannot overwrite a scan artifact.",
-      );
-    }
-    const outputPath =
-      arguments_.output === "-"
-        ? "-"
-        : !isOutsidePath(scanRelativeOutput)
-          ? join(canonicalScan, scanRelativeOutput)
-          : join(
-              await realpath(dirname(arguments_.output)).catch(
-                (error: NodeJS.ErrnoException) => {
-                  if (error.code === "ENOENT") {
-                    throw new CodexSecurityError(
-                      `Export output directory does not exist: ${dirname(arguments_.output)}. Create the directory and retry.`,
-                    );
-                  }
-                  throw error;
-                },
-              ),
-              basename(arguments_.output),
-            );
-    if (arguments_.output !== "-") {
-      const currentDirectory = dependencies.currentDirectory();
-      const outputFromCurrent = relative(currentDirectory, arguments_.output);
-      if (!isOutsidePath(outputFromCurrent)) {
-        const canonicalCurrent = await realpath(currentDirectory).catch(
-          () => currentDirectory,
-        );
-        if (
-          relative(resolve(canonicalCurrent, outputFromCurrent), outputPath) !==
-          ""
-        ) {
-          throw new CodexSecurityError(
-            "The export output path cannot traverse a repository symlink.",
-          );
-        }
-      }
-    }
-    const contents = await dependencies.exportFindings(
-      { ...arguments_, scanDir: canonicalScan, output: outputPath },
-      output,
-    );
+    const contents = await dependencies.exportFindings(prepared, output);
     if (arguments_.output === "-") {
       if (contents !== undefined) {
         await writeCliOutput(output, Buffer.from(contents));
@@ -8103,12 +7971,7 @@ async function chooseInteractiveAuthentication(
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
-    dependencies.scanAuthenticationPrompt ??
-    createBulkScanDiscoveryDependencies({
-      output: errorOutput,
-      now: dependencies.now,
-      currentDirectory: dependencies.currentDirectory,
-    }).prompt;
+    dependencies.scanAuthenticationPrompt ?? createTerminalPrompt(errorOutput);
   const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
   if (
     !prompt.isInteractive() ||
@@ -8215,13 +8078,12 @@ async function executeScan(
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
     if (!verbose) return;
-    const attributes = Object.entries(fields).flatMap(([name, value]) =>
-      value === undefined
-        ? []
-        : [
-            `${name}=${JSON.stringify(typeof value === "string" ? diagnosticValue(value) : value)}`,
-          ],
-    );
+    const attributes = Object.entries(fields).flatMap(([name, value]) => {
+      if (value === undefined) return [];
+      const displayed =
+        typeof value === "string" ? diagnosticValue(value) : value;
+      return [`${name}=${JSON.stringify(displayed)}`];
+    });
     writeAboveProgress(() => {
       errorOutput.write(
         `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
@@ -8267,11 +8129,9 @@ async function executeScan(
   const onInterrupt = signalListener("SIGINT");
   const onTerminate = signalListener("SIGTERM");
   const removeSignalListeners = (): void => {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
+    signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
   };
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  signalHandlers(dependencies, "add", onInterrupt, onTerminate);
 
   let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
     null;
@@ -8310,11 +8170,7 @@ async function executeScan(
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
-    if (
-      analytics !== undefined &&
-      isJsonObject(analytics) &&
-      analytics["enabled"] !== undefined
-    ) {
+    if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
@@ -8395,7 +8251,6 @@ async function executeScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: safeErrorMessage,
         input: scanInput,
         onInterrupt,
       });
@@ -8517,6 +8372,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        const bedrock =
+          providerOptions.provider === "amazon-bedrock" ||
+          authentication.method === "aws_credentials";
         diagnostic("authentication.selected", {
           requested: auth ?? DEFAULT_SCAN_AUTH,
           method: authentication.method,
@@ -8534,6 +8392,11 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
+          if (bedrock) {
+            dashboard.note(
+              "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+            );
+          }
           return;
         }
         progress?.stopTimer();
@@ -8552,6 +8415,11 @@ async function executeScan(
           progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
+        }
+        if (bedrock) {
+          progress?.stage(
+            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+          );
         }
         progress?.startTimer("Preparing scan");
       },
@@ -8739,7 +8607,11 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure, selectedAuthentication);
+        : scanFailureMessage(
+            failure,
+            selectedAuthentication,
+            providerOptions.provider,
+          );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -8890,11 +8762,7 @@ async function executeScan(
       arguments_.patch ||
       (await (
         dependencies.confirmPatchReview ??
-        createBulkScanDiscoveryDependencies({
-          output: errorOutput,
-          now: dependencies.now,
-          currentDirectory: dependencies.currentDirectory,
-        }).prompt.confirm
+        createTerminalPrompt(errorOutput).confirm
       )("Review and patch these findings?"));
     if (confirmed) {
       const selectPatches =
@@ -8928,13 +8796,15 @@ async function executeScan(
     try {
       patches = await runFindingPatches(
         selected,
-        [
-          `model=${JSON.stringify(effectiveModel)}`,
-          ...(patchAnalyticsOverride === undefined
-            ? []
-            : [patchAnalyticsOverride]),
-        ],
-        effectiveReasoningEffort as ScanReasoningEffort,
+        {
+          codex: [
+            `model=${JSON.stringify(effectiveModel)}`,
+            `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            ...(patchAnalyticsOverride === undefined
+              ? []
+              : [patchAnalyticsOverride]),
+          ],
+        },
         errorOutput,
         dependencies,
         {
@@ -8962,7 +8832,7 @@ async function executeScan(
         }
       }
     } catch (error) {
-      errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
       scanData = { ...scanData, patches };
       return completedScan(2);
     }
@@ -9049,12 +8919,10 @@ function authenticationFailureMessage(
     );
   }
   if (authentication?.method === "api_key") {
-    const openAiKey =
-      authentication.source === "OPENAI_API_KEY" ||
-      authentication.source === "CODEX_API_KEY";
     return (
       `Authentication failed using ${authentication.source}. ` +
-      (openAiKey
+      (authentication.source === "OPENAI_API_KEY" ||
+      authentication.source === "CODEX_API_KEY"
         ? "Retry with '--auth chatgpt' or provide a valid API key."
         : `Provide a valid ${authentication.source} for the selected provider.`)
     );
@@ -9072,16 +8940,49 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
+  provider?: string,
 ): string {
   // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
-  //
-  // The advice branches below still replace the underlying text rather than
-  // appending it. That is deliberate: upstream authentication and authorization
-  // errors can name the organization or project, which must not reach stderr or
-  // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const classification = classifyConnectionFailure(error);
+  if (
+    provider === "amazon-bedrock" ||
+    authentication?.method === "aws_credentials"
+  ) {
+    const detail = diagnosticValue(error);
+    switch (classification) {
+      case "unauthorized":
+        if (authentication?.method === "command") {
+          return `${detail}\n${authenticationFailureMessage(authentication)}`;
+        }
+        if (authentication?.method === "aws_credentials") {
+          return (
+            `${detail}\n${authenticationFailureMessage(authentication)} ` +
+            (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
+              ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
+              : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
+          );
+        }
+        return `${detail}\nAmazon Bedrock authentication failed. Check the credentials configured for the selected provider.`;
+      case "forbidden":
+        if (authentication?.method === "command") {
+          return (
+            `${detail}\nThe configured provider auth command's credentials cannot access the Amazon Bedrock model. ` +
+            "Check the configured provider auth command, AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+          );
+        }
+        return (
+          `${detail}\nThe AWS credentials${authentication?.method === "aws_credentials" ? ` from ${authentication.source}` : ""} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+        );
+      case "rate_limited":
+        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
+      default:
+        return detail;
+    }
+  }
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9099,18 +9000,12 @@ function scanFailureMessage(
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
-  switch (classifyConnectionFailure(error)) {
+  switch (classification) {
     case "unauthorized":
       return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
-          "Check your AWS identity and Bedrock model permissions."
-        );
       }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
@@ -9196,10 +9091,8 @@ async function readDeepScanStop(
   if (state?.terminalReason !== "capped") return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = state.config;
   if (state.dispatchedCount >= maxDiscoveryRuns) {
-    const stillFindingIssues =
-      state.completionSequence > 0 && state.noNewStreak === 0;
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.completionSequence > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -9238,12 +9131,9 @@ function printScanSummary(
       (severities.get(finding.severity.level) ?? 0) + 1,
     );
   }
-  const severitySummary = DISPLAY_SEVERITIES.map((severity) => {
-    const count = severities.get(severity);
-    return count === undefined ? null : `${count} ${severity}`;
-  })
-    .filter((value): value is string => value !== null)
-    .join(", ");
+  const severitySummary = SCAN_SEVERITIES.flatMap((severity) =>
+    severities.has(severity) ? `${severities.get(severity)} ${severity}` : [],
+  ).join(", ");
 
   const started = Date.parse(result.manifest.scan.startedAt);
   const completed = Date.parse(result.manifest.scan.completedAt);
@@ -9272,9 +9162,13 @@ function printScanSummary(
         : severities.has("medium")
           ? 33
           : 36;
+  const threatModelPath = result.threatModelPath;
   errorOutput.write(
-    `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
-      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+    `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n` +
+      (threatModelPath === null
+        ? ""
+        : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
+      `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       (deepScanStop === undefined
         ? ""
@@ -9329,20 +9223,18 @@ function protectedRootErrorMessage(
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
-  const recovery =
+  return [
+    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
+    `  Resolved path:  ${error.outputDirectory}`,
+    `  Protected root: ${error.protectedRoot}`,
+    `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
         ? "Choose a private output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
-        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`;
-  return [
-    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
-    `  Resolved path:  ${error.outputDirectory}`,
-    `  Protected root: ${error.protectedRoot}`,
-    `  Reason:         ${reason}`,
-    recovery,
+        : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`,
   ].join("\n");
 }
 
@@ -9470,7 +9362,7 @@ function resolveCliScope(
 export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
-  effort?: ScanReasoningEffort,
+  effort?: ModelCliOptions["effort"],
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
   defaults?: JsonObject,
 ): JsonObject {
@@ -9702,9 +9594,7 @@ export class Progress {
 
   #line(message: string): string {
     const elapsedSeconds = this.elapsedSeconds;
-    const minutes = Math.floor(elapsedSeconds / 60);
-    const seconds = elapsedSeconds % 60;
-    return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${message}`;
+    return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
   }
 
   #observeStreamErrors(): void {
@@ -9752,10 +9642,6 @@ function interruptedExit(
   return ctrlC ? 130 : 143;
 }
 
-function isJsonObject(value: JsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function invokedAsMain(): boolean {
   const entrypoint = process.argv[1];
   if (entrypoint === undefined) return false;
@@ -9767,6 +9653,13 @@ function invokedAsMain(): boolean {
   }
 }
 
+const interruptedExitCode = (signal: AbortSignal): number | undefined =>
+  signal.reason === "SIGINT"
+    ? 130
+    : signal.reason === "SIGTERM"
+      ? 143
+      : undefined;
+
 if (invokedAsMain()) {
   void main().then(
     (exitCode) => {
@@ -9776,5 +9669,33 @@ if (invokedAsMain()) {
       process.stderr.write(`codex-security: ${errorMessage(error)}\n`);
       process.exitCode = 2;
     },
+  );
+}
+
+function listenForAbort(
+  dependencies: Pick<
+    CliDependencies,
+    "addSignalListener" | "removeSignalListener"
+  >,
+  controller: AbortController,
+): () => void {
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  return () => {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  };
+}
+
+function withoutLinearCredentials(
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(name),
+    ),
   );
 }

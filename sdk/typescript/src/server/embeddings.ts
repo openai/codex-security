@@ -104,6 +104,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       );
     }
     if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
       throw new FindingsError(
         "embedding_failed",
         `Embedding provider returned HTTP ${response.status}.`,

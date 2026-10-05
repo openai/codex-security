@@ -44,29 +44,11 @@ export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
   "prepareInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string }>;
 
-export const prepareReviewItemsOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "prepareOutput",
-) as z.ZodType<PreparedReviewItems>;
-
 export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
   "reviewItemsInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
-
-export const reviewItemsWorkerReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsWorkerInput",
-) as z.ZodType<ArtifactPage>;
-
-export const reviewItemsReaderOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsOutput",
-) as z.ZodType<ReviewItemsResult>;
 
 const reviewItemSchema = loadArtifactZodSchema(
   documents,

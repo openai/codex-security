@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -34,14 +35,11 @@ import {
   basename,
   dirname,
   extname,
-  isAbsolute,
   join,
   relative,
   resolve,
-  sep,
   win32,
 } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
@@ -59,9 +57,12 @@ import {
   type ProtectedScanPathKind,
   SandboxUnavailableError,
   errorMessage,
+  abortReason,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import {
+  isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
 } from "./trusted-executable.js";
@@ -221,11 +222,7 @@ export async function prepareCodexSecurityCredentialHome(
       await mkdir(path, { recursive: true, mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) === "EEXIST") {
-        const existing = await lstat(path).catch(() => null);
-        if (
-          existing !== null &&
-          (!existing.isDirectory() || existing.isSymbolicLink())
-        ) {
+        if ((await lstat(path).catch(() => null))?.isDirectory() === false) {
           throw new OutputDirectoryError(
             `Codex Security credential home is not a directory: ${path}`,
             { cause: error },
@@ -236,7 +233,7 @@ export async function prepareCodexSecurityCredentialHome(
     }
     if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     const metadata = await lstat(path, { bigint: true });
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    if (!metadata.isDirectory()) {
       throw new OutputDirectoryError(
         `Codex Security credential home is not a directory: ${path}`,
       );
@@ -267,9 +264,7 @@ export async function prepareCodexSecurityCredentialHome(
  */
 export async function requireSecureCredentialHome(
   path: string,
-  options: {
-    platform?: NodeJS.Platform;
-    secureWindowsHome?: (path: string) => Promise<void>;
+  options: Parameters<typeof requirePrivateDirectory>[3] & {
     metadata?: BigIntStats;
     expectedDevice?: bigint;
     expectedInode?: bigint;
@@ -305,7 +300,7 @@ export async function requireSecureCredentialHome(
     );
   }
   metadata = canonicalMetadata;
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+  if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(
       `Codex Security credential home is not a directory: ${path}`,
     );
@@ -339,20 +334,14 @@ export async function requireSecureCredentialHome(
 export async function requirePrivateCredentialHome(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
-  options: {
-    platform?: NodeJS.Platform;
-    secureWindowsHome?: (path: string) => Promise<void>;
-  } = {},
+  options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
 export async function requirePrivatePolicyOutputDirectory(
   path: string,
-  options: {
-    platform?: NodeJS.Platform;
-    secureWindowsHome?: (path: string) => Promise<void>;
-  } = {},
+  options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
   await requirePrivateDirectory(
     await lstat(path),
@@ -395,9 +384,7 @@ function windowsCredentialAclFailure(error: unknown): string {
   const detail =
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
-      : error instanceof Error
-        ? error.message
-        : String(error);
+      : errorMessage(error);
   const normalized = errorMessage(detail)
     .replace(/\s+/gu, " ")
     .trim()
@@ -698,7 +685,7 @@ export async function streamWindowsCredentialAclDescriptors(
   args: readonly string[],
   inspectDescriptor: (descriptor: string) => Promise<void>,
   options: { environment?: NodeJS.ProcessEnv } = {},
-): Promise<number> {
+): Promise<void> {
   const child = spawn(command, [...args], {
     env: options.environment,
     stdio: ["ignore", "pipe", "pipe"],
@@ -734,19 +721,24 @@ export async function streamWindowsCredentialAclDescriptors(
     });
   });
 
-  let descriptors = 0;
   try {
     await Promise.all([
       completion,
       (async () => {
-        const lines = createInterface({
-          input: child.stdout,
-          crlfDelay: Infinity,
-        });
-        for await (const descriptor of lines) {
-          if (descriptor === "") continue;
-          await inspectDescriptor(descriptor);
-          descriptors += 1;
+        // Consume chunks directly: readline can resume its queued-line
+        // iterator after EOF and throw instead of draining the last lines.
+        child.stdout.setEncoding("utf8");
+        let pending = "";
+        for await (const chunk of child.stdout) {
+          const lines = (pending + chunk).split(/[\r\n]/u);
+          pending = lines.pop()!;
+          for (const descriptor of lines) {
+            if (descriptor === "") continue;
+            await inspectDescriptor(descriptor);
+          }
+        }
+        if (pending !== "") {
+          await inspectDescriptor(pending);
         }
       })(),
     ]);
@@ -761,7 +753,6 @@ export async function streamWindowsCredentialAclDescriptors(
       "Windows credential descendants changed during ACL inspection",
     );
   }
-  return descriptors;
 }
 
 export async function inspectWindowsCredentialAclSnapshot(
@@ -1129,10 +1120,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
-  securityOptions: {
-    platform?: NodeJS.Platform;
-    secureWindowsHome?: (path: string) => Promise<void>;
-  } = {},
+  securityOptions: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<() => Promise<void>> {
   throwIfSignalAborted(signal);
   const homeMetadata = await requireSecureCredentialHome(
@@ -1146,10 +1134,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
   const token = randomUUID();
   const databasePath = join(codexHome, CREDENTIAL_LOCK_DATABASE);
   const existingDatabaseMetadata = await lstat(databasePath).catch(
-    (error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT") return null;
-      throw error;
-    },
+    nullIfMissingFileError,
   );
   if (existingDatabaseMetadata !== null) {
     requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
@@ -1223,11 +1208,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
         }
         databaseLocked = true;
       }
-      const existingLock = await lstat(lock).catch((error: unknown) => {
-        if (nodeErrorCode(error) === "ENOENT") return null;
-        throw error;
-      });
-      if (existingLock !== null) {
+      if ((await lstat(lock).catch(nullIfMissingFileError)) !== null) {
         if (await recoverStaleCredentialHomeLock(lock)) continue;
         await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
         continue;
@@ -1316,12 +1297,9 @@ interface CredentialLockDatabaseConstructor {
 }
 
 async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
-  const metadata = await lstat(lock).catch((error: unknown) => {
-    if (nodeErrorCode(error) === "ENOENT") return null;
-    throw error;
-  });
+  const metadata = await lstat(lock).catch(nullIfMissingFileError);
   if (metadata === null) return true;
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+  if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(
       `Codex Security credential-home lock is not a directory: ${lock}`,
     );
@@ -1409,8 +1387,7 @@ export async function codexSecurityCredentialAllowsAmbientImport(
 ): Promise<boolean> {
   await requireSecureCredentialHome(codexHome);
   try {
-    const marker = await lstat(join(codexHome, CREDENTIAL_LOGOUT_MARKER));
-    if (!marker.isFile() || marker.isSymbolicLink()) {
+    if (!(await lstat(join(codexHome, CREDENTIAL_LOGOUT_MARKER))).isFile()) {
       throw new OutputDirectoryError(
         `Codex Security logout marker is not a regular file: ${codexHome}`,
       );
@@ -1434,7 +1411,7 @@ export async function codexSecurityHasStoredFileCredentials(
     if (nodeErrorCode(error) === "ENOENT") return false;
     throw error;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+  if (!metadata.isFile()) {
     throw new OutputDirectoryError(
       `Codex Security stored authentication is not a regular file: ${path}`,
     );
@@ -1514,17 +1491,9 @@ export function requireOutputOutsideRepository(
   outputDirectory: string,
   pathKind: ProtectedScanPathKind = "output",
 ): void {
-  const outputRelative = relative(repository, outputDirectory);
-  const repositoryRelative = relative(outputDirectory, repository);
   if (
-    outputRelative === "" ||
-    (outputRelative !== ".." &&
-      !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative)) ||
-    (pathKind === "output" &&
-      repositoryRelative !== ".." &&
-      !repositoryRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(repositoryRelative))
+    isWithin(repository, outputDirectory) ||
+    (pathKind === "output" && isWithin(outputDirectory, repository))
   ) {
     throw new OutputInsideProtectedRootError(
       outputDirectory,
@@ -1692,12 +1661,9 @@ export async function validateOutputDir(
   requireModelSafeOutputDir(outputDirectory);
   const path = resolve(expandHome(outputDirectory));
   try {
-    const metadata = await lstat(path).catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT") return null;
-      throw error;
-    });
+    const metadata = await lstat(path).catch(nullIfMissingFileError);
     if (metadata !== null) {
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      if (!metadata.isDirectory()) {
         throw new OutputDirectoryError(
           `Scan output is not a directory: ${path}`,
         );
@@ -1785,8 +1751,7 @@ export async function prepareScanArtifactRestorer(
     const prepared: unknown = JSON.parse(result.stdout);
     if (
       !isRecord(prepared) ||
-      typeof prepared["canonicalPath"] !== "string" ||
-      prepared["canonicalPath"].length === 0 ||
+      !isNonEmptyString(prepared["canonicalPath"]) ||
       typeof prepared["dev"] !== "string" ||
       !/^(?:0|[1-9]\d*)$/u.test(prepared["dev"]) ||
       typeof prepared["ino"] !== "string" ||
@@ -1825,7 +1790,6 @@ export async function prepareScanArtifactRestorer(
           ],
           pluginHelperEnvironment(options.environment),
           contents,
-          options.signal,
         );
         if (!result.success) {
           throw new Error(
@@ -1835,7 +1799,6 @@ export async function prepareScanArtifactRestorer(
           );
         }
       } catch (error) {
-        if (options.signal?.aborted) throw error;
         throw new OutputDirectoryError(
           "Could not safely restore a completed scan artifact.",
           { cause: error },
@@ -1849,16 +1812,12 @@ export async function planOutputArchive(
   outputDirectory: string | null,
 ): Promise<string | null> {
   if (outputDirectory === null) return null;
-  const entries = await readdir(outputDirectory).catch((error: unknown) => {
-    if (nodeErrorCode(error) === "ENOENT") return null;
-    throw error;
-  });
+  const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  const timestamp = new Date()
+  return `${outputDirectory}.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "");
-  return `${outputDirectory}.previous-${timestamp}-${randomUUID().slice(0, 8)}`;
+    .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
 }
 
 export function requireModelSafeOutputDir(path: string): void {
@@ -1881,15 +1840,26 @@ export async function canonicalizeModelSafePath(
 ): Promise<string> {
   const path = resolve(expandHome(input));
   requireModelSafeOutputDir(path);
-  for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+  const canonical = await canonicalConfigPath(path);
+  requireModelSafeOutputDir(canonical);
+  return canonical;
+}
+
+export async function canonicalConfigPath(path: string): Promise<string> {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (true) {
     try {
-      const canonicalAncestor = resolve(ancestor, await realpath(ancestor));
-      const canonical = resolve(canonicalAncestor, relative(ancestor, path));
-      requireModelSafeOutputDir(canonical);
-      return canonical;
+      return join(await realpath(existing), ...missing);
     } catch (error) {
-      if (nodeErrorCode(error) !== "ENOENT") throw error;
-      if (dirname(ancestor) === ancestor) throw error;
+      const parent = dirname(existing);
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+        parent === existing
+      )
+        throw error;
+      missing.unshift(basename(existing));
+      existing = parent;
     }
   }
 }
@@ -1922,10 +1892,7 @@ export async function prepareOutputDir(
   }
   let createdRoot: string | undefined;
   try {
-    let existing = await lstat(path).catch((error: unknown) => {
-      if (nodeErrorCode(error) === "ENOENT") return null;
-      throw error;
-    });
+    let existing = await lstat(path).catch(nullIfMissingFileError);
     if (existing !== null && archiveExisting) {
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
@@ -1958,7 +1925,7 @@ export async function validatePreparedOutputDir(
   validateLocation?: (path: string) => void,
 ): Promise<string> {
   const metadata = await lstat(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+  if (!metadata.isDirectory()) {
     throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
   }
   const canonical = await realpath(path);
@@ -2031,7 +1998,7 @@ export async function requireSecureOutputAncestry(
         { cause: error },
       );
     }
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    if (!metadata.isDirectory()) {
       throw new OutputDirectoryError(
         `Scan output parent must be a non-symlink directory: ${current}`,
       );
@@ -2367,7 +2334,7 @@ export async function resolvePluginPath(
       signal,
     );
   }
-  if (metadata?.isDirectory() && !metadata.isSymbolicLink()) {
+  if (metadata?.isDirectory()) {
     throwIfSignalAborted(signal);
     return await validatePluginRoot(path);
   }
@@ -2498,10 +2465,7 @@ export async function bootstrapPlugin(
     CODEX_HOME: codexHome,
   };
   const run = options.runCodex ?? runPluginCommand;
-  const existing = await lstat(marketplace).catch((error: unknown) => {
-    if (nodeErrorCode(error) === "ENOENT") return null;
-    throw error;
-  });
+  const existing = await lstat(marketplace).catch(nullIfMissingFileError);
   if (existing !== null && !existing.isDirectory()) {
     throw new PluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
@@ -2712,8 +2676,7 @@ export async function pluginMetadata(
   const manifestPath = join(root, ".codex-plugin", "plugin.json");
   let manifest: unknown;
   try {
-    const metadata = await lstat(manifestPath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    if (!(await lstat(manifestPath)).isFile()) {
       throw new Error("plugin manifest is not a regular file");
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -3135,32 +3098,23 @@ export function isPythonPathCandidate(candidate: string): boolean {
 }
 
 async function hasPluginManifest(root: string): Promise<boolean> {
-  return await isRegularFile(join(root, ".codex-plugin", "plugin.json"));
+  return await lstat(join(root, ".codex-plugin", "plugin.json")).then(
+    (metadata) => metadata.isFile(),
+    () => false,
+  );
 }
 
-async function isRegularFile(path: string): Promise<boolean> {
-  try {
-    const metadata = await lstat(path);
-    return metadata.isFile() && !metadata.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-async function sameFile(left: string, right: string): Promise<boolean> {
-  try {
-    // NTFS file IDs can exceed JavaScript's safe integer range.
-    const [leftMetadata, rightMetadata] = await Promise.all([
-      stat(left, { bigint: true }),
-      stat(right, { bigint: true }),
-    ]);
-    return (
+function sameFile(left: string, right: string): Promise<boolean> {
+  // NTFS file IDs can exceed JavaScript's safe integer range.
+  return Promise.all([
+    stat(left, { bigint: true }),
+    stat(right, { bigint: true }),
+  ]).then(
+    ([leftMetadata, rightMetadata]) =>
       leftMetadata.dev === rightMetadata.dev &&
-      leftMetadata.ino === rightMetadata.ino
-    );
-  } catch {
-    return false;
-  }
+      leftMetadata.ino === rightMetadata.ino,
+    () => false,
+  );
 }
 
 export function expandHome(
@@ -3199,23 +3153,29 @@ function processErrorDetail(error: unknown): string {
   return String(error) || "unknown error";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function nodeErrorCode(error: unknown): string | undefined {
   return isRecord(error) && typeof error["code"] === "string"
     ? error["code"]
     : undefined;
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
-}
-
 function throwIfSignalAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal);
 }
+
+function nullIfMissingFileError(error: unknown): null {
+  if (nodeErrorCode(error) === "ENOENT") return null;
+  throw error;
+}
+
+/** @internal */
+export function workbenchEnvironment(environment: ProcessEnvironment) {
+  return {
+    ...environment,
+    CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
+  };
+}
+
+/** @internal */
+export const resolveWorkbenchRuntime = (options: PluginPythonOptions) =>
+  Promise.all([resolvePluginPython(options), bundledPluginRoot()]);

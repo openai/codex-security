@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "application": "../app",
+  "findings": [
+    {
+      "id": "ID-001",
+      "category": "Secret exposure",
+      "cwe": ["CWE-200"],
+      "title": "Support reports disclose a server-side connector credential",
+      "locations": [{ "path": "integrations.mjs", "symbol": "supportReport" }],
+      "boundary": "A workspace member receives a server-only Ledger credential."
+    },
+    {
+      "id": "ID-002",
+      "category": "Broken object authorization",
+      "cwe": ["CWE-639"],
+      "title": "Invoice API lookup omits workspace ownership",
+      "locations": [
+        { "path": "server.mjs", "symbol": "createApp" },
+        { "path": "invoices.mjs", "symbol": "getInvoice" }
+      ],
+      "boundary": "An authenticated member reads another workspace's invoice."
+    },
+    {
+      "id": "ID-003",
+      "category": "Cross-tenant cache leakage",
+      "cwe": ["CWE-524"],
+      "title": "Invoice previews share a cache key across workspaces",
+      "locations": [{ "path": "invoices.mjs", "symbol": "previewInvoice" }],
+      "boundary": "A correctly authorized preview returns another workspace's cached content."
+    },
+    {
+      "id": "ID-004",
+      "category": "Stale approval",
+      "cwe": ["CWE-841"],
+      "title": "Invoice edits retain approvals for an earlier version",
+      "locations": [
+        { "path": "invoices.mjs", "symbol": "updateInvoice" },
+        { "path": "invoices.mjs", "symbol": "sendInvoice" }
+      ],
+      "boundary": "An edited invoice is sent without approval of its current amount."
+    },
+    {
+      "id": "ID-005",
+      "category": "Fail-open validation",
+      "cwe": ["CWE-636"],
+      "title": "Import-review errors turn into successful approvals",
+      "locations": [{ "path": "imports.mjs", "symbol": "importInvoice" }],
+      "boundary": "An unsupported document version bypasses the import amount policy."
+    },
+    {
+      "id": "ID-006",
+      "category": "Credential destination confusion",
+      "cwe": ["CWE-201"],
+      "title": "Connector deliveries reuse a credential at a different destination",
+      "locations": [{ "path": "integrations.mjs", "symbol": "deliverInvoice" }],
+      "boundary": "A destination owned by another workspace receives a reusable Ledger credential."
+    },
+    {
+      "id": "ID-007",
+      "category": "Shared mutable security policy",
+      "cwe": ["CWE-668"],
+      "title": "Workspace import limits share the same nested policy object",
+      "locations": [
+        { "path": "store.mjs", "symbol": "createStore" },
+        { "path": "imports.mjs", "symbol": "updateImportPolicy" }
+      ],
+      "boundary": "An administrator changes a different workspace's effective import policy."
+    },
+    {
+      "id": "ID-008",
+      "category": "Validation and consumption mismatch",
+      "cwe": ["CWE-436"],
+      "title": "Import authorization and persistence choose different workspace fields",
+      "locations": [{ "path": "imports.mjs", "symbol": "importInvoice" }],
+      "boundary": "A document authorized for one workspace creates an invoice in another."
+    },
+    {
+      "id": "ID-009",
+      "category": "Mass assignment",
+      "cwe": ["CWE-915"],
+      "title": "Profile updates can change the caller's administrative role",
+      "locations": [{ "path": "accounts.mjs", "symbol": "updateProfile" }],
+      "boundary": "A member acquires administrator-only approval privileges."
+    },
+    {
+      "id": "ID-010",
+      "category": "Stored HTML injection",
+      "cwe": ["CWE-79"],
+      "title": "Invoice notes render stored user input as HTML",
+      "locations": [{ "path": "views.mjs", "symbol": "invoicePage" }],
+      "boundary": "A member's note becomes active markup in another user's invoice page."
+    }
+  ]
+}

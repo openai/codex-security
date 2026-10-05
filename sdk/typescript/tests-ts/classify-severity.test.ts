@@ -1,5 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -10,19 +9,16 @@ import {
   type ClassifySeverityOptions,
   type SeverityClassificationFinding,
 } from "../src/classify-severity.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "severity-policy-",
+  false,
+);
+afterEach(cleanup);
 
 async function document(contents: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "severity-policy-"));
-  directories.push(directory);
+  const directory = await temporaryDirectory();
   const path = join(directory, "policy.md");
   await writeFile(path, contents);
   return path;

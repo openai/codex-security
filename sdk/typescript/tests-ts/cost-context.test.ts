@@ -9,8 +9,9 @@ import {
 test.each([
   ["gpt-5.5", [5, 0.5, 5, 30], [10, 1, 10, 45]],
   ["gpt-5.5-2026-04-23", [5, 0.5, 5, 30], [10, 1, 10, 45]],
-  ["gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]],
+  ["gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
   ["gpt-6-astra", [10, 1, 12.5, 50], [20, 2, 25, 75]],
+  ["gpt-6-luna", [0.1, 0.01, 0.125, 0.5], [0.2, 0.02, 0.25, 0.75]],
   ["gpt-5.6", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
   ["gpt-5.6-sol", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
   ["gpt-5.6-terra", [2, 0.2, 2.5, 12], [4, 0.4, 5, 18]],
@@ -35,6 +36,83 @@ test.each([
         });
       }
     }
+  },
+);
+
+test("prices the exact Bedrock Daybreak Blue ID with AWS short and long context rates", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 200_000,
+    cache_write_input_tokens: 300_000,
+    output_tokens: 100_000,
+  };
+  const cost = estimateScanCost("openai.gpt-daybreak-blue-5.6-sol", usage)!;
+  expect(cost).toMatchObject({
+    model: "openai.gpt-daybreak-blue-5.6-sol",
+    estimatedUsd: 6.138,
+    estimatedUsdRange: { min: 6.138, max: 11.176, context: "unknown" },
+    pricing: {
+      source:
+        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html",
+      asOf: "2026-10-01",
+      serviceTier: "standard",
+      context: "short",
+      usdPerMillionTokens: {
+        input: 4.4,
+        cacheRead: 0.44,
+        cacheWrite: 5.5,
+        output: 22,
+      },
+      longContextUsdPerMillionTokens: {
+        input: 8.8,
+        cacheRead: 0.88,
+        cacheWrite: 11,
+        output: 33,
+      },
+    },
+  });
+  expect(estimateScanCost("gpt-daybreak-blue-5.6-sol", usage)).toBeNull();
+});
+
+test("prices the exact Bedrock Daybreak Red ID without inventing long-context rates", () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    cached_input_tokens: 200_000,
+    cache_write_input_tokens: 300_000,
+    output_tokens: 100_000,
+  };
+  const cost = estimateScanCost("openai.gpt-5.6-cyber", usage)!;
+  expect(cost).toMatchObject({
+    model: "openai.gpt-5.6-cyber",
+    estimatedUsd: 20.55625,
+    estimatedUsdRange: { min: 20.55625, max: null, context: "unknown" },
+    pricing: {
+      source:
+        "https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html",
+      asOf: "2026-10-01",
+      serviceTier: "standard",
+      context: "short",
+      usdPerMillionTokens: {
+        input: 13.75,
+        cacheRead: 1.375,
+        cacheWrite: 17.1875,
+        output: 82.5,
+      },
+    },
+  });
+  expect(cost.pricing).not.toHaveProperty("longContextUsdPerMillionTokens");
+  expect(estimateScanCost("gpt-5.6-cyber", usage)).toBeNull();
+});
+
+test.each([1, 3])(
+  "retains a Bedrock Red estimate for %i cache-write tokens",
+  (written) => {
+    const cost = estimateScanCost("openai.gpt-5.6-cyber", {
+      input_tokens: written,
+      cache_write_input_tokens: written,
+      output_tokens: 0,
+    });
+    expect(cost?.estimatedUsd).toBe((written * 17.1875) / 1_000_000);
   },
 );
 

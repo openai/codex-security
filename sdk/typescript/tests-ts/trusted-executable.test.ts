@@ -1,14 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -16,24 +7,13 @@ import {
   inspectTrustedExecutable,
   resolveTrustedExecutable,
 } from "../src/trusted-executable.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "trusted-executable-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "trusted-executable-")),
-  );
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 async function resolveWindowsExecutable(
   candidate: string,

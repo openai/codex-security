@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
@@ -64,7 +65,6 @@ interface ScanDashboardOptions {
   showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
-  sanitize?: (value: string) => string;
   input?: DashboardInput;
   onInterrupt?: () => void;
 }
@@ -600,7 +600,7 @@ export class ScanDashboard {
       scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
 
-    const lines = [
+    return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
@@ -624,9 +624,7 @@ export class ScanDashboard {
                 ]),
           ]),
       `  TIME     ${time}  ·  ${this.#budget === null ? scrollStatus : "Enter to apply · Ctrl+C to exit"}`,
-    ];
-
-    return this.#formatFrame(lines);
+    ]);
   }
 
   #formatFrame(lines: (string | DashboardActivityLine)[]): string {
@@ -636,12 +634,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(
-            typeof line !== "string" && this.#view === "details"
-              ? text
-              : (this.#options.sanitize?.(text) ?? text),
-            width,
-          );
+          const clean = fitLine(text, width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -662,7 +655,6 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
-                  this.#options.sanitize,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -746,7 +738,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${fitLine(name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
     const table = this.#components
       .slice(first, first + rows)
       .map(({ receipt, dashboard }, index) => {
@@ -963,7 +955,6 @@ export class ScanDashboard {
       value: string,
       kind: DashboardActivityLine["kind"],
     ): void => {
-      value = this.#options.sanitize?.(value) ?? value;
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -1063,9 +1054,7 @@ function detailsDescription(
   const itemType = typeof payload["type"] === "string" ? payload["type"] : type;
   if (itemType === "token_count") return undefined;
   if (itemType === "message" || itemType === "agent_message") {
-    const role =
-      typeof payload["role"] === "string" ? payload["role"] : "assistant";
-    return `${role}: ${detailsText(payload["content"] ?? payload["message"])}`;
+    return `${typeof payload["role"] === "string" ? payload["role"] : "assistant"}: ${detailsText(payload["content"] ?? payload["message"])}`;
   }
   if (itemType === "reasoning" || itemType.startsWith("agent_reasoning")) {
     const text = detailsText(
@@ -1101,10 +1090,6 @@ function detailsText(value: unknown): string {
     .join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
     value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
@@ -1121,10 +1106,9 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
-  sanitize: ((value: string) => string) | undefined,
 ): string {
   for (const { label, target } of links ?? []) {
-    const safe = safeHyperlinkTarget(sanitize?.(target) ?? target);
+    const safe = safeHyperlinkTarget(target);
     if (safe !== undefined) {
       value = value.replace(
         label,
@@ -1281,11 +1265,7 @@ function styleLine(
     if (kind === "status" || kind === "warning") {
       return `${prefix}\u001B[${style}m${marker}${separator}${description}\u001B[0m`;
     }
-    const workerLabel =
-      worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`;
-    const prose =
-      kind === "message" ? `\u001B[1m${description}\u001B[22m` : description;
-    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${workerLabel}${prose}`;
+    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`}${kind === "message" ? `\u001B[1m${description}\u001B[22m` : description}`;
   }
   return `\u001B[${style}m${value}\u001B[0m`;
 }
