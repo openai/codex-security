@@ -46,6 +46,7 @@ interface ChildReceipt {
 async function inlinePatch(
   settings: string[],
   beforeChild?: () => Promise<void>,
+  homeConfig?: string,
 ): Promise<ChildReceipt> {
   const root = await temporaryDirectory("inline-patch-settings-");
   const repository = join(root, "repository");
@@ -73,6 +74,10 @@ async function inlinePatch(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       SYNTHETIC_PATCH_RECEIPT: receipt,
     };
+    if (homeConfig !== undefined) {
+      await mkdir(environment.CODEX_HOME, { recursive: true });
+      await writeFile(join(environment.CODEX_HOME, "config.toml"), homeConfig);
+    }
     const { stderr, runCli } = createCliTest(main);
     const status = await runCli(
       [
@@ -149,16 +154,14 @@ describe("inline patch service tier", () => {
       ],
       "standard",
     ],
-    ["native default", [], undefined],
+    ["native default", [], "default"],
   ] as const)(
     "preserves %s at the child-process boundary",
     async (_, settings, tier) => {
       const child = await inlinePatch([...settings]);
       expect(
         child.argv.filter((value) => value.startsWith("service_tier=")),
-      ).toEqual(
-        tier === undefined ? [] : [`service_tier=${JSON.stringify(tier)}`],
-      );
+      ).toEqual([`service_tier=${JSON.stringify(tier)}`]);
       expect(child.argv).toContain('model="gpt-6.1-sol"');
       expect(child.argv).toContain('model_reasoning_effort="low"');
       expect(child.argv).not.toContain("features.goals=false");
@@ -169,6 +172,15 @@ describe("inline patch service tier", () => {
       expect(child.preflightSandbox).toBe("workspaceWrite");
     },
   );
+
+  test("preserves the scan native default over an ambient fast tier", async () => {
+    const child = await inlinePatch([], undefined, 'service_tier = "fast"\n');
+    expect(child.argv).toContain('service_tier="default"');
+    expect(child.homeTier).toBe('"fast"');
+    expect(child.loginType).toBe("apiKey");
+    expect(child.approvalPolicy).toBe("never");
+    expect(child.sandbox).toBe("workspace-write");
+  });
 
   test("keeps overlapping scan tiers isolated", async () => {
     let arrivals = 0;
@@ -181,14 +193,19 @@ describe("inline patch service tier", () => {
       await ready;
     };
     const children = await Promise.all([
-      inlinePatch(["--codex", 'service_tier="fast"'], beforeChild),
-      inlinePatch([], beforeChild),
+      inlinePatch(
+        ["--codex", 'service_tier="fast"'],
+        beforeChild,
+        'service_tier = "standard"\n',
+      ),
+      inlinePatch([], beforeChild, 'service_tier = "fast"\n'),
     ]);
     expect(children[0]!.argv).toContain('service_tier="fast"');
-    expect(
-      children[1]!.argv.some((value) => value.startsWith("service_tier=")),
-    ).toBe(false);
-    expect(children.map((child) => child.homeTier)).toEqual([null, null]);
+    expect(children[1]!.argv).toContain('service_tier="default"');
+    expect(children.map((child) => child.homeTier)).toEqual([
+      '"standard"',
+      '"fast"',
+    ]);
   });
 
   test("retains standalone patch override compatibility", async () => {

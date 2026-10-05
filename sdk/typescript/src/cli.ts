@@ -8175,9 +8175,8 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    patchServiceTier = resolveCodexProfile(effectiveConfiguration)[
-      "service_tier"
-    ];
+    patchServiceTier =
+      resolveCodexProfile(effectiveConfiguration)["service_tier"] ?? "default";
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
