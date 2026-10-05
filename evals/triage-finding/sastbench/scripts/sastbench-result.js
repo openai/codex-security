@@ -3,7 +3,10 @@
 const VALID_VERDICTS = new Set(["confirmed", "not_actionable", "needs_review"]);
 const VALID_LABELS = new Set(["true_positive", "false_positive"]);
 
-function extractTriageResult(output) {
+function extractTriageResult(
+  output,
+  failureMessage = "Could not find a parseable triage-finding/v0 JSON result",
+) {
   const text = typeof output === "string" ? output : JSON.stringify(output);
   const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) =>
     match[1].trim(),
@@ -26,7 +29,7 @@ function extractTriageResult(output) {
       // The response may contain more than one fenced block. Try the next one.
     }
   }
-  throw new Error("Could not find a parseable triage-finding/v0 JSON result");
+  throw new Error(failureMessage);
 }
 
 function parseCaseOutcome(output, expectedInputId) {

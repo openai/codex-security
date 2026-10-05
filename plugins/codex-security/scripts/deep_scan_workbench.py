@@ -17,16 +17,10 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
-from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
-from workbench_target import (
-    directory_content_digest,
-    directory_snapshot_regular_file_count,
-    git_revision,
-    worktree_content_digest,
-)
+from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
@@ -671,7 +665,7 @@ def begin_deep_scan_for_scan(
     if workflow_version is None:
         raise SystemExit("workflow-version is required.")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
         require_current_continuation(
             scan,
@@ -679,10 +673,6 @@ def begin_deep_scan_for_scan(
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
         ensure_deep_scan_run(connection, scan, config, workflow_version, dependencies().now())
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id, start_disposition="created")
 
 
@@ -697,19 +687,13 @@ def begin_deep_scan_for_target(
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
     target_metadata = target.stat()
-    revision = git_revision(target)
-    target_snapshot_digest = (
-        directory_content_digest(target)
-        if revision == "unversioned"
-        else worktree_content_digest(target)
-    )
-    target_device = serialize_filesystem_identity(target_metadata.st_dev)
-    target_inode = serialize_filesystem_identity(target_metadata.st_ino)
+    target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
+    revision, target_snapshot_digest, target_device, target_inode = target_identity
     scope_file_count = directory_snapshot_regular_file_count(
         target if scope == "." else target / scope
     )
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
             existing_run = connection.execute(
@@ -759,11 +743,7 @@ def begin_deep_scan_for_target(
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
-        root = (
-            Path(args.scan_root).expanduser().resolve()
-            if args.scan_root
-            else dependencies().state_dir() / "scans"
-        )
+        root = dependencies().resolve_scan_root(args.scan_root)
         target_root = (root / dependencies().safe_segment(target.name)).resolve()
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
@@ -800,55 +780,28 @@ def begin_deep_scan_for_target(
                 timestamp,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-                target_device, target_inode, scope, mode, user_context,
-                deep_scan_owner_thread_id, scan_dir, model, reasoning_effort, status, phase,
-                handoff_status, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
-                'running', 'preflight', 'delivered', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                target_id,
-                target_path,
-                revision,
-                target_snapshot_digest,
-                target_device,
-                target_inode,
-                scope,
-                user_context,
-                thread_id,
-                str(scan_dir),
-                model,
-                reasoning_effort,
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO scan_progress (
-                scan_id, scope_file_count, review_items_total, review_items_completed,
-                reportable_findings_count, updated_at
-            ) VALUES (?, ?, 0, 0, 0, ?)
-            """,
-            (scan_id, scope_file_count, timestamp),
-        )
-        connection.execute(
-            "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
-            (scan_id, timestamp, workspace_id),
+        workspace = connection.execute(
+            "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+        dependencies().insert_running_scan(
+            connection,
+            scan_id=scan_id,
+            workspace=workspace,
+            target=target,
+            scope=scope,
+            diff_target=None,
+            target_identity=target_identity,
+            target_root=target_root,
+            target_summary=None,
+            scope_file_count=scope_file_count,
+            timestamp=timestamp,
+            handoff_status="delivered",
+            model=model,
+            reasoning_effort=reasoning_effort,
+            scan_dir=scan_dir,
         )
         scan = dependencies().require_scan(connection, scan_id)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id, start_disposition="created")
 
 
@@ -931,7 +884,7 @@ def claim_deep_scan_coordinator_locked(
     connection: sqlite3.Connection, args: argparse.Namespace, scan_id: str
 ) -> dict[str, Any]:
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan, _ = require_owned_scan(connection, scan_id, args.thread_id)
         require_current_continuation(
             scan,
@@ -963,10 +916,6 @@ def claim_deep_scan_coordinator_locked(
             """,
             (int(args.coordinator_generation != run["coordinator_generation"]), timestamp, scan_id),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return {
         **deep_scan_result(connection, scan_id),
         "coordinatorDisposition": disposition,
@@ -1128,7 +1077,7 @@ def upsert_deep_scan_worker(
     scan_id = require_uuid(args.scan_id, "scan-id")
     worker_id = require_uuid(args.worker_id, "worker-id")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
@@ -1349,10 +1298,6 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id)
 
 
@@ -1365,7 +1310,7 @@ def claim_deep_scan_dedup(
     if len(set(input_ids)) != len(input_ids):
         raise SystemExit("Dedup input worker IDs must be unique.")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         run, scan = require_running_deep_scan(connection, scan_id)
         require_current_coordinator(run, args)
         prompt_path = deep_scan_path(scan, args.prompt_path, "Dedup prompt path", kind="file")
@@ -1494,10 +1439,6 @@ def claim_deep_scan_dedup(
             """,
             (timestamp, scan_id),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id)
 
 
@@ -2011,7 +1952,7 @@ def record_deep_scan_publication_failure(
         raise SystemExit("message is required.")
     with dependencies().scan_completion_lock(scan_id):
         connection.execute("BEGIN IMMEDIATE")
-        try:
+        with connection:
             run = require_deep_scan_run(connection, scan_id)
             require_current_coordinator(run, args)
             scan = dependencies().require_scan(connection, scan_id)
@@ -2035,10 +1976,6 @@ def record_deep_scan_publication_failure(
                     """,
                     (message, timestamp, scan_id),
                 )
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
     return deep_scan_result(connection, scan_id)
 
 

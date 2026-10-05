@@ -14,31 +14,21 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
+    start_workspace_scan,
     write_checkpoint,
     write_completed_contract,
 )
 
 
 def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     return state_dir, scan_id, scan_dir
 
@@ -50,15 +40,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     run_workbench(
         state_dir,
         "begin-deep-scan",
@@ -554,15 +536,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
             "--mode",
             mode,
         )
-        started = start_delivered_scan(
-            state_dir,
-            "--workspace-id",
-            workspace_id,
-            "--scan-root",
-            str(tmp_path / "scans"),
-        )
-        scan_id = str(started["results"]["scanId"])
-        scan_dir = Path(str(started["results"]["scanDir"]))
+        scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
         if mode == "deep":
             run_workbench(
                 state_dir,
@@ -603,19 +577,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
 def test_completion_populates_workbench_owned_unsealed_envelope(
     tmp_path: Path, omit_metadata: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     findings = json.loads((scan_dir / "findings.json").read_text())
