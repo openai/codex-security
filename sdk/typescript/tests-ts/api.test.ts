@@ -1686,24 +1686,35 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     await mkdir(repository);
-    const scenarios: [JsonObject, string][] = [
-      [{}, "none"],
-      [{ model_reasoning_summary: "auto" }, "auto"],
+    const scenarios: [JsonObject, string, string | undefined][] = [
+      [{}, "none", undefined],
+      [
+        { model_reasoning_summary: "auto", service_tier: "flex" },
+        "auto",
+        "flex",
+      ],
       [
         {
           profile: "cloud",
-          profiles: { cloud: { model_reasoning_summary: "concise" } },
+          profiles: {
+            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+          },
         },
         "concise",
+        "fast",
       ],
       [
         {
           profile: "cloud.production",
           profiles: {
-            "cloud.production": { model_reasoning_summary: "concise" },
+            "cloud.production": {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+            },
           },
         },
         "concise",
+        "fast",
       ],
     ];
     let started = 0;
@@ -1716,7 +1727,7 @@ describe("CodexSecurity orchestration", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const clients = await Promise.all(
-      scenarios.map(async ([overrides, expected], index) => {
+      scenarios.map(async ([overrides, expected, expectedTier], index) => {
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
         return new TestClient(
@@ -1774,6 +1785,9 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_effort: "xhigh",
                     model_provider: "amazon-bedrock",
                   });
+                  expect(resolveCodexProfile(config)["service_tier"]).toBe(
+                    expectedTier,
+                  );
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );

@@ -1336,7 +1336,7 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "other-program",
       configuration:
-        'service_tier = "flex"\nprofile = "selected"\n[profiles.selected]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
       serviceTier: "fast",
       program: "standard",
       features: {
