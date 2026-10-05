@@ -83,6 +83,7 @@
 - cancel failed embedding response bodies ([#1232](https://github.com/openai/codex-security/pull/1232))
 - recognize PHP heredoc terminators inside expressions ([#1236](https://github.com/openai/codex-security/pull/1236))
 - preserve Go declarations after raw strings ending in backslashes ([#1235](https://github.com/openai/codex-security/pull/1235))
+- migrate tests to TypeScript and simplify tooling ([#1219](https://github.com/openai/codex-security/pull/1219))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

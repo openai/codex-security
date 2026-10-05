@@ -36,18 +36,13 @@ import { basename } from "node:path";
 
 const args = [basename(process.argv[1]), ...process.argv.slice(2)];
 if (args.join(" ") === "login --with-api-key") {
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
+  const input = await process.stdin.reduce((text, chunk) => text + chunk, "");
   if (input.trim() !== "secret-key") {
     console.error("wrong key");
     process.exitCode = 2;
-  } else {
-    console.log("API key stored");
   }
 } else if (args.join(" ") === "login status") {
   console.log("Logged in using ChatGPT");
-} else if (args.join(" ") === "logout") {
-  console.log("Logged out");
 } else if (args[0] === "login") {
   console.error("Listening on http://localhost:1455.");
   console.error("Listening on http://localhost.:1455.");
@@ -64,8 +59,7 @@ if (args.join(" ") === "login --with-api-key") {
   console.error('Open "\\u001b[32mhttps://127.auth.example.test/device\\u001b[0m"');
   console.error("Enter this one-time code");
   console.error("\\u001b[36m8356-V2EGR\\u001b[0m");
-  process.exit(0);
-} else {
+} else if (args.join(" ") !== "logout") {
   console.error("unexpected args: " + args.join(" "));
   process.exitCode = 3;
 }
@@ -163,9 +157,8 @@ describe("Codex authentication process boundary", () => {
         script,
         `process.stderr.write(${JSON.stringify(`Open ${url}\n${instruction}\n`)}, () => process.exit(0));\n`,
       );
-      const command = nodeCommand().command;
       const handle = new CodexLoginHandle(
-        { command },
+        nodeCommand(),
         [script],
         process.env,
         () => {},

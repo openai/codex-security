@@ -7,13 +7,9 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "types": ["node"]
+    "types": ["node"],
+    "lib": ["ES2024"],
+    "allowImportingTsExtensions": true
   },
-  "include": [
-    "main.ts",
-    "artifact-writer-main.ts",
-    "helpers-main.ts",
-    "server.ts",
-    "src"
-  ]
+  "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]
 }
