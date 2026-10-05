@@ -67,7 +67,7 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
-  const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
+  const existingRoot = await resolveStoragePath(scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
     throw new Error("Artifact storage must be outside the target repository.");
   }
@@ -107,7 +107,17 @@ async function storageContext(
       .catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "EEXIST") throw error;
       });
-  return { ...context, root };
+  const canonicalRoot = await requireArtifactRoot(
+    root,
+    "Temporary artifact storage",
+  );
+  const uid = process.geteuid?.();
+  if (uid !== undefined && (await fs.lstat(root)).uid !== uid) {
+    throw new Error(
+      "Temporary artifact storage must be owned by the current user.",
+    );
+  }
+  return { ...context, root: canonicalRoot };
 }
 
 function components(path: string): string[] {

@@ -425,6 +425,60 @@ inline int answer() { return 42; }
     )
 
 
+@pytest.mark.parametrize(
+    "suffix", [".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm", ".CPP"]
+)
+def test_cpp_raw_string_does_not_hide_following_declarations(tmp_path: Path, suffix: str) -> None:
+    source = """void before() {}
+const char* text = R"tag("{)tag";
+class Service {
+public:
+  const char* value() { return R"("{)"; }
+  void visible() {}
+};
+void after() {}
+"""
+
+    preview = generate_preview(tmp_path, f"sample{suffix}", source)
+
+    assert preview.splitlines() == [
+        "function before",
+        "class Service",
+        "method Service.value",
+        "method Service.visible",
+        "function after",
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "u8", "u", "U", "L"])
+@pytest.mark.parametrize("delimiter", ["", "tag", "abcdefghijklmnop"])
+def test_cpp_raw_string_body_is_not_code(tmp_path: Path, prefix: str, delimiter: str) -> None:
+    source = f'''void before() {{}}
+const auto text = {prefix}R"{delimiter}(
+void fake() {{}}
+" {{ /*
+){delimiter}";
+void after() {{}}
+'''
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
+@pytest.mark.parametrize("macro", ["ERROR", "FORMAT_u8R", "x\u0301R"])
+def test_cpp_macro_before_string_is_not_a_raw_string(tmp_path: Path, macro: str) -> None:
+    source = f"""#define {macro} "error: "
+void before() {{}}
+const char* text = {macro}"(connection failed";
+void after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
 def test_expression_bodied_function_does_not_consume_next_type_body(tmp_path: Path) -> None:
     source = """fun answer(): Int = 42
 class Service {
@@ -551,6 +605,63 @@ def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> 
     assert "method Controller.validate" in preview
 
 
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_php_heredoc_terminator_can_continue_expression(
+    tmp_path: Path, opener: str, indent: str
+) -> None:
+    source = f"""<?php
+function before() {{}}
+
+$values = [<<<{opener}
+{indent}hello
+{indent}TXT,
+];
+
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+def test_php_heredoc_terminator_preserves_following_brace(tmp_path: Path, opener: str) -> None:
+    source = f"""<?php
+class Service {{
+  public function template() {{
+    return <<<{opener}
+hello
+TXT; }}
+  public function visible() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "Service.php", source)
+
+    assert "method Service.template" in preview
+    assert "method Service.visible" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", "'TXT'"])
+@pytest.mark.parametrize("suffix", ["_more", "2", "😀", "\u0301"])
+def test_php_heredoc_label_prefix_stays_in_body(tmp_path: Path, opener: str, suffix: str) -> None:
+    source = f"""<?php
+function before() {{}}
+$value = <<<{opener}
+TXT{suffix} {{
+TXT;
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
 def test_php_heredoc_does_not_hide_following_method(tmp_path: Path) -> None:
     source = """<?php
 class Service {
@@ -567,6 +678,22 @@ TXT;
 
     assert "method Service.template" in preview
     assert "method Service.visible" in preview
+
+
+def test_go_raw_string_backslash_does_not_hide_following_function(tmp_path: Path) -> None:
+    source = r"""package sample
+
+func Before() {}
+
+const Root = `C:\`
+
+func After() {}
+"""
+
+    preview = generate_preview(tmp_path, "sample.go", source)
+
+    assert "function Before" in preview
+    assert "function After" in preview
 
 
 def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
@@ -590,12 +717,14 @@ second_runtime_line()
     "prefix", ["", "def visible():\n    pass\n"], ids=["sampled-source", "simple-outline"]
 )
 def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str) -> None:
-    source = prefix + "value = " + " + ".join(["x"] * 10000) + "\n"
+    source = prefix + "value = 1\n"
     path = tmp_path / "generated.py"
     data = source.encode("utf-8")
     path.write_bytes(data)
 
-    preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+    with patch("rank_preview.ast.parse", side_effect=RecursionError):
+        preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+        assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
 
     assert not is_binary
     assert preview
@@ -604,7 +733,6 @@ def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str)
         assert preview == "function visible"
     else:
         assert source.startswith(preview)
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
 
 
 def test_fallback_preview_uses_head_and_evenly_sampled_nonblank_lines(tmp_path: Path) -> None:
@@ -632,7 +760,8 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    "filename", ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Counter.svelte"]
+    "filename",
+    ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Vault.vy", "Counter.svelte"],
 )
 def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
     tmp_path: Path, filename: str
