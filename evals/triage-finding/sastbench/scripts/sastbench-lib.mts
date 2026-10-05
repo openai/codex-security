@@ -201,13 +201,6 @@ export function validateDataset(
   return { caseCount: records.length, labelCounts: counts };
 }
 
-export function opaqueCaseId(index: number) {
-  if (!Number.isInteger(index) || index < 0) {
-    throw new Error("SastBench case index must be a non-negative integer");
-  }
-  return `sastbench-${String(index).padStart(6, "0")}`;
-}
-
 export function repositoryStateId(
   record: Pick<SastBenchRecord, "repo_url" | "commit_hash">,
 ) {
@@ -250,7 +243,7 @@ export function buildPromptVars(
   index: number,
   targetRoot: string | undefined = DEFAULT_TARGET_ROOT,
 ) {
-  const caseId = opaqueCaseId(index);
+  const caseId = `sastbench-${String(index).padStart(6, "0")}`;
   return {
     case_id: caseId,
     target_repo: path.join(path.resolve(targetRoot), repositoryStateId(record)),

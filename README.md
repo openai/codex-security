@@ -18,6 +18,10 @@ npx @openai/codex-security login
 npx @openai/codex-security scan /path/to/directory
 ```
 
+On remote or headless machines, use `login --device-auth` if your workspace
+allows it. If device auth is disabled,
+[sign in over SSH](sdk/typescript/README.md#remote-login-with-ssh-forwarding).
+
 For CI, set `OPENAI_API_KEY` instead of signing in.
 
 ## Generate SECURITY.md

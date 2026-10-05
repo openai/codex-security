@@ -130,6 +130,7 @@ describe("bundled plugin build", () => {
     for (const script of [
       "build-plugin",
       "check-plugin-source",
+      "is-main",
       "plugin-contract",
     ]) {
       await writeFixture(

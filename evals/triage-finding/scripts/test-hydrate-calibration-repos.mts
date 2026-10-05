@@ -5,6 +5,7 @@ import childProcess from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { plannedJobs } from "./hydrate-calibration-repos.mts";
 
 const evalDir = path.join(import.meta.dirname, "..");
 const scriptPath = path.join(
@@ -12,7 +13,6 @@ const scriptPath = path.join(
   "scripts",
   "hydrate-calibration-repos.mts",
 );
-import { plannedJobs } from "./hydrate-calibration-repos.mts";
 
 function runHydrator(args: string[]) {
   return childProcess.execFileSync(
