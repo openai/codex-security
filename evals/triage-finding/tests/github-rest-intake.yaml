@@ -75,9 +75,11 @@
     invocation_preamble: "Use $codex-security:triage-finding for code scanning alerts in GitHub repo promptfoo/promptfoo."
     expected_github_rest_behavior: code_scanning
     eval_instructions: |-
-      This is an automated eval. Describe the GitHub REST intake that should be
-      used for this source. Do not query live GitHub, inspect code, or emit the
-      triage JSON result.
+      This is an automated eval. Return only a JSON object describing the REST
+      intake, with keys alerts, instances, and source_type. Each request has a
+      path and a parameters object with the required query parameters. Use the
+      literal {alert_number} placeholder in the instances path. Do not query live
+      GitHub, inspect code, or emit the triage JSON result.
   options:
     disableDefaultAsserts: true
   assert:

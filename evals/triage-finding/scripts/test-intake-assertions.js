@@ -86,23 +86,33 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     expectPass(github, `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. ${sourceType}`, githubContext("dependabot_malware"));
     expectPass(github, `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage is for private vulnerability reports. ${sourceType}`, githubContext("advisories_private_reports"));
   }
-  for (const alert of ["{alert_number}", "42"]) {
-    for (const query of ["?per_page=100", "?page=2&per_page=100", "?per_page=100&page=2"]) {
-      for (const [open, close] of [["", "."], ["**", "**"], ["_", "_"], ["<", ">"], ["[", "]"]]) {
-        expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and ${open}https://api.github.com/repos/${repository}/code-scanning/alerts/${alert}/instances${query}${close} source_type: "sarif"`, githubContext("code_scanning"));
-      }
-    }
-    for (const query of ["", "?page=2", "?per_page=1000"]) {
-      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"), false);
-    }
-    for (const request of [
-      `GET /repos/${repository}/code-scanning/alerts/${alert}/instances with per_page=100`,
-      `gh api --method GET /repos/${repository}/code-scanning/alerts/${alert}/instances -f per_page=100 --paginate`,
-    ]) {
-      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100. ${request}. source_type: "sarif"`, githubContext("code_scanning"));
-    }
+
+}
+const codeScanning = {
+  alerts: { path: "/repos/example/project/code-scanning/alerts", parameters: { state: "open", per_page: 100 } },
+  instances: { path: "/repos/example/project/code-scanning/alerts/{alert_number}/instances", parameters: { per_page: 100 } },
+  source_type: "sarif",
+};
+for (const repository of ["{owner}/{repo}", "example/project"]) {
+  const answer = JSON.parse(JSON.stringify(codeScanning).replaceAll("example/project", repository));
+  expectPass(github, JSON.stringify(answer).replaceAll(":100", ":\"100\""), githubContext("code_scanning"));
+  for (const text of [JSON.stringify(answer), `\`\`\`json\n${JSON.stringify(answer)}\n\`\`\``]) {
+    expectPass(github, text, githubContext("code_scanning"));
   }
 }
+for (const invalid of [
+  null, [], {},
+  { ...codeScanning, source_type: "advisory" },
+  { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
+  { ...codeScanning, instances: { ...codeScanning.instances, parameters: { per_page: 1000 } } },
+  { ...codeScanning, instances: { ...codeScanning.instances, path: "/repos/example/other/code-scanning/alerts/{alert_number}/instances" } },
+  { ...codeScanning, alerts: { ...codeScanning.alerts, parameters: { state: "closed", per_page: 100 } } },
+  { ...codeScanning, alerts: { ...codeScanning.alerts, parameters: { state: "open" } } },
+]) {
+  expectPass(github, JSON.stringify(invalid), githubContext("code_scanning"), false);
+}
+expectPass(github, "not JSON", githubContext("code_scanning"), false);
+
 expectPass(github, 'GitHub Issues require an explicit issue and are not included in all sources. source_type: "freeform"', githubContext("explicit_issue"));
 for (const text of [
   'GET /repos/example/other/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: "advisory"',
