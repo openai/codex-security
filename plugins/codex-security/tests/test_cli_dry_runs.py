@@ -27,6 +27,7 @@ def test_all_scripts_support_help() -> None:
         assert "usage:" in result.stdout.lower(), script.name
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="-P requires Python 3.11 or newer")
 @pytest.mark.parametrize("name", ("workbench_publication.py", "workbench_severity.py"))
 def test_workbench_helpers_support_help_with_safe_path(name: str) -> None:
     result = subprocess.run(
