@@ -60,7 +60,10 @@ function ensureGitCheckout(job: (typeof jobs)[number]) {
     fs.mkdirSync(job.targetDir, { recursive: true });
   }
 
-  if (!fs.existsSync(path.join(job.targetDir, ".git"))) {
+  if (
+    !fs.existsSync(path.join(job.targetDir, ".git")) ||
+    gitOutput(["rev-parse", "--show-prefix"], job.targetDir) !== ""
+  ) {
     const entries = fs.readdirSync(job.targetDir);
     if (entries.length > 0) {
       throw new Error(

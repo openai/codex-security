@@ -70,6 +70,7 @@ TEXT_CODE_EXTENSIONS = {
     ".ts",
     ".tsx",
     ".vue",
+    ".vy",
     ".xml",
     ".yaml",
     ".yml",
