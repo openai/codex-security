@@ -10,7 +10,6 @@ import {
   generateSampleTests,
   generatePromptfooTests,
   generateRepresentativeSampleTests,
-  opaqueCaseId,
   repositoryStateId,
   selectRepresentativeSample,
   validateDataset,
@@ -101,9 +100,10 @@ assert.doesNotMatch(sparsePromptVars.finding_input, /claim:\s*\n/);
 assert.match(sparsePromptVars.finding_input, /src\/file-level\.js:0-100/);
 assert.match(sparsePromptVars.finding_input, /src\/zero-width\.js:54-53/);
 
-assert.equal(opaqueCaseId(0), "sastbench-000000");
-assert.equal(opaqueCaseId(2736), "sastbench-002736");
-assert.throws(() => opaqueCaseId(-1), /non-negative integer/);
+assert.equal(
+  buildPromptVars(positive, 2736, targetRoot).case_id,
+  "sastbench-002736",
+);
 
 const stateId = repositoryStateId(positive);
 assert.match(stateId, /^state-[a-f0-9]{16}$/);

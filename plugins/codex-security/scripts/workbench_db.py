@@ -3039,15 +3039,15 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
 
 
 def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
-    if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
-        return False
     try:
+        if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
+            return False
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
             relative_path,
             f"finding artifact {relative_path}",
         )
-    except (ContractError, OSError):
+    except (ContractError, OSError, UnicodeEncodeError):
         return False
     try:
         return stat.S_ISREG(os.fstat(descriptor).st_mode)

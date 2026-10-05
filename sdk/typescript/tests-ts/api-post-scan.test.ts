@@ -21,7 +21,7 @@ import {
 } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { writeThreatModel } from "../src/artifact-export.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
@@ -30,8 +30,7 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 
 afterEach(cleanup);
 
