@@ -18,7 +18,7 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
-import { mergedCodexConfig, resolveCommandAuthConfig } from "../src/config.js";
+import { resolveCommandAuthConfig } from "../src/config.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
@@ -102,6 +102,109 @@ describe("semantic scan comparison", () => {
     );
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
+
+  test.each(["synthetic.gateway", "fireworks", "amazon-bedrock", "command"])(
+    "automatic matching retains the per-scan %s provider",
+    async (selection) => {
+      const home = await temporaryDirectory();
+      await writeFile(join(home, "config.toml"), "");
+      const providerName =
+        selection === "command" ? "synthetic.command" : selection;
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example.test/v1",
+        ...(selection === "command"
+          ? { auth: { command: "synthetic-auth", cwd: join(home, "helpers") } }
+          : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
+      };
+      const before = finding("before");
+      const after = finding("after");
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      let captured: CodexOptions | undefined;
+      let saved = false;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchCompletedScan({
+          scanId: "current",
+          repository: home,
+          previousFindings: [before],
+          falsePositives: [],
+          findings: [after],
+          environment: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_SCAN_ID: "current",
+            OPENAI_API_KEY: "synthetic-ambient-key",
+            SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
+          },
+          config: {
+            codexOverrides: {
+              profile: "selected",
+              profiles: { selected: { model_provider: providerName } },
+              model_providers: { [providerName]: provider },
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: { filesystem: { [home]: "write" } },
+              },
+              projects: { [home]: { trust_level: "trusted" } },
+            },
+          },
+          async workbench(args) {
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    beforeScans: [{ scanId: "prior", findings: [before] }],
+                  },
+                ],
+              };
+            }
+            saved = args[0] === "save-scan-comparison";
+            return {};
+          },
+        });
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config).toMatchObject({
+          profile: "selected",
+          profiles: { selected: { model_provider: providerName } },
+        });
+        expect(parse(captured!.configOverrides![0]!)).toEqual({
+          model_providers: { [providerName]: provider },
+        });
+        for (const key of [
+          "model_providers",
+          "default_permissions",
+          "permissions",
+          "projects",
+        ]) {
+          expect(captured?.config).not.toHaveProperty(key);
+        }
+        if (selection === "command") {
+          expect(captured?.apiKey).toBeUndefined();
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+        }
+        expect(calls.threadOptions).toMatchObject({
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(saved).toBe(true);
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
 
   test.each([
     [
@@ -354,14 +457,7 @@ describe("semantic scan comparison", () => {
             "synthetic-ambient-key",
           );
           expect(captured?.config?.["model_provider"]).toBe("openai");
-          expect(parse(captured!.configOverrides![0]!)).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: { ...provider.auth, cwd: home },
-              },
-            },
-          });
+          expect(captured?.configOverrides).toBeUndefined();
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
@@ -414,26 +510,24 @@ describe("semantic scan comparison", () => {
             const after = finding(`after-${index}`);
             const scanId = `current-${index}`;
             const codexConfig = resolveCommandAuthConfig(
-              await mergedCodexConfig({
-                codexOverrides: {
-                  ...(mode === "permissions"
-                    ? {
-                        permissions: {
-                          audit: { filesystem: { [home]: { ".": "read" } } },
-                        },
-                      }
-                    : {}),
-                  model_provider: "synthetic.provider",
-                  model_providers: {
-                    "synthetic.provider": {
-                      ...provider,
-                      ...(provider.auth === undefined
-                        ? {}
-                        : { auth: { ...provider.auth, cwd: "helpers" } }),
-                    },
+              {
+                ...(mode === "permissions"
+                  ? {
+                      permissions: {
+                        audit: { filesystem: { [home]: { ".": "read" } } },
+                      },
+                    }
+                  : {}),
+                model_provider: "synthetic.provider",
+                model_providers: {
+                  "synthetic.provider": {
+                    ...provider,
+                    ...(!("auth" in provider)
+                      ? {}
+                      : { auth: { ...provider.auth, cwd: "helpers" } }),
                   },
                 },
-              }),
+              },
               join(home, `native-${index}`),
             );
             await matchCompletedScan({
@@ -442,12 +536,7 @@ describe("semantic scan comparison", () => {
               previousFindings: [before],
               falsePositives: [],
               findings: [after],
-              matchFindings: (input, options) => {
-                return matchScanFindingsInternal(input, options, {
-                  surface: "sdk",
-                  codexConfig,
-                });
-              },
+              config: { codexOverrides: codexConfig },
               environment: {
                 PATH: process.env["PATH"],
                 SystemRoot: process.env["SystemRoot"],

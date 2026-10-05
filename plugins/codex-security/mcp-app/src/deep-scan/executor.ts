@@ -54,6 +54,7 @@ export interface CodexSdkWorkerArtifactContext {
 interface CodexSdkWorkerRuntimeSettings {
   configOverrides?: string[];
   reasoningSummary?: string;
+  serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
     api_key_cyber_access_programs?: boolean;
@@ -122,6 +123,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
+          ...(runtimeSettings.serviceTier === undefined
+            ? {}
+            : { service_tier: runtimeSettings.serviceTier }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -325,6 +329,10 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
     filesystem: Object.fromEntries([
       [":root", "read"],
       ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
+      ...Array.from(sandbox.literalFilesystemDenies ?? [], (key) => [
+        key,
+        { ".": "deny" },
+      ]),
       ...(sandbox.globScanMaxDepth === undefined
         ? []
         : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
@@ -488,17 +496,39 @@ async function workerRuntimeSettings(
     isRecord(profile) && profile.model_reasoning_summary !== undefined
       ? profile.model_reasoning_summary
       : config.model_reasoning_summary;
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
   const settings: CodexSdkWorkerRuntimeSettings = {
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
+    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
-  const provider =
-    isRecord(profile) && profile.model_provider !== undefined
-      ? profile.model_provider
-      : config.model_provider;
-  if (typeof provider === "string") {
-    settings.configOverrides = [`model_provider=${JSON.stringify(provider)}`];
+  const workerConfigPath = environmentVariable(
+    environment,
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    process.platform,
+  );
+  const workerConfig = workerConfigPath
+    ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
+    : undefined;
+  const provider = isRecord(workerConfig)
+    ? workerConfig.model_provider
+    : undefined;
+  for (const key of ["model_instructions_file", "model_verbosity"]) {
+    const value = isRecord(workerConfig) ? workerConfig[key] : undefined;
+    if (typeof value === "string") {
+      (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
+    }
   }
-  const providers = config.model_providers;
+  if (typeof provider === "string") {
+    (settings.configOverrides ??= []).push(
+      `model_provider=${JSON.stringify(provider)}`,
+    );
+  }
+  const providers = isRecord(workerConfig)
+    ? workerConfig.model_providers
+    : undefined;
   if (isRecord(providers)) {
     const selected =
       typeof provider === "string"
@@ -508,15 +538,6 @@ async function workerRuntimeSettings(
         : providers;
     (settings.configOverrides ??= []).push(
       `model_providers=${inlineToml(selected)}`,
-    );
-  }
-  const serviceTier =
-    isRecord(profile) && profile.service_tier !== undefined
-      ? profile.service_tier
-      : config.service_tier;
-  if (typeof serviceTier === "string") {
-    (settings.configOverrides ??= []).push(
-      `service_tier=${JSON.stringify(serviceTier)}`,
     );
   }
   const security = config.codex_security;

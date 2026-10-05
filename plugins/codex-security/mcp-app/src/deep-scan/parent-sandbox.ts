@@ -13,6 +13,8 @@ export type DeepWorkerParentSandbox = {
    * workers never inherit parent write access.
    */
   readonly filesystemDenies: readonly string[];
+  /** Literal paths with glob characters retain native point-deny semantics. */
+  readonly literalFilesystemDenies?: readonly string[];
   readonly globScanMaxDepth?: number;
 };
 
@@ -57,6 +59,7 @@ export function resolveDeepWorkerParentSandbox(
 
   let hasRootRead = false;
   const filesystemDenies: string[] = [];
+  const literalFilesystemDenies: string[] = [];
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -102,12 +105,10 @@ export function resolveDeepWorkerParentSandbox(
             "a parent filesystem denial path cannot be preserved",
           );
         }
-        if (hasGlobMetacharacters(path.path)) {
-          throw unsupportedParentSandbox(
-            "a parent filesystem denial path with glob characters cannot be preserved",
-          );
-        }
-        filesystemDenies.push(path.path);
+        (hasGlobMetacharacters(path.path)
+          ? literalFilesystemDenies
+          : filesystemDenies
+        ).push(path.path);
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -138,6 +139,12 @@ export function resolveDeepWorkerParentSandbox(
     }
   }
 
+  if (literalFilesystemDenies.some((path) => filesystemDenies.includes(path))) {
+    throw unsupportedParentSandbox(
+      "literal path and glob denials with the same key cannot be preserved",
+    );
+  }
+
   if (!hasRootRead) {
     throw unsupportedParentSandbox(
       "the parent restricts readable paths beyond the supported read-only worker sandbox",
@@ -146,6 +153,7 @@ export function resolveDeepWorkerParentSandbox(
 
   return {
     filesystemDenies,
+    ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
 }

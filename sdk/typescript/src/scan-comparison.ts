@@ -160,7 +160,7 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
 
 interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
-  "environment" | "model" | "signal"
+  "config" | "environment" | "model" | "signal"
 > {
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
@@ -259,11 +259,7 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    singleTurn?: boolean;
-    codexConfig?: JsonObject;
-  },
+  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -517,15 +513,12 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
-    codexConfig?: JsonObject;
-  },
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
   const config =
-    runtimeOptions.codexConfig ??
-    (options.config === undefined
+    options.config === undefined
       ? undefined
-      : await mergedCodexConfig(options.config));
+      : await mergedCodexConfig(options.config);
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
@@ -558,7 +551,10 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = structuredCodexConfig(config);
-  const providerOverrides = modelProviderConfigOverride(providerConfig);
+  delete sdkConfig["default_permissions"];
+  const providerOverrides = modelProviderConfigOverride(
+    commandAuth ? providerConfig : (config ?? {}),
+  );
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
@@ -743,6 +739,7 @@ export async function matchCompletedScan(
   };
   const comparison = await (options.matchFindings ?? matchScanFindings)(input, {
     allowHistoricalUncertainty: true,
+    config: options.config,
     cyberAccessProgram: options.cyberAccessProgram,
     environment: options.environment,
     model: options.model,
