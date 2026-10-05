@@ -30,6 +30,15 @@ export function preparedRuntime(
   };
 }
 
+export function scanRuntimeDependencies(codexHome: string, scanDir: string) {
+  return {
+    prepareRuntime: async () => preparedRuntime(codexHome),
+    resolvePluginPython: async () => "/managed/python",
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+  };
+}
+
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];

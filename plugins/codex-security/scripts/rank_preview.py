@@ -102,6 +102,7 @@ BRACE_LANGUAGE_EXTENSIONS = {
     ".swift",
 }
 NESTED_BLOCK_COMMENT_EXTENSIONS = {".kt", ".kts", ".rs", ".scala", ".swift"}
+CPP_RAW_STRING_RE = re.compile(r'(?<![\w\x80-\U0010ffff])(?:u8|u|U|L)?R"([^\s()\\]{0,16})\(')
 RUST_RAW_STRING_RE = re.compile(r'(?:br|r)(#{0,16})"')
 RUST_LIFETIME_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
 PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
@@ -303,13 +304,13 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             continue
         if heredoc_terminator:
             if index == 0 or text[index - 1] == "\n":
-                line_end = text.find("\n", index)
-                if line_end < 0:
-                    line_end = len(text)
-                candidate = text[index:line_end].strip().removesuffix(";")
-                if candidate == heredoc_terminator:
-                    masked.extend(" " * (line_end - index))
-                    index = line_end
+                # PHP identifiers allow every non-ASCII byte, including non-word characters.
+                terminator_match = re.compile(
+                    rf"[ \t]*{heredoc_terminator}(?![A-Za-z0-9_\x80-\U0010ffff])"
+                ).match(text, index)
+                if terminator_match:
+                    masked.extend(" " * (terminator_match.end() - index))
+                    index = terminator_match.end()
                     heredoc_terminator = ""
                     continue
             masked.append(" ")
@@ -357,6 +358,14 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                     quote = ""
                 index += 1
             continue
+        if suffix in {".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm"}:
+            raw_match = CPP_RAW_STRING_RE.match(text, index)
+            if raw_match:
+                token = raw_match.group(0)
+                masked.extend(" " * len(token))
+                raw_terminator = f'){raw_match.group(1)}"'
+                index += len(token)
+                continue
         if suffix == ".rs":
             raw_match = RUST_RAW_STRING_RE.match(text, index)
             if raw_match:
@@ -378,6 +387,11 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             masked.extend((" ", " "))
             quote = '@"'
             index += 2
+            continue
+        if suffix == ".go" and char == "`":
+            masked.append(" ")
+            raw_terminator = "`"
+            index += 1
             continue
         triple_quote = text[index : index + 3]
         if triple_quote in {'"""', "'''"}:
