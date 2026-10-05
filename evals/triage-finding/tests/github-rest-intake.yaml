@@ -117,9 +117,15 @@
     invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for code scanning in GitHub repo promptfoo/promptfoo."
     expected_github_rest_behavior: explicit_connector
     eval_instructions: |-
-      This is an automated eval. Describe how this workflow should handle a
-      user's explicit request to use the GitHub Connector. Do not query live
-      GitHub, inspect code, or emit the triage JSON result.
+      This is an automated eval. Decide how this workflow should handle the
+      user's explicit GitHub Connector request, including an unsupported
+      endpoint. Do not query live GitHub, inspect code, or emit a triage result.
+      Return only a JSON decision with these three fields:
+      - transport: one of "rest", "github_connector_read_only", or "other".
+      - fallback: one of "automatic_rest", "stop", or
+        "explain_and_request_rest_approval".
+      - scope: an object with account ("any" or "user_specified_or_approved")
+        and repository (the owner/repo identifier for the proposed REST scope).
   options:
     disableDefaultAsserts: true
   assert:

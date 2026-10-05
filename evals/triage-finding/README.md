@@ -51,6 +51,9 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
 - `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
 
+The explicit Connector case returns a three-field JSON decision for transport,
+fallback, and account/repository scope. Other intake cases use freeform answers.
+
 ## Calibration Dataset
 
 `datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`.
