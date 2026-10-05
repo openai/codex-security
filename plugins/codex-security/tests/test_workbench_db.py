@@ -3957,7 +3957,7 @@ def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator:
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None},
+        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -3979,7 +3979,7 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None},
+        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -4009,7 +4009,7 @@ def test_source_excerpt_preserves_final_lines(
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
-    scan = {"target_revision": revision, "target_snapshot_digest": None}
+    scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}
 
     excerpt = finding_source_excerpt(
         scan,
