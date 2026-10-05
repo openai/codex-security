@@ -19,6 +19,7 @@ for (const text of [
   '```json\n{"findings": "paste the findings here"}\n```',
   '```json\n{"schema_version": "example/v0", "findings": []}\n```',
   '{"findings":[{"message":"Paste the scanner finding here"}]}',
+  '{"input_id":"example","message":"Paste the scanner finding here"}',
   JSON.stringify({ example: '"schema_version": "triage-finding/v0"' }),
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
@@ -35,6 +36,7 @@ for (const text of [
   `\`\`\`json\n${triage.replace("triage-finding/v0", "triage-finding\\/v0")}\n\`\`\``,
   `Response: {"error":"forbidden"}\n${triage.replace("triage-finding/v0", "triage-finding\\u002fv0")}`,
   '{"findings":[{"input_id":"SEC-293","verdict":"not_actionable"}]}',
+  '{"input_id":"SEC-293","verdict":"not_actionable"}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
   expectPass(missingInput, `${request}\n${text}`, undefined, false);
