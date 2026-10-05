@@ -2113,6 +2113,18 @@ describe("CLI", () => {
           expect(stripVTControlCharacters(stderr.text())).toContain(
             "consolidating results",
           );
+          const beforeTerminal = stderr.text().length;
+          options?.onDeepProgress?.({
+            completed: 4,
+            active: 0,
+            maximum: 16,
+            consolidating: false,
+          });
+          const terminal = stripVTControlCharacters(
+            stderr.text().slice(beforeTerminal),
+          );
+          expect(terminal).toContain("consolidating results");
+          expect(terminal).not.toContain("discovery");
           return fakeResult();
         });
 

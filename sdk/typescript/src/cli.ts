@@ -8057,6 +8057,7 @@ async function executeScan(
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
   let deepProgress: DeepScanProgress | null = null;
+  let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
@@ -8514,7 +8515,8 @@ async function executeScan(
         )
           return;
         deepProgress = update;
-        phase = update.consolidating ? "consolidating results" : "discovery";
+        deepConsolidating ||= update.consolidating === true;
+        phase = deepConsolidating ? "consolidating results" : "discovery";
         const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
         if (dashboard !== null) {
           dashboard.setStage(phase);
