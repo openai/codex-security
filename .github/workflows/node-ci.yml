@@ -423,71 +423,7 @@ jobs:
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
-    name: plugin source contracts
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.13.0"
-      - name: Set up pnpm
-        uses: ./.github/actions/setup-tools
-        with:
-          setup-node: false
-          compile: true
-          cache-dependency-path: |
-            sdk/typescript/pnpm-lock.yaml
-            plugins/codex-security/mcp-app/pnpm-lock.yaml
-      - name: Install plugin dependencies
-        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: plugins/codex-security/pyproject.toml
-      - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
-      - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
-      - name: Check plugin source compatibility
-        run: |
-          python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
-          python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
-          node .github/scripts/check_plugin_source_compatibility.mjs
-      - name: Test source compatibility checker
-        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
-      - name: Test Python source contracts
-        run: python -m pytest plugins/codex-security/tests -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
-      - name: Upload Python test reports
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: python-test-reports
-          overwrite: true
-          path: reports/python.xml
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Build SDK and type-check eval tooling
-        run: pnpm --dir sdk/typescript run build:evals
-      - name: Test deterministic triage eval contracts
-        working-directory: evals/triage-finding
-        run: node --run test:deterministic
-      - name: Test secret discovery eval contracts
-        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
-
-  python-compatibility:
-    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: validate-title
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
@@ -499,9 +435,15 @@ jobs:
           - os: ubuntu-latest
             python: "3.10"
             tests: plugins/codex-security/tests
+          - os: ubuntu-latest
+            python: "3.12"
+            tests: plugins/codex-security/tests
+          - os: ubuntu-latest
+            python: "3.14"
+            tests: plugins/codex-security/tests
           - os: macos-latest
             python: "3.12"
-            tests: plugins/codex-security/tests/test_threat_model_projection.py plugins/codex-security/tests/test_workbench_scan_usage.py
+            tests: plugins/codex-security/tests/test_workbench_scan_usage.py plugins/codex-security/tests/test_threat_model_projection.py
           - os: windows-latest
             python: "3.12"
             tests: plugins/codex-security/tests/test_windows_scan_local_files.py plugins/codex-security/tests/test_threat_model_projection.py
@@ -510,6 +452,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set up Node.js
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.13.0"
+      - name: Set up pnpm
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: ./.github/actions/setup-tools
+        with:
+          setup-node: false
+          compile: true
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Install plugin dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -518,16 +477,51 @@ jobs:
           cache-dependency-path: plugins/codex-security/pyproject.toml
       - name: Install Python test dependencies
         run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
-      - name: Install ripgrep for the compatibility suite
+      - name: Install ripgrep
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes ripgrep
-      - name: Test supported Python and native filesystem behavior
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Check plugin source compatibility
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          node .github/scripts/check_plugin_source_compatibility.mjs
+      - name: Test source compatibility checker
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test Python source contracts
+        shell: bash
         env:
           PYTHON_TEST_PATHS: ${{ matrix.tests }}
-        shell: bash
+          PYTHON_TEST_FILTER: ${{ runner.os == 'Windows' && 'not test_model_files_remain_private_and_editable_under_restrictive_umask' || '' }}
         run: |
           read -ra tests <<< "$PYTHON_TEST_PATHS"
-          python -m pytest "${tests[@]}" -q -n 4 --dist worksteal --max-worker-restart 0
+          python -m pytest "${tests[@]}" -k "$PYTHON_TEST_FILTER" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+      - name: Require native platform coverage
+        if: runner.os != 'Linux'
+        run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"
+      - name: Upload Python test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-test-reports-${{ matrix.os }}-${{ matrix.python }}
+          overwrite: true
+          path: reports/python.xml
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Build SDK and type-check eval tooling
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: pnpm --dir sdk/typescript run build:evals
+      - name: Test deterministic triage eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        working-directory: evals/triage-finding
+        run: node --run test:deterministic
+      - name: Test secret discovery eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 
   required-test:
     name: ${{ matrix.os }} / node-22
@@ -542,7 +536,6 @@ jobs:
         mcp,
         plugin-host,
         plugin-source,
-        python-compatibility,
         container-validate,
       ]
     if: always()
@@ -556,7 +549,7 @@ jobs:
         if: needs.validate-title.outputs.workflow-quality == 'true' && needs.workflow-quality.result != 'success'
         run: exit 1
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.python-compatibility.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
       - name: Require selected container coverage
         if: needs.validate-title.outputs.container-validate == 'true' && needs.container-validate.result != 'success'
@@ -679,12 +672,19 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      [validate-title, static-checks, plugin-host, windows-test, windows-verify]
+      [
+        validate-title,
+        static-checks,
+        plugin-host,
+        plugin-source,
+        windows-test,
+        windows-verify,
+      ]
     strategy:
       fail-fast: false
       matrix:
         node: ["22.13.0", "24"]
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1

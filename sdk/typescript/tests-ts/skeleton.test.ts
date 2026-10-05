@@ -184,13 +184,13 @@ describe("TypeScript package skeleton", () => {
       "mcp",
       "plugin-host",
       "plugin-source",
-      "python-compatibility",
       "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
       "static-checks",
       "plugin-host",
+      "plugin-source",
       "windows-test",
       "windows-verify",
     ]);
@@ -224,6 +224,47 @@ describe("TypeScript package skeleton", () => {
         run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
+  });
+
+  test("covers the Python runtime floor and native platform paths", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const job = jobs["plugin-source"]!;
+    expect(job.strategy?.matrix["include"]).toEqual([
+      ...["3.10", "3.12", "3.14"].map((python) => ({
+        os: "ubuntu-latest",
+        python,
+        tests: "plugins/codex-security/tests",
+      })),
+      {
+        os: "macos-latest",
+        python: "3.12",
+        tests:
+          "plugins/codex-security/tests/test_workbench_scan_usage.py plugins/codex-security/tests/test_threat_model_projection.py",
+      },
+      {
+        os: "windows-latest",
+        python: "3.12",
+        tests:
+          "plugins/codex-security/tests/test_windows_scan_local_files.py plugins/codex-security/tests/test_threat_model_projection.py",
+      },
+    ]);
+    const testStep = job.steps!.find(
+      ({ name }) => name === "Test Python source contracts",
+    )!;
+    expect(testStep.env?.["PYTHON_TEST_PATHS"]).toBe("${{ matrix.tests }}");
+    expect(testStep.run).toContain('python -m pytest "${tests[@]}"');
+    expect(testStep).not.toHaveProperty("if");
+    expect(testStep).not.toHaveProperty("continue-on-error");
+    for (const name of [
+      "Install plugin dependencies",
+      "Build SDK and type-check eval tooling",
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      );
+    }
+    expect(jobs["required-test"]?.needs).toContain("plugin-source");
+    expect(jobs["windows"]?.needs).toContain("plugin-source");
   });
 
   test("checks one archive and restores its plugin before every test shard", async () => {

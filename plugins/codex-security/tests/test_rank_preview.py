@@ -716,19 +716,15 @@ second_runtime_line()
 @pytest.mark.parametrize(
     "prefix", ["", "def visible():\n    pass\n"], ids=["sampled-source", "simple-outline"]
 )
-def test_python_preview_falls_back_on_ast_recursion(
-    tmp_path: Path, prefix: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail_parse(_text):
-        raise RecursionError("synthetic parser recursion")
-
-    monkeypatch.setattr("rank_preview.ast.parse", fail_parse)
-    source = prefix + "value = " + " + ".join(["x"] * 10000) + "\n"
+def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str) -> None:
+    source = prefix + "value = 1\n"
     path = tmp_path / "generated.py"
     data = source.encode("utf-8")
     path.write_bytes(data)
 
-    preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+    with patch("rank_preview.ast.parse", side_effect=RecursionError):
+        preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+        assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
 
     assert not is_binary
     assert preview
@@ -737,7 +733,6 @@ def test_python_preview_falls_back_on_ast_recursion(
         assert preview == "function visible"
     else:
         assert source.startswith(preview)
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
 
 
 def test_fallback_preview_uses_head_and_evenly_sampled_nonblank_lines(tmp_path: Path) -> None:
