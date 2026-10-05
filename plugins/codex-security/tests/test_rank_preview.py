@@ -580,6 +580,8 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
         "object./* member */else / { value: count / total }",
         "object1.\nreturn / { value: count / total }",
         "1e1.\nreturn / { value: count / total }",
+        "1e+10.if(ready) / { value: count / total }",
+        "1e-10.if(ready) / { value: count / total }",
         "this.#if() / { valueOf() { return 12 / 2; } }",
         "this.#else / { valueOf() { return 12 / 2; } }",
     ],

@@ -257,6 +257,7 @@ def javascript_keyword_follows_member_access(masked: list[str], start: int) -> b
         start == end
         or masked[start] not in "0123456789"
         or (start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$.#"))
+        or (start > 1 and masked[start - 1] in "+-" and masked[start - 2] in "eE")
     )
 
 
