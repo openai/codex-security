@@ -88,7 +88,9 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
   }
   for (const alert of ["{alert_number}", "42"]) {
     for (const query of ["?per_page=100", "?page=2&per_page=100", "?per_page=100&page=2"]) {
-      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"));
+      for (const [open, close] of [["", "."], ["**", "**"], ["_", "_"], ["<", ">"], ["[", "]"]]) {
+        expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and ${open}https://api.github.com/repos/${repository}/code-scanning/alerts/${alert}/instances${query}${close} source_type: "sarif"`, githubContext("code_scanning"));
+      }
     }
     for (const query of ["", "?page=2", "?per_page=1000"]) {
       expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"), false);
