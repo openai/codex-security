@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { captureCli } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -125,14 +126,9 @@ describe("CLI help", () => {
       const text = await help([command, "--help"]);
       expect(option(text, "--format")).not.toMatch(/\bjsonl?\b/u);
       expect(option(text, "--json")).toBe("");
-      const schema = capture();
+      const schema = captureCli(main, "stdout");
       expect(
-        await main(
-          [command, "--schema", "--json"],
-          schema.stream,
-          capture().stream,
-          dependencies(),
-        ),
+        await schema.run([command, "--schema", "--json"], dependencies()),
       ).toBe(0);
       expect(JSON.parse(schema.text())).toEqual(expect.any(Object));
     },

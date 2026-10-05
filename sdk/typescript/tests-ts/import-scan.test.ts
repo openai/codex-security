@@ -120,7 +120,11 @@ async function fixture(format: "csv" | "json" = "csv") {
   return {
     root,
     stateDirectory,
-    environment,
+    dependencies: {
+      environment,
+      // Import persistence uses real Python; runtime tests cover interpreter discovery.
+      resolvePluginPython: async () => python!,
+    },
     python: python!,
     source,
     options,
@@ -166,7 +170,7 @@ test.each(["csv", "json"] as const)(
   async (format) => {
     const context = await fixture(format);
     const result = completed(
-      await importScan(context.options, { environment: context.environment }),
+      await importScan(context.options, context.dependencies),
     );
     expect(result.findings.findings).toHaveLength(2);
     expect(
@@ -277,7 +281,7 @@ test.each(["csv", "json"] as const)(
       await expect(
         importScan(
           { ...context.options, sourcePath: linked, dryRun },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must be a regular file");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -307,7 +311,7 @@ test.each(["csv", "json"] as const)(
             sourcePath: join(linked, `findings.${format}`),
             dryRun,
           },
-          { environment: context.environment },
+          context.dependencies,
         ),
       ).rejects.toThrow("Import source must not traverse directory links");
       await expect(stat(context.stateDirectory)).rejects.toMatchObject({
@@ -325,7 +329,7 @@ test.each(process.platform === "win32" ? ["directory"] : ["directory", "FIFO"])(
     if (kind === "directory") await mkdir(context.options.sourcePath);
     else execFileSync("mkfifo", [context.options.sourcePath]);
     await expect(
-      importScan(context.options, { environment: context.environment }),
+      importScan(context.options, context.dependencies),
     ).rejects.toThrow("Import source must be a regular file");
     await expect(stat(context.stateDirectory)).rejects.toMatchObject({
       code: "ENOENT",
@@ -370,7 +374,7 @@ test.each(["regular file", "symbolic link"])(
     );
     try {
       await expect(
-        importScan(context.options, { environment: context.environment }),
+        importScan(context.options, context.dependencies),
       ).rejects.toThrow();
       expect(replaced).toBe(true);
       expect(observeRead).not.toHaveBeenCalled();
@@ -387,7 +391,7 @@ test.each(["regular file", "symbolic link"])(
 test("reimporting the retained source preserves finding identities with new scan occurrences", async () => {
   const context = await fixture();
   const first = completed(
-    await importScan(context.options, { environment: context.environment }),
+    await importScan(context.options, context.dependencies),
   );
   const recipe = await runWorkbench(context.workbenchOptions, [
     "get-scan-recipe",
@@ -404,7 +408,7 @@ test("reimporting the retained source preserves finding identities with new scan
         sourcePath: imported.sourcePath,
         parentScanId: first.manifest.scan.id,
       },
-      { environment: context.environment },
+      context.dependencies,
     ),
   );
   expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
@@ -433,7 +437,7 @@ test("dry run validates source rows without creating database state or invoking 
   const result = await importScan(
     { ...context.options, dryRun: true },
     {
-      environment: context.environment,
+      ...context.dependencies,
       runWorkbench: unexpected,
       resolvePluginPython: unexpected,
     },
@@ -452,7 +456,7 @@ test("dry run validates source rows without creating database state or invoking 
     importScan(
       { ...context.options, dryRun: true },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: unexpected,
       },
     ),
@@ -468,20 +472,14 @@ test("imports archive prior output without replacing its saved findings", async 
     ...context.options,
     outputDir: join(context.root, "results"),
   };
-  const first = completed(
-    await importScan(options, { environment: context.environment }),
-  );
+  const first = completed(await importScan(options, context.dependencies));
   const originalManifest = await readFile(first.manifestPath, "utf8");
-  await expect(
-    importScan(options, { environment: context.environment }),
-  ).rejects.toThrow();
+  await expect(importScan(options, context.dependencies)).rejects.toThrow();
   expect(await readFile(first.manifestPath, "utf8")).toBe(originalManifest);
   const second = completed(
     await importScan(
       { ...options, archiveExisting: true },
-      {
-        environment: context.environment,
-      },
+      context.dependencies,
     ),
   );
   const scans = await storedScans(context);
@@ -515,7 +513,7 @@ test.each(["failure", "abort"] as const)(
     const operation = importScan(
       { ...context.options, signal: controller.signal },
       {
-        environment: context.environment,
+        ...context.dependencies,
         runWorkbench: run,
       },
     );

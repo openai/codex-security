@@ -18,6 +18,11 @@ import {
   stageResult,
 } from "./support/security-policy.js";
 import { rejecting, throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
@@ -113,15 +118,8 @@ function policyDependencies(
 
 describe("policy CLI", () => {
   test("documents the policy workflow in help", async () => {
-    const stdout = capture();
-    expect(
-      await main(
-        ["policy", "--help"],
-        stdout.stream,
-        capture().stream,
-        dependencies(),
-      ),
-    ).toBe(0);
+    const stdout = captureCli(main, "stdout");
+    expect(await stdout.run(["policy", "--help"], dependencies())).toBe(0);
     expect(stdout.text()).toContain("SECURITY.md");
     expect(stdout.text()).not.toContain("--apply");
     expect(stdout.text()).not.toContain("--write");
@@ -145,12 +143,12 @@ describe("policy CLI", () => {
       estimatedUsd: 1,
       estimatedUsdRange: { min: 1, max: 2, context: "unknown" },
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const onClose = mock();
     const onConfig = mock<(config: unknown) => void>();
     expect(
-      await main(
+      await runCli(
         [
           "policy",
           ".",
@@ -161,8 +159,6 @@ describe("policy CLI", () => {
           "high",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         policyDependencies(f, {
           draft,
           onClose,
@@ -334,13 +330,11 @@ describe("policy CLI", () => {
   test("does not present a partial cost as the final estimate", async () => {
     const f = await fixture();
     const draft = await f.generate();
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["policy", "--headless", "--json"],
-        stdout.stream,
-        stderr.stream,
         policyDependencies(f, {
           draft,
           onGenerate: (_repository, options) =>
@@ -378,13 +372,11 @@ describe("policy CLI", () => {
 
   test("preserves a completed draft when runtime cleanup fails", async () => {
     const f = await fixture();
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["policy", "--headless", "--json"],
-        stdout.stream,
-        stderr.stream,
         policyDependencies(f, {
           onClose: throwing("synthetic cleanup failure"),
         }),
@@ -469,13 +461,11 @@ describe("policy CLI", () => {
     "does not run a diff preview for %s output",
     async (format) => {
       const f = await fixture();
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       let previews = 0;
       expect(
-        await main(
+        await stdout.run(
           ["policy", "--format", format],
-          stdout.stream,
-          capture().stream,
           policyDependencies(f, { onPreview: () => previews++ }),
         ),
       ).toBe(0);
@@ -539,18 +529,11 @@ describe("policy CLI", () => {
 
   test("preflights without generation", async () => {
     const f = await fixture();
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     const deps = policyDependencies(f, {
       onGenerate: throwing("Must not generate"),
     });
-    expect(
-      await main(
-        ["policy", "--dry-run", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await stdout.run(["policy", "--dry-run", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text()).dryRun).toBe(true);
     expect(await readdir(f.outputDir)).toEqual([]);
   });
@@ -563,13 +546,11 @@ describe("policy CLI", () => {
       for (const cooperative of [false, true]) {
         const f = await fixture();
         const signals = new FakeSignals();
-        const stdout = capture();
+        const stdout = captureCli(main, "stdout");
         const onClose = mock();
         expect(
-          await main(
+          await stdout.run(
             ["policy", "--dry-run", "--json"],
-            stdout.stream,
-            capture().stream,
             policyDependencies(f, {
               signals,
               onPreflight: (_repository, options) => {
@@ -595,12 +576,10 @@ describe("policy CLI", () => {
     const draft = await f.generate({
       run: async (stage) => stageResult(stage, markdown),
     });
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["policy", "--format", "md"],
-        stdout.stream,
-        capture().stream,
         policyDependencies(f, { draft }),
       ),
     ).toBe(0);
@@ -627,26 +606,22 @@ describe("policy CLI", () => {
       [["--filter-output", "status"], "draft"],
       [["--format", "md", "--filter-output", "status"], "draft"],
     ] as const) {
-      const stdout = capture(true);
-      const stderr = capture(true);
-      expect(
-        await main(["policy", ...args], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stdout: true,
+        stderr: true,
+      });
+
+      expect(await runCli(["policy", ...args], deps)).toBe(0);
       expect(stdout.text()).toContain(marker);
       expect(stderr.text()).not.toContain(
         draft.content.split("\n").filter(Boolean).at(-1)!,
       );
       expect(stderr.text()).not.toContain(draft.reviewNotes[0]!);
     }
-    const stdout = capture();
-    expect(
-      await main(
-        ["policy", "--json", "--full-output"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    const stdout = captureCli(main, "stdout");
+    expect(await stdout.run(["policy", "--json", "--full-output"], deps)).toBe(
+      0,
+    );
     expect(JSON.parse(stdout.text())).toMatchObject({
       ok: true,
       data: { status: "draft", draftPath: draft.draftPath },
@@ -668,16 +643,9 @@ describe("policy CLI", () => {
         ["--token-offset", "1"],
         ["--token-offset", "1", "--token-limit", "4"],
       ]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            ["policy", ...format, ...transform],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
-        ).toBe(0);
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        expect(await runCli(["policy", ...format, ...transform], deps)).toBe(0);
         expect(stderr.text()).not.toContain(
           draft.content.split("\n").filter(Boolean).at(-1)!,
         );
@@ -691,14 +659,9 @@ describe("policy CLI", () => {
         }
       }
     }
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        ["policy", "--format", "md", "--full-output"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
+      await stdout.run(["policy", "--format", "md", "--full-output"], deps),
     ).toBe(0);
     expect(stdout.text()).toContain("## data");
     expect(stdout.text()).toContain(POLICY.trim());
@@ -729,30 +692,19 @@ describe("policy CLI", () => {
       };
     };
     for (const args of [["--dry-run"], ["--format", "toon"]]) {
-      const stdout = capture(true);
-      expect(
-        await main(["policy", ...args], stdout.stream, capture().stream, deps),
-      ).toBe(0);
+      const stdout = captureCli(main, "stdout", true);
+      expect(await stdout.run(["policy", ...args], deps)).toBe(0);
       expect(stdout.text()).not.toMatch(/[\u001b\p{Bidi_Control}]/u);
       expect(stdout.text()).toContain("\\u202e");
     }
-    const json = capture();
-    expect(
-      await main(["policy", "--json"], json.stream, capture().stream, deps),
-    ).toBe(0);
+    const json = captureCli(main, "stdout");
+    expect(await json.run(["policy", "--json"], deps)).toBe(0);
     expect(JSON.parse(json.text())).toMatchObject({
       scope,
       reviewNotes: expect.arrayContaining([note]),
     });
-    const markdown = capture();
-    expect(
-      await main(
-        ["policy", "--format", "md"],
-        markdown.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    const markdown = captureCli(main, "stdout");
+    expect(await markdown.run(["policy", "--format", "md"], deps)).toBe(0);
     expect(markdown.text()).toBe(content);
   });
 
@@ -764,13 +716,11 @@ describe("policy CLI", () => {
       ["SIGTERM", 143],
     ] as const) {
       const signals = new FakeSignals();
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           ["policy", "--json", "--full-output"],
-          stdout.stream,
-          stderr.stream,
           policyDependencies(f, {
             signals,
             onGenerate: (_repository, options) => {
@@ -811,13 +761,11 @@ describe("policy CLI", () => {
     ] as const) {
       for (const leadingOutputFlags of [false, true]) {
         const flags = ["--json", "--full-output"];
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
+
         expect(
-          await main(
+          await runCli(
             leadingOutputFlags ? [...flags, ...args] : [...args, ...flags],
-            stdout.stream,
-            stderr.stream,
             deps,
           ),
         ).toBe(2);
@@ -864,12 +812,10 @@ describe("policy CLI", () => {
     const draft = await f.generate({ path: scope });
     const controlled = `${POLICY}\nLiteral \u001b[2J text.${controls}\n`;
     await writeFile(draft.draftPath, controlled);
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["policy", "--path", scope],
-        capture().stream,
-        stderr.stream,
         policyDependencies(f, { draft: { ...draft, content: controlled } }),
       ),
     ).toBe(0);
@@ -889,10 +835,9 @@ describe("policy CLI", () => {
     const signals = new FakeSignals();
     const onClose = mock();
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["policy", "--headless"],
-        capture().stream,
-        capture().stream,
         policyDependencies(f, {
           signals,
           onClose,

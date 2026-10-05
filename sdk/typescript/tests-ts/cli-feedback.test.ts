@@ -6,19 +6,15 @@ import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function run(args: string[], deps = dependencies()) {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["feedback", ...args],
-    stdout.stream,
-    stderr.stream,
-    deps,
-  );
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["feedback", ...args], deps);
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 

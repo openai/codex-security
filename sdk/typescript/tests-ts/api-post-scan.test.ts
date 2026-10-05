@@ -86,7 +86,6 @@ async function startPostScan(scenario: PostScanScenario) {
   const client = new TestClient(
     {},
     {
-      environment: {},
       prepareRuntime: async () => runtime,
       resolvePluginPython: async () => python!,
       prepareOutputDir: async () => scanDir,

@@ -1,3 +1,4 @@
+import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
@@ -333,57 +334,52 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
     f.threadId,
   ]);
   let resumedThread: string | undefined;
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["scans", "resume", f.scanId, "--json"],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: (config) =>
-        new TestClient(config, {
-          environment: f.environment,
-          prepareRuntime: async () => preparedRuntime(f.codexHome),
-          resolvePluginPython: async () => f.python,
-          runWorkbench,
-          createCodex: (options) => ({
-            startThread: () => fail("Resume must not create a new thread."),
-            resumeThread(threadId, threadOptions) {
-              resumedThread = threadId;
-              expect(threadOptions.workingDirectory).toBe(f.scanDir);
-              expect(options.env).toMatchObject({
-                CODEX_SECURITY_SCAN_ID: f.scanId,
-                CODEX_SECURITY_SCAN_DIR: f.scanDir,
-              });
-              return {
-                id: threadId,
-                async runStreamed(prompt) {
-                  expect(prompt).toContain(f.scanId);
-                  expect(prompt).toContain(
-                    "Keep the original scan instructions.",
-                  );
-                  const joined = await f.command([
-                    "begin-deep-scan",
-                    "--scan-id",
-                    f.scanId,
-                    "--thread-id",
-                    threadId,
-                    "--available-parallelism",
-                    "4",
-                  ]);
-                  expect(joined["deepScan"]).toMatchObject({
-                    scanId: f.scanId,
-                  });
-                  throw new Error("Synthetic transport disconnected");
-                },
-              };
-            },
-          }),
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => preparedRuntime(f.codexHome),
+        resolvePluginPython: async () => f.python,
+        runWorkbench,
+        createCodex: (options) => ({
+          startThread: () => fail("Resume must not create a new thread."),
+          resumeThread(threadId, threadOptions) {
+            resumedThread = threadId;
+            expect(threadOptions.workingDirectory).toBe(f.scanDir);
+            expect(options.env).toMatchObject({
+              CODEX_SECURITY_SCAN_ID: f.scanId,
+              CODEX_SECURITY_SCAN_DIR: f.scanDir,
+            });
+            return {
+              id: threadId,
+              async runStreamed(prompt) {
+                expect(prompt).toContain(f.scanId);
+                expect(prompt).toContain(
+                  "Keep the original scan instructions.",
+                );
+                const joined = await f.command([
+                  "begin-deep-scan",
+                  "--scan-id",
+                  f.scanId,
+                  "--thread-id",
+                  threadId,
+                  "--available-parallelism",
+                  "4",
+                ]);
+                expect(joined["deepScan"]).toMatchObject({
+                  scanId: f.scanId,
+                });
+                throw new Error("Synthetic transport disconnected");
+              },
+            };
+          },
         }),
-    },
-  );
+      }),
+  });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
@@ -404,41 +400,34 @@ test("CLI resumes the owning Codex thread and preserves running state on a trans
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {
   const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["scans", "resume", f.scanId, "--json"],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: resumeClient(f, (options) => ({
-        startThread() {
-          throw new Error("Resume must not create a new thread.");
-        },
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          expect(options.env).toMatchObject({
-            AWS_PROFILE: "synthetic-bedrock",
-          });
-          expect(options.apiKey).toBeUndefined();
-          return {
-            id: threadId,
-            async runStreamed(prompt) {
-              expect(prompt).toContain(
-                "Amazon Bedrock with AWS authentication",
-              );
-              expect(prompt).toContain(
-                "Skip the ChatGPT account Daybreak access advisory",
-              );
-              throw new Error("Resumed Bedrock prompt captured");
-            },
-          };
-        },
-      })),
-    },
-  );
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: resumeClient(f, (options) => ({
+      startThread() {
+        throw new Error("Resume must not create a new thread.");
+      },
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        expect(options.env).toMatchObject({
+          AWS_PROFILE: "synthetic-bedrock",
+        });
+        expect(options.apiKey).toBeUndefined();
+        return {
+          id: threadId,
+          async runStreamed(prompt) {
+            expect(prompt).toContain("Amazon Bedrock with AWS authentication");
+            expect(prompt).toContain(
+              "Skip the ChatGPT account Daybreak access advisory",
+            );
+            throw new Error("Resumed Bedrock prompt captured");
+          },
+        };
+      },
+    })),
+  });
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
@@ -540,14 +529,12 @@ test.each([
         },
       }) + "\n",
     );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({
           environment: f.environment,
@@ -696,14 +683,12 @@ test.each([
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
     const rejected = !["single", "bulk"].includes(scenario);
     let turns = 0;
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       scenario === "bulk"
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({
           environment: f.environment,
@@ -789,9 +774,9 @@ test.each(["chatgpt", "api-key"] as const)(
         args,
         input,
       );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       [
         "scan",
         repository,
@@ -808,8 +793,6 @@ test.each(["chatgpt", "api-key"] as const)(
         promptFile,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ environment, currentDirectory: root }),
         runWorkbench: command,
@@ -878,14 +861,12 @@ test.each([
     await mkdir(join(ambientHome, "codex-security"), { recursive: true });
     await writeFile(ambientDeepConfig, "invalid ambient TOML [");
     const prompts: string[] = [];
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({
           environment: f.environment,
@@ -976,20 +957,15 @@ test.each([
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
   await rm(f.sessionPath);
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["scans", "resume", f.scanId],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: resumeClient(f, () =>
-        fail("Must not invoke Codex without the original session"),
-      ),
-    },
-  );
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume", f.scanId], {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: resumeClient(f, () =>
+      fail("Must not invoke Codex without the original session"),
+    ),
+  });
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("original Codex session");
   expect(
@@ -1016,18 +992,16 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
       await rm(f.repository, { recursive: true });
     if (scenario === "missing-session") await rm(f.sessionPath);
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies({
       environment: f.environment,
       currentDirectory: f.root,
     });
     let attempts = 0;
     expect(
-      await main(
+      await runCli(
         ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
-        stdout.stream,
-        stderr.stream,
         {
           ...deps,
           runWorkbench: f.command,
@@ -1073,9 +1047,9 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
 );
 
 test("resume requires an explicit scan ID", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(["scans", "resume"], stdout.stream, stderr.stream, {
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume"], {
     ...dependencies(),
     runWorkbench: async () => fail("Must select a scan explicitly"),
   });

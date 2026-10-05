@@ -5,9 +5,14 @@ import { afterEach, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { FindingsDocument } from "../src/models.js";
 import type { OwnerSuggestions } from "../src/suggest-owners.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "owner-cli-",
@@ -41,8 +46,8 @@ test("accepts exported findings, forwards model settings, and leaves the input u
   const { directory, contents, document } = await input();
   await mkdir(join(directory, "source repo"));
   const deps = dependencies({ currentDirectory: directory });
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   deps.suggestOwners = async (repository, findings, options, surface) => {
     expect(repository).toBe(join(directory, "source repo"));
     expect(findings).toEqual(document.findings);
@@ -56,7 +61,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
     return report;
   };
   expect(
-    await main(
+    await runCli(
       [
         "suggest-owners",
         "findings.json",
@@ -68,8 +73,6 @@ test("accepts exported findings, forwards model settings, and leaves the input u
         "high",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       deps,
     ),
     stderr.text(),
@@ -83,7 +86,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
 test("uses the current repository by default and emits a partial report with exit code 2", async () => {
   const { directory } = await input();
   const deps = dependencies({ currentDirectory: directory });
-  const stdout = capture();
+  const stdout = captureCli(main, "stdout");
   deps.suggestOwners = async (repository, findings, options) => {
     expect(repository).toBe(directory);
     expect(options!.model).toBeUndefined();
@@ -104,12 +107,7 @@ test("uses the current repository by default and emits a partial report with exi
     };
   };
   expect(
-    await main(
-      ["suggest-owners", "findings.json", "--json"],
-      stdout.stream,
-      capture().stream,
-      deps,
-    ),
+    await stdout.run(["suggest-owners", "findings.json", "--json"], deps),
   ).toBe(2);
   expect(JSON.parse(stdout.text()).results[0].status).toBe("error");
 });
@@ -129,14 +127,9 @@ test("rejects invalid input and extra arguments before model execution", async (
     ["findings.json", "extra"],
     ["findings.json", "--source-root"],
   ]) {
-    expect(
-      await main(
-        ["suggest-owners", ...args],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCapturedCli(main, ["suggest-owners", ...args], deps)).toBe(
+      2,
+    );
   }
   expect(suggestOwners).not.toHaveBeenCalled();
 });
@@ -156,12 +149,7 @@ test.each([
       return report;
     };
     expect(
-      await main(
-        ["suggest-owners", "findings.json"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
+      await runCapturedCli(main, ["suggest-owners", "findings.json"], deps),
     ).toBe(code);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
@@ -175,15 +163,8 @@ test("reports owner lookup errors without changing the diagnostic or leaving lis
   deps.suggestOwners = async () => {
     throw new Error("Owner lookup failed.");
   };
-  const stderr = capture();
-  expect(
-    await main(
-      ["suggest-owners", "findings.json"],
-      capture().stream,
-      stderr.stream,
-      deps,
-    ),
-  ).toBe(2);
+  const stderr = captureCli(main, "stderr");
+  expect(await stderr.run(["suggest-owners", "findings.json"], deps)).toBe(2);
   expect(stderr.text()).toBe("codex-security: Owner lookup failed.\n");
   expect(signals.listeners.get("SIGINT")?.size).toBe(0);
   expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
