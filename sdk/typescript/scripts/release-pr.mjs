@@ -2,9 +2,10 @@ import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
 export const notesPath = ".github/release-notes.md";
@@ -682,10 +683,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   };
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const directory = fileURLToPath(new URL("../../..", import.meta.url));
   const repository = process.env.GITHUB_REPOSITORY ?? "openai/codex-security";
   const token =

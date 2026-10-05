@@ -170,7 +170,8 @@ describe("CLI", () => {
           verbose: { type: "boolean" },
           showCost: { type: "boolean", default: false },
           effort: {
-            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            type: "string",
+            minLength: 1,
           },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
@@ -865,6 +866,43 @@ describe("CLI", () => {
     }
   });
 
+  test("surfaces unsupported effort errors without substituting settings or retrying", async () => {
+    const model = "synthetic-future-model";
+    const effort = "synthetic-future-effort";
+    const message = `Provider does not support reasoning effort '${effort}' for model '${model}'.`;
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const run = mock(async () => {
+      throw new CodexSecurityError(message);
+    });
+    const createSecurity = mock((_config: CodexSecurityConfig) =>
+      fakeSecurity(run),
+    );
+    deps.createSecurity = createSecurity;
+
+    expect(
+      await main(
+        ["scan", ".", "--model", model, "--effort", effort, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(createSecurity).toHaveBeenCalledTimes(1);
+    expect(createSecurity.mock.lastCall?.[0].codexOverrides).toEqual({
+      model,
+      model_reasoning_effort: effort,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
+  });
+
   test.each([
     [
       "OpenRouter",
@@ -1477,6 +1515,44 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("info metadata field");
   });
+
+  test.each([
+    { options: [["--format", "json"]] },
+    { options: [["--filter-output", "model,reasoningEffort"]] },
+    { options: [["--token-limit", "4"]] },
+    {
+      options: [
+        ["--token-offset", "1"],
+        ["--token-limit", "4"],
+      ],
+    },
+  ])("accepts equivalent output option forms %j", async ({ options }) => {
+    const separated = captureCli(main, "stdout");
+    const equals = captureCli(main, "stdout");
+    expect(
+      await separated.run(["info", ...options.flat()], dependencies()),
+    ).toBe(0);
+    expect(
+      await equals.run(
+        ["info", ...options.map(([flag, value]) => `${flag}=${value}`)],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(equals.text()).toBe(separated.text());
+    expect(equals.text()).not.toBe("");
+  });
+
+  test.each(["--format", "--filter-output", "--token-limit", "--token-offset"])(
+    "rejects missing values for output option %s",
+    async (flag) => {
+      for (const args of [[flag], [flag, "--json"], [`${flag}=`]]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(await runCli(["info", ...args], dependencies())).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(flag);
+      }
+    },
+  );
 
   test("registers the scoped package as the MCP command", async () => {
     const home = await temporaryDirectory("codex-security-mcp-home-");
@@ -2277,8 +2353,22 @@ describe("CLI", () => {
       ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort", "none"], { model_reasoning_effort: "none" }],
+      [["--effort", "ultra"], { model_reasoning_effort: "ultra" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
       [["--effort", "max"], { model_reasoning_effort: "max" }],
+      [
+        [
+          "--model",
+          "synthetic-future-model",
+          "--effort",
+          "synthetic-future-effort",
+        ],
+        {
+          model: "synthetic-future-model",
+          model_reasoning_effort: "synthetic-future-effort",
+        },
+      ],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2517,6 +2607,65 @@ describe("CLI", () => {
     }
   });
 
+  test("ignores override key whitespace and preserves literal string contents", () => {
+    expect(
+      parseCodexOverrides([
+        ' model = "  example  " ',
+        " agents . max_threads = 4",
+      ]),
+    ).toEqual({ model: "  example  ", agents: { max_threads: 4 } });
+    expect(() =>
+      parseCodexOverrides([
+        "agents.max_threads=4",
+        " agents . max_threads = 8",
+      ]),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(["agents=4", " agents . max_threads = 8"]),
+    ).toThrow("Conflicting --codex key");
+    expect(() => parseCodexOverrides([' model = "example"'], "other")).toThrow(
+      "--model conflicts with --codex model",
+    );
+    for (const key of ["agents. .limit", "agents. __proto__ .limit"]) {
+      expect(() => parseCodexOverrides([`${key}=1`])).toThrow(
+        "Invalid --codex key",
+      );
+    }
+  });
+
+  test.each(
+    [
+      ["classify-severity", "--scan", "--rubric", "policy.md"],
+      ["classify-severity", "--scan-dir", "--rubric", "policy.md"],
+      ["classify-severity", "--scan", "latest", "--rubric", "--reprocess"],
+      [
+        "dedupe",
+        "--scan",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+      [
+        "dedupe",
+        "--workflow-id",
+        "--all-repositories",
+        "--findings-url",
+        "http://localhost:3000",
+      ],
+    ].map((args) => ({ args })),
+  )("rejects missing option values before running %j", async ({ args }) => {
+    const deps = dependencies();
+    const unexpected = mock(throwing("Unexpected SDK or workbench call"));
+    deps.classifyScanSeverity = unexpected;
+    deps.classifyScanDirectorySeverity = unexpected;
+    deps.deduplicateScan = unexpected;
+    deps.runWorkbench = unexpected;
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(args, deps)).toBe(2);
+    expect(stderr.text()).toContain("Missing value for flag:");
+    expect(unexpected).not.toHaveBeenCalled();
+  });
+
   test("does not echo malformed --codex overrides and accepts large values", () => {
     const secret = "SYNTHETIC_TOML_SECRET_MUST_NOT_ECHO";
     let malformed: unknown;
@@ -2608,10 +2757,7 @@ describe("CLI", () => {
         ["scan", ".", "--provider", "fireworks"],
         "--model is required when using --provider fireworks",
       ],
-      [
-        ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, xhigh, or max",
-      ],
+      [["scan", ".", "--effort="], "--effort must not be empty"],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],

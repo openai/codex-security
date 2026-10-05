@@ -307,14 +307,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 
-const MODEL_REASONING_EFFORTS = [
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const MODEL_OPTIONS = modelOptions();
@@ -985,12 +977,11 @@ function modelOptions(
 ) {
   return z.object({
     model: optionValue("--model").optional().describe(modelDescription),
-    effort: z
-      .enum(MODEL_REASONING_EFFORTS, {
-        error: "--effort must be minimal, low, medium, high, xhigh, or max.",
-      })
+    effort: optionValue("--effort")
       .optional()
-      .describe(effortDescription),
+      .describe(
+        `${effortDescription} Passed through to Codex; supported values depend on the model, provider, and Codex version.`,
+      ),
   });
 }
 
@@ -5805,11 +5796,16 @@ export async function main(
   let notice: UpdateNotice | undefined;
   try {
     await cli.serve(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      argv.flatMap((argument) => {
+        if (
+          !/^--(?:format|filter-output|token-limit|token-offset)=/u.test(
+            argument,
+          )
+        )
+          return [argument];
+        const separator = argument.indexOf("=");
+        return [argument.slice(0, separator), argument.slice(separator + 1)];
+      }),
       {
         stdout: frameworkCapture.stream.write,
         exit: (code) => {
@@ -6193,6 +6189,8 @@ function validateCliArguments(
       "validate",
       "verify-fix",
       "suggest-owners",
+      "classify-severity",
+      "dedupe",
       "patch",
       "login",
       "logout",
@@ -6328,9 +6326,14 @@ function validateCliArguments(
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
+    const canonicalOption = option.replace(
+      /[A-Z]/g,
+      (letter) => `-${letter.toLowerCase()}`,
+    );
     if (
       equals >= 0 ||
-      (!VALUE_OPTIONS.has(option) && !(scanImport && option === "--json"))
+      (!VALUE_OPTIONS.has(canonicalOption) &&
+        !(scanImport && option === "--json"))
     )
       continue;
     const next = argv[index + 1];
@@ -7685,7 +7688,7 @@ export async function readSkillCommandOutput(
           appServer.input.end();
         } else if (value["id"] === 1 || value["id"] === "login") {
           if (value["id"] === 1) {
-            send({ method: "notifications/initialized" });
+            send({ method: "initialized" });
             if (appServer.apiKey !== undefined) {
               send({
                 id: "login",
@@ -9399,12 +9402,12 @@ export function parseCodexOverrides(
   }
   for (const value of values) {
     const separator = value.indexOf("=");
-    const key = separator < 0 ? "" : value.slice(0, separator);
+    const key = separator < 0 ? "" : value.slice(0, separator).trim();
     const literal = separator < 0 ? "" : value.slice(separator + 1);
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    const parts = key.split(".");
+    const parts = key.split(".").map((part) => part.trim());
     if (
       parts.some(
         (part) =>
