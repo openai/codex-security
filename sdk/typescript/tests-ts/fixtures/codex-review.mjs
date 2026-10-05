@@ -4,6 +4,14 @@ import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout] = process.argv.slice(2);
 const turnFailures = {
+  "policy-turn-code": {
+    message: "Request blocked.",
+    codexErrorInfo: "cyberPolicy",
+  },
+  "policy-turn": {
+    message: "Request flagged for possible cybersecurity risk.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "failed-turn": {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
@@ -65,16 +73,30 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
-    if (["request-error", "credential-error"].includes(scenario)) {
+    if (
+      [
+        "request-error",
+        "credential-error",
+        "policy-request",
+        "policy-request-code",
+      ].includes(scenario)
+    ) {
       send({
         id: message.id,
         error: {
           code: -32000,
           message:
-            scenario === "credential-error"
-              ? "Authentication failed: Bearer synthetic-review-key"
-              : "Authentication required",
-          data: "Synthetic private response data",
+            scenario === "policy-request-code"
+              ? "Request blocked."
+              : scenario === "policy-request"
+                ? "Request rejected: cyber_policy."
+                : scenario === "credential-error"
+                  ? "Authentication failed: Bearer synthetic-review-key"
+                  : "Authentication required",
+          data:
+            scenario === "policy-request-code"
+              ? { codexErrorInfo: "cyberPolicy" }
+              : "Synthetic private response data",
         },
       });
       continue;
@@ -145,6 +167,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
+      scenario === "refusal-text" ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -157,7 +180,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         params: {
           threadId: "review-thread",
           turnId,
-          item: { type: "agentMessage", text: '{"decision":"SAME"}' },
+          item: {
+            type: "agentMessage",
+            text:
+              scenario === "refusal-text"
+                ? "I'm sorry, but I can't assist with that request."
+                : '{"decision":"SAME"}',
+          },
         },
       });
       complete();
@@ -175,12 +204,20 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (scenario === "invalid-review-error") {
       submit("invalid-error", { reason: " " }, { tool: "submit_error" });
-    } else if (scenario.startsWith("required-source-error")) {
+    } else if (
+      scenario.startsWith("required-source-error") ||
+      scenario === "policy-reported-error"
+    ) {
       if (scenario === "required-source-error-after-verdict")
         submit("pending-verdict", { decision: "SAME" });
       submit(
         "blocked",
-        { reason: "Required source revision could not be read." },
+        {
+          reason:
+            scenario === "policy-reported-error"
+              ? "Request refused due to cybersecurity policy violation."
+              : "Required source revision could not be read.",
+        },
         { tool: "submit_error" },
       );
     } else if (scenario === "incomplete-content") {

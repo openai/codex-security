@@ -19,6 +19,9 @@ __pycache__/
 # Never publish internal-only plugin data.
 .internal/
 
+# Emitted by the standalone plugin build.
+/plugins/codex-security/mcp/
+
 # Emitted by sdk/typescript's build:ci script.
 /.github/scripts/check_plugin_source_compatibility.mjs
 /.github/scripts/test_check_plugin_source_compatibility.mjs

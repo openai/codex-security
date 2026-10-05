@@ -13,12 +13,14 @@ export type SchemaDocument = ArtifactSchemaObject & {
 export function bundleArtifactSchema(
   documents: readonly SchemaDocument[],
   documentId: string,
-  definition: string
+  definition: string,
 ): ArtifactSchemaObject {
   const documentsById = new Map<string, SchemaDocument>();
   for (const document of documents) {
     if (documentsById.has(document.$id)) {
-      throw new Error("Duplicate Codex Security schema document: " + document.$id);
+      throw new Error(
+        "Duplicate Codex Security schema document: " + document.$id,
+      );
     }
     documentsById.set(document.$id, document);
   }
@@ -35,7 +37,7 @@ export function bundleArtifactSchema(
     source,
     document,
     documentsById,
-    new Set<string>()
+    new Set<string>(),
   ) as ArtifactSchemaObject;
 }
 
@@ -45,14 +47,14 @@ export function bundleArtifactSchema(
 export function loadArtifactZodSchema(
   documents: readonly SchemaDocument[],
   documentId: string,
-  definition: string
+  definition: string,
 ): z.ZodType {
   return z.fromJSONSchema(
     bundleArtifactSchema(
       documents,
       documentId,
-      definition
-    ) as z.core.JSONSchema.JSONSchema
+      definition,
+    ) as z.core.JSONSchema.JSONSchema,
   );
 }
 
@@ -60,15 +62,17 @@ function dereferenceArtifactSchema(
   value: unknown,
   document: SchemaDocument,
   documentsById: ReadonlyMap<string, SchemaDocument>,
-  activeReferences: ReadonlySet<string>
+  activeReferences: ReadonlySet<string>,
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => dereferenceArtifactSchema(
-      item,
-      document,
-      documentsById,
-      activeReferences
-    ));
+    return value.map((item) =>
+      dereferenceArtifactSchema(
+        item,
+        document,
+        documentsById,
+        activeReferences,
+      ),
+    );
   }
   if (!value || typeof value !== "object") return value;
 
@@ -77,16 +81,20 @@ function dereferenceArtifactSchema(
     return Object.fromEntries(
       Object.entries(object).map(([name, child]) => [
         name,
-        dereferenceArtifactSchema(child, document, documentsById, activeReferences)
-      ])
+        dereferenceArtifactSchema(
+          child,
+          document,
+          documentsById,
+          activeReferences,
+        ),
+      ]),
     );
   }
 
   const reference = object.$ref;
   const separator = reference.indexOf("#");
-  const referencedDocumentId = separator < 0
-    ? reference
-    : reference.slice(0, separator);
+  const referencedDocumentId =
+    separator < 0 ? reference : reference.slice(0, separator);
   const pointer = separator < 0 ? "" : reference.slice(separator + 1);
   const referencedDocument = referencedDocumentId
     ? documentsById.get(referencedDocumentId)
@@ -105,25 +113,26 @@ function dereferenceArtifactSchema(
     readSchemaPointer(referencedDocument, pointer),
     referencedDocument,
     documentsById,
-    nextReferences
+    nextReferences,
   );
   const siblings = Object.fromEntries(
-    Object.entries(object).filter(([name]) => name !== "$ref")
+    Object.entries(object).filter(([name]) => name !== "$ref"),
   );
   if (Object.keys(siblings).length === 0) return resolved;
   if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
     throw new Error(
-      "Codex Security schema reference cannot have sibling fields: " + reference
+      "Codex Security schema reference cannot have sibling fields: " +
+        reference,
     );
   }
   return {
     ...resolved,
-    ...dereferenceArtifactSchema(
+    ...(dereferenceArtifactSchema(
       siblings,
       document,
       documentsById,
-      activeReferences
-    ) as ArtifactSchemaObject
+      activeReferences,
+    ) as ArtifactSchemaObject),
   };
 }
 
@@ -136,11 +145,7 @@ function readSchemaPointer(document: SchemaDocument, pointer: string): unknown {
   let value: unknown = document;
   for (const encoded of pointer.slice(1).split("/")) {
     const key = encoded.replaceAll("~1", "/").replaceAll("~0", "~");
-    if (
-      !value
-      || typeof value !== "object"
-      || !Object.hasOwn(value, key)
-    ) {
+    if (!value || typeof value !== "object" || !Object.hasOwn(value, key)) {
       throw new Error("Unknown Codex Security schema pointer: #" + pointer);
     }
     value = (value as ArtifactSchemaObject)[key];

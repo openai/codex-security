@@ -16,15 +16,12 @@ from workbench_validation import optional_text, require_uuid, user_context_argum
 MAX_PREFLIGHT_ISSUES = 32
 
 
-def _javascript_string_length(value: str) -> int:
-    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
-
-
 def _preflight_issue_text(value: Any, maximum: int, label: str) -> str:
     if not isinstance(value, str):
         raise SystemExit(f"Preflight issue {label} must be text.")
     normalized = value.strip()
-    if not normalized or _javascript_string_length(normalized) > maximum:
+    # Match JavaScript's UTF-16 code-unit length.
+    if not normalized or len(normalized.encode("utf-16-le", errors="surrogatepass")) // 2 > maximum:
         raise SystemExit(f"Preflight issue {label} must contain 1 to {maximum} characters.")
     return normalized
 
@@ -85,7 +82,7 @@ def update_context(
     scan_id = require_uuid(args.scan_id, "scan-id")
     context = user_context_argument(args)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = require_scan(connection, scan_id)
         if scan["status"] != "running" or scan["canceled_at"] is not None:
             raise SystemExit("Only a running scan can update context.")
@@ -120,10 +117,6 @@ def update_context(
                 "UPDATE workspaces SET updated_at = ? WHERE id = ?",
                 (timestamp, workspace["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, scan_id)
 
 
@@ -169,7 +162,7 @@ def update_progress(
     )
     serialized_preflight_issues = preflight_issues_json(preflight_issues)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         scan = require_scan(connection, scan_id)
         if scan["status"] != "running":
@@ -233,8 +226,12 @@ def update_progress(
                 and args.phase_progress_unit != progress["phase_progress_unit"]
             ):
                 raise SystemExit("Phase progress unit cannot change within a phase.")
-        updates: list[str] = []
-        values: list[Any] = []
+        updates: list[str] = [
+            "phase_items_total = ?",
+            "phase_items_completed = ?",
+            "phase_progress_unit = ?",
+        ]
+        values: list[Any] = [phase_total, phase_completed, phase_unit]
         if next_phase == "preflight" and scan["mode"] != "deep":
             updates.extend(["preflight_checks_total = ?", "preflight_checks_completed = ?"])
             values.extend([phase_total, phase_completed])
@@ -288,29 +285,10 @@ def update_progress(
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can update progress.")
-        if updates:
-            connection.execute(
-                f"UPDATE scan_progress SET {', '.join(updates)}, updated_at = ? WHERE scan_id = ?",
-                (*values, timestamp, scan["id"]),
-            )
-        else:
-            connection.execute(
-                "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-                (timestamp, scan["id"]),
-            )
         connection.execute(
-            """
-            UPDATE scan_progress
-            SET phase_items_total = ?, phase_items_completed = ?,
-                phase_progress_unit = ?, updated_at = ?
-            WHERE scan_id = ?
-            """,
-            (phase_total, phase_completed, phase_unit, timestamp, scan["id"]),
+            f"UPDATE scan_progress SET {', '.join(updates)}, updated_at = ? WHERE scan_id = ?",
+            (*values, timestamp, scan["id"]),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, scan["id"])
 
 

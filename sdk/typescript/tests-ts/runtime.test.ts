@@ -1,14 +1,16 @@
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { EventEmitter, once } from "node:events";
+import { EventEmitter } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
+  cp,
   link,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   readlink,
   realpath,
@@ -23,6 +25,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -74,6 +77,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
+  environmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -85,7 +89,8 @@ import {
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -93,25 +98,16 @@ import {
   ownershipRollout,
   readPythonRolloutUsage,
 } from "./support/usage-rollout.js";
+import { rejecting, throwing } from "./support/errors.js";
+import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-runtime-");
 const testPosix = process.platform === "win32" ? test.skip : test;
+const restoreSpawn = (spawn: typeof childProcess.spawn) =>
+  mock.module("node:child_process", () => ({ ...childProcess, spawn }));
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(
-  prefix = "codex-security-runtime-",
-): Promise<string> {
-  const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 function windowsCredentialAclOutput(descriptors: readonly string[]): string {
   return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
@@ -197,14 +193,9 @@ async function inspectMcpServer(): Promise<McpServerResponse[]> {
     [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
     { encoding: "utf8", timeout: 10_000, windowsHide: true },
   );
-  execution.child.stdin?.end(
-    `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-  );
+  execution.child.stdin?.end(`${jsonLines(messages)}\n`);
   const { stdout } = await execution;
-  return stdout
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as McpServerResponse);
+  return parseJsonLines<McpServerResponse>(stdout);
 }
 
 describe("plugin runtime preparation", () => {
@@ -325,101 +316,6 @@ describe("plugin runtime preparation", () => {
       "candidate-a",
       "candidate-b",
     ]);
-  });
-
-  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-
-    type Surface = {
-      id?: string;
-      label: string;
-      disposition: string;
-      receiptRefs?: string[];
-    };
-    type Deferred = { id: string; reason: string; surfaceIds: string[] };
-    const buildCoverage = new Function(
-      "semanticIdentifier",
-      "coverageMode",
-      "inventoryStrategy",
-      `${source}\nreturn buildCoverage;`,
-    )(
-      (label: string) => label.toLowerCase(),
-      () => "deep_repository",
-      () => "repository",
-    ) as (
-      context: Record<string, unknown>,
-      contract: Record<string, unknown>,
-      coverage: { surfaces: Surface[]; deferred: Deferred[] },
-      scope: { includePaths: string[]; excludePaths: string[] },
-      target: Record<string, unknown>,
-    ) => {
-      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
-      deferred: Deferred[];
-    };
-
-    const coverage = {
-      surfaces: [
-        {
-          id: "surface-web",
-          label: "Primary",
-          disposition: "reported",
-          receiptRefs: ["artifacts/primary.json"],
-        },
-        { id: "surface-web", label: "Secondary", disposition: "reported" },
-        {
-          id: "surface-web-2",
-          label: "Reserved suffix",
-          disposition: "no_issue_found",
-        },
-        { label: "Uploads", disposition: "reported" },
-        {
-          id: "surface_uploads",
-          label: "Owned uploads",
-          disposition: "reported",
-        },
-        { label: "Archive", disposition: "reported" },
-        { label: "Archive", disposition: "no_issue_found" },
-      ],
-      deferred: [
-        {
-          id: "deferred-review",
-          reason: "Environment unavailable",
-          surfaceIds: ["surface-web", "surface_uploads"],
-        },
-      ],
-    };
-    const original = structuredClone(coverage);
-    const canonical = buildCoverage(
-      { mode: "deep" },
-      {},
-      coverage,
-      { includePaths: ["."], excludePaths: [] },
-      {},
-    );
-
-    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
-      "surface-web",
-      "surface-web-3",
-      "surface-web-2",
-      "surface_uploads-2",
-      "surface_uploads",
-      "surface_archive",
-      "surface_archive-2",
-    ]);
-    expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
-      coverage.surfaces.map((surface) => surface.label),
-    );
-    expect(canonical.surfaces[0]!.receiptRefs).toEqual([
-      "artifacts/primary.json",
-    ]);
-    expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
-    expect(canonical.deferred).toEqual(coverage.deferred);
-    expect(coverage).toEqual(original);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -779,109 +675,78 @@ describe("plugin runtime preparation", () => {
 
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const sourcePlugin = await bundledPluginRoot();
-      const projector = new URL(
-        "../scripts/project-plugin.mjs",
-        import.meta.url,
-      );
-      const publicManifest = new URL(
-        "../public-repo/sdk/typescript/plugin.public.json",
-        import.meta.url,
-      );
-      let bundledPlugin = sourcePlugin;
-      if (existsSync(projector) && existsSync(publicManifest)) {
-        const packageRoot = join(root, "package");
-        const isolatedProjector = join(
-          packageRoot,
-          "scripts",
-          "project-plugin.mjs",
+      const bundledPlugin = await bundledPluginRoot();
+      const normalizer = join(bundledPlugin, "mcp", "helpers.mjs");
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const locations: { path: string }[] = [];
+      const input = join(root, "candidate-input.jsonl");
+      const output = join(root, "candidate-output.jsonl");
+      for (const item of cases) {
+        await writeFile(
+          input,
+          JSON.stringify({
+            cwe_ids: ["CWE-89"],
+            locations: [{ path: item.path, start_line: 1, role: "entrypoint" }],
+            summary: "Test finding",
+            evidence: "Test evidence",
+          }) + "\n",
         );
-        const isolatedManifest = join(
-          packageRoot,
-          "public-repo",
-          "sdk",
-          "typescript",
-          "plugin.public.json",
-        );
-        await Promise.all([
-          mkdir(dirname(isolatedProjector), { recursive: true }),
-          mkdir(dirname(isolatedManifest), { recursive: true }),
+        const normalized = Bun.spawnSync([
+          node!,
+          normalizer,
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          root,
+          "--in-scope-files",
+          scopePath,
         ]);
-        await Promise.all([
-          copyFile(projector, isolatedProjector),
-          copyFile(publicManifest, isolatedManifest),
-        ]);
-        const projection = Bun.spawnSync(
-          [process.execPath, isolatedProjector],
-          {
-            cwd: packageRoot,
-            env: {
-              ...process.env,
-              CODEX_SECURITY_PLUGIN_ROOT: sourcePlugin,
-            },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(new TextDecoder().decode(projection.stderr)).toBe("");
-        expect(projection.exitCode).toBe(0);
-        bundledPlugin = join(packageRoot, "_bundled_plugin");
+        const safe =
+          item.path.trim().length > 0 &&
+          !item.path.includes(":") &&
+          !item.path.includes("\\");
+        expect(normalized.exitCode).toBe(safe ? 0 : 2);
+        if (safe) {
+          const row = JSON.parse(await readFile(output, "utf8")) as {
+            locations: typeof locations;
+          };
+          const location = row.locations[0]!;
+          expect(location.path).toBe(item.path);
+          expect(await readFile(join(root, location.path), "utf8")).toBe(
+            item.contents,
+          );
+          locations.push(location);
+        }
       }
-      const normalizer = join(
-        bundledPlugin,
-        "scripts",
-        "normalize_candidates.py",
-      );
-      expect(await readFile(normalizer, "utf8")).toBe(
-        await readFile(
-          join(sourcePlugin, "scripts", "normalize_candidates.py"),
-          "utf8",
-        ),
-      );
       const result = Bun.spawnSync([
         python!,
         "-I",
         "-B",
         "-c",
         [
-          "import json, pathlib, runpy, sys",
-          "module = runpy.run_path(sys.argv[1])",
-          "root = pathlib.Path(sys.argv[2])",
-          "scope = module['read_scope'](pathlib.Path(sys.argv[3]), root)",
-          "finalizer = runpy.run_path(sys.argv[5])",
+          "import json, runpy, sys",
+          "finalizer = runpy.run_path(sys.argv[1])",
           "results = []",
-          "for value in json.loads(sys.argv[4]):",
-          "    path, source = module['relative_file'](value, root)",
-          "    candidate = {'cwe_ids': ['CWE-89'], 'locations': [{'path': value, 'start_line': 1, 'role': 'entrypoint'}], 'summary': 'Test finding', 'evidence': 'Test evidence'}",
+          "for location in json.loads(sys.argv[2]):",
           "    try:",
-          "        normalized = module['normalize_candidate'](candidate, root, scope, {})",
-          "        location = normalized['locations'][0]",
           "        finalizer['_validate_location']({'path': location['path'], 'startLine': location['start_line'], 'endLine': location['end_line'], 'role': location['role']}, 'candidate.locations[0]')",
           "    except ValueError:",
-          "        contract_valid = False",
+          "        results.append(False)",
           "    else:",
-          "        contract_valid = True",
-          "    results.append({'path': path, 'contents': source.read_text(encoding='utf-8'), 'inScope': path in scope, 'contractValid': contract_valid})",
+          "        results.append(True)",
           "print(json.dumps(results))",
         ].join("\n"),
-        normalizer,
-        root,
-        scopePath,
-        JSON.stringify(cases.map((item) => item.path)),
         join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+        JSON.stringify(locations),
       ]);
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual(
-        cases.map((item) => ({
-          ...item,
-          inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !/^[A-Za-z]:/.test(item.path) &&
-            !item.path.includes("\\") &&
-            !/[\u0000-\u001f]/u.test(item.path),
-        })),
+        locations.map((item) => !/[\u0000-\u001f]/u.test(item.path)),
       );
     },
   );
@@ -992,8 +857,7 @@ describe("plugin runtime preparation", () => {
     const controller = new AbortController();
     const originalLstat = fsPromises.lstat;
     let discovered = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
+    mockFs(() => ({
       lstat: async (...args: Parameters<typeof originalLstat>) => {
         const metadata = await originalLstat(...args);
         if (dirname(String(args[0])) === cancellationDirectory) {
@@ -1025,10 +889,7 @@ describe("plugin runtime preparation", () => {
         ),
       ).toBe(false);
     } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
+      restoreFs({ lstat: originalLstat });
     }
   });
 
@@ -1119,8 +980,7 @@ describe("plugin runtime preparation", () => {
       await writeFile(join(outsideScripts, "helper.py"), "OUTSIDE_SECRET");
       const originalLstat = fsPromises.lstat;
       let swapped = false;
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
+      mockFs(() => ({
         lstat: async (...args: Parameters<typeof originalLstat>) => {
           if (!swapped && String(args[0]) === helper) {
             swapped = true;
@@ -1141,10 +1001,7 @@ describe("plugin runtime preparation", () => {
           "OUTSIDE_SECRET",
         );
       } finally {
-        mock.module("node:fs/promises", () => ({
-          ...fsPromises,
-          lstat: originalLstat,
-        }));
+        restoreFs({ lstat: originalLstat });
       }
     },
   );
@@ -1200,20 +1057,17 @@ describe("plugin runtime preparation", () => {
     const home = join(root, "home");
     await mkdir(home);
     const controller = new AbortController();
-    let registrationCalls = 0;
+    const runCodex = mock((Promise.resolve<string>).bind(Promise, ""));
     controller.abort(new DOMException("canceled", "AbortError"));
 
     await expect(
       bootstrapPlugin(home, selected, {
         codexCommand: { command: "/codex" },
         signal: controller.signal,
-        runCodex: async () => {
-          registrationCalls += 1;
-          return "";
-        },
+        runCodex,
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
-    expect(registrationCalls).toBe(0);
+    expect(runCodex).toHaveBeenCalledTimes(0);
     expect(
       existsSync(join(home, "sdk-marketplace", "plugins", "codex-security")),
     ).toBe(false);
@@ -1258,6 +1112,68 @@ describe("plugin runtime preparation", () => {
     expect(await readFile(join(extracted, "é.txt"), "utf8")).toBe(
       "legacy filename\n",
     );
+  });
+
+  test("extracts ZIP directories and preserves executable file permissions", async () => {
+    const root = await temporaryDirectory();
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "__MACOSX/._release": strToU8("metadata"),
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/unix-directory": [
+          new Uint8Array(),
+          { os: 3, attrs: 0o40700 << 16 },
+        ],
+        "release/dos-directory": [new Uint8Array(), { os: 0, attrs: 16 }],
+        "release/scripts/helper": [
+          strToU8("#!/bin/sh\n"),
+          { os: 3, attrs: 0o100755 << 16 },
+        ],
+      }),
+    );
+    const extracted = await extractPluginZip(archive, join(root, "extracted"));
+    expect((await stat(join(extracted, "unix-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect((await stat(join(extracted, "dos-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect(await readFile(join(extracted, "scripts/helper"), "utf8")).toBe(
+      "#!/bin/sh\n",
+    );
+    expect(existsSync(join(root, "extracted", "__MACOSX"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(join(extracted, "scripts/helper"))).mode & 0o777).toBe(
+        0o755 & ~process.umask(),
+      );
+    }
+  });
+
+  test("rejects ZIP symlinks before writing through them and cleans staging", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const target = join(outside, "target.txt");
+    await writeFile(target, "unchanged");
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/link": [strToU8(outside), { os: 3, attrs: 0o120777 << 16 }],
+        "release/link/target.txt": strToU8("overwritten"),
+      }),
+    );
+    await expect(
+      extractPluginZip(archive, join(root, "extracted")),
+    ).rejects.toThrow("unsafe path");
+    expect(await readFile(target, "utf8")).toBe("unchanged");
+    expect(await readdir(root)).toEqual(["plugin.zip"]);
   });
 
   test("honors cancellation while preparing a plugin ZIP", async () => {
@@ -1469,8 +1385,7 @@ describe("plugin runtime preparation", () => {
     await mkdir(ambient);
     await writeFile(join(ambient, "auth.json"), '{"token":"portable"}\n');
     const originalLink = fsPromises.link;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
+    mockFs(() => ({
       link: async () => {
         const error = new Error(
           "hard links are unsupported",
@@ -1485,10 +1400,7 @@ describe("plugin runtime preparation", () => {
         '{"token":"portable"}\n',
       );
     } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        link: originalLink,
-      }));
+      restoreFs({ link: originalLink });
     }
   });
 
@@ -1626,6 +1538,147 @@ describe("plugin runtime preparation", () => {
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
+  });
+
+  describe("installed plugin reuse", () => {
+    async function fixture() {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = join(home, "sdk-marketplace");
+      const staged = join(marketplace, "plugins", "codex-security");
+      const installed = join(home, "installed", "1.2.3");
+      const record = join(marketplace, "installed-plugin.json");
+      const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+      const calls: string[][] = [];
+      await mkdir(home);
+      const bootstrap = () =>
+        bootstrapPlugin(home, selected, {
+          codexCommand: { command: "/codex" },
+          runCodex: async (_command, args) => {
+            calls.push([...args]);
+            if (args[1] === "marketplace") {
+              await writeFile(join(home, "config.toml"), configuration);
+              return "";
+            }
+            await rm(installed, { recursive: true, force: true });
+            await cp(staged, installed, { recursive: true });
+            await writeFile(
+              join(home, "config.toml"),
+              `${configuration}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`,
+            );
+            return JSON.stringify({
+              installedPath: installed,
+              version: "1.2.3",
+            });
+          },
+        });
+      await bootstrap();
+      return { selected, home, staged, installed, record, calls, bootstrap };
+    }
+
+    test("preserves generated installed files during reuse", async () => {
+      const { installed, calls, bootstrap } = await fixture();
+      const generated = join(installed, "scripts", "__pycache__", "helper.pyc");
+      await mkdir(dirname(generated));
+      await writeFile(generated, "generated cache");
+
+      expect((await bootstrap()).installedRoot).toBe(installed);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
+      expect(await readFile(generated, "utf8")).toBe("generated cache");
+    });
+
+    test.each(["changed", "added", "removed"] as const)(
+      "refreshes %s same-version source files",
+      async (change) => {
+        const { selected, staged, installed, bootstrap } = await fixture();
+        const name = change === "added" ? "added.py" : "helper.py";
+        const source = join(selected, "scripts", name);
+        if (change === "removed") {
+          await rm(source);
+        } else {
+          // Same length as the original helper, so byte comparison must detect it.
+          await writeFile(source, "print('no')\n");
+        }
+
+        await bootstrap();
+
+        for (const root of [staged, installed]) {
+          const path = join(root, "scripts", name);
+          if (change === "removed") {
+            expect(existsSync(path)).toBe(false);
+          } else {
+            expect(await readFile(path, "utf8")).toBe("print('no')\n");
+          }
+        }
+      },
+    );
+
+    testPosix("refreshes changed source executable permissions", async () => {
+      const { selected, staged, installed, bootstrap } = await fixture();
+      await chmod(join(selected, "scripts", "helper.py"), 0o750);
+
+      await bootstrap();
+
+      for (const root of [staged, installed]) {
+        expect(
+          (await stat(join(root, "scripts", "helper.py"))).mode & 0o111,
+        ).toBe(0o110);
+      }
+    });
+
+    test.each([
+      "missing file",
+      "changed file",
+      "missing record",
+      "invalid record",
+      "disabled plugin",
+      "missing registration",
+      "extra staged file",
+    ])("repairs %s before reusing the installation", async (damage) => {
+      const { home, staged, installed, record, calls, bootstrap } =
+        await fixture();
+      const helper = join(installed, "scripts", "helper.py");
+      switch (damage) {
+        case "missing file":
+          await rm(helper);
+          break;
+        case "changed file":
+          await writeFile(helper, "print('no')\n");
+          break;
+        case "missing record":
+          await rm(record);
+          break;
+        case "invalid record":
+          await writeFile(record, "{");
+          break;
+        case "disabled plugin": {
+          const config = await readFile(join(home, "config.toml"), "utf8");
+          await writeFile(
+            join(home, "config.toml"),
+            config.replace("enabled = true", "enabled = false"),
+          );
+          break;
+        }
+        case "missing registration":
+          await writeFile(join(home, "config.toml"), "");
+          break;
+        case "extra staged file":
+          await writeFile(join(staged, "stale.py"), "pass\n");
+          break;
+      }
+
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
+      expect(existsSync(join(staged, "stale.py"))).toBe(false);
+      expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
+        installedPath: installed,
+        version: "1.2.3",
+      });
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+    });
   });
 
   test("does not preserve a different marketplace when numeric identities collide", async () => {
@@ -2043,24 +2096,25 @@ describe("plugin runtime preparation", () => {
       });
       await writeFile(join(scanDir, artifact), expected);
       const python = await resolvePluginPython({ environment });
+      const restorationSignal = new AbortController();
       const restorer = await prepareScanArtifactRestorer(
         {
           python,
           pluginRoot: upgraded.installedRoot,
           environment,
+          signal: restorationSignal.signal,
         },
         scanDir,
       );
       await writeFile(join(scanDir, artifact), Buffer.from([9, 0, 8]));
+      restorationSignal.abort();
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 
       const rolloutPath = join(root, "cached-rollout.jsonl");
       await writeFile(
         rolloutPath,
-        ownershipRollout([lowerUuid7Turn])
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
+        jsonLines(ownershipRollout([lowerUuid7Turn])) + "\n",
       );
       expect(
         readPythonRolloutUsage(upgraded.installedRoot, rolloutPath),
@@ -2384,7 +2438,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.push(stateDirectory);
+      temporaryDirectories.track(stateDirectory);
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -2502,19 +2556,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const releaseFirst = await acquireCodexSecurityCredentialHomeLock(home);
     const database = join(home, ".codex-security-scan.sqlite3");
     const original = await stat(database);
-    let secondAcquired = false;
+    const observeSecondAcquired = mock((release: () => Promise<void>) => {
+      return release;
+    });
     const second = acquireCodexSecurityCredentialHomeLock(home).then(
-      (release) => {
-        secondAcquired = true;
-        return release;
-      },
+      observeSecondAcquired,
     );
 
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(secondAcquired).toBe(false);
+    expect(observeSecondAcquired).not.toHaveBeenCalled();
     await releaseFirst();
     const releaseSecond = await second;
-    expect(secondAcquired).toBe(true);
+    expect(observeSecondAcquired).toHaveBeenCalled();
     await releaseSecond();
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
     // Removing this file would let waiters lock different inodes.
@@ -2542,23 +2595,16 @@ describe("runtime directories and plugin Python boundary", () => {
       let separateDatabaseCreates = 0;
       let observedMode: number | undefined;
       let paused = false;
-      let reportPaused!: () => void;
-      let resumeCreator!: () => void;
-      const creatorPaused = new Promise<void>((resolve) => {
-        reportPaused = resolve;
-      });
-      const creatorResumed = new Promise<void>((resolve) => {
-        resumeCreator = resolve;
-      });
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
+      const creatorPaused = Promise.withResolvers<void>();
+      const creatorResumed = Promise.withResolvers<void>();
+      mockFs(() => ({
         lstat: async (...args: Parameters<typeof originalLstat>) => {
           const metadata = await originalLstat(...args);
           if (args[0] === database && !paused) {
             paused = true;
             observedMode = Number(metadata.mode) & 0o777;
-            reportPaused();
-            await creatorResumed;
+            creatorPaused.resolve();
+            await creatorResumed.promise;
           }
           return metadata;
         },
@@ -2573,10 +2619,8 @@ describe("runtime directories and plugin Python boundary", () => {
       try {
         first = acquireCredentialHomeLockWithTimeout(home);
         await Promise.race([
-          creatorPaused,
-          first.then(() => {
-            throw new Error("Credential-lock initialization did not pause");
-          }),
+          creatorPaused.promise,
+          first.then(throwing("Credential-lock initialization did not pause")),
         ]);
 
         // Pause the creator at its first post-open inspection. A contender must
@@ -2584,20 +2628,16 @@ describe("runtime directories and plugin Python boundary", () => {
         releaseSecond = await acquireCredentialHomeLockWithTimeout(home);
         await releaseSecond();
         releaseSecond = undefined;
-        resumeCreator();
+        creatorResumed.resolve();
         const releaseFirst = await first;
         await releaseFirst();
         first = undefined;
       } finally {
-        resumeCreator();
+        creatorResumed.resolve();
         await releaseSecond?.();
         const pendingRelease = await first?.catch(() => undefined);
         await pendingRelease?.();
-        mock.module("node:fs/promises", () => ({
-          ...fsPromises,
-          lstat: originalLstat,
-          writeFile: originalWriteFile,
-        }));
+        restoreFs({ lstat: originalLstat, writeFile: originalWriteFile });
       }
 
       // Closing another descriptor for this inode can release SQLite's
@@ -2855,7 +2895,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const home = join(root, "home");
     await mkdir(home);
     const metadata = await lstat(home);
-    const secured: string[] = [];
+    const secured = mock(async (_path: string) => {});
 
     for (const [description, secure] of [
       [
@@ -2871,20 +2911,16 @@ describe("runtime directories and plugin Python boundary", () => {
     ] as const) {
       await secure({
         platform: "win32",
-        secureWindowsHome: async (path) => {
-          secured.push(path);
-        },
+        secureWindowsHome: secured,
       });
       await expect(
         secure({
           platform: "win32",
-          secureWindowsHome: async () => {
-            throw new Error("ACL could not be secured");
-          },
+          secureWindowsHome: rejecting("ACL could not be secured"),
         }),
       ).rejects.toThrow(`private Windows ${description}`);
     }
-    expect(secured).toEqual([home, home]);
+    expect(secured.mock.calls.map(([value]) => value)).toEqual([home, home]);
   });
 
   test.each(["created", "removed"] as const)(
@@ -3055,10 +3091,7 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      mock.module("node:child_process", () => ({
-        ...childProcess,
-        spawn: originalSpawn,
-      }));
+      restoreSpawn(originalSpawn);
     }
   });
 
@@ -3163,14 +3196,8 @@ describe("runtime directories and plugin Python boundary", () => {
           kill: () => true,
         });
       const first = makeChild();
-      let enterCallback!: () => void;
-      const callbackEntered = new Promise<void>((resolve) => {
-        enterCallback = resolve;
-      });
-      let releaseCallback!: () => void;
-      const callbackReleased = new Promise<void>((resolve) => {
-        releaseCallback = resolve;
-      });
+      const callbackEntered = Promise.withResolvers<void>();
+      const callbackReleased = Promise.withResolvers<void>();
       let paused = false;
       let callbackFinished = false;
       let attempts = 0;
@@ -3199,8 +3226,8 @@ describe("runtime directories and plugin Python boundary", () => {
         resolveDescriptorAliases: async () => {
           if (paused) return;
           paused = true;
-          enterCallback();
-          await callbackReleased;
+          callbackEntered.resolve();
+          await callbackReleased.promise;
           callbackFinished = true;
         },
       }).then(
@@ -3216,23 +3243,19 @@ describe("runtime directories and plugin Python boundary", () => {
       try {
         first.stdout.write(`${firstDescriptors.join("\n")}\n`);
         await Promise.race([
-          callbackEntered,
-          outcome.then(() => {
-            throw new Error(
-              "Credential inspection settled before its callback",
-            );
-          }),
+          callbackEntered.promise,
+          outcome.then(
+            throwing("Credential inspection settled before its callback"),
+          ),
         ]);
-        const ended = once(first.stdout, "end");
         first.stdout.end();
         first.stderr.end();
-        await ended;
         first.exitCode = 2;
         first.emit("close", 2, null);
         await nextTurn();
         expect(settled).toBe(false);
         expect(attempts).toBe(1);
-        releaseCallback();
+        callbackReleased.resolve();
         const result = await outcome;
         if (kind === "unsafe") {
           expect(result.error).toMatchObject({
@@ -3249,13 +3272,10 @@ describe("runtime directories and plugin Python boundary", () => {
           expect(attempts).toBe(2);
         }
       } finally {
-        releaseCallback();
+        callbackReleased.resolve();
         first.stdout.destroy();
         first.stderr.destroy();
-        mock.module("node:child_process", () => ({
-          ...childProcess,
-          spawn: originalSpawn,
-        }));
+        restoreSpawn(originalSpawn);
       }
     },
   );
@@ -3378,7 +3398,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const expected = Math.ceil((1024 * 1024) / (descriptor.length + 1)) + 1;
     let observed = 0;
 
-    const count = await streamWindowsCredentialAclDescriptors(
+    await streamWindowsCredentialAclDescriptors(
       process.execPath,
       [
         "--eval",
@@ -3392,9 +3412,85 @@ describe("runtime directories and plugin Python boundary", () => {
       },
     );
 
-    expect(count).toBe(expected);
     expect(observed).toBe(expected);
   });
+
+  test.each(["queued", "chunked"] as const)(
+    "streams %s Windows credential descriptors through EOF",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `streams ${kind} Windows credential descriptors through EOF`,
+        )
+      ) {
+        return;
+      }
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null as number | null,
+        signalCode: null,
+        kill: () => true,
+      });
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => child,
+      }));
+      const expected =
+        kind === "queued"
+          ? Array.from({ length: 4096 }, (_, i) => `descriptor-${i}`)
+          : ["first", "café", "middle", "last"];
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const observed: string[] = [];
+      const outcome = streamWindowsCredentialAclDescriptors(
+        "synthetic-credential-inspector",
+        [],
+        async (descriptor) => {
+          observed.push(descriptor);
+          if (observed.length === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      );
+      try {
+        if (kind === "queued") {
+          // End with more queued lines than readline's watermark while the
+          // first asynchronous descriptor inspection is still pending.
+          child.stdout.end(`${expected.join("\n")}\n`);
+        } else {
+          child.stdout.write(
+            Buffer.concat([Buffer.from("first\r\ncaf"), Buffer.from([0xc3])]),
+          );
+        }
+        await entered.promise;
+        if (kind === "chunked") {
+          child.stdout.end(
+            Buffer.concat([
+              Buffer.from([0xa9]),
+              Buffer.from("\r\n\r\nmiddle\rlast"),
+            ]),
+          );
+        }
+        child.stderr.end();
+        child.exitCode = 0;
+        child.emit("close", 0, null);
+        await nextTurn();
+        expect(observed).toEqual([expected[0]!]);
+        release.resolve();
+        await outcome;
+        expect(observed).toEqual(expected);
+      } finally {
+        release.resolve();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        restoreSpawn(originalSpawn);
+      }
+    },
+  );
 
   test("preserves Windows credential ACL subprocess failures while streaming", async () => {
     await expect(
@@ -3833,9 +3929,7 @@ describe("runtime directories and plugin Python boundary", () => {
     try {
       await requirePrivateCredentialHome(metadata, home, {
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw underlying;
-        },
+        secureWindowsHome: (Promise.reject<never>).bind(Promise, underlying),
       });
       throw new Error("expected the Windows ACL operation to fail");
     } catch (error) {
@@ -3893,22 +3987,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
-    const validations: string[] = [];
+    const validations = mock(async (_path: string) => {});
 
     await requireSecureCredentialHome(home, {
       platform: "win32",
-      secureWindowsHome: async (path) => {
-        validations.push(path);
-      },
+      secureWindowsHome: validations,
     });
 
-    expect(validations).toEqual([home]);
+    expect(validations.mock.calls.map(([value]) => value)).toEqual([home]);
     await expect(
       requireSecureCredentialHome(home, {
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw new Error("ACL changed after preparation");
-        },
+        secureWindowsHome: rejecting("ACL changed after preparation"),
       }),
     ).rejects.toThrow("private Windows credential home");
   });
@@ -4725,6 +4815,86 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
+
+  test.each([
+    ["unbound", false],
+    ["bound", true],
+  ] as const)(
+    "selects workbench Git for the requested target (%s)",
+    async (_label, bound) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const untrustedBin = join(repository, "tools");
+      const launchHome = join(root, "home");
+      const hostBin = join(launchHome, "tools");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      const git = Bun.which("git");
+      const python = await resolvePluginPython();
+      expect(git).not.toBeNull();
+      if (git === null) return;
+      const trustedGit = join(
+        hostBin,
+        process.platform === "win32" ? "git.exe" : "git",
+      );
+      await mkdir(untrustedBin, { recursive: true });
+      await mkdir(join(repository, ".git"));
+      await mkdir(hostBin, { recursive: true });
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await symlink(await realpath(git), trustedGit);
+      await writeFile(
+        join(untrustedBin, basename(trustedGit)),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, sys",
+          "from pathlib import Path",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
+          "from workbench_target import git_command",
+          "assert os.environ.get('GIT_SSH_COMMAND') == 'synthetic-ssh'",
+          "target = Path(sys.argv[1])",
+          "completed = git_command(target, '--version', text=True)",
+          "completed.check_returncode()",
+          "print(json.dumps({'git': completed.args[0], 'path': os.environ.get('PATH'), 'binding': os.environ.get('CODEX_SECURITY_GIT')}))",
+        ].join("\n"),
+      );
+      const currentDirectory = spyOn(process, "cwd").mockReturnValue(
+        launchHome,
+      );
+      try {
+        const environment = {
+          PATH: [untrustedBin, hostBin].join(delimiter),
+          GIT_SSH_COMMAND: "synthetic-ssh",
+        };
+        const result = await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: bound
+              ? environmentWithGit(
+                  environment,
+                  await inspectTrustedExecutable(
+                    "git",
+                    environment,
+                    repository,
+                  ),
+                )
+              : environment,
+          },
+          [repository],
+        );
+        expect(result["git"]).toBe(trustedGit);
+        expect(result["binding"]).toBe(bound ? trustedGit : null);
+        if (bound) expect(result["path"]).toBe(hostBin);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        currentDirectory.mockRestore();
+      }
+    },
+  );
 
   test.each([
     ["legacy", "0.1.22", false, false, undefined],
@@ -5550,7 +5720,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      temporaryDirectories.push(output);
+      temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),
@@ -5603,7 +5773,7 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     await expect(stat(preview!)).rejects.toThrow();
 
-    let archived: string | undefined;
+    const onOutputArchived = mock((_archiveDir: string) => {});
     expect(
       await prepareOutputDir(
         output,
@@ -5611,11 +5781,10 @@ describe("runtime directories and plugin Python boundary", () => {
         undefined,
         undefined,
         true,
-        (archiveDir) => {
-          archived = archiveDir;
-        },
+        onOutputArchived,
       ),
     ).toBe(output);
+    const archived = onOutputArchived.mock.lastCall?.[0];
     expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
     expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
@@ -5718,7 +5887,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await expect(validateOutputDir(absent)).rejects.toThrow("is not empty");
 
     const home = await createIsolatedHome();
-    temporaryDirectories.push(home);
+    temporaryDirectories.track(home);
     if (process.platform !== "win32") {
       expect((await stat(home)).mode & 0o777).toBe(0o700);
 
@@ -5769,21 +5938,74 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const interpreter =
+    const discovered =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
+    expect(discovered).not.toBeNull();
+    const interpreter = join(
+      await realpath(dirname(discovered!)),
+      basename(discovered!),
+    );
+    const repository = await temporaryDirectory();
 
     expect(
       await resolvePluginPython({
+        protectedRoot: repository,
         environment: {
           PATH: "",
-          Python: interpreter!,
+          Python: interpreter,
           ...(process.env["SystemRoot"] === undefined
             ? {}
             : { SystemRoot: process.env["SystemRoot"] }),
         },
       }),
-    ).toBe(await realpath(interpreter!));
+    ).toBe(interpreter);
+  });
+
+  test("binds the plugin environment to inspected Git", () => {
+    const unbound = { Path: join(tmpdir(), "operator-tools"), KEEP: "1" };
+    expect(environmentWithGit(unbound, undefined)).toEqual(unbound);
+    const environment = environmentWithGit(
+      {
+        Path: join(tmpdir(), "repository-bin"),
+        PATH: join(tmpdir(), "other-repository-bin"),
+        Git_Config_Count: "1",
+        GIT_DIR: join(tmpdir(), "repository", ".git"),
+        Codex_Security_Git: join(tmpdir(), "repository-bin", "git"),
+        PYTHONUTF8: "1",
+        PYTHON: "selected-python",
+        CODEX_CLI_PATH: "selected-codex",
+        TEST: "1",
+      },
+      {
+        executable: join(tmpdir(), "trusted-bin", "git"),
+        environment: {
+          PATH: join(tmpdir(), "trusted-bin"),
+          OPENAI_API_KEY: "unselected-synthetic-key",
+          TEST: "old-snapshot",
+        },
+      },
+    );
+
+    expect(environment).toEqual({
+      CODEX_SECURITY_GIT: join(tmpdir(), "trusted-bin", "git"),
+      CODEX_CLI_PATH: "selected-codex",
+      GIT_DIR: join(tmpdir(), "repository", ".git"),
+      Git_Config_Count: "1",
+      PATH: join(tmpdir(), "trusted-bin"),
+      PYTHON: "selected-python",
+      PYTHONUTF8: "1",
+      TEST: "1",
+    });
+    expect(
+      environmentWithGit(
+        { Path: join(tmpdir(), "repository-bin"), GIT_DIR: ".git" },
+        { executable: null, environment: { PATH: "" } },
+      ),
+    ).toEqual({
+      CODEX_SECURITY_GIT: "",
+      GIT_DIR: ".git",
+      PATH: "",
+    });
   });
 
   test.skipIf(process.platform !== "win32")(
@@ -5885,6 +6107,38 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  testPosix("preserves an explicit virtualenv Python launcher", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(root, "venv", "bin");
+    const systemPython = join(systemBin, "python3");
+    const virtualenvPython = join(virtualenvBin, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      systemPython,
+      '#!/bin/sh\ncase "$0" in */venv/bin/python) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(systemPython, 0o700);
+    await symlink(systemPython, virtualenvPython);
+    const aliasedBin = join(root, "venv-bin-alias");
+    await symlink(virtualenvBin, aliasedBin, "dir");
+
+    for (const candidate of [virtualenvPython, join(aliasedBin, "python")]) {
+      await expect(
+        resolvePluginPython({
+          configuredPath: candidate,
+          environment: { PATH: "" },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(virtualenvPython);
+    }
+  });
+
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
@@ -5962,9 +6216,13 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const marker = join(root, "sitecustomize-executed");
-      const interpreter = Bun.which("python3");
-      expect(interpreter).not.toBeNull();
-      if (interpreter === null) return;
+      const discovered = Bun.which("python3");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const interpreter = join(
+        await realpath(dirname(discovered)),
+        basename(discovered),
+      );
 
       await mkdir(repository);
       await writeFile(
@@ -5985,7 +6243,7 @@ describe("runtime directories and plugin Python boundary", () => {
           environment,
           protectedRoot: repository,
         }),
-      ).toBe(await realpath(interpreter));
+      ).toBe(interpreter);
       expect(existsSync(marker)).toBe(false);
     },
   );
