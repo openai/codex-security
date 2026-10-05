@@ -2682,7 +2682,8 @@ export class CodexSecurity {
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
     delete sdkCodexConfig["permissions"];
-    if (commandAuth) delete sdkCodexConfig["model_providers"];
+    delete sdkCodexConfig["model_providers"];
+    const providerOverrides = modelProviderConfigOverride(sessionConfig);
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
@@ -2713,14 +2714,9 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(commandAuth || configOverrides.length > 0
+      ...(providerOverrides.length > 0 || configOverrides.length > 0
         ? {
-            configOverrides: [
-              ...(commandAuth
-                ? modelProviderConfigOverride(sessionConfig)
-                : []),
-              ...configOverrides,
-            ],
+            configOverrides: [...providerOverrides, ...configOverrides],
           }
         : {}),
       env: sdkEnvironment,
@@ -4605,8 +4601,8 @@ function requirePolicyConfigKeys(config: JsonObject): void {
 function policyCodexConfig(config: JsonObject): JsonObject {
   const resolved = resolveCodexProfile(config);
   requirePolicyConfigKeys(resolved);
-  // The selected provider is already written as TOML. The SDK cannot quote
-  // provider names when it flattens this table into command-line overrides.
+  // The selected provider is passed as raw TOML by createSessionCodex.
+  // Structured SDK overrides cannot quote literal provider names.
   delete resolved["model_providers"];
   return {
     ...resolved,
@@ -4636,28 +4632,14 @@ function sharedCredentialCodexConfig(
   config: JsonObject,
   credentialHome: string,
 ): JsonObject {
+  // Providers stay in per-session overrides. Codex merges provider tables, so
+  // persisting them here would mix credentials from concurrent scans.
   const shared: JsonObject = {
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
   for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
-  }
-  const modelProvider = scanModelProvider(config);
-  if (hasCommandAuth(config)) {
-    for (const key of ["profile", "profiles"]) {
-      if (Object.hasOwn(config, key))
-        shared[key] = structuredClone(config[key]!);
-    }
-  }
-  if (typeof modelProvider === "string" && modelProvider.length > 0) {
-    shared["model_provider"] = modelProvider;
-    const providers = config["model_providers"];
-    if (isRecord(providers) && Object.hasOwn(providers, modelProvider)) {
-      shared["model_providers"] = {
-        [modelProvider]: structuredClone(providers[modelProvider]!),
-      };
-    }
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
 }

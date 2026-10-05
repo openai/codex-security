@@ -1118,7 +1118,7 @@ async function testWorkerRuntimeSettings() {
         ].join("\n"),
       );
       const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
-        const provider = index === 0 ? "openai" : `synthetic.gateway.${index}`;
+        const provider = index === 0 ? "openai" : "synthetic.gateway";
         const providerConfig =
           index === 0
             ? undefined
@@ -1370,14 +1370,31 @@ async function testWorkerRuntimeSettings() {
               await readFile(launch.markerPath, "utf8"),
             );
             assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
-            const selectedProvider = workerConfigurations.find((entry) =>
-              preflight.argv.includes(
-                `model_provider=${JSON.stringify(entry.provider)}`,
-              ),
+            const selectedProvider = workerConfigurations.find(
+              (entry) => preflight.configPath === entry.path,
             );
             assert.ok(
               selectedProvider,
               "worker preflight must use the same isolated provider",
+            );
+            assert.ok(
+              preflight.argv.includes(
+                `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+              ),
+            );
+            const providerOverride = preflight.argv.find((arg) =>
+              arg.startsWith("model_providers="),
+            );
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(parseToml(providerOverride).model_providers),
+              ),
+              selectedProvider.providerConfig
+                ? {
+                    [selectedProvider.provider]:
+                      selectedProvider.providerConfig,
+                  }
+                : {},
             );
             assert.equal(
               workerPermissionProfileOverride(launch.args),
@@ -2328,7 +2345,7 @@ async function fakeCodexFixture(
       `const accountResult = ${JSON.stringify(accountResult)};`,
       `const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
-      "  const preflight = { argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
+      "  const preflight = { argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
       "  let buffer = '';",
       "  process.stdin.setEncoding('utf8');",

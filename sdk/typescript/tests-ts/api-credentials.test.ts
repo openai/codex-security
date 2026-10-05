@@ -150,9 +150,9 @@ describe("CodexSecurity orchestration", () => {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
-          expect(saved["model_providers"]).toEqual({
-            "synthetic.provider": provider,
-          });
+          expect(saved["model_provider"]).toBeUndefined();
+          expect(saved["model_providers"]).toBeUndefined();
+          expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
       } finally {

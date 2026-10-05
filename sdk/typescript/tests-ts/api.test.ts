@@ -5135,12 +5135,8 @@ describe("CodexSecurity orchestration", () => {
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
       expect(persistentConfig["model"]).toBeUndefined();
-      if (provider !== undefined) {
-        expect(persistentConfig).toMatchObject({
-          model_provider: provider,
-          model_providers: { [provider]: providerConfig },
-        });
-      }
+      expect(persistentConfig["model_provider"]).toBeUndefined();
+      expect(persistentConfig["model_providers"]).toBeUndefined();
     },
   );
 
@@ -5193,11 +5189,14 @@ describe("CodexSecurity orchestration", () => {
                   ? {}
                   : {
                       model_provider: provider,
-                      model_providers: {
-                        [provider]: OPENROUTER_CODEX_PROVIDER,
-                      },
                     }),
               });
+              expect(options.config?.["model_providers"]).toBeUndefined();
+              if (provider !== undefined) {
+                expect(parseToml(options.configOverrides![0]!)).toEqual({
+                  model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
+                });
+              }
               return {
                 startThread: () => ({
                   id: null,
