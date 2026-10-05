@@ -263,8 +263,9 @@ The extraction root is not enforced.
         completed_at = manifest["scan"]["completedAt"]
         self.assertEqual(manifest["scan"]["startedAt"], started_at)
         self.assertTrue(completed_at.endswith("Z"))
-        self.assertGreaterEqual(datetime.fromisoformat(completed_at), before)
-        self.assertLessEqual(datetime.fromisoformat(completed_at), datetime.now(timezone.utc))
+        completed_datetime = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        self.assertGreaterEqual(completed_datetime, before)
+        self.assertLessEqual(completed_datetime, datetime.now(timezone.utc))
         self.assertEqual(manifest["scan"]["sealedAt"], completed_at)
 
     def test_headless_finalization_rejects_invalid_authoritative_start(self) -> None:

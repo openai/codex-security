@@ -1,7 +1,7 @@
 [project]
 name = "codex-security"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 test = [
@@ -19,7 +19,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 required-version = "==0.16.9"
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [
