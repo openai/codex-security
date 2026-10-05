@@ -38,7 +38,7 @@ function repository(name) {
   git(directory, "init", "-b", "main");
   fs.writeFileSync(path.join(directory, "fixture.txt"), name);
   git(directory, "add", "fixture.txt");
-  git(directory, "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-m", "Fixture");
+  git(directory, "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Fixture");
   return directory;
 }
 try {
