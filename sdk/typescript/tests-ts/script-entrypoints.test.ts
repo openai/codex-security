@@ -31,6 +31,7 @@ beforeAll(async () => {
     import http from "node:http";
     import { syncBuiltinESMExports } from "node:module";
     function entered() { throw new Error("SCRIPT_MAIN_REACHED"); }
+    globalThis.fetch = entered;
     childProcess.execFile = entered;
     childProcess.execFileSync = entered;
     http.createServer = entered;
