@@ -8,7 +8,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
-@pytest.mark.parametrize("configured", [None, "", "  ", "explicit"])
+@pytest.mark.parametrize("configured", [None, "", "  ", "explicit", "explicit padded"])
 def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, configured):
     home = tmp_path / "user"
     home.mkdir()
@@ -20,8 +20,11 @@ def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, conf
     if configured is None:
         monkeypatch.delenv("CODEX_HOME", raising=False)
     else:
-        if configured == "explicit":
-            configured = str(tmp_path / "selected codex")
+        if configured in {"explicit", "explicit padded"}:
+            configured = str(
+                tmp_path
+                / ("selected codex " if configured == "explicit padded" else "selected codex")
+            )
             expected = Path(configured)
         monkeypatch.setenv("CODEX_HOME", configured)
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
