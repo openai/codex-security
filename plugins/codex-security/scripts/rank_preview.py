@@ -15,6 +15,8 @@ PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 TEXT_CODE_EXTENSIONS = {
+    ".ascx",
+    ".aspx",
     ".c",
     ".cc",
     ".cfg",
@@ -22,6 +24,7 @@ TEXT_CODE_EXTENSIONS = {
     ".clj",
     ".cpp",
     ".cs",
+    ".cshtml",
     ".css",
     ".cts",
     ".cue",
@@ -42,6 +45,8 @@ TEXT_CODE_EXTENSIONS = {
     ".java",
     ".js",
     ".json",
+    ".jsp",
+    ".jspx",
     ".jsx",
     ".kt",
     ".kts",
@@ -57,6 +62,7 @@ TEXT_CODE_EXTENSIONS = {
     ".psd1",
     ".psm1",
     ".py",
+    ".razor",
     ".rb",
     ".rs",
     ".scala",
