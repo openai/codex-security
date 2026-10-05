@@ -241,6 +241,25 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
+def javascript_keyword_follows_member_access(masked: list[str], start: int) -> bool:
+    while start > 0 and masked[start - 1].isspace():
+        start -= 1
+    if start == 0 or masked[start - 1] not in ".#":
+        return False
+    if masked[start - 1] == "#":
+        return True
+    # A decimal literal can end in a dot before a new statement, unlike a member access.
+    end = start - 1
+    start = end
+    while start > 0 and masked[start - 1] in "0123456789_":
+        start -= 1
+    return (
+        start == end
+        or masked[start] not in "0123456789"
+        or (start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$.#"))
+    )
+
+
 def javascript_regex_end(
     text: str,
     start: int,
@@ -258,10 +277,7 @@ def javascript_regex_end(
         keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$", prefix)
         if keyword is None:
             return None
-        previous -= len(keyword.group())
-        while previous >= 0 and masked[previous].isspace():
-            previous -= 1
-        if previous >= 0 and masked[previous] in ".#":
+        if javascript_keyword_follows_member_access(masked, previous + 1 - len(keyword.group())):
             return None
 
     index = start + 1
@@ -459,11 +475,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$"):
                     start -= 1
                 keyword = "".join(masked[start:end])
-                while start > 0 and masked[start - 1].isspace():
-                    start -= 1
                 control_parentheses.append(
                     keyword in {"if", "while", "for", "with"}
-                    and (start == 0 or masked[start - 1] not in ".#")
+                    and not javascript_keyword_follows_member_access(masked, start)
                 )
             if char == ")":
                 after_control = bool(control_parentheses) and control_parentheses.pop()

@@ -550,6 +550,26 @@ def test_javascript_regex_after_control_flow_preserves_declarations(
     assert preview.splitlines() == ["function before", "function after"]
 
 
+@pytest.mark.parametrize("number", ["1.", "1_000."])
+@pytest.mark.parametrize("statement", ["return /{/.test(input)", "if (input) /{/.test(input)"])
+def test_javascript_decimal_before_keyword_preserves_the_following_method(
+    tmp_path: Path, number: str, statement: str
+) -> None:
+    source = f"""class Service {{
+  check(input) {{
+    this.count = {number}
+    {statement};
+  }}
+  authorize(request) {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "service.js", source)
+
+    assert "method Service.check" in preview
+    assert "method Service.authorize" in preview
+
+
 @pytest.mark.parametrize(
     "expression",
     [
@@ -558,6 +578,8 @@ def test_javascript_regex_after_control_flow_preserves_declarations(
         "object.else / { value: count / total }",
         "object. else / { value: count / total }",
         "object./* member */else / { value: count / total }",
+        "object1.\nreturn / { value: count / total }",
+        "1e1.\nreturn / { value: count / total }",
         "this.#if() / { valueOf() { return 12 / 2; } }",
         "this.#else / { valueOf() { return 12 / 2; } }",
     ],
