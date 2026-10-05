@@ -88,8 +88,10 @@ After merging to `main`, push `container-v<version>` matching the SDK package
 version or run `container-release` manually on `main`. Releases require a commit
 on protected `main`; pull requests only build and test.
 
-If a release fails, fix the cause and rerun only failed jobs; do not overwrite
-an existing stable version. `bootstrap` and
+If a release fails, fix the cause and rerun only failed jobs. Promotion accepts an
+existing stable version only when it already references the verified digest.
+Publishing or retrying an older version leaves `latest` on the newest stable
+version. `bootstrap` and
 `release-candidate-<commit>` tags are not consumer releases.
 
 See the [findings service guide](../sdk/typescript/README.md#findings-service-preview)

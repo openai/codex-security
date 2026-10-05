@@ -68,6 +68,7 @@ async function runEntrypoint(
 async function runVersionVerifier(
   response: string,
   failure = false,
+  expectedDigest?: string,
 ): Promise<SpawnSyncReturns<string> & { workflowOutput: string }> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
@@ -96,18 +97,27 @@ async function runVersionVerifier(
     const endpoint = "orgs/openai/packages/container/codex-security";
     const output = join(root, "output");
     await writeFile(output, "");
-    const result = spawnSync("sh", [versionVerifier, endpoint, "0.1.4"], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        EXPECTED_ENDPOINT: endpoint,
-        GH_FIXTURE_FAILURE: failure ? "1" : "0",
-        GH_FIXTURE_RESPONSE: response,
-        GITHUB_OUTPUT: output,
-        PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
+    const result = spawnSync(
+      "sh",
+      [
+        versionVerifier,
+        endpoint,
+        "0.1.4",
+        ...(expectedDigest ? [expectedDigest] : []),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          EXPECTED_ENDPOINT: endpoint,
+          GH_FIXTURE_FAILURE: failure ? "1" : "0",
+          GH_FIXTURE_RESPONSE: response,
+          GITHUB_OUTPUT: output,
+          PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        timeout: 10_000,
       },
-      timeout: 10_000,
-    });
+    );
     return { ...result, workflowOutput: await readFile(output, "utf8") };
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -245,13 +255,65 @@ describe("immutable customer container releases", () => {
   testPosix("rejects an existing immutable release version", async () => {
     const result = await runVersionVerifier(
       JSON.stringify([
-        { metadata: { container: { tags: ["0.1.4", "latest"] } } },
+        {
+          name: `sha256:${"a".repeat(64)}`,
+          metadata: { container: { tags: ["0.1.4", "latest"] } },
+        },
       ]),
     );
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Container version 0.1.4 already exists");
   });
+
+  testPosix(
+    "retries the verified digest without moving latest backwards",
+    async () => {
+      const digest = `sha256:${"a".repeat(64)}`;
+      for (const newer of [false, true]) {
+        const versions = [
+          { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+          ...(newer
+            ? [
+                {
+                  name: `sha256:${"b".repeat(64)}`,
+                  metadata: { container: { tags: ["0.2.0", "latest"] } },
+                },
+              ]
+            : []),
+        ];
+        const result = await runVersionVerifier(
+          `[]\n${JSON.stringify(versions)}`,
+          false,
+          digest,
+        );
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.workflowOutput).toBe(`publish_latest=${!newer}\n`);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects a retry with a different or missing published digest",
+    async () => {
+      const digest = `sha256:${"a".repeat(64)}`;
+      for (const name of [`sha256:${"b".repeat(64)}`, undefined]) {
+        const result = await runVersionVerifier(
+          JSON.stringify([
+            { name, metadata: { container: { tags: ["0.1.4"] } } },
+          ]),
+          false,
+          digest,
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "stable version tags cannot be overwritten",
+        );
+        expect(result.workflowOutput).toBe("");
+      }
+    },
+  );
 
   testPosix(
     "accepts an unpublished version across paginated results",
