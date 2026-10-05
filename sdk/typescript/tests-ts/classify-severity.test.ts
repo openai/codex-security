@@ -100,7 +100,7 @@ test("supplies complete evidence and separate policy/context to a restricted str
     codex,
     signal,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
   });
   expect(result.assessments[0]).toMatchObject({
     ...assessed,
@@ -114,7 +114,7 @@ test("supplies complete evidence and separate policy/context to a restricted str
   expect(calls[0]!.thread).toMatchObject({
     threadSource: "security_severity_classification",
     model: "synthetic-model",
-    modelReasoningEffort: "high",
+    modelReasoningEffort: "future-effort",
     sandboxMode: "read-only",
     approvalPolicy: "never",
     networkAccessEnabled: false,
