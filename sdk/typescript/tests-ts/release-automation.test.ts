@@ -4028,9 +4028,14 @@ describe("GitHub release workflow safeguards", () => {
       )?.if,
     ).toBe("steps.scope.outputs.ci-mode == 'markdown'");
     const markdownCommand =
-      validationSteps.find(({ name }) => name === "Check formatting")?.run ??
-      "";
-    expect(markdownCommand).toBe("pnpm --dir sdk/typescript run format");
+      validationSteps.find(({ name }) => name === "Check Markdown formatting")
+        ?.run ?? "";
+    expect(markdownCommand).toContain(
+      'pnpm --dir sdk/typescript exec prettier --check "${files[@]}"',
+    );
+    expect(markdownCommand).toContain(
+      "git diff --no-renames --name-only -z HEAD^1 HEAD",
+    );
     const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
@@ -4251,7 +4256,7 @@ describe("GitHub release workflow safeguards", () => {
         for (const stepName of [
           "Set up TypeScript tools",
           "Install dependencies",
-          "Check formatting",
+          "Check Markdown formatting",
         ]) {
           const condition =
             validationSteps.find(({ name }) => name === stepName)?.if ?? "";
