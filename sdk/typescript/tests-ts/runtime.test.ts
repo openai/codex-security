@@ -6133,6 +6133,48 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test("uses XDG_CACHE_HOME for Windows managed Python", async () => {
+    const root = await temporaryDirectory();
+    const cache = join(root, "Custom Cache");
+    const python = join(
+      cache,
+      "codex-runtimes",
+      "codex-primary-runtime",
+      "dependencies",
+      "python",
+      "python.exe",
+    );
+    await mkdir(dirname(python), { recursive: true });
+    await writeFile(python, "Synthetic executable");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
+      import { mock } from "bun:test";
+      import * as childProcess from "node:child_process";
+      import { promisify } from "node:util";
+      const probe = () => {};
+      probe[promisify.custom] = async (command) => {
+        if (command !== process.argv[3]) throw new Error("Unexpected Python probe: " + command);
+        return { stdout: "codex-security-python-ok\\n", stderr: "" };
+      };
+      mock.module("node:child_process", () => ({ ...childProcess, execFile: probe }));
+      Object.defineProperty(process, "platform", { value: "win32" });
+      const { resolvePluginPython } = await import(process.argv[1]);
+      console.log(await resolvePluginPython({ environment: { PATH: "", XDG_CACHE_HOME: process.argv[2] }, homeDirectory: process.argv[4] }));
+    `,
+        fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+        cache,
+        python,
+        join(root, "unused-home"),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(python);
+  });
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
     const configured = join(root, "configured-python");

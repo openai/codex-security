@@ -124,11 +124,7 @@ async function discover(
   signal?.throwIfAborted();
   for (const entry of entries) {
     signal?.throwIfAborted();
-    if (
-      (process.platform === "win32" ? entry.name.toLowerCase() : entry.name) ===
-      ".git"
-    )
-      continue;
+    if (entry.name.toLowerCase() === ".git") continue;
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {

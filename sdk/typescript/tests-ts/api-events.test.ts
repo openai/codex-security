@@ -1,3 +1,4 @@
+import { copyCompletedScan } from "./plugin-root.js";
 import { once } from "node:events";
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -28,8 +29,7 @@ import {
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 
 afterEach(cleanup);
 

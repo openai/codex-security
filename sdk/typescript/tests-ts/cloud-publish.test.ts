@@ -214,6 +214,24 @@ describe("Cloud publication", () => {
     expect(finding!.occurrenceId).toMatch(/^occ_[a-f0-9]{24}$/);
   });
 
+  test("keeps separate CSV occurrences with the same source finding ID", async () => {
+    const second = csvRow.replace(
+      "occ_e79cb19591e696572a1c22be",
+      "occ_111111111111111111111111",
+    );
+    const path = await csvFixture(`${csvHeader}\n${csvRow}\n${second}\n`);
+    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(result.findingCount).toBe(2);
+    expect(
+      new Set(result.findings!.map((finding) => finding.occurrenceId)).size,
+    ).toBe(2);
+    expect(
+      new Set(result.findings!.map((finding) => finding.findingId)).size,
+    ).toBe(2);
+    const repeated = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(repeated.findings).toEqual(result.findings);
+  });
+
   test("accepts the candidate_id column from a Deep scan export", async () => {
     const path = await csvFixture(
       `${csvHeader.replace("finding_id,", "finding_id,candidate_id,")}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a,", "csf_852f90d6e1177502ff113d4a,candidate-001,")}\n`,

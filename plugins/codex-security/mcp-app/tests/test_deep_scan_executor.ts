@@ -1081,6 +1081,7 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "XDG_CACHE_HOME",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
@@ -1116,14 +1117,16 @@ async function testWorkerRuntimeSettings() {
       await mkdir(codexHome);
       await writeFile(
         path.join(codexHome, "config.toml"),
-        `model_provider = "synthetic"
+        `model = "fixture-inherited-model"
+model_reasoning_effort = "medium"
+model_provider = "synthetic"
 [model_providers.synthetic]
 name = "Synthetic gateway"
 base_url = "https://gateway.example.test/v1"
 wire_api = "responses"
 env_key = "SYNTHETIC_GATEWAY_KEY"`,
       );
-      const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
+      const workerConfigurations = Array.from({ length: 6 }, (_, index) => {
         const parsedConfiguration = parseToml(configuration);
         const profiles = (parsedConfiguration.profiles ?? {}) as Record<
           string,
@@ -1268,12 +1271,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        // Omitted settings preserve the model and effort in the Codex home.
+        {},
       ];
-      const providerKeys = [
-        "synthetic-gateway-key-0",
-        "synthetic-gateway-key-1",
-        undefined,
-      ];
+      const providerKeys = settings.map((_, index) =>
+        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
+      );
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -1282,7 +1286,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             artifactContext: {
               pluginRoot: fixture.root,
               repoRoot: fixture.root,
-              scanId: `fixture-scan-${modelSettings.model}`,
+              scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
             },
           }),
@@ -1296,6 +1300,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
+              process.env.XDG_CACHE_HOME = path.join(
+                fixture.root,
+                `cache-${index}`,
+              );
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
               if (providerKeys[index] === undefined) {
@@ -1333,8 +1341,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(
-              ({ args }) => args[args.indexOf("--model") + 1] === model,
+            const workerLaunch = workerLaunches.find(({ args }) =>
+              model === undefined
+                ? !args.includes("--model")
+                : args[args.indexOf("--model") + 1] === model,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
             assert.equal(
@@ -1381,13 +1391,28 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
-              model_reasoning_effort: reasoningEffort,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
               model_verbosity: workerConfigurations[index].verbosity,
             });
-            assertFlagPair(invocation.argv, "--model", model);
+            assert.equal(
+              invocation.cacheDirectory,
+              path.join(fixture.root, `cache-${index}`),
+            );
+            assert.deepEqual(
+              invocation.argv.filter((arg: string) =>
+                arg.startsWith("model_reasoning_effort="),
+              ),
+              reasoningEffort === undefined
+                ? []
+                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+            );
+            if (model === undefined) {
+              assert.equal(invocation.argv.includes("--model"), false);
+            } else {
+              assertFlagPair(invocation.argv, "--model", model);
+            }
             assert.equal(
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,
@@ -1466,6 +1491,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
             });
+            assert.equal(
+              preflight.cacheDirectory,
+              path.join(
+                fixture.root,
+                `cache-${workerConfigurations.indexOf(selectedProvider)}`,
+              ),
+            );
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 preflight.argv.some(
@@ -1536,6 +1568,7 @@ async function testWorkerCyberAccessSettings() {
     name: string;
     configuration: string;
     program?: string;
+    serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
@@ -1544,7 +1577,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "blue",
       configuration:
-        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      serviceTier: "fast",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: true,
@@ -1554,7 +1588,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "explicit-false",
       configuration:
-        '[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+      serviceTier: "flex",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: false,
@@ -1564,7 +1599,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "other-program",
       configuration:
-        '[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
+      serviceTier: "fast",
       program: "standard",
       features: {
         api_key_cyber_access_programs: true,
@@ -1574,7 +1610,8 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "features-only",
       configuration:
-        "[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n",
+        'service_tier = "fast"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n',
+      serviceTier: "fast",
       features: {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: true,
@@ -1648,11 +1685,19 @@ async function testWorkerCyberAccessSettings() {
           ({ args }) => args[0] === "exec",
         );
         assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, features = {} } of cases) {
+        for (const { name, program, serviceTier, features = {} } of cases) {
           const launch = workerLaunches.find(
             ({ args }) => args[args.indexOf("--model") + 1] === name,
           );
           const invocation = await readJson(launch!.markerPath);
+          assert.deepEqual(
+            invocation.argv.filter((arg: string) =>
+              arg.startsWith("service_tier="),
+            ),
+            serviceTier === undefined
+              ? []
+              : [`service_tier=${JSON.stringify(serviceTier)}`],
+          );
           if (program === undefined) {
             assert.equal(
               invocation.argv.includes("--cyber-access-program"),
@@ -2361,7 +2406,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2402,7 +2447,7 @@ if (process.argv.includes('app-server')) {
 const stdin = (await process.stdin.toArray()).join('');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

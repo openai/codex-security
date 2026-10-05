@@ -27,6 +27,7 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
@@ -143,8 +144,8 @@ export interface ReadOnlyCodexOptions {
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  /** Passed through to Codex; support depends on the runtime, model, and provider. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -520,9 +521,7 @@ async function startReadOnlyCodexThread(
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
-    options.reasoningEffort ??
-    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
+    options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
   const source = options.environment ?? process.env;
   const providerConfig =
     options.codex === undefined
@@ -547,16 +546,8 @@ async function startReadOnlyCodexThread(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const sdkConfig = { ...config };
-  // Scan permission profiles and path keys must not replace this helper's read-only settings.
-  for (const key of [
-    "default_permissions",
-    "permissions",
-    "projects",
-    "model_providers",
-  ]) {
-    delete sdkConfig[key];
-  }
+  const sdkConfig = structuredCodexConfig(config);
+  delete sdkConfig["default_permissions"];
   const providerOverrides = modelProviderConfigOverride(
     commandAuth ? providerConfig : (config ?? {}),
   );
@@ -626,6 +617,7 @@ async function startReadOnlyCodexThread(
   return codex.startThread({
     threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
     sandboxMode: "read-only",
     approvalPolicy: "never",

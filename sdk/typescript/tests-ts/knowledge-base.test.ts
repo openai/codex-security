@@ -78,14 +78,9 @@ describe("scan knowledge bases", () => {
       );
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
-      expect((await extractedDocuments(directory.path)).sort()).toEqual(
-        [
-          "Documented application behavior.",
-          ...(process.platform !== "win32" && metadataName !== ".git"
-            ? [await readFile(metadata, "utf8")]
-            : []),
-        ].sort(),
-      );
+      expect(await extractedDocuments(directory.path)).toEqual([
+        "Documented application behavior.",
+      ]);
       const explicit = await prepareKnowledgeBase([metadata]);
       temporaryDirectories.track(explicit.path);
       expect(await extractedDocuments(explicit.path)).toEqual([
@@ -102,6 +97,9 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
+    await mkdir(join(root, ".GiT"));
+    await writeFile(join(root, ".GiT", "config"), "Repository metadata.");
+    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
@@ -114,6 +112,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");
     expect(documents).toContain("Prioritize SSRF.");
+    expect(documents).not.toContain("Repository metadata.");
     expect(knowledgeBase.path.startsWith(root)).toBe(false);
     if (process.platform !== "win32") {
       expect((await stat(knowledgeBase.path)).mode & 0o777).toBe(0o700);
