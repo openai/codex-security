@@ -1,44 +1,19 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { copyCompletedScanFixture } from "../plugin-root.js";
+import {
+  createTemporaryDirectories,
+  temporaryDirectory as createPluginTemporaryDirectory,
+} from "../../../../plugins/codex-security/mcp-app/tests/support/temporary-directories.ts";
 
-export function createTemporaryDirectories({
-  canonical = true,
-}: { canonical?: boolean } = {}) {
-  const directories: string[] = [];
-
-  return {
-    track(path: string): void {
-      directories.push(path);
-    },
-
-    async create(prefix: string): Promise<string> {
-      const directory = await mkdtemp(join(tmpdir(), prefix));
-      const path = canonical ? await realpath(directory) : directory;
-      directories.push(path);
-      return path;
-    },
-
-    async cleanup(): Promise<void> {
-      await Promise.all(
-        directories
-          .splice(0)
-          .map((path) => rm(path, { recursive: true, force: true })),
-      );
-    },
-  };
-}
+export { createTemporaryDirectories };
 
 export function createApiTestFixtures(
   prefix = "codex-security-api-",
   canonicalize = true,
 ) {
-  const temporaryDirectories = createTemporaryDirectories({
-    canonical: canonicalize,
-  });
+  const temporaryDirectories = createTemporaryDirectories(canonicalize);
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,
@@ -55,35 +30,9 @@ export function createApiTestFixtures(
   };
 }
 
-export function createSyncTestDirectories(
-  prefix: string,
-  canonicalize = false,
-) {
-  const temporaryDirectories: string[] = [];
-  return {
-    temporaryDirectories,
-    cleanup(): void {
-      for (const directory of temporaryDirectories.splice(0)) {
-        rmSync(directory, { recursive: true, force: true });
-      }
-    },
-    temporaryDirectory(directoryPrefix = prefix): string {
-      const created = temporaryDirectorySync(directoryPrefix);
-      const path = canonicalize ? realpathSync(created) : created;
-      temporaryDirectories.push(path);
-      return path;
-    },
-  };
-}
-
-export function temporaryDirectorySync(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
-}
-
-export async function temporaryDirectory(
+export function temporaryDirectory(
   prefix: string,
   canonicalize = true,
 ): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), prefix));
-  return canonicalize ? realpath(path) : path;
+  return createPluginTemporaryDirectory(prefix, canonicalize);
 }
