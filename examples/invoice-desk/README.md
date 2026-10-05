@@ -66,6 +66,11 @@ account alone does not grant that network access. Do not use a repository or
 organization Actions secret for this workflow. A missing key fails the scan
 with a setup error.
 
+The scan defaults to `https://api.openai.com/v1`. If the service account's project
+requires a regional endpoint, set the `OPENAI_BASE_URL` Actions variable in the
+same environment to the full API base URL, including `/v1`. The workflow passes
+it through Codex's existing `openai_base_url` setting.
+
 Review the source commit before approving inference. Behavior tests receive no
 inference credentials; GitHub may separately require approval to run them for a
 first-time contributor.
