@@ -27,9 +27,9 @@ function structuredAnswer(text) {
 }
 
 function normalizesAs(text, sourceType) {
-  const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)\\s*:\\s*|\x60?normalize as\\s+)`;
+  const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)[*_]*\\s*:\\s*|\x60?normalize as\\s+)`;
   const value = `(?:"${sourceType}"|'${sourceType}'|\x60${sourceType}\x60|${sourceType})`;
-  const normalization = field + value + "\x60?";
+  const normalization = field + "[*_]*" + value + "\x60?";
   return new RegExp(`(?:^|[\\s{,(\\[])[*_]*${normalization}[*_]*(?=$|[\\s\x60,}.;:!?\\)\\]])`, "i").test(text);
 }
 
@@ -100,6 +100,7 @@ const checks = {
       ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
         ? ["must describe per-alert instances with per_page=100"] : []),
       ...(answer?.source_type !== "sarif" ? ["must normalize code scanning as sarif"] : []),
+      ...(hasTriageJson(text) ? ["must not emit triage JSON during source intake"] : []),
     ];
   },
 

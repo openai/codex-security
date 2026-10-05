@@ -24,6 +24,7 @@ for (const text of [
   JSON.stringify({ example: '"verdict": "confirmed"' }),
   '{"verdict":"unknown"}',
   JSON.stringify({ example: '{schema_version: "triage-finding/v0"}' }),
+  JSON.stringify({ example: '{verdict: confirmed}' }),
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
   assert.equal(hasTriageJson(text), false, text);
@@ -48,6 +49,10 @@ for (const text of [
   "{'schema_version': 'triage-finding/v0', 'findings': []}",
   '{schema_version: "triage-finding/v0", findings: []}',
   '{input_id: "synthetic", verdict: "confirmed"}',
+  '{verdict: confirmed}',
+  '{verdict: needs_review}',
+  '{verdict: not_actionable}',
+  '{schema_version: triage-finding/v0, findings: []}',
   '{"ver\\u0064ict":"needs\\u005freview"}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
@@ -103,6 +108,8 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
 for (const invalid of [
   null, [], {},
   { ...codeScanning, source_type: "advisory" },
+  { ...codeScanning, schema_version: "triage-finding/v0", findings: [] },
+  { ...codeScanning, findings: [{ verdict: "confirmed" }] },
   { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
   { ...codeScanning, instances: { ...codeScanning.instances, parameters: { per_page: 1000 } } },
   { ...codeScanning, instances: { ...codeScanning.instances, path: "/repos/example/other/code-scanning/alerts/{alert_number}/instances" } },
@@ -130,6 +137,9 @@ for (const text of [
 }
 
 for (const emphasis of ["**", "*", "__", "_", "***"]) {
+  for (const normalization of [`source_type: ${emphasis}advisory${emphasis}`, `Normalize as ${emphasis}advisory${emphasis}`, `${emphasis}source_type${emphasis}: advisory`]) {
+    expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${normalization}.`, githubContext("dependabot_malware"));
+  }
   for (const normalization of ["source_type: advisory", "source_type: `advisory`", '"source_type": "advisory"', "normalize as advisory", "normalize as `advisory`", "`source_type: advisory`", "`normalize as advisory`", "Normalize as advisory.", "Normalize as advisory: preserve the identifier", "Normalization: source_type: advisory"]) {
     expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}${normalization}${emphasis}.`, githubContext("dependabot_malware"));
   }
