@@ -146,9 +146,20 @@ jobs:
         run: |
           node .github/scripts/check_plugin_source_compatibility.mjs
 
-      - name: Check formatting
+      - name: Check Markdown formatting
         if: steps.scope.outputs.check-markdown == 'true'
-        run: pnpm --dir sdk/typescript run format
+        shell: bash
+        run: |
+          files=()
+          while IFS= read -r -d '' path; do
+            if [[ -f "$GITHUB_WORKSPACE/$path" &&
+                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
+              files+=("$GITHUB_WORKSPACE/$path")
+            fi
+          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
+          if ((${#files[@]} > 0)); then
+            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
+          fi
 
   workflow-quality:
     needs: validate-title
