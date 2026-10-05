@@ -310,11 +310,9 @@ export const CODEX_AUTH_CONFIG_KEYS = [
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =
-  "No credentials were found. Run 'codex-security login'. On a remote or " +
-  "headless machine, use 'codex-security login --device-auth' if your workspace " +
-  "permits it. If device auth is disabled, use browser login with SSH forwarding; " +
-  "see 'codex-security login --help' or " +
-  "https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh. " +
+  "No credentials were found. Run 'codex-security login'. On a remote or headless " +
+  "machine, use 'codex-security login --device-auth' if your workspace allows it. " +
+  "If device auth is disabled, see 'codex-security login --help' for browser login over SSH. " +
   "For CI, set OPENAI_API_KEY or CODEX_API_KEY.";
 
 function preferredAuthUrl(value: string): string | null {

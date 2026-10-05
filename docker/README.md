@@ -131,7 +131,7 @@ docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
 
-The device-login example requires your workspace to permit device authentication.
+Use device login only if your workspace allows it.
 For unattended use, provide `OPENAI_API_KEY` or `CODEX_API_KEY` instead of login.
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 `CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;

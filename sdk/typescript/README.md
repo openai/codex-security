@@ -248,16 +248,13 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-On remote or headless machines, use device authentication if your workspace
-permits it:
+On remote or headless machines, use device auth if your workspace allows it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
 
-If your workspace disables device authentication, use
-[browser login with SSH forwarding](#remote-login-with-ssh-forwarding) on
-SSH-accessible machines.
+If device auth is disabled, [sign in over SSH](#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -271,35 +268,23 @@ Access-token environment variables are not scan API keys.
 
 ### Remote login with SSH forwarding
 
-When device authentication is disabled, forward Codex's localhost browser-login
-callback over SSH.
+Use an SSH tunnel when device auth is disabled.
 
-On your local machine (the one with a browser), open an SSH session with port
-forwarding. Replace `user@remote-host` with your SSH destination:
+On your local machine, replace `user@remote-host` with your SSH address and run:
 
 ```bash
 ssh -L 1455:localhost:1455 user@remote-host
 ```
 
-In that SSH session, on the remote machine, start browser login:
+Run login in that SSH session:
 
 ```bash
 npx @openai/codex-security login
 ```
 
-Open the URL printed by the login command in your local browser and finish
-signing in. Keep the SSH session open until login completes; the tunnel forwards
-the browser callback to the remote machine's localhost port 1455.
+Open the sign-in URL in your local browser. Keep SSH connected until login finishes.
 
-On the remote machine, verify the saved login and start your scan:
-
-```bash
-npx @openai/codex-security login status
-npx @openai/codex-security scan .
-```
-
-See the [Codex authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh)
-for the SSH forwarding fallback.
+See the [authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh).
 
 ### Native command authentication and other providers
 
@@ -2833,7 +2818,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
-The device-login example requires your workspace to permit device authentication.
+Use device login only if your workspace allows it.
 With a published image, run from the Codex Security repository root:
 
 ```bash
