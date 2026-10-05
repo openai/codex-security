@@ -2551,7 +2551,10 @@ export class CodexSecurity {
             authentication.environment,
             this.#abortController.signal,
           );
-          await setCodexSecurityCredentialLogout(authentication.codexHome, true);
+          await setCodexSecurityCredentialLogout(
+            authentication.codexHome,
+            true,
+          );
         },
         this.#abortController.signal,
       );

@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import { nodeCommand } from "./support/shell.js";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
