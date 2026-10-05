@@ -85,6 +85,7 @@
 - preserve Go declarations after raw strings ending in backslashes ([#1235](https://github.com/openai/codex-security/pull/1235))
 - migrate tests to TypeScript and simplify tooling ([#1219](https://github.com/openai/codex-security/pull/1219))
 - update Codex CLI and SDK to 0.162.0-alpha.14 ([#1242](https://github.com/openai/codex-security/pull/1242))
+- preserve declarations around C++ raw strings ([#1279](https://github.com/openai/codex-security/pull/1279))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
