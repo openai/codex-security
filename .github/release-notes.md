@@ -90,6 +90,7 @@
 - preserve split UTF-8 diagnostics ([#1249](https://github.com/openai/codex-security/pull/1249))
 - simplify fixtures and eval tooling ([#1292](https://github.com/openai/codex-security/pull/1292))
 - preserve saved results with non-UTF-8 artifact names ([#1289](https://github.com/openai/codex-security/pull/1289))
+- preserve scan service tier for inline patches ([#1274](https://github.com/openai/codex-security/pull/1274))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
