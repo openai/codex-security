@@ -253,11 +253,17 @@ def javascript_keyword_follows_member_access(masked: list[str], start: int) -> b
     start = end
     while start > 0 and masked[start - 1] in "0123456789_":
         start -= 1
+    if start > 2 and masked[start - 1] in "+-" and masked[start - 2] in "eE":
+        start -= 2
+        while start > 0 and masked[start - 1] in "0123456789_.":
+            start -= 1
+        return start < end - 2 and (
+            start == 0 or not (masked[start - 1].isalnum() or masked[start - 1] in "_$")
+        )
     return (
         start == end
         or masked[start] not in "0123456789"
         or (start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$.#"))
-        or (start > 1 and masked[start - 1] in "+-" and masked[start - 2] in "eE")
     )
 
 
