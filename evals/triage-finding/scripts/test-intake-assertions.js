@@ -23,6 +23,7 @@ for (const text of [
   JSON.stringify({ example: '"schema_version": "triage-finding/v0"' }),
   JSON.stringify({ example: '"verdict": "confirmed"' }),
   '{"verdict":"unknown"}',
+  JSON.stringify({ example: '{schema_version: "triage-finding/v0"}' }),
   'The result later uses schema_version: "triage-finding/v0".',
 ]) {
   assert.equal(hasTriageJson(text), false, text);
@@ -45,6 +46,8 @@ for (const text of [
   '{"verdict":"not_actionable"}',
   "```json\n{'verdict': 'confirmed'}\n```",
   "{'schema_version': 'triage-finding/v0', 'findings': []}",
+  '{schema_version: "triage-finding/v0", findings: []}',
+  '{input_id: "synthetic", verdict: "confirmed"}',
   '{"ver\\u0064ict":"needs\\u005freview"}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
@@ -84,7 +87,12 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     expectPass(github, `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage is for private vulnerability reports. ${sourceType}`, githubContext("advisories_private_reports"));
   }
   for (const alert of ["{alert_number}", "42"]) {
-    expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances. source_type: "sarif"`, githubContext("code_scanning"));
+    for (const query of ["?per_page=100", "?page=2&per_page=100", "?per_page=100&page=2"]) {
+      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"));
+    }
+    for (const query of ["", "?page=2", "?per_page=1000"]) {
+      expectPass(github, `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100 and code-scanning/alerts/${alert}/instances${query}. source_type: "sarif"`, githubContext("code_scanning"), false);
+    }
   }
 }
 expectPass(github, 'GitHub Issues require an explicit issue and are not included in all sources. source_type: "freeform"', githubContext("explicit_issue"));
