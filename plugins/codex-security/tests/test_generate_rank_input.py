@@ -173,25 +173,25 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     )
 
 
-def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["repo", "revisions"])
+def test_rank_input_keeps_large_generated_python(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
-    source = "value = " + " + ".join(["x"] * 10000) + "\n"
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    source = "value = " + " + ".join(["x"] * 150000) + "\n"
     (repo / "src" / "generated.py").write_text(source, encoding="utf-8")
     (repo / "src" / "normal.py").write_text("value = 1\n", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
 
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scope",
-        "src",
-        "--preview-bytes",
-        "128",
-        "--out",
-        str(output),
-    )
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "src"]
+    else:
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "change")
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--head", "HEAD"]
+    run_cli(*arguments, "--preview-bytes", "128", "--out", str(output))
 
     rows = read_jsonl(output)
     assert [row["path"] for row in rows] == ["src/generated.py", "src/normal.py"]
@@ -200,6 +200,68 @@ def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) ->
     assert source.startswith(preview)
     assert len(preview.encode("utf-8")) <= 128
     assert rows[1]["preview"] == "value = 1"
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+@pytest.mark.parametrize(
+    "source",
+    ['{"\\ud800":1}', '{"value":' + "1" * 4301 + "}"],
+    ids=["surrogate", "integer-limit"],
+)
+def test_rank_input_samples_json_without_a_renderable_outline(
+    tmp_path: Path, mode: str, source: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "data.json").write_text(source, encoding="utf-8")
+    output = tmp_path / "rank.jsonl"
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo)]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--mode", mode, "--base", base]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", "HEAD"])
+
+    run_cli(*arguments, "--preview-bytes", "128", "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert len(rows) == 1
+    assert rows[0]["path"] == "data.json"
+    assert rows[0]["preview"] == source[:128]
+
+
+def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "large.py").write_text(
+        "def visible():\n    pass\n" + "# comment\n" * 10000 + "def outside():\n    pass\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "change")
+    output = tmp_path / "rank.jsonl"
+
+    run_cli(
+        "make-diff-rank-input",
+        "--repo",
+        str(repo),
+        "--base",
+        base,
+        "--head",
+        "HEAD",
+        "--out",
+        str(output),
+    )
+
+    assert read_jsonl(output)[0]["preview"] == "function visible()"
 
 
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])

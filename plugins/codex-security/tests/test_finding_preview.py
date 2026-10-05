@@ -7,6 +7,36 @@ from pathlib import Path
 FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
 
 
+def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    compact = {
+        "severity": "high",
+        "confidence": 0.9,
+        "ruleId": "example-rule",
+        "status": "validated",
+        "identity": {"id": "example-finding"},
+    }
+    finding = {
+        **compact,
+        "codeEvidence": [
+            {
+                "id": "example-source",
+                "code": "synthetic code " * 1000,
+                "explanation": "synthetic explanation " * 1000,
+            }
+        ],
+    }
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert {key: bounded[key] for key in compact} == compact
+    assert bounded["codeEvidence"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
+
+
 def test_nested_attack_path_stays_within_its_preview_budget() -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     attack_path = {

@@ -108,7 +108,7 @@ PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
 
 
 def _decode_source(data: bytes) -> str:
-    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8"
+    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8-sig"
     return data.decode(encoding, errors="ignore")
 
 
@@ -116,6 +116,14 @@ def is_binary_sample(data: bytes) -> bool:
     if data.startswith(_UTF16_BOMS):
         return "\0" in _decode_source(data)
     return b"\0" in data
+
+
+def is_binary_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as source:
+            return is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES))
+    except OSError:
+        return True
 
 
 def compact_preview_line(line: str) -> str:
@@ -233,23 +241,33 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_regex_end(text: str, start: int) -> int | None:
+def javascript_regex_end(
+    text: str,
+    start: int,
+    failed_scans: set[tuple[int, bool]],
+    after_control: bool,
+) -> int | None:
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
     previous = start - 1
     while previous >= 0 and text[previous] in " \t\r":
         previous -= 1
-    if previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
+    if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
-        if not re.search(r"\b(?:case|return|throw)$", prefix):
+        if not re.search(r"(?<![\w.$])(?:case|return|throw|else)$", prefix):
             return None
 
     index = start + 1
     in_character_class = False
+    visited = []
     while index < len(text):
+        state = (index, in_character_class)
+        if state in failed_scans:
+            break
+        visited.append(state)
         char = text[index]
         if char == "\n":
-            return None
+            break
         if char == "\\" and index + 1 < len(text):
             index += 2
             continue
@@ -263,6 +281,8 @@ def javascript_regex_end(text: str, start: int) -> int | None:
                 index += 1
             return index
         index += 1
+    # Reuse failed suffixes without mistaking a division expression for a regex.
+    failed_scans.update(visited)
     return None
 
 
@@ -274,6 +294,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
     quote = ""
     raw_terminator = ""
     heredoc_terminator = ""
+    failed_regex_scans: set[tuple[int, bool]] = set()
+    control_parentheses: list[bool] = []
+    after_control = False
     while index < len(text):
         char = text[index]
         next_char = text[index + 1] if index + 1 < len(text) else ""
@@ -399,10 +422,11 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 index += len(token)
                 continue
         if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index)
+            regex_end = javascript_regex_end(text, index, failed_regex_scans, after_control)
             if regex_end is not None:
                 masked.extend(" " * (regex_end - index))
                 index = regex_end
+                after_control = False
                 continue
         if char == "/" and next_char == "/":
             masked.extend((" ", " "))
@@ -419,6 +443,25 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             in_line_comment = True
             index += 1
             continue
+        if suffix in JAVASCRIPT_EXTENSIONS:
+            if char == "(":
+                end = len(masked)
+                while end > 0 and masked[end - 1].isspace():
+                    end -= 1
+                start = end
+                while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$"):
+                    start -= 1
+                keyword = "".join(masked[start:end])
+                while start > 0 and masked[start - 1].isspace():
+                    start -= 1
+                control_parentheses.append(
+                    keyword in {"if", "while", "for", "with"}
+                    and (start == 0 or masked[start - 1] != ".")
+                )
+            if char == ")":
+                after_control = bool(control_parentheses) and control_parentheses.pop()
+            elif not char.isspace():
+                after_control = False
         if char in {'"', "'", "`"}:
             quote = char
             masked.append(" ")
@@ -934,7 +977,7 @@ def simple_language_outline(text: str, suffix: str) -> list[str]:
 def json_outline(text: str) -> list[str]:
     try:
         parsed = json.loads(text)
-    except (json.JSONDecodeError, RecursionError, MemoryError):
+    except (ValueError, RecursionError, MemoryError):
         return []
     if not isinstance(parsed, dict):
         return []
@@ -985,7 +1028,11 @@ def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str,
     text = _decode_source(data)
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
-    return fit_preview_lines(preview_lines, preview_bytes), False
+    try:
+        preview = fit_preview_lines(preview_lines, preview_bytes)
+    except UnicodeEncodeError:
+        preview = fit_preview_lines(select_preview_lines(text.splitlines()), preview_bytes)
+    return preview, False
 
 
 if __name__ == "__main__":

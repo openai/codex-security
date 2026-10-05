@@ -186,16 +186,16 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         "code_evidence",
     )
     core_keys = (
-        "writeup",
-        *diagnostics,
+        "severity",
         "confidence",
+        "ruleId",
+        "status",
         "detectedAt",
         "identity",
-        "provenance",
-        "ruleId",
-        "severity",
-        "status",
         "taxonomy",
+        "writeup",
+        *diagnostics,
+        "provenance",
         "evidence",
         "evidenceExcerpt",
     )

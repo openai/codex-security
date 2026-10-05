@@ -8,7 +8,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
-from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for, preview_for_bytes
+from rank_preview import DEFAULT_PREVIEW_BYTES, mask_c_style_source, preview_for, preview_for_bytes
 
 
 @pytest.fixture(
@@ -534,6 +534,70 @@ def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Pa
     preview = generate_preview(tmp_path, "service.ts", source)
 
     assert "method Service.visible" in preview
+
+
+@pytest.mark.parametrize(
+    "condition",
+    ["if (ready)", "if /* condition */ (check(value))", "while (ready)", "if (ready) {} else"],
+)
+def test_javascript_regex_after_control_flow_preserves_declarations(
+    tmp_path: Path, condition: str
+) -> None:
+    source = f"function before() {{}}\n{condition} /{{/.test(value);\nfunction after() {{}}\n"
+
+    preview = generate_preview(tmp_path, "example.js", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "{} / [1, 2]",
+        "object.if(ready) / { value: count / total }",
+        "object.else / { value: count / total }",
+    ],
+)
+def test_javascript_division_preserves_the_following_method(
+    tmp_path: Path, expression: str
+) -> None:
+    source = f"""class Service {{
+  calculate() {{ const value = {expression}; }}
+  visible() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "service.js", source)
+
+    assert "method Service.calculate" in preview
+    assert "method Service.visible" in preview
+
+
+def test_unterminated_javascript_regex_scans_take_linear_work() -> None:
+    class CountedSource(str):
+        reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+
+    reads = []
+    for repetitions in (1000, 2000):
+        source = CountedSource(",/[" * repetitions)
+        assert mask_c_style_source(source, ".js") == source
+        reads.append(source.reads)
+
+    assert reads[1] < 3 * reads[0]
+
+
+def test_python_preview_ignores_utf8_bom(tmp_path: Path) -> None:
+    source = b"def first():\n    pass\n\ndef second():\n    pass\n"
+    path = tmp_path / "example.py"
+    path.write_bytes(b"\xef\xbb\xbf" + source)
+
+    expected = preview_for_bytes(path, source, DEFAULT_PREVIEW_BYTES)
+    assert expected[0].splitlines() == ["function first()", "function second()"]
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
 
 
 def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> None:
