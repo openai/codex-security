@@ -16,7 +16,7 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
   readonly cwd: string;
-  /** Raw `-c` values passed to both this preflight and the SDK worker. */
+  /** Worker overrides; preflight checks permissions with native OpenAI account selection. */
   readonly configOverrides: readonly string[];
   /**
    * Exact environment snapshot shared with the SDK worker. The caller resolves
@@ -40,7 +40,7 @@ type PendingRequest = {
 
 /**
  * Verify the worker profile with the same executable, effective worker cwd,
- * Codex home, and raw overrides that the real worker will use. App-server must
+ * Codex home, and permission overrides that the real worker will use. App-server must
  * start in the worker cwd because startup config also selects authentication
  * and cloud-managed requirements; cwd-scoped RPCs alone do not replace that
  * startup context. This must finish before starting a turn: startup warnings
@@ -86,8 +86,8 @@ export async function preflightDeepScanWorkerPermissionProfile(
     ) {
       return { useOpenAiApiKey: false };
     }
-    // Reuse Codex's selected credential store and provider, including keyring
-    // and command-backed providers, instead of interpreting auth.json here.
+    // Reuse Codex's selected credential store, including keyring, instead of
+    // interpreting auth.json here. Custom provider auth is loaded privately by exec.
     const account = await client.request("account/read", {
       refreshToken: false,
     });
@@ -116,8 +116,13 @@ class AppServerPreflightClient {
   ) {
     const args: string[] = [];
     for (const override of options.configOverrides) {
+      if (override.startsWith("model_provider=")) continue;
       args.push("--config", override);
     }
+    // App-server has no private profile-file option. Check permissions and
+    // native OpenAI account selection without putting provider credentials in argv.
+    // Managed provider requirements still take precedence over this selection.
+    args.push("--config", 'model_provider="openai"');
     args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {

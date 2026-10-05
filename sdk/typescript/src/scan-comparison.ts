@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -19,10 +19,11 @@ import {
   withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
   mergedCodexConfig,
-  modelProviderConfigOverride,
+  inlineToml,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCyberAccessConfig,
@@ -32,6 +33,10 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  createProfileCodex,
+  createProviderProfile,
+} from "./provider-profile.js";
 import {
   compactFinding,
   findingCatalogue,
@@ -141,6 +146,8 @@ export interface ReadOnlyCodexOptions {
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
   config?: CodexSecurityConfig;
+  /** @internal Private native profile owned by the calling scan. */
+  nativeProfile?: { name: string; path: string };
   /** @internal */
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
@@ -159,7 +166,7 @@ export interface ScanComparisonOptions extends ReadOnlyCodexOptions {
 
 interface CompletedScanMatchingOptions extends Pick<
   ScanComparisonOptions,
-  "config" | "environment" | "model" | "signal"
+  "config" | "environment" | "model" | "nativeProfile" | "signal"
 > {
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
@@ -302,7 +309,7 @@ export async function matchScanFindingsInternal(
       }
     }
   }
-  const thread = await startReadOnlyCodexThread(options, {
+  const { thread, cleanup } = await startReadOnlyCodexThread(options, {
     ...runtimeOptions,
     threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
   });
@@ -338,182 +345,191 @@ export async function matchScanFindingsInternal(
   };
   let prompt = comparisonPrompt(pages[0]!, 0, pages.length);
   progress("catalogue", 1);
-  for (;;) {
-    options.signal?.throwIfAborted();
-    const turn = await thread.run(prompt, turnOptions);
-    let response: unknown;
-    try {
-      response = JSON.parse(turn.finalResponse);
-    } catch (error) {
-      throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-        cause: error,
-      });
-    }
-    const parsed = matchingTurnSchema.safeParse(response);
-    if (!parsed.success) {
-      throw new CodexSecurityError(
-        "Scan comparison returned an invalid match result.",
-      );
-    }
-    const { request: modelRequest, ...result } = parsed.data;
-    let request = modelRequest;
-    if (request == null) {
-      const unseenPage = remainingPages.values().next().value;
-      if (unseenPage !== undefined) {
-        request = { kind: "catalogue", page: unseenPage };
-      } else {
-        validateComparison(
-          initialCatalogue,
-          result,
-          options.allowHistoricalUncertainty ?? false,
-        );
-        // Omitted descriptions need evidence even for a no-match decision.
-        request = requiredEvidenceRequest(
-          result.matches,
-          omittedEvidence,
-          requestedEvidence,
+  try {
+    for (;;) {
+      options.signal?.throwIfAborted();
+      const turn = await thread.run(prompt, turnOptions);
+      let response: unknown;
+      try {
+        response = JSON.parse(turn.finalResponse);
+      } catch (error) {
+        throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+          cause: error,
+        });
+      }
+      const parsed = matchingTurnSchema.safeParse(response);
+      if (!parsed.success) {
+        throw new CodexSecurityError(
+          "Scan comparison returned an invalid match result.",
         );
       }
-    } else if (
-      result.matches.length > 0 ||
-      result.uncertain.length > 0 ||
-      (result.related?.length ?? 0) > 0
-    ) {
-      throw new CodexSecurityError(
-        "Scan comparison cannot request evidence and finish at the same time.",
-      );
-    }
-    if (request != null) {
-      if (runtimeOptions.singleTurn) {
-        throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
+      const { request: modelRequest, ...result } = parsed.data;
+      let request = modelRequest;
+      if (request == null) {
+        const unseenPage = remainingPages.values().next().value;
+        if (unseenPage !== undefined) {
+          request = { kind: "catalogue", page: unseenPage };
+        } else {
+          validateComparison(
+            initialCatalogue,
+            result,
+            options.allowHistoricalUncertainty ?? false,
+          );
+          // Omitted descriptions need evidence even for a no-match decision.
+          request = requiredEvidenceRequest(
+            result.matches,
+            omittedEvidence,
+            requestedEvidence,
+          );
+        }
+      } else if (
+        result.matches.length > 0 ||
+        result.uncertain.length > 0 ||
+        (result.related?.length ?? 0) > 0
+      ) {
+        throw new CodexSecurityError(
+          "Scan comparison cannot request evidence and finish at the same time.",
+        );
       }
-      if (request.kind === "catalogue") {
-        const page = pages[request.page];
-        if (page === undefined) {
-          throw new CodexSecurityError(
-            "Scan comparison requested an unknown catalogue page.",
-          );
+      if (request != null) {
+        if (runtimeOptions.singleTurn) {
+          throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
         }
-        if (!remainingPages.delete(request.page)) {
-          throw new CodexSecurityError(
-            "Scan comparison repeated a request without making progress.",
-          );
-        }
-        prompt = comparisonPrompt(page, request.page, pages.length);
-        progress("catalogue", request.page + 1);
-      } else {
-        request.beforeOccurrenceIds = [
-          ...new Set(request.beforeOccurrenceIds),
-        ].sort();
-        request.afterOccurrenceIds = [
-          ...new Set(request.afterOccurrenceIds),
-        ].sort();
-        if (
-          (request.beforeOccurrenceIds.length === 0 &&
-            request.afterOccurrenceIds.length === 0) ||
-          request.beforeOccurrenceIds.some((id) => !catalogue.has(id)) ||
-          request.afterOccurrenceIds.some((id) => !after.has(id))
-        ) {
-          throw new CodexSecurityError(
-            "Scan comparison requested evidence outside its findings.",
-          );
-        }
-        const requestKey = JSON.stringify([
-          request.beforeOccurrenceIds,
-          request.afterOccurrenceIds,
-        ]);
-        const previous = evidenceCursors.get(requestKey);
-        const expectedOffset = previous === undefined ? 0 : previous.nextOffset;
-        if (request.offset !== expectedOffset) {
-          throw new CodexSecurityError(
-            "Scan comparison requested an invalid evidence offset; start at 0 and follow nextOffset.",
-          );
-        }
-        let cursor = previous;
-        if (cursor === undefined) {
-          const beforeOccurrenceIds = request.beforeOccurrenceIds.filter(
-            (id) => !requestedEvidence.before.has(id),
-          );
-          const afterOccurrenceIds = request.afterOccurrenceIds.filter(
-            (id) => !requestedEvidence.after.has(id),
-          );
-          if (
-            beforeOccurrenceIds.length === 0 &&
-            afterOccurrenceIds.length === 0
-          ) {
+        if (request.kind === "catalogue") {
+          const page = pages[request.page];
+          if (page === undefined) {
             throw new CodexSecurityError(
-              "Scan comparison repeated evidence without making progress. Continue an unfinished selection with its returned IDs and nextOffset.",
+              "Scan comparison requested an unknown catalogue page.",
             );
           }
-          cursor = {
-            beforeOccurrenceIds,
-            afterOccurrenceIds,
-            text: JSON.stringify({
-              before: beforeOccurrenceIds.flatMap(
-                (id) => catalogue.get(id)!.occurrences,
-              ),
-              after: afterOccurrenceIds.map((id) => after.get(id)!),
-            }),
-            utf16Offset: 0,
-            nextOffset: 0,
-          };
+          if (!remainingPages.delete(request.page)) {
+            throw new CodexSecurityError(
+              "Scan comparison repeated a request without making progress.",
+            );
+          }
+          prompt = comparisonPrompt(page, request.page, pages.length);
+          progress("catalogue", request.page + 1);
+        } else {
+          request.beforeOccurrenceIds = [
+            ...new Set(request.beforeOccurrenceIds),
+          ].sort();
+          request.afterOccurrenceIds = [
+            ...new Set(request.afterOccurrenceIds),
+          ].sort();
+          if (
+            (request.beforeOccurrenceIds.length === 0 &&
+              request.afterOccurrenceIds.length === 0) ||
+            request.beforeOccurrenceIds.some((id) => !catalogue.has(id)) ||
+            request.afterOccurrenceIds.some((id) => !after.has(id))
+          ) {
+            throw new CodexSecurityError(
+              "Scan comparison requested evidence outside its findings.",
+            );
+          }
+          const requestKey = JSON.stringify([
+            request.beforeOccurrenceIds,
+            request.afterOccurrenceIds,
+          ]);
+          const previous = evidenceCursors.get(requestKey);
+          const expectedOffset =
+            previous === undefined ? 0 : previous.nextOffset;
+          if (request.offset !== expectedOffset) {
+            throw new CodexSecurityError(
+              "Scan comparison requested an invalid evidence offset; start at 0 and follow nextOffset.",
+            );
+          }
+          let cursor = previous;
+          if (cursor === undefined) {
+            const beforeOccurrenceIds = request.beforeOccurrenceIds.filter(
+              (id) => !requestedEvidence.before.has(id),
+            );
+            const afterOccurrenceIds = request.afterOccurrenceIds.filter(
+              (id) => !requestedEvidence.after.has(id),
+            );
+            if (
+              beforeOccurrenceIds.length === 0 &&
+              afterOccurrenceIds.length === 0
+            ) {
+              throw new CodexSecurityError(
+                "Scan comparison repeated evidence without making progress. Continue an unfinished selection with its returned IDs and nextOffset.",
+              );
+            }
+            cursor = {
+              beforeOccurrenceIds,
+              afterOccurrenceIds,
+              text: JSON.stringify({
+                before: beforeOccurrenceIds.flatMap(
+                  (id) => catalogue.get(id)!.occurrences,
+                ),
+                after: afterOccurrenceIds.map((id) => after.get(id)!),
+              }),
+              utf16Offset: 0,
+              nextOffset: 0,
+            };
+          }
+          const page = evidencePage(cursor, request.offset);
+          cursor.nextOffset = page.nextOffset;
+          cursor.utf16Offset = page.nextUtf16Offset;
+          // Keep completed cursors to reject repeats, but release their evidence.
+          if (page.nextOffset === null) cursor.text = "";
+          // Either the original selection or the returned fresh IDs can resume it.
+          evidenceCursors.set(requestKey, cursor);
+          evidenceCursors.set(
+            JSON.stringify([
+              cursor.beforeOccurrenceIds,
+              cursor.afterOccurrenceIds,
+            ]),
+            cursor,
+          );
+          for (const id of cursor.beforeOccurrenceIds)
+            requestedEvidence.before.set(id, cursor);
+          for (const id of cursor.afterOccurrenceIds)
+            requestedEvidence.after.set(id, cursor);
+          prompt = page.prompt;
+          progress("evidence");
         }
-        const page = evidencePage(cursor, request.offset);
-        cursor.nextOffset = page.nextOffset;
-        cursor.utf16Offset = page.nextUtf16Offset;
-        // Keep completed cursors to reject repeats, but release their evidence.
-        if (page.nextOffset === null) cursor.text = "";
-        // Either the original selection or the returned fresh IDs can resume it.
-        evidenceCursors.set(requestKey, cursor);
-        evidenceCursors.set(
-          JSON.stringify([
-            cursor.beforeOccurrenceIds,
-            cursor.afterOccurrenceIds,
-          ]),
-          cursor,
-        );
-        for (const id of cursor.beforeOccurrenceIds)
-          requestedEvidence.before.set(id, cursor);
-        for (const id of cursor.afterOccurrenceIds)
-          requestedEvidence.after.set(id, cursor);
-        prompt = page.prompt;
-        progress("evidence");
+        continue;
       }
-      continue;
-    }
 
-    const expandBefore = (id: string) =>
-      catalogue.get(id)!.occurrences.map(({ occurrenceId }) => occurrenceId);
-    const expandPairs = (pairs: ScanComparisonResult["uncertain"]) =>
-      pairs.flatMap((pair) =>
-        expandBefore(pair.beforeOccurrenceId).map((beforeOccurrenceId) => ({
-          ...pair,
-          beforeOccurrenceId,
-        })),
+      const expandBefore = (id: string) =>
+        catalogue.get(id)!.occurrences.map(({ occurrenceId }) => occurrenceId);
+      const expandPairs = (pairs: ScanComparisonResult["uncertain"]) =>
+        pairs.flatMap((pair) =>
+          expandBefore(pair.beforeOccurrenceId).map((beforeOccurrenceId) => ({
+            ...pair,
+            beforeOccurrenceId,
+          })),
+        );
+      const expanded = reconcileComparison(
+        input,
+        {
+          matches: result.matches.map((match) => ({
+            ...match,
+            beforeOccurrenceIds:
+              match.beforeOccurrenceIds.flatMap(expandBefore),
+          })),
+          uncertain: expandPairs(result.uncertain),
+          ...(result.related === undefined
+            ? {}
+            : { related: expandPairs(result.related) }),
+        },
+        options.allowHistoricalUncertainty ?? false,
       );
-    const expanded = reconcileComparison(
-      input,
-      {
-        matches: result.matches.map((match) => ({
-          ...match,
-          beforeOccurrenceIds: match.beforeOccurrenceIds.flatMap(expandBefore),
-        })),
-        uncertain: expandPairs(result.uncertain),
-        ...(result.related === undefined
-          ? {}
-          : { related: expandPairs(result.related) }),
-      },
-      options.allowHistoricalUncertainty ?? false,
-    );
-    progress("complete");
-    return expanded.comparison;
+      progress("complete");
+      return expanded.comparison;
+    }
+  } finally {
+    await cleanup?.();
   }
 }
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
-): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
+): Promise<{
+  thread: ReturnType<ReadOnlyCodex["startThread"]>;
+  cleanup?: () => Promise<void>;
+}> {
   const config =
     options.config === undefined
       ? undefined
@@ -549,7 +565,7 @@ async function startReadOnlyCodexThread(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const sdkConfig = { ...config };
+  const sdkConfig = resolveCodexProfile(config ?? {});
   // Scan permission profiles and path keys must not replace this helper's read-only settings.
   for (const key of [
     "default_permissions",
@@ -559,9 +575,7 @@ async function startReadOnlyCodexThread(
   ]) {
     delete sdkConfig[key];
   }
-  const providerOverrides = modelProviderConfigOverride(
-    commandAuth ? providerConfig : (config ?? {}),
-  );
+  const providerSettings = commandAuth ? providerConfig : (config ?? {});
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
@@ -577,55 +591,7 @@ async function startReadOnlyCodexThread(
       : undefined;
   const command =
     environment === undefined ? undefined : resolveCodexCommand(environment);
-  const codex =
-    options.codex ??
-    new Codex({
-      codexPathOverride: executablePathForSpawn(command!.command),
-      env: environment,
-      // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
-      apiKey:
-        environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
-        environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
-        undefined,
-      ...(providerOverrides.length > 0
-        ? { configOverrides: providerOverrides }
-        : {}),
-      config: {
-        ...sdkConfig,
-        mcp_servers: await disabledMcpServers(
-          command!,
-          config,
-          environment!,
-          options,
-        ),
-        allow_login_shell: false,
-        project_doc_max_bytes: 0,
-        responses_api_metadata: {
-          codex_security_surface: runtimeOptions.surface,
-        },
-        features: {
-          api_key_cyber_access_programs:
-            effectiveFeatures?.["api_key_cyber_access_programs"],
-          api_key_model_discovery:
-            effectiveFeatures?.["api_key_model_discovery"],
-          apps: false,
-          code_mode: false,
-          code_mode_only: false,
-          js_repl: false,
-          multi_agent: false,
-          multi_agent_v2: false,
-          plugins: false,
-          shell_tool: false,
-          unified_exec: false,
-        },
-        shell_environment_policy: {
-          inherit: "core",
-          ignore_default_excludes: false,
-          exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
-        },
-      } as NonNullable<CodexOptions["config"]>,
-    });
-  return codex.startThread({
+  const threadOptions: ThreadOptions = {
     threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
@@ -635,7 +601,94 @@ async function startReadOnlyCodexThread(
     webSearchMode: "disabled",
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
-  });
+  };
+  if (options.codex !== undefined) {
+    return { thread: options.codex.startThread(threadOptions) };
+  }
+  const codexOptions: CodexOptions = {
+    codexPathOverride: executablePathForSpawn(command!.command),
+    env: environment,
+    // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
+    apiKey:
+      environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
+      environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+      undefined,
+    config: {
+      ...sdkConfig,
+      mcp_servers: await disabledMcpServers(
+        command!,
+        config,
+        environment!,
+        options,
+      ),
+      allow_login_shell: false,
+      project_doc_max_bytes: 0,
+      responses_api_metadata: {
+        codex_security_surface: runtimeOptions.surface,
+      },
+      features: {
+        api_key_cyber_access_programs:
+          effectiveFeatures?.["api_key_cyber_access_programs"],
+        api_key_model_discovery: effectiveFeatures?.["api_key_model_discovery"],
+        apps: false,
+        code_mode: false,
+        code_mode_only: false,
+        js_repl: false,
+        multi_agent: false,
+        multi_agent_v2: false,
+        plugins: false,
+        shell_tool: false,
+        unified_exec: false,
+      },
+      shell_environment_policy: {
+        inherit: "core",
+        ignore_default_excludes: false,
+        exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
+      },
+    } as NonNullable<CodexOptions["config"]>,
+  };
+  const ownProfile =
+    options.nativeProfile === undefined &&
+    resolveCodexProfile(providerSettings)["model_providers"] !== undefined
+      ? await createProviderProfile(
+          configuredCodexHome(environment!),
+          providerSettings,
+        )
+      : undefined;
+  const profile = options.nativeProfile ?? ownProfile;
+  try {
+    if (profile !== undefined) {
+      delete threadOptions.sandboxMode;
+      codexOptions.config = {
+        ...codexOptions.config,
+        windows:
+          resolveCodexProfile(providerConfig)["windows"] ??
+          DEFAULT_CODEX_CONFIG["windows"],
+      } as NonNullable<CodexOptions["config"]>;
+      codexOptions.configOverrides = [
+        'default_permissions="codex_security_policy"',
+        `permissions.codex_security_policy=${inlineToml({
+          extends: ":read-only",
+          filesystem: {
+            ":root": "read",
+            [dirname(profile.path)]: { ".": "deny" },
+          },
+          network: { enabled: false },
+        })}`,
+      ];
+    }
+    const codex =
+      profile === undefined
+        ? new Codex(codexOptions)
+        : await createProfileCodex(codexOptions, profile.name);
+    return {
+      thread: codex.startThread(threadOptions),
+      ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),
+    };
+  } catch (error) {
+    await ownProfile?.cleanup();
+    throw error;
+  }
 }
 
 export async function runReadOnlyCodex(
@@ -647,13 +700,20 @@ export async function runReadOnlyCodex(
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<string> {
-  const thread = await startReadOnlyCodexThread(options, runtimeOptions);
-  const turn = await thread.run(prompt, {
-    outputSchema,
-    cyberAccessProgram: options.cyberAccessProgram,
-    signal: options.signal,
-  });
-  return turn.finalResponse;
+  const { thread, cleanup } = await startReadOnlyCodexThread(
+    options,
+    runtimeOptions,
+  );
+  try {
+    const turn = await thread.run(prompt, {
+      outputSchema,
+      cyberAccessProgram: options.cyberAccessProgram,
+      signal: options.signal,
+    });
+    return turn.finalResponse;
+  } finally {
+    await cleanup?.();
+  }
 }
 
 export async function disabledMcpServers(
@@ -750,6 +810,7 @@ export async function matchCompletedScan(
     cyberAccessProgram: options.cyberAccessProgram,
     environment: options.environment,
     model: options.model,
+    nativeProfile: options.nativeProfile,
     signal: options.signal,
     workingDirectory: options.repository,
   });

@@ -76,12 +76,20 @@ describe("scan knowledge bases", () => {
         join(root, "guide.md"),
         "Documented application behavior.",
       );
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      if (metadataName !== ".git" && !aliasesGit) {
+        await mkdir(join(root, ".git"));
+        await writeFile(join(root, ".git", "config"), "Separate Git metadata.");
+      }
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
       expect((await extractedDocuments(directory.path)).sort()).toEqual(
         [
           "Documented application behavior.",
-          ...(process.platform !== "win32" && metadataName !== ".git"
+          ...(process.platform !== "win32" && !aliasesGit
             ? [await readFile(metadata, "utf8")]
             : []),
         ].sort(),
@@ -91,6 +99,46 @@ describe("scan knowledge bases", () => {
       expect(await extractedDocuments(explicit.path)).toEqual([
         await readFile(metadata, "utf8"),
       ]);
+    },
+  );
+
+  testPosix(
+    "omits case-variant metadata aliases on a case-insensitive filesystem",
+    async () => {
+      const root = await temporaryDirectory();
+      const preservedGit = join(root, ".GIT");
+      await mkdir(preservedGit);
+      const metadata = join(preservedGit, "config");
+      await writeFile(
+        metadata,
+        "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const originalLstat = filesystem.lstat;
+      const aliasSpy = spyOn(filesystem, "lstat").mockImplementation(
+        async (...args) =>
+          Reflect.apply(originalLstat, filesystem, [
+            args[0] === join(root, ".git") ? preservedGit : args[0],
+            ...args.slice(1),
+          ]),
+      );
+      try {
+        const directory = await prepareKnowledgeBase([root]);
+        temporaryDirectories.track(directory.path);
+        expect(await extractedDocuments(directory.path)).toEqual([
+          "Documented application behavior.",
+        ]);
+        const explicit = await prepareKnowledgeBase([metadata]);
+        temporaryDirectories.track(explicit.path);
+        expect(await extractedDocuments(explicit.path)).toEqual([
+          await readFile(metadata, "utf8"),
+        ]);
+      } finally {
+        aliasSpy.mockRestore();
+      }
     },
   );
 

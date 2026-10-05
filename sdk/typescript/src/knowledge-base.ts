@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
+import { nullIfMissingFile } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -130,6 +131,17 @@ async function discover(
     )
       continue;
     const path = join(directory, entry.name);
+    if (entry.name.toLowerCase() === ".git") {
+      const marker = await lstat(join(directory, ".git"), {
+        bigint: true,
+      }).catch(nullIfMissingFile);
+      if (marker !== null) {
+        const candidate = await lstat(path, { bigint: true });
+        if (candidate.dev === marker.dev && candidate.ino === marker.ino) {
+          continue;
+        }
+      }
+    }
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);

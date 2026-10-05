@@ -73,7 +73,17 @@ test.each([false, true])(
               const workerFile =
                 options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
               expect(dirname(workerFile)).toBe(protectedDirectory!);
-              expect(await readFile(workerFile, "utf8")).toContain(
+              expect(await readFile(workerFile, "utf8")).not.toContain(
+                "synthetic-client-secret",
+              );
+              const profileFile = join(
+                options.env!["CODEX_HOME"]!,
+                `${options.nativeProfile}.config.toml`,
+              );
+              expect(await readFile(profileFile, "utf8")).toContain(
+                "synthetic-client-secret",
+              );
+              expect(JSON.stringify(options)).not.toContain(
                 "synthetic-client-secret",
               );
               const filesystem = parseToml(
@@ -91,7 +101,16 @@ test.each([false, true])(
                   >
                 )[workerFile],
               ).toEqual({ ".": "deny" });
+              expect(
+                (
+                  filesystem["codex_security_scan"]!["filesystem"] as Record<
+                    string,
+                    unknown
+                  >
+                )[dirname(profileFile)],
+              ).toEqual({ ".": "deny" });
               if (process.platform !== "win32") {
+                expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
                 expect((await stat(file)).mode & 0o777).toBe(0o600);
                 expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
               }

@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, relative, win32 } from "node:path";
-import { parse, stringify } from "smol-toml";
+import { parse, stringify, type TomlTable } from "smol-toml";
 import {
   Codex,
   type CodexOptions,
@@ -18,6 +18,7 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
+import * as providerProfiles from "../src/provider-profile.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
@@ -91,6 +92,26 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
+function captureProfileClient() {
+  const profiles: {
+    name: string;
+    path: string;
+    config: TomlTable;
+  }[] = [];
+  const spy = spyOn(providerProfiles, "createProfileCodex").mockImplementation(
+    async (options, name) => {
+      const path = join(options.env!["CODEX_HOME"]!, `${name}.config.toml`);
+      profiles.push({
+        name,
+        path,
+        config: parse(await readFile(path, "utf8")),
+      });
+      return new Codex(options);
+    },
+  );
+  return { profiles, spy };
+}
+
 describe("semantic scan comparison", () => {
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
@@ -113,10 +134,25 @@ describe("semantic scan comparison", () => {
         name: "Synthetic",
         wire_api: "responses",
         base_url: "https://provider.example.test/v1",
+        http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
         ...(selection === "command"
-          ? { auth: { command: "synthetic-auth", cwd: join(home, "helpers") } }
+          ? {
+              auth: {
+                command: "synthetic-auth",
+                cwd: join(home, "helpers"),
+                env: { SYNTHETIC_AUTH_KEY: "synthetic-command-marker" },
+              },
+            }
           : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
       };
+      const parentProfile =
+        selection === "fireworks"
+          ? await providerProfiles.createProviderProfile(home, {
+              model_provider: providerName,
+              model_providers: { [providerName]: provider },
+            })
+          : undefined;
+      const profileClient = captureProfileClient();
       const before = finding("before");
       const after = finding("after");
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
@@ -136,6 +172,9 @@ describe("semantic scan comparison", () => {
           previousFindings: [before],
           falsePositives: [],
           findings: [after],
+          ...(parentProfile === undefined
+            ? {}
+            : { nativeProfile: parentProfile }),
           environment: {
             PATH: process.env["PATH"],
             SystemRoot: process.env["SystemRoot"],
@@ -147,7 +186,12 @@ describe("semantic scan comparison", () => {
           config: {
             codexOverrides: {
               profile: "selected",
-              profiles: { selected: { model_provider: providerName } },
+              profiles: {
+                selected: {
+                  model_provider: providerName,
+                  model_providers: { [providerName]: provider },
+                },
+              },
               model_providers: { [providerName]: provider },
               default_permissions: "codex_security_scan",
               permissions: {
@@ -174,17 +218,52 @@ describe("semantic scan comparison", () => {
         });
         expect(startThread).toHaveBeenCalledTimes(1);
         expect(captured?.config).toMatchObject({
-          profile: "selected",
-          profiles: { selected: { model_provider: providerName } },
+          model_provider: providerName,
         });
-        expect(parse(captured!.configOverrides![0]!)).toEqual({
+        expect(profileClient.profiles).toHaveLength(1);
+        const profile = profileClient.profiles[0]!;
+        expect(profile.config).toEqual({
           model_providers: { [providerName]: provider },
         });
+        expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+          default_permissions: "codex_security_policy",
+          permissions: {
+            codex_security_policy: {
+              extends: ":read-only",
+              filesystem: { ":root": "read", [home]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          },
+        });
+        expect(JSON.stringify(captured?.config)).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(captured!.configOverrides!.join("\n")).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(JSON.stringify(captured?.config)).not.toContain(
+          "synthetic-command-marker",
+        );
+        expect(captured!.configOverrides!.join("\n")).not.toContain(
+          "synthetic-command-marker",
+        );
+        if (parentProfile === undefined) {
+          await expect(readFile(profile.path, "utf8")).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } else {
+          expect(profile.name).toBe(parentProfile.name);
+          expect(parse(await readFile(parentProfile.path, "utf8"))).toEqual(
+            profile.config,
+          );
+        }
         for (const key of [
           "model_providers",
           "default_permissions",
           "permissions",
           "projects",
+          "profile",
+          "profiles",
         ]) {
           expect(captured?.config).not.toHaveProperty(key);
         }
@@ -193,13 +272,108 @@ describe("semantic scan comparison", () => {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
         }
         expect(calls.threadOptions).toMatchObject({
-          sandboxMode: "read-only",
           approvalPolicy: "never",
           networkAccessEnabled: false,
         });
+        expect(calls.threadOptions?.sandboxMode).toBeUndefined();
         expect(saved).toBe(true);
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
       } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+        await parentProfile?.cleanup();
+      }
+    },
+  );
+
+  test.each(["complete", "turn error", "abort"])(
+    "keeps its private provider profile through evidence turns and cleans up on %s",
+    async (outcome) => {
+      const home = await temporaryDirectory();
+      const controller = new AbortController();
+      const profileClient = captureProfileClient();
+      let turns = 0;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(
+        () =>
+          ({
+            async run() {
+              expect(
+                parse(await readFile(profileClient.profiles[0]!.path, "utf8")),
+              ).toMatchObject({
+                model_providers: {
+                  synthetic: {
+                    http_headers: {
+                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
+                    },
+                  },
+                },
+              });
+              turns++;
+              if (turns === 2 && outcome === "turn error")
+                throw new Error("synthetic turn failure");
+              if (turns === 1 && outcome === "abort")
+                controller.abort(new DOMException("canceled", "AbortError"));
+              return {
+                finalResponse: JSON.stringify({
+                  matches: [],
+                  uncertain: [],
+                  ...(turns === 1
+                    ? {
+                        request: {
+                          kind: "evidence",
+                          beforeOccurrenceIds: ["before"],
+                          afterOccurrenceIds: ["after"],
+                          offset: 0,
+                        },
+                      }
+                    : {}),
+                }),
+              };
+            },
+          }) as unknown as ReturnType<Codex["startThread"]>,
+      );
+      try {
+        const result = matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            signal: controller.signal,
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+            },
+            config: {
+              codexOverrides: {
+                model_provider: "synthetic",
+                model_providers: {
+                  synthetic: {
+                    name: "Synthetic",
+                    wire_api: "responses",
+                    base_url: "https://provider.example.test/v1",
+                    http_headers: {
+                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        );
+        if (outcome === "complete")
+          await expect(result).resolves.toEqual({ matches: [], uncertain: [] });
+        else if (outcome === "turn error")
+          await expect(result).rejects.toThrow("synthetic turn failure");
+        else await expect(result).rejects.toMatchObject({ name: "AbortError" });
+        expect(turns).toBe(outcome === "abort" ? 1 : 2);
+        expect(profileClient.profiles).toHaveLength(1);
+        await expect(
+          readFile(profileClient.profiles[0]!.path, "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        profileClient.spy.mockRestore();
         startThread.mockRestore();
       }
     },
@@ -353,7 +527,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["home", "profile", "overrides", "override-away"])(
+  test.each(["home", "home-elevated", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
       const home = await temporaryDirectory(
@@ -371,6 +545,9 @@ describe("semantic scan comparison", () => {
         },
       };
       const config = {
+        ...(selection === "home-elevated"
+          ? { windows: { sandbox: "elevated" } }
+          : {}),
         model_provider:
           selection === "overrides" || selection === "profile"
             ? "openai"
@@ -388,6 +565,7 @@ describe("semantic scan comparison", () => {
       };
       let captured: CodexOptions | undefined;
       let threadOptions: ThreadOptions | undefined;
+      const profileClient = captureProfileClient();
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
       const startThread = spyOn(
         Codex.prototype,
@@ -433,13 +611,22 @@ describe("semantic scan comparison", () => {
           },
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
-        if (selection === "profile")
-          expect(captured?.config?.["profile"]).toBe("review");
+        if (selection === "profile") {
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config).not.toHaveProperty("profile");
+          expect(captured?.config).not.toHaveProperty("profiles");
+        }
         if (commandAuth) {
+          expect(captured?.config?.["windows"]).toEqual({
+            sandbox: selection === "home-elevated" ? "elevated" : "unelevated",
+          });
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(parse(captured!.configOverrides![0]!)).toEqual({
+          expect(profileClient.profiles).toHaveLength(1);
+          expect(profileClient.profiles[0]!.config).toEqual({
             model_providers: {
               "synthetic.provider": {
                 ...provider,
@@ -451,22 +638,29 @@ describe("semantic scan comparison", () => {
               },
             },
           });
+          await expect(
+            readFile(profileClient.profiles[0]!.path, "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
         } else {
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
           expect(captured?.configOverrides).toBeUndefined();
+          expect(profileClient.profiles).toHaveLength(0);
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
-          sandboxMode: "read-only",
           approvalPolicy: "never",
           networkAccessEnabled: false,
         });
+        expect(threadOptions?.sandboxMode).toBe(
+          commandAuth ? undefined : "read-only",
+        );
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
           contents,
         );
       } finally {
+        profileClient.spy.mockRestore();
         startThread.mockRestore();
       }
     },
@@ -516,6 +710,7 @@ describe("semantic scan comparison", () => {
         workingDirectory: home,
       };
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const profileClient = captureProfileClient();
       const startThread = spyOn(
         Codex.prototype,
         "startThread",
@@ -557,6 +752,7 @@ describe("semantic scan comparison", () => {
         ).rejects.toThrow("conflicts with command authentication");
         expect(startThread).not.toHaveBeenCalled();
       } finally {
+        profileClient.spy.mockRestore();
         startThread.mockRestore();
       }
     },

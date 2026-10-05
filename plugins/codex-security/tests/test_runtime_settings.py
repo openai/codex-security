@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import runpy
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,3 +59,18 @@ def test_count_validation_still_rejects_nonintegers(value):
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
     with pytest.raises(SystemExit, match="positive integer"):
         deep["require_integer"](value, "workers", minimum=1)
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_storage_preserves_literal_home_spaces(tmp_path, monkeypatch, absolute):
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / (" selected home" if sys.platform == "win32" else " selected home ")
+    state = home / "state" / "plugins" / "codex-security"
+    state.mkdir(parents=True)
+    (state / "existing-state.txt").write_text("selected state\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home) if absolute else home.name)
+    monkeypatch.delenv("CODEX_SECURITY_STATE_DIR", raising=False)
+    storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
+    selected_state = storage["state_dir"]()
+    assert selected_state == state
+    assert (selected_state / "existing-state.txt").read_text(encoding="utf-8") == "selected state\n"

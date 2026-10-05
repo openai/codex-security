@@ -5235,7 +5235,9 @@ describe("CodexSecurity orchestration", () => {
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
-            createCodex: (options: CodexOptions) => {
+            createCodex: async (
+              options: CodexOptions & { nativeProfile?: string },
+            ) => {
               expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
               expect(options.config).toMatchObject({
                 model,
@@ -5247,7 +5249,14 @@ describe("CodexSecurity orchestration", () => {
               });
               expect(options.config?.["model_providers"]).toBeUndefined();
               if (provider !== undefined) {
-                expect(parseToml(options.configOverrides![0]!)).toEqual({
+                expect(
+                  parseToml(
+                    await readFile(
+                      join(codexHome, `${options.nativeProfile}.config.toml`),
+                      "utf8",
+                    ),
+                  ),
+                ).toEqual({
                   model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
                 });
               }
