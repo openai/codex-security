@@ -1,4 +1,6 @@
 import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import {
   copyFile,
   mkdir,
@@ -17,7 +19,12 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
-import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
+import * as runtimeCommands from "../src/runtime.js";
+import {
+  executablePathForSpawn,
+  resolveCodexCommand,
+  runCodexCommand,
+} from "../src/runtime.js";
 import { resolveCommandAuthConfig } from "../src/config.js";
 import * as providerProfiles from "../src/provider-profile.js";
 import {
@@ -134,8 +141,13 @@ describe("semantic scan comparison", () => {
       const providerName =
         selection === "command" ? "synthetic.command" : selection;
       const provider = {
-        name: "Synthetic",
-        wire_api: "responses",
+        ...(selection === "amazon-bedrock"
+          ? { aws: { region: "us-east-1" } }
+          : {
+              name: "Synthetic",
+              wire_api: "responses",
+              requires_openai_auth: false,
+            }),
         base_url: "https://provider.example.test/v1",
         http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
         ...(selection === "command"
@@ -146,7 +158,9 @@ describe("semantic scan comparison", () => {
                 env: { SYNTHETIC_AUTH_KEY: "synthetic-command-marker" },
               },
             }
-          : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
+          : selection === "amazon-bedrock"
+            ? {}
+            : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
       };
       const parentProfile =
         selection === "fireworks"
@@ -156,6 +170,15 @@ describe("semantic scan comparison", () => {
             })
           : undefined;
       const profileClient = captureProfileClient();
+      const startupCommands: Parameters<typeof runCodexCommand>[0][] = [];
+      const runNativeCommand = runtimeCommands.runCodexCommand;
+      const nativeCommand = spyOn(
+        runtimeCommands,
+        "runCodexCommand",
+      ).mockImplementation((...args) => {
+        if (args[1].includes("mcp")) startupCommands.push(args[0]);
+        return runNativeCommand(...args);
+      });
       const before = finding("before");
       const after = finding("after");
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
@@ -228,10 +251,29 @@ describe("semantic scan comparison", () => {
         expect(profile.config).toEqual({
           model_providers: { [providerName]: provider },
         });
+        expect(startupCommands).toHaveLength(1);
+        expect(parse(startupCommands[0]!.args![1]!)).toEqual({
+          model_providers: {
+            [providerName]:
+              selection === "amazon-bedrock"
+                ? {}
+                : {
+                    name: "Synthetic",
+                    wire_api: "responses",
+                    requires_openai_auth: false,
+                  },
+          },
+        });
+        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
+          "synthetic-command-marker",
+        );
         expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
-          default_permissions: "codex_security_policy",
+          default_permissions: profile.name,
           permissions: {
-            codex_security_policy: {
+            [profile.name]: {
               extends: ":read-only",
               filesystem: { ":root": "read", [home]: { ".": "deny" } },
               network: { enabled: false },
@@ -282,6 +324,7 @@ describe("semantic scan comparison", () => {
         expect(saved).toBe(true);
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
       } finally {
+        nativeCommand.mockRestore();
         profileClient.spy.mockRestore();
         startThread.mockRestore();
         await parentProfile?.cleanup();
@@ -381,6 +424,134 @@ describe("semantic scan comparison", () => {
       }
     },
   );
+
+  test("does not inherit write grants from an existing helper permission profile", async () => {
+    const home = await temporaryDirectory();
+    const work = await temporaryDirectory();
+    await writeFile(
+      join(home, "config.toml"),
+      stringify({
+        permissions: {
+          codex_security_policy: {
+            extends: ":read-only",
+            filesystem: { [work]: "write" },
+          },
+        },
+      }),
+    );
+    const profileClient = captureProfileClient();
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let captured: CodexOptions | undefined;
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      captured = (this as unknown as { options: CodexOptions }).options;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          workingDirectory: work,
+          environment: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+          },
+          config: {
+            codexOverrides: {
+              model_provider: "synthetic",
+              model_providers: {
+                synthetic: {
+                  name: "Synthetic",
+                  wire_api: "responses",
+                  base_url: "https://provider.example.test/v1",
+                },
+              },
+            },
+          },
+        },
+      );
+      const profile = profileClient.profiles[0]!;
+      // App-server reads the same native permission layers without a model turn.
+      // Provider definitions stay in their private file and are unnecessary here.
+      const child = spawn(
+        executablePathForSpawn(resolveCodexCommand({}).command),
+        [
+          ...captured!.configOverrides!.flatMap((value) => ["-c", value]),
+          "-c",
+          'model_provider="openai"',
+          "app-server",
+          "--stdio",
+        ],
+        {
+          cwd: work,
+          env: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+          },
+          windowsHide: true,
+        },
+      );
+      const closed = once(child, "close");
+      const lines = createInterface({ input: child.stdout });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      try {
+        child.stdin.write(
+          JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: {
+              clientInfo: { name: "synthetic_permission_test", version: "1" },
+              capabilities: { experimentalApi: true },
+            },
+          }) + "\n",
+        );
+        let inspected = false;
+        for await (const line of lines) {
+          const message = JSON.parse(line);
+          if (message.error) throw new Error(JSON.stringify(message.error));
+          if (message.id === 1)
+            child.stdin.write(
+              JSON.stringify({
+                id: 2,
+                method: "config/read",
+                params: { cwd: work, includeLayers: false },
+              }) + "\n",
+            );
+          if (message.id === 2) {
+            const config = message.result.config;
+            expect(
+              config.permissions[config.default_permissions].filesystem,
+            ).not.toHaveProperty(work);
+            expect(config.default_permissions).toBe(profile.name);
+            expect(config.permissions[profile.name].filesystem).toMatchObject({
+              ":root": "read",
+              [home]: { ".": "deny" },
+            });
+            expect(
+              config.permissions.codex_security_policy.filesystem[work],
+            ).toBe("write");
+            inspected = true;
+            break;
+          }
+        }
+        expect(inspected, stderr).toBe(true);
+      } finally {
+        lines.close();
+        child.kill();
+        await closed;
+      }
+    } finally {
+      profileClient.spy.mockRestore();
+      startThread.mockRestore();
+    }
+  });
 
   test.each([
     [

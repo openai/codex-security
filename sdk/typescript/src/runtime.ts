@@ -157,6 +157,7 @@ export interface PluginInstall {
 
 export interface CodexCommand {
   command: string;
+  args?: readonly string[];
 }
 
 interface CodexCommandResult {
@@ -2843,12 +2844,16 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
 ): Promise<CodexCommandResult> {
-  const child = spawn(executablePathForSpawn(command.command), [...args], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    signal,
-  });
+  const child = spawn(
+    executablePathForSpawn(command.command),
+    [...(command.args ?? []), ...args],
+    {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal,
+    },
+  );
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;

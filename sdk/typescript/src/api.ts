@@ -35,6 +35,7 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
 
@@ -2515,7 +2516,7 @@ export class CodexSecurity {
       const authentication = await this.#authentication();
       this.#requireOpen();
       const result = await persistApiKey(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         authentication.environment,
         apiKey,
         this.#abortController.signal,
@@ -2543,7 +2544,7 @@ export class CodexSecurity {
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         deviceCode ? ["login", "--device-auth"] : ["login"],
         authentication.environment,
         () => this.#recordLogin(authentication.codexHome, "stored_credentials"),
@@ -2574,7 +2575,7 @@ export class CodexSecurity {
         authentication.codexHome,
       );
       return await accountStatus(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         authentication.environment,
         this.#abortController.signal,
       );
@@ -2586,7 +2587,7 @@ export class CodexSecurity {
       const authentication = await this.#authentication();
       this.#requireOpen();
       await codexLogout(
-        this.#codexCommand(),
+        await this.#providerPreflightCommand(),
         authentication.environment,
         this.#abortController.signal,
       );
@@ -2948,7 +2949,7 @@ export class CodexSecurity {
         authentication.method === "stored_credentials"
       ) {
         const status = await accountStatus(
-          this.#codexCommand(),
+          await this.#providerPreflightCommand(requestedConfig),
           runtime.environment,
           signal,
         );
@@ -3041,6 +3042,13 @@ export class CodexSecurity {
     );
   }
 
+  async #providerPreflightCommand(config?: JsonObject): Promise<CodexCommand> {
+    return await providerPreflightCommand(
+      this.#codexCommand(),
+      config ?? (await mergedCodexConfig(this.config)),
+    );
+  }
+
   async #refreshPersistentRuntime(
     runtime: PreparedRuntime,
     environment: ProcessEnvironment,
@@ -3057,7 +3065,7 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
-        codexCommand: this.#codexCommand(),
+        codexCommand: await this.#providerPreflightCommand(mergedConfig),
         environment: withoutCodexHome(environment),
         signal,
       },
@@ -3526,7 +3534,8 @@ export class CodexSecurity {
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
-      const codexCommand = this.#codexCommand();
+      const codexCommand =
+        await this.#providerPreflightCommand(requestedConfig);
       await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
         codexCommand,
         { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },

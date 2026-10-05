@@ -18,6 +18,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly cwd: string;
   /** Worker overrides; preflight checks permissions with native OpenAI account selection. */
   readonly configOverrides: readonly string[];
+  /** Provider metadata needed for managed selection; credentials stay in private profiles. */
+  readonly providerConfigOverrides?: readonly string[];
   /**
    * Exact environment snapshot shared with the SDK worker. The caller resolves
    * relative CODEX_HOME values before changing the preflight subprocess cwd.
@@ -117,6 +119,9 @@ class AppServerPreflightClient {
     const args: string[] = [];
     for (const override of options.configOverrides) {
       if (override.startsWith("model_provider=")) continue;
+      args.push("--config", override);
+    }
+    for (const override of options.providerConfigOverrides ?? []) {
       args.push("--config", override);
     }
     // App-server has no private profile-file option. Check permissions and

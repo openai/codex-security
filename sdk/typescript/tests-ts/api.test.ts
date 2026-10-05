@@ -5117,6 +5117,22 @@ describe("CodexSecurity orchestration", () => {
   test.each([
     ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
+    [
+      "managed custom",
+      "synthetic.gateway",
+      "OPENAI_API_KEY",
+      "gpt-5.6-sol",
+      {
+        name: "Synthetic",
+        wire_api: "responses",
+        requires_openai_auth: false,
+        http_headers: { "X-Synthetic-Key": "synthetic-provider-secret" },
+        auth: {
+          command: "synthetic-auth",
+          args: ["synthetic-command-secret"] as string[],
+        },
+      },
+    ],
   ] as const)(
     "retains %s scan sessions in the managed Codex home",
     async (_name, provider, apiKey, model, providerConfig) => {
@@ -5158,6 +5174,30 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          probeCodexSandbox: async (command) => {
+            if (provider === undefined) {
+              expect(command.args).toBeUndefined();
+            } else {
+              expect(command.args?.[0]).toBe("-c");
+              expect(parseToml(command.args![1]!)).toEqual({
+                model_providers: {
+                  [provider]: {
+                    name: providerConfig!.name,
+                    wire_api: providerConfig!.wire_api,
+                    ...(provider === "synthetic.gateway"
+                      ? { requires_openai_auth: false }
+                      : {}),
+                  },
+                },
+              });
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-provider-secret",
+              );
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-command-secret",
+              );
+            }
+          },
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
@@ -5179,6 +5219,9 @@ describe("CodexSecurity orchestration", () => {
       );
 
       try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "persistent session recorded",
+        );
         await expect(client.run(repository)).rejects.toThrow(
           "persistent session recorded",
         );

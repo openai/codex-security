@@ -4,6 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
+// Native startup needs provider identity and auth selection, while exec reads
+// the full provider configuration from its private profile file.
+export function preflightProviderDefinitions(providers) {
+  return Object.fromEntries(
+    Object.entries(providers).map(([id, provider]) => [
+      id,
+      Object.fromEntries(
+        ["name", "wire_api", "requires_openai_auth"]
+          .filter((key) => Object.hasOwn(provider, key))
+          .map((key) => [key, provider[key]]),
+      ),
+    ]),
+  );
+}
+
 // Native profile files keep provider configuration off process arguments while
 // retaining the existing CODEX_HOME credential store.
 export function createCodexProfileClient(options) {

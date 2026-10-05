@@ -116,6 +116,9 @@ async function testAllowedProfileAndRawArgv() {
           ...rawOverrides,
           'model_provider="synthetic.gateway"',
         ],
+        providerConfigOverrides: [
+          'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        ],
         expectedProfile,
         signal: new AbortController().signal,
       });
@@ -125,6 +128,8 @@ async function testAllowedProfileAndRawArgv() {
         rawOverrides[0],
         "--config",
         rawOverrides[1],
+        "--config",
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
         "--config",
         'model_provider="openai"',
         "app-server",

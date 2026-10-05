@@ -37,6 +37,7 @@ import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  providerPreflightCommand,
 } from "./provider-profile.js";
 import {
   compactFinding,
@@ -609,7 +610,7 @@ async function startReadOnlyCodexThread(
     config: {
       ...sdkConfig,
       mcp_servers: await disabledMcpServers(
-        command!,
+        await providerPreflightCommand(command!, providerSettings),
         config,
         environment!,
         options,
@@ -659,8 +660,8 @@ async function startReadOnlyCodexThread(
           DEFAULT_CODEX_CONFIG["windows"],
       } as NonNullable<CodexOptions["config"]>;
       codexOptions.configOverrides = [
-        'default_permissions="codex_security_policy"',
-        `permissions.codex_security_policy=${inlineToml({
+        `default_permissions=${JSON.stringify(profile.name)}`,
+        `permissions.${profile.name}=${inlineToml({
           extends: ":read-only",
           filesystem: {
             ":root": "read",
@@ -1206,7 +1207,7 @@ export async function comparisonEnvironment(
     }
     storedEnvironment["CODEX_HOME"] = canonicalCredentialHome;
     const status = await nativeAccountStatus(
-      resolveCodexCommand(source),
+      await providerPreflightCommand(resolveCodexCommand(source), config ?? {}),
       storedEnvironment,
       signal,
     );

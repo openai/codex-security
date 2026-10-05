@@ -1,3 +1,7 @@
+export function preflightProviderDefinitions(
+  providers: Record<string, unknown>,
+): Record<string, unknown>;
+
 export interface CodexProfileOptions {
   codexPathOverride: string;
   profileName: string;

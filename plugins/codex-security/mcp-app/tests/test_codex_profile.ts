@@ -5,7 +5,53 @@ import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
-import { createCodexProfileClient } from "../../scripts/codex_profile.mjs";
+import {
+  createCodexProfileClient,
+  preflightProviderDefinitions,
+} from "../../scripts/codex_profile.mjs";
+
+test("native startup provider metadata preserves identity and auth without private configuration", () => {
+  const providers = {
+    "custom.provider": {
+      name: "Synthetic managed provider",
+      wire_api: "responses",
+      requires_openai_auth: false,
+      base_url: "https://synthetic-provider.example.test/v1",
+      http_headers: { Authorization: "synthetic-private-header" },
+      env_http_headers: { Authorization: "SYNTHETIC_PRIVATE_ENV" },
+      env_key: "SYNTHETIC_PRIVATE_KEY",
+      experimental_bearer_token: "synthetic-private-token",
+      auth: { env: { SYNTHETIC_PRIVATE_SECRET: "synthetic-secret-value" } },
+    },
+    "account-provider": {
+      name: "Synthetic account provider",
+      requires_openai_auth: true,
+    },
+    "default-auth-provider": {
+      name: "Synthetic default auth provider",
+      wire_api: "responses",
+    },
+    "amazon-bedrock": { aws: { region: "us-east-1" } },
+  };
+  const before = structuredClone(providers);
+  assert.deepEqual(preflightProviderDefinitions(providers), {
+    "custom.provider": {
+      name: "Synthetic managed provider",
+      wire_api: "responses",
+      requires_openai_auth: false,
+    },
+    "account-provider": {
+      name: "Synthetic account provider",
+      requires_openai_auth: true,
+    },
+    "default-auth-provider": {
+      name: "Synthetic default auth provider",
+      wire_api: "responses",
+    },
+    "amazon-bedrock": {},
+  });
+  assert.deepEqual(providers, before);
+});
 
 async function fixture(mode = "success") {
   const directory = await mkdtemp(path.join(tmpdir(), "codex-profile-test-"));

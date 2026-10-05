@@ -41,6 +41,8 @@ const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR =
   process.env.CODEX_SECURITY_STATE_DIR?.trim();
 const PLUGIN_ROOT = resolve(__dirname, "..");
+const WORKER_PLUGIN_ROOT =
+  process.env.CODEX_SECURITY_PLUGIN_ROOT || PLUGIN_ROOT;
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
   "resolve-scan-root",
@@ -1174,14 +1176,14 @@ export function createCodexSecurityServer(): McpServer {
                 ...modelSettings,
                 parentSandbox,
                 artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
+                  pluginRoot: WORKER_PLUGIN_ROOT,
                   repoRoot: begun.targetPath,
                   scanId: begun.scanId,
                   scope: begun.scope,
                   pythonCommand: await resolvePythonCommand(),
                 },
               }),
-              pluginRoot: PLUGIN_ROOT,
+              pluginRoot: WORKER_PLUGIN_ROOT,
               log: logDeepScanEvent,
               handoffClaimToken,
               threadId,

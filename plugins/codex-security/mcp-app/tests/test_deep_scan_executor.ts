@@ -91,7 +91,7 @@ try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
-  await testLegacyProviderSnapshotRequiresUpgrade();
+  await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
@@ -1045,7 +1045,7 @@ async function testOpenAiCredentialsReachWorker() {
   }
 }
 
-async function testLegacyProviderSnapshotRequiresUpgrade() {
+async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
   const fixture = await fakeCodexFixture();
   const configPath = path.join(fixture.root, "config.toml");
   const deepPath = path.join(fixture.root, "deep.toml");
@@ -1085,6 +1085,30 @@ async function testLegacyProviderSnapshotRequiresUpgrade() {
         error.name === "DeepScanNonRetryableError" &&
         error.message.includes("Update the SDK and bundled plugin together"),
     );
+    await assert.rejects(
+      readFile(fixture.preflightMarkerPath),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+    );
+    for (const nativeProfile of ["../outside", "C:\\outside", "", "scan\n"]) {
+      await writeFile(
+        deepPath,
+        stringifyToml({ worker_runtime: { native_profile: nativeProfile } }),
+      );
+      await assert.rejects(
+        new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run(
+          {
+            kind: "discovery",
+            promptPath,
+            workingDirectory: fixture.root,
+            subagents: 0,
+            signal: new AbortController().signal,
+          },
+        ),
+        (error: Error) =>
+          error.name === "DeepScanNonRetryableError" &&
+          error.message.includes("invalid --profile value"),
+      );
+    }
     await assert.rejects(
       readFile(fixture.preflightMarkerPath),
       (error: NodeJS.ErrnoException) => error.code === "ENOENT",
@@ -1197,6 +1221,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 name: `Synthetic gateway ${index}`,
                 base_url: `https://gateway-${index}.example.test/v1`,
                 wire_api: "responses",
+                ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                 experimental_bearer_token: `synthetic-bearer-${index}`,
                 auth: {
                   type: "command",
@@ -1547,10 +1572,37 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
             );
             assert.ok(preflight.argv.includes('model_provider="openai"'));
+            const providerOverrides = preflight.argv.filter((arg: string) =>
+              arg.startsWith("model_providers="),
+            );
+            const provider = selectedProvider.providerConfig;
+            assert.equal(
+              providerOverrides.length,
+              provider === undefined ? 0 : 1,
+            );
+            if (provider !== undefined) {
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(
+                    parseToml(providerOverrides[0]).model_providers,
+                  ),
+                ),
+                {
+                  [selectedProvider.provider!]: {
+                    name: provider.name,
+                    wire_api: "responses",
+                    ...(provider.requires_openai_auth === undefined
+                      ? {}
+                      : {
+                          requires_openai_auth: provider.requires_openai_auth,
+                        }),
+                  },
+                },
+              );
+            }
             assert.equal(
               preflight.argv.some(
                 (arg: string) =>
-                  arg.startsWith("model_providers=") ||
                   arg.includes("synthetic-bearer-") ||
                   arg.includes("synthetic-client-secret-"),
               ),

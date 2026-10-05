@@ -328,10 +328,9 @@ const legacyProviders: Array<[string, JsonObject]> = [
     "inherited provider definition",
     {
       model_providers: {
-        openai: {
-          name: "Synthetic OpenAI gateway",
+        "amazon-bedrock": {
+          aws: { region: "us-east-1" },
           base_url: "https://gateway.example.test/v1",
-          wire_api: "responses",
         },
       },
     },

@@ -7,6 +7,7 @@ import {
   statSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -21,7 +22,10 @@ import {
   type ThreadEvent,
 } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
-import { createCodexProfileClient } from "../../../scripts/codex_profile.mjs";
+import {
+  createCodexProfileClient,
+  preflightProviderDefinitions,
+} from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -58,6 +62,7 @@ export interface CodexSdkWorkerArtifactContext {
 
 interface CodexSdkWorkerRuntimeSettings {
   configOverrides?: string[];
+  preflightProviderOverrides?: string[];
   nativeProfile?: string;
   reasoningSummary?: string;
   serviceTier?: string;
@@ -113,6 +118,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           codexPath,
           cwd: request.workingDirectory,
           configOverrides,
+          providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
           expectedProfile: workerProfile,
           env: childEnv,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
@@ -528,7 +534,34 @@ async function workerRuntimeSettings(
   const nativeProfile = isRecord(workerConfig)
     ? workerConfig.native_profile
     : undefined;
-  if (typeof nativeProfile === "string") settings.nativeProfile = nativeProfile;
+  if (typeof nativeProfile === "string") {
+    // Match Codex's plain profile-v2 names before constructing a private file path.
+    if (nativeProfile.length === 0 || /[^A-Za-z0-9_-]/.test(nativeProfile)) {
+      throw new DeepScanNonRetryableError(
+        `invalid --profile value ${JSON.stringify(nativeProfile)}; pass a plain name such as "work"`,
+      );
+    }
+    settings.nativeProfile = nativeProfile;
+    const codexHome =
+      environmentVariable(environment, "CODEX_HOME", process.platform) ||
+      join(homedir(), ".codex");
+    const nativeProfileConfig = parseToml(
+      await fs.readFile(
+        join(codexHome, `${nativeProfile}.config.toml`),
+        "utf8",
+      ),
+    );
+    if (isRecord(nativeProfileConfig.model_providers)) {
+      const providers = preflightProviderDefinitions(
+        nativeProfileConfig.model_providers,
+      );
+      if (Object.keys(providers).length > 0) {
+        settings.preflightProviderOverrides = [
+          `model_providers=${tomlInlineValue(providers as TomlObject)}`,
+        ];
+      }
+    }
+  }
   const legacyProviders = isRecord(workerConfig)
     ? workerConfig.model_providers
     : undefined;
