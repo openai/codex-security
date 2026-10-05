@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import {
@@ -15,7 +16,11 @@ import {
   providerPreflightCommand,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
-import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
+import {
+  bundledPluginRoot,
+  resolveCodexCommand,
+  runCodexCommand,
+} from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -254,5 +259,47 @@ test.each(["rejected", "aborted"])(
     } finally {
       await profile.cleanup();
     }
+  },
+);
+
+test.each(["synthetic-tools", "synthetic.tools"])(
+  "native overrides disable the inherited MCP server %s",
+  async (name) => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "config.toml"),
+      `[mcp_servers.${JSON.stringify(name)}]\ncommand = "synthetic-never-launched"\nenabled = true\n`,
+    );
+    const { profileConfigOverrides } = await import(
+      pathToFileURL(
+        join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
+      ).href
+    );
+    const overrides = profileConfigOverrides({
+      features: { plugins: false },
+      mcp_servers: { [name]: { enabled: false } },
+    });
+    const result = await runCodexCommand(
+      resolveCodexCommand({}),
+      [
+        ...overrides.flatMap((value: string) => ["-c", value]),
+        "mcp",
+        "list",
+        "--json",
+      ],
+      {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+      },
+    );
+    expect(result.success, result.stderr).toBe(true);
+    expect(JSON.parse(result.stdout)).toMatchObject([
+      {
+        name,
+        enabled: false,
+        transport: { command: "synthetic-never-launched" },
+      },
+    ]);
   },
 );

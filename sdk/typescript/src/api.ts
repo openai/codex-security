@@ -1920,18 +1920,6 @@ export class CodexSecurity {
         runtimePaths,
         options.auth,
         git,
-        undefined,
-        mode === "deep" && runtime.deepScanConfigPath !== undefined
-          ? [
-              // The coordinator reads provider credentials; model shell commands cannot.
-              `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
-                ":root": "read",
-                ":workspace_roots": "write",
-                [runtimeHome]: { ".": "deny" },
-                [runtime.deepScanConfigPath]: { ".": "deny" },
-              })}`,
-            ]
-          : [],
       );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2689,6 +2677,7 @@ export class CodexSecurity {
   ): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
     const {
       runtime,
+      runtimeHome,
       python,
       modelProvider,
       externalProvider,
@@ -2726,6 +2715,18 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
+    // This snapshot outlives a Deep Scan when the client reuses its runtime.
+    if (runtime.deepScanConfigPath !== undefined) {
+      configOverrides = [
+        `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
+          ":root": "read",
+          ":workspace_roots": "write",
+          [runtimeHome]: { ".": "deny" },
+          [runtime.deepScanConfigPath]: { ".": "deny" },
+        })}`,
+        ...configOverrides,
+      ];
+    }
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )

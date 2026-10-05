@@ -2688,15 +2688,24 @@ function assertConfigOverrides(
   args: readonly string[],
   values: Record<string, string | number | boolean | undefined>,
 ) {
+  const overrides = args.flatMap((arg, index) =>
+    arg === "--config" || arg === "-c" ? [parseToml(args[index + 1])] : [],
+  );
   for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) {
-      assert.equal(
-        args.some((arg) => arg.startsWith(`${key}=`)),
-        false,
-      );
-    } else {
-      assert.equal(args.includes(`${key}=${JSON.stringify(value)}`), true);
-    }
+    const supplied = overrides.map((config) =>
+      key
+        .split(".")
+        .reduce<unknown>(
+          (current, part) =>
+            (current as Record<string, unknown> | undefined)?.[part],
+          config,
+        ),
+    );
+    assert.deepEqual(
+      supplied.findLast((item) => item !== undefined),
+      value,
+      key,
+    );
   }
 }
 

@@ -12,7 +12,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([false, true])(
-  "protects provider snapshots before writing credentials (ACL failure: %j)",
+  "protects provider snapshots across runtime reuse (ACL failure: %j)",
   async (failAcl) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -22,6 +22,7 @@ test.each([false, true])(
     const original = runtime.requirePrivateCredentialHome;
     let protectedDirectory: string | undefined;
     let launched = false;
+    let operation: "deep" | "standard" | "validation" = "deep";
     const guard = spyOn(
       runtime,
       "requirePrivateCredentialHome",
@@ -65,13 +66,21 @@ test.each([false, true])(
             id: null,
             async runStreamed() {
               launched = true;
-              const file = options.env!["CODEX_SECURITY_CONFIG_PATH"]!;
+              const file = join(protectedDirectory!, "config-preflight.toml");
+              expect(options.env!["CODEX_SECURITY_CONFIG_PATH"]).toBe(
+                operation === "validation" ? undefined : file,
+              );
               expect(dirname(file)).toBe(protectedDirectory!);
               expect(await readFile(file, "utf8")).not.toContain(
                 "synthetic-client-secret",
               );
-              const workerFile =
-                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+              const workerFile = join(
+                protectedDirectory!,
+                "deep-scan-config.toml",
+              );
+              expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
+                operation === "deep" ? workerFile : undefined,
+              );
               expect(dirname(workerFile)).toBe(protectedDirectory!);
               expect(await readFile(workerFile, "utf8")).not.toContain(
                 "synthetic-client-secret",
@@ -126,6 +135,20 @@ test.each([false, true])(
       );
       expect(protectedDirectory).toBeDefined();
       expect(launched).toBe(!failAcl);
+      if (!failAcl) {
+        operation = "standard";
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic scan reached",
+        );
+        operation = "validation";
+        await expect(
+          client.validate({
+            repositoryPath: repository,
+            finding: "Synthetic finding",
+            outputDir: join(root, "validation"),
+          }),
+        ).rejects.toThrow("synthetic scan reached");
+      }
     } finally {
       guard.mockRestore();
       await client.close();

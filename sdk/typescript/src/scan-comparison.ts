@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { isRecord } from "./record.js";
 import { dirname, join } from "node:path";
 import {
   Codex,
@@ -640,9 +641,11 @@ async function startReadOnlyCodexThread(
       },
     } as NonNullable<CodexOptions["config"]>,
   };
+  const providers = resolveCodexProfile(providerSettings)["model_providers"];
   const ownProfile =
     options.nativeProfile === undefined &&
-    resolveCodexProfile(providerSettings)["model_providers"] !== undefined
+    isRecord(providers) &&
+    Object.keys(providers).length > 0
       ? await createProviderProfile(
           configuredCodexHome(environment!),
           providerSettings,

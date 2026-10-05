@@ -577,7 +577,7 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["allowed", "disallowed", "fallback"])(
+  test.each(["allowed", "disallowed", "fallback", "empty"])(
     "checks the actual helper permission child before starting a turn when %s",
     async (mode) => {
       const home = await temporaryDirectory();
@@ -659,25 +659,33 @@ describe("semantic scan comparison", () => {
               CODEX_CLI_PATH: executable,
               CODEX_HOME: home,
               SYNTHETIC_PREFLIGHT_SENTINEL: "synthetic-inherited-setting",
+              ...(mode === "empty"
+                ? { OPENAI_API_KEY: "synthetic-api-key" }
+                : {}),
             },
             config: {
-              codexOverrides: {
-                model_provider: "synthetic.provider",
-                model_providers: {
-                  "synthetic.provider": {
-                    name: "Synthetic provider",
-                    wire_api: "responses",
-                    auth: {
-                      command: "synthetic-auth",
-                      env: { SYNTHETIC_SECRET: "synthetic-private-marker" },
+              codexOverrides:
+                mode === "empty"
+                  ? { model_providers: {} }
+                  : {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          name: "Synthetic provider",
+                          wire_api: "responses",
+                          auth: {
+                            command: "synthetic-auth",
+                            env: {
+                              SYNTHETIC_SECRET: "synthetic-private-marker",
+                            },
+                          },
+                        },
+                      },
                     },
-                  },
-                },
-              },
             },
           },
         );
-        if (mode === "allowed") {
+        if (mode === "allowed" || mode === "empty") {
           await expect(matching).resolves.toEqual({
             matches: [],
             uncertain: [],
@@ -690,6 +698,11 @@ describe("semantic scan comparison", () => {
               : "did not select",
           );
           expect(startThread).not.toHaveBeenCalled();
+        }
+        if (mode === "empty") {
+          expect(existsSync(callsPath)).toBe(false);
+          expect(profileClient.profiles).toEqual([]);
+          return;
         }
         const calls = (await readFile(callsPath, "utf8"))
           .trim()

@@ -199,7 +199,7 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       "--profile",
       "scan_fixture_1",
       "--config",
-      "features.plugins=true",
+      "features={plugins = true}",
       "--config",
       "empty={}",
       "--config",

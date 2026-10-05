@@ -147,7 +147,9 @@ describe("CodexSecurity orchestration", () => {
           ...overrides.model_providers["synthetic.provider"],
           auth: expectedAuth,
         };
-        expect(captured!.configOverrides).toBeUndefined();
+        expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
+          "model_providers",
+        );
         expect(
           parseToml(
             await readFile(
