@@ -15,8 +15,13 @@ import {
   resolve,
   win32,
 } from "node:path";
-import { Codex, type CyberAccessProgram } from "@openai/codex-sdk";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import {
+  Codex,
+  type CyberAccessProgram,
+  type ThreadEvent,
+} from "@openai/codex-sdk";
+import { parse as parseToml } from "smol-toml";
+import { createCodexProfileClient } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -53,6 +58,7 @@ export interface CodexSdkWorkerArtifactContext {
 
 interface CodexSdkWorkerRuntimeSettings {
   configOverrides?: string[];
+  nativeProfile?: string;
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
@@ -113,7 +119,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           signal: request.signal,
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
-      const codex = new Codex({
+      const codexOptions = {
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
@@ -141,7 +147,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Structured SDK config cannot preserve literal filesystem keys such as
         // ":root" or "/repo/.env"; raw overrides keep this inline TOML intact.
         configOverrides,
-      });
+      };
+      const codex =
+        runtimeSettings.nativeProfile === undefined
+          ? new Codex(codexOptions)
+          : createCodexProfileClient<ThreadEvent>({
+              ...codexOptions,
+              profileName: runtimeSettings.nativeProfile,
+            });
       const threadOptions = {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
@@ -512,6 +525,22 @@ async function workerRuntimeSettings(
   const workerConfig = workerConfigPath
     ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
     : undefined;
+  const nativeProfile = isRecord(workerConfig)
+    ? workerConfig.native_profile
+    : undefined;
+  if (typeof nativeProfile === "string") settings.nativeProfile = nativeProfile;
+  const legacyProviders = isRecord(workerConfig)
+    ? workerConfig.model_providers
+    : undefined;
+  if (
+    settings.nativeProfile === undefined &&
+    isRecord(legacyProviders) &&
+    Object.keys(legacyProviders).length > 0
+  ) {
+    throw new DeepScanNonRetryableError(
+      "This Deep Scan provider snapshot needs private native profile support. Update the SDK and bundled plugin together.",
+    );
+  }
   const provider = isRecord(workerConfig)
     ? workerConfig.model_provider
     : undefined;
@@ -524,20 +553,6 @@ async function workerRuntimeSettings(
   if (typeof provider === "string") {
     (settings.configOverrides ??= []).push(
       `model_provider=${JSON.stringify(provider)}`,
-    );
-  }
-  const providers = isRecord(workerConfig)
-    ? workerConfig.model_providers
-    : undefined;
-  if (isRecord(providers)) {
-    const selected =
-      typeof provider === "string"
-        ? Object.hasOwn(providers, provider)
-          ? { [provider]: providers[provider] }
-          : {}
-        : providers;
-    (settings.configOverrides ??= []).push(
-      `model_providers=${inlineToml(selected)}`,
     );
   }
   const security = config.codex_security;
@@ -558,17 +573,6 @@ async function workerRuntimeSettings(
     }
   }
   return settings;
-}
-
-// Raw TOML preserves provider IDs and command-auth environment keys containing dots.
-function inlineToml(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.entries(value)
-      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
-      .join(",")}}`;
-  }
-  return stringifyToml({ value }).slice("value = ".length).trim();
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {

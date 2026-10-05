@@ -91,6 +91,7 @@ try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
+  await testLegacyProviderSnapshotRequiresUpgrade();
   await testWorkerCyberAccessSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
@@ -1044,6 +1045,55 @@ async function testOpenAiCredentialsReachWorker() {
   }
 }
 
+async function testLegacyProviderSnapshotRequiresUpgrade() {
+  const fixture = await fakeCodexFixture();
+  const configPath = path.join(fixture.root, "config.toml");
+  const deepPath = path.join(fixture.root, "deep.toml");
+  const promptPath = path.join(fixture.root, "prompt.md");
+  await writeFile(configPath, "");
+  await writeFile(promptPath, "synthetic provider upgrade fixture");
+  await writeFile(
+    deepPath,
+    stringifyToml({
+      worker_runtime: {
+        model_provider: "synthetic.gateway",
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic gateway",
+            env_key: "SYNTHETIC_GATEWAY_KEY",
+          },
+        },
+      },
+    }),
+  );
+  const saved = [
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ].map((name) => [name, process.env[name]] as const);
+  try {
+    process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+    process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepPath;
+    await assert.rejects(
+      new CodexSdkWorkerExecutor({ parentSandbox: trustedParentSandbox }).run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory: fixture.root,
+        subagents: 0,
+        signal: new AbortController().signal,
+      }),
+      (error: Error) =>
+        error.name === "DeepScanNonRetryableError" &&
+        error.message.includes("Update the SDK and bundled plugin together"),
+    );
+    await assert.rejects(
+      readFile(fixture.preflightMarkerPath),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+    );
+  } finally {
+    for (const [name, value] of saved) restoreEnv(name, value);
+  }
+}
+
 async function testWorkerRuntimeSettings() {
   const cases: [string, string | undefined][] = [
     ["", undefined],
@@ -1099,7 +1149,7 @@ async function testWorkerRuntimeSettings() {
       };
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
-      const codexHome = path.join(fixture.root, "scan home");
+      const codexHome = path.join(fixture.root, "scan [home]");
       const promptPath = path.join(fixture.root, "prompt.md");
       await mkdir(codexHome);
       await writeFile(
@@ -1126,11 +1176,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         const verbosity = [undefined, "low", "medium", "high"][index];
         const entryPath = `${configPath}.${index}`;
         const deepPath = `${entryPath}.deep`;
+        const nativeProfile =
+          index === 0 ? undefined : `synthetic-scan-${index}`;
+        const profilePath =
+          nativeProfile === undefined
+            ? undefined
+            : path.join(codexHome, `${nativeProfile}.config.toml`);
         const parentSandbox = {
           filesystemDenies: [
             ...trustedParentSandboxWithDenials.filesystemDenies,
           ],
-          literalFilesystemDenies: [deepPath],
+          literalFilesystemDenies: [deepPath, codexHome],
           globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
         };
         const provider = index === 0 ? undefined : "synthetic.gateway";
@@ -1152,12 +1208,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         return {
           path: entryPath,
           deepPath,
+          nativeProfile,
+          profilePath,
           parentSandbox,
           permissionProfile: {
             ...deniedWorkerPermissionProfile,
             filesystem: {
               ...deniedWorkerPermissionProfile.filesystem,
               [deepPath]: { ".": "deny" },
+              [codexHome]: { ".": "deny" },
             },
           },
           provider,
@@ -1201,12 +1260,23 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         model_instructions_file: entry.instructionsFile,
                         model_verbosity: entry.verbosity,
                         model_provider: entry.provider,
-                        model_providers: {
-                          [entry.provider]: entry.providerConfig,
-                        },
+                        native_profile: entry.nativeProfile,
                       },
               }),
             ),
+            ...(entry.profilePath === undefined
+              ? []
+              : [
+                  writeFile(
+                    entry.profilePath,
+                    stringifyToml({
+                      model_provider: entry.provider,
+                      model_providers: {
+                        [entry.provider!]: entry.providerConfig,
+                      },
+                    }),
+                  ),
+                ]),
           ]),
         ),
       );
@@ -1411,22 +1481,31 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider.provider !== undefined &&
               selectedProvider.providerConfig
             ) {
-              const providerOverride = invocation.argv.find((arg: string) =>
-                arg.startsWith("model_providers="),
-              );
-              assert.ok(
-                providerOverride,
-                "worker must retain its selected provider configuration",
+              assertFlagPair(
+                invocation.argv,
+                "--profile",
+                selectedProvider.nativeProfile!,
               );
               assert.deepEqual(
                 JSON.parse(
-                  JSON.stringify(parseToml(providerOverride).model_providers),
+                  JSON.stringify(
+                    parseToml(invocation.profileContents).model_providers,
+                  ),
                 ),
                 {
                   [selectedProvider.provider]: selectedProvider.providerConfig,
                 },
               );
             }
+            assert.equal(
+              invocation.argv.some(
+                (arg: string) =>
+                  arg.startsWith("model_providers=") ||
+                  arg.includes("synthetic-bearer-") ||
+                  arg.includes("synthetic-client-secret-"),
+              ),
+              false,
+            );
             assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
@@ -1454,7 +1533,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.ok(
               selectedProvider,
-              "worker preflight must use the same isolated provider",
+              "worker preflight must use the same scan environment",
             );
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
@@ -1467,36 +1546,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 `cache-${workerConfigurations.indexOf(selectedProvider)}`,
               ),
             );
-            if (selectedProvider.provider === undefined) {
-              assert.equal(
-                preflight.argv.some(
-                  (arg: string) =>
-                    arg.startsWith("model_provider=") ||
-                    arg.startsWith("model_providers="),
-                ),
-                false,
-              );
-            } else {
-              assert.ok(
-                preflight.argv.includes(
-                  `model_provider=${JSON.stringify(selectedProvider.provider)}`,
-                ),
-              );
-              const providerOverride = preflight.argv.find((arg: string) =>
-                arg.startsWith("model_providers="),
-              );
-              assert.deepEqual(
-                JSON.parse(
-                  JSON.stringify(parseToml(providerOverride).model_providers),
-                ),
-                selectedProvider.providerConfig
-                  ? {
-                      [selectedProvider.provider]:
-                        selectedProvider.providerConfig,
-                    }
-                  : {},
-              );
-            }
+            assert.ok(preflight.argv.includes('model_provider="openai"'));
+            assert.equal(
+              preflight.argv.some(
+                (arg: string) =>
+                  arg.startsWith("model_providers=") ||
+                  arg.includes("synthetic-bearer-") ||
+                  arg.includes("synthetic-client-secret-"),
+              ),
+              false,
+            );
             assert.equal(
               workerPermissionProfileOverride(launch.args),
               workerPermissionProfileOverride(
@@ -1517,7 +1576,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n',
+                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n',
                 ),
               ]),
             ),
@@ -2356,7 +2415,8 @@ async function fakeCodexFixture(
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
@@ -2401,9 +2461,11 @@ if (process.argv.includes('app-server')) {
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
+const profileIndex = process.argv.indexOf('--profile');
+const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

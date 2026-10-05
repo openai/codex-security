@@ -32,6 +32,11 @@ import {
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
+import {
+  createProfileCodex,
+  createProviderProfile,
+  type ProviderProfile,
+} from "./provider-profile.js";
 
 import {
   CODEX_AUTH_CONFIG_KEYS,
@@ -57,7 +62,6 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   resolveCodexProfile,
-  modelProviderConfigOverride,
   resolveCommandAuthConfig,
   scanApprovalPolicy,
   scanCyberAccessConfig,
@@ -255,6 +259,7 @@ interface PreparedRuntime {
   bootstrapWorkspace?: string;
   configPath?: string;
   deepScanConfigPath?: string;
+  providerProfile?: ProviderProfile;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
@@ -444,7 +449,9 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
-  createCodex(options: CodexOptions): CodexClientLike;
+  createCodex(
+    options: CodexOptions & { nativeProfile?: string },
+  ): CodexClientLike | Promise<CodexClientLike>;
   environment: ProcessEnvironment;
   prepareRuntime?: (
     config: Readonly<CodexSecurityConfig>,
@@ -462,7 +469,10 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
+  createCodex: ({ nativeProfile, ...options }) =>
+    nativeProfile === undefined
+      ? new Codex(options)
+      : createProfileCodex(options, nativeProfile),
   environment: process.env,
 };
 
@@ -688,7 +698,7 @@ export class CodexSecurity {
         ...(session.sessionConfig["features"] as JsonObject),
         plugins: false,
       };
-      const { codex } = this.#createSessionCodex(
+      const { codex } = await this.#createSessionCodex(
         session,
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
@@ -997,7 +1007,7 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
-      const { codex } = this.#createSessionCodex(
+      const { codex } = await this.#createSessionCodex(
         session,
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
@@ -1363,14 +1373,17 @@ export class CodexSecurity {
         scanDir,
         runtime.environment,
       );
+      const workerSnapshot = { ...workerRuntimeConfig };
+      delete workerSnapshot["model_providers"];
+      if (runtime.providerProfile !== undefined) {
+        workerSnapshot["native_profile"] = runtime.providerProfile.name;
+      }
       if (deepScanConfiguration !== undefined) {
         await writeDeepScanConfig(
           runtime.deepScanConfigPath ??
             join(runtimeHome, "codex-security", "config.toml"),
           deepScanConfiguration,
-          runtime.deepScanConfigPath === undefined
-            ? undefined
-            : workerRuntimeConfig,
+          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
         );
       }
       checkOpen();
@@ -1901,7 +1914,7 @@ export class CodexSecurity {
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
-      const { codex, environment } = this.#createSessionCodex(
+      const { codex, environment } = await this.#createSessionCodex(
         session,
         runtimePaths,
         options.auth,
@@ -1913,7 +1926,7 @@ export class CodexSecurity {
               `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
                 ":root": "read",
                 ":workspace_roots": "write",
-                [runtimeHome]: "read",
+                [runtimeHome]: { ".": "deny" },
                 [runtime.deepScanConfigPath]: { ".": "deny" },
               })}`,
             ]
@@ -2293,6 +2306,7 @@ export class CodexSecurity {
                 },
               ),
             environment,
+            nativeProfile: runtime.providerProfile,
             config: {
               codexOverrides: {
                 ...scanPreflightCodexConfig(
@@ -2604,6 +2618,7 @@ export class CodexSecurity {
     );
     const runtime = this.#runtime;
     this.#runtime = null;
+    await runtime?.providerProfile?.cleanup();
     if (runtime?.bootstrapWorkspace !== undefined) {
       await cleanupSdkDirectory(runtime.bootstrapWorkspace);
     }
@@ -2661,14 +2676,14 @@ export class CodexSecurity {
     }
   }
 
-  #createSessionCodex(
+  async #createSessionCodex(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
-  ): { codex: CodexClientLike; environment: ProcessEnvironment } {
+  ): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
     const {
       runtime,
       python,
@@ -2708,7 +2723,6 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
-    const providerOverrides = modelProviderConfigOverride(sessionConfig);
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
@@ -2734,14 +2748,17 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = this.#dependencies.createCodex({
+    const codex = await this.#dependencies.createCodex({
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(providerOverrides.length > 0 || configOverrides.length > 0
+      ...(runtime.providerProfile === undefined
+        ? {}
+        : { nativeProfile: runtime.providerProfile.name }),
+      ...(configOverrides.length > 0
         ? {
-            configOverrides: [...providerOverrides, ...configOverrides],
+            configOverrides,
           }
         : {}),
       env: sdkEnvironment,
@@ -2879,6 +2896,17 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
+      if (isRecord(providers) && Object.keys(providers).length > 0) {
+        const previousProfile = runtime.providerProfile;
+        runtime.providerProfile = await createProviderProfile(
+          runtimeHome,
+          effectiveConfig,
+        );
+        await previousProfile?.cleanup();
+      } else {
+        await runtime.providerProfile?.cleanup();
+        delete runtime.providerProfile;
+      }
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
         runtimeHome,
@@ -4582,7 +4610,7 @@ export function scanRuntimeCodexConfig(
           ":workspace_roots": "write",
           ...(protectedCredentialHome === undefined
             ? {}
-            : { [protectedCredentialHome]: "read" }),
+            : { [protectedCredentialHome]: { ".": "deny" } }),
         },
       },
       [POLICY_PERMISSION_PROFILE]: {
@@ -4660,7 +4688,7 @@ function sharedCredentialCodexConfig(
   config: JsonObject,
   credentialHome: string,
 ): JsonObject {
-  // Providers stay in per-session overrides. Codex merges provider tables, so
+  // Providers stay in private session profiles. Codex merges provider tables, so
   // persisting them here would mix credentials from concurrent scans.
   const shared: JsonObject = {
     approval_policy: scanApprovalPolicy(config),
@@ -4827,7 +4855,7 @@ async function pluginSupportsWorkerProviderSnapshot(
   return (
     isRecord(manifest) &&
     isRecord(manifest["codexSecurity"]) &&
-    manifest["codexSecurity"]["workerProviderSnapshot"] === 2
+    manifest["codexSecurity"]["workerProviderSnapshot"] === 3
   );
 }
 

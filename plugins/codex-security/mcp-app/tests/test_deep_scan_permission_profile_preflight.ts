@@ -109,13 +109,24 @@ async function testAllowedProfileAndRawArgv() {
       ],
     },
     async ({ codexPath, cwd, argvPath, callsPath }) => {
-      await preflight(codexPath, cwd);
+      await preflightDeepScanWorkerPermissionProfile({
+        codexPath,
+        cwd,
+        configOverrides: [
+          ...rawOverrides,
+          'model_provider="synthetic.gateway"',
+        ],
+        expectedProfile,
+        signal: new AbortController().signal,
+      });
 
       assert.deepEqual(await readJson(argvPath), [
         "--config",
         rawOverrides[0],
         "--config",
         rawOverrides[1],
+        "--config",
+        'model_provider="openai"',
         "app-server",
         "--stdio",
       ]);

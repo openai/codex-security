@@ -65,12 +65,16 @@ function pdf(text: string): Uint8Array {
 
 describe("scan knowledge bases", () => {
   test.each(["win32", "darwin", "linux"])(
-    "matches case-variant Git metadata using %s filename rules",
+    "matches case-variant Git metadata using %s platform and filesystem rules",
     async (platform) => {
       const root = await temporaryDirectory();
       await mkdir(join(root, ".GIT"));
       await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
       await writeFile(join(root, "guide.md"), "Synthetic guide");
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
       const result = spawnSync(
         process.execPath,
         [
@@ -93,7 +97,7 @@ describe("scan knowledge bases", () => {
       );
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout).sort()).toEqual(
-        platform === "win32" || platform === "darwin"
+        platform === "win32" || aliasesGit
           ? ["Synthetic guide"]
           : ["Synthetic guide", "Synthetic metadata"],
       );
@@ -114,14 +118,20 @@ describe("scan knowledge bases", () => {
         join(root, "guide.md"),
         "Documented application behavior.",
       );
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      if (metadataName !== ".git" && !aliasesGit) {
+        await mkdir(join(root, ".git"));
+        await writeFile(join(root, ".git", "config"), "Separate Git metadata.");
+      }
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
       expect((await extractedDocuments(directory.path)).sort()).toEqual(
         [
           "Documented application behavior.",
-          ...(process.platform !== "win32" &&
-          process.platform !== "darwin" &&
-          metadataName !== ".git"
+          ...(process.platform !== "win32" && !aliasesGit
             ? [await readFile(metadata, "utf8")]
             : []),
         ].sort(),
@@ -131,6 +141,46 @@ describe("scan knowledge bases", () => {
       expect(await extractedDocuments(explicit.path)).toEqual([
         await readFile(metadata, "utf8"),
       ]);
+    },
+  );
+
+  testPosix(
+    "omits case-variant metadata aliases on a case-insensitive filesystem",
+    async () => {
+      const root = await temporaryDirectory();
+      const preservedGit = join(root, ".GIT");
+      await mkdir(preservedGit);
+      const metadata = join(preservedGit, "config");
+      await writeFile(
+        metadata,
+        "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const originalLstat = filesystem.lstat;
+      const aliasSpy = spyOn(filesystem, "lstat").mockImplementation(
+        async (...args) =>
+          Reflect.apply(originalLstat, filesystem, [
+            args[0] === join(root, ".git") ? preservedGit : args[0],
+            ...args.slice(1),
+          ]),
+      );
+      try {
+        const directory = await prepareKnowledgeBase([root]);
+        temporaryDirectories.track(directory.path);
+        expect(await extractedDocuments(directory.path)).toEqual([
+          "Documented application behavior.",
+        ]);
+        const explicit = await prepareKnowledgeBase([metadata]);
+        temporaryDirectories.track(explicit.path);
+        expect(await extractedDocuments(explicit.path)).toEqual([
+          await readFile(metadata, "utf8"),
+        ]);
+      } finally {
+        aliasSpy.mockRestore();
+      }
     },
   );
 
