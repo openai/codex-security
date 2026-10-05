@@ -1,4 +1,3 @@
-import { isMain } from "./script-main.mjs";
 import { execFile } from "node:child_process";
 import {
   chmod,
@@ -13,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
 import { promisify } from "node:util";
+import { isMain } from "./is-main.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const packageRoot = resolve(import.meta.dirname, "..");

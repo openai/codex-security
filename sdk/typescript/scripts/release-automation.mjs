@@ -1,7 +1,7 @@
-import { isMain } from "./script-main.mjs";
 import { X509Certificate, hash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { isMain } from "./is-main.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 
 const packageName = "@openai/codex-security";

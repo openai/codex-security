@@ -442,9 +442,52 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 path.write_bytes(body.encode())
                 self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
                 self.assertEqual(path.read_text(), body)
-                self.assertTrue(
-                    Path(FINALIZER.describe_threat_model(source)["path"]).samefile(path)
-                )
+                description = FINALIZER.describe_threat_model(source)
+                self.assertEqual(description["path"], str(path))
+                self.assertEqual(description["provenance"]["source"], filename)
+
+    @unittest.skipUnless(
+        FINALIZER._descriptor_relative_writes_available(), "requires descriptor-relative reads"
+    )
+    def test_legacy_document_spelling_stays_on_open_parent_after_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "scan"
+            parent = source / "artifacts" / "01_context"
+            parent.mkdir(parents=True)
+            body = "# Original model\n"
+            (parent / "threat_model.md").write_text(body)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "threat_model.md").write_text("# Replacement model\n")
+            open_directory = FINALIZER._open_scan_local_directory
+            iterdir = Path.iterdir
+            outside_lookups = []
+
+            def open_then_swap(root_fd, parts, *, create):
+                descriptor = open_directory(root_fd, parts, create=create)
+                parent.rename(parent.with_name("original"))
+                parent.symlink_to(outside, target_is_directory=True)
+                return descriptor
+
+            def record_listing(path):
+                if path.resolve() == outside:
+                    outside_lookups.append(path)
+                return iterdir(path)
+
+            with (
+                unittest.mock.patch.object(
+                    FINALIZER, "_open_scan_local_directory", side_effect=open_then_swap
+                ),
+                unittest.mock.patch.object(Path, "iterdir", record_listing),
+            ):
+                description = FINALIZER.describe_threat_model(source)
+
+            self.assertEqual(description["threatModel"]["content"], body)
+            self.assertEqual(
+                description["provenance"]["source"], "artifacts/01_context/threat_model.md"
+            )
+            self.assertEqual(outside_lookups, [])
 
     def test_exports_legacy_document_with_crlf_bytes_unchanged(self) -> None:
         body = b"# Existing Model\r\n\r\n    Preserve indentation.\r\n"

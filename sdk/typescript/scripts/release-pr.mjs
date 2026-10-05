@@ -1,4 +1,3 @@
-import { isMain } from "./script-main.mjs";
 import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
@@ -6,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
 export const notesPath = ".github/release-notes.md";

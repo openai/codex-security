@@ -495,7 +495,7 @@ jobs:
         shell: bash
         env:
           PYTHON_TEST_PATHS: ${{ matrix.tests }}
-          PYTHON_TEST_FILTER: ${{ runner.os == 'Windows' && 'not test_model_files_remain_private_and_editable_under_restrictive_umask' || '' }}
+          PYTHON_TEST_FILTER: ${{ runner.os == 'Windows' && 'not (test_model_files_remain_private_and_editable_under_restrictive_umask or test_legacy_document_spelling_stays_on_open_parent_after_swap)' || '' }}
         run: |
           read -ra tests <<< "$PYTHON_TEST_PATHS"
           python -m pytest "${tests[@]}" -k "$PYTHON_TEST_FILTER" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml

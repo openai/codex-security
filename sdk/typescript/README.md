@@ -1889,6 +1889,11 @@ cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+CSV escapes spreadsheet formula prefixes and literal leading apostrophes with
+an extra apostrophe; import removes that escape. Older CSV exports cannot
+distinguish some literal apostrophes from escapes. Use the JSON export when
+recovering those values from an older scan. Distinct CSV occurrence IDs are
+retained even when their finding IDs match, including when publishing CSV.
 
 For CI, save output outside the checkout and set a severity threshold:
 
@@ -2190,6 +2195,12 @@ an authenticated proxy. It does not add authentication or broaden the default
 network binding.
 
 ### API
+
+Mutation requests to `POST /v1/bulk/findings` and `POST /v1/dedupe-groups` require
+`Content-Type: application/json`; charset parameters are accepted. Other media
+types, including a missing content type, return HTTP 400 `invalid_request`
+before embedding or storage. The API remains unauthenticated and requires an
+authenticated TLS proxy before sharing access.
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.

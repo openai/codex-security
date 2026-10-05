@@ -1,9 +1,9 @@
-import { isMain } from "./script-main.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isMain } from "./is-main.mjs";
 import { resolveNpm } from "./package-smoke-npm.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 

@@ -1,7 +1,7 @@
-import { isMain } from "./script-main.mjs";
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { isMain } from "./is-main.mjs";
 
 const execFileAsync = promisify(execFile);
 const defaultPackageRoot = resolve(import.meta.dirname, "..");
