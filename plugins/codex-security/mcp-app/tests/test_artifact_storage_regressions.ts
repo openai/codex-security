@@ -131,16 +131,20 @@ try {
       );
       temporaryDirectories.push(saved.directory);
       const lstat = fs.lstat;
-      t.mock.method(fs, "lstat", async (value, ...options) => {
-        const metadata = await lstat(value, ...options);
-        return String(value) === saved.directory
-          ? Object.assign(Object.create(metadata), {
-              uid: process.getuid() + 1,
-            })
-          : metadata;
-      });
+      t.mock.method(
+        fs,
+        "lstat",
+        async (...args: Parameters<typeof fs.lstat>) => {
+          const metadata = await lstat(...args);
+          return String(args[0]) === saved.directory
+            ? Object.assign(Object.create(metadata), {
+                uid: process.getuid!() + 1,
+              })
+            : metadata;
+        },
+      );
       let calls = 0;
-      const run = (...args) => {
+      const run = (...args: Parameters<typeof workbench>) => {
         calls += 1;
         return workbench(...args);
       };
