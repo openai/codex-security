@@ -1,11 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
-  createWorkerArtifactContext,
+  canonicalDirectory,
+  defined,
+  type ArtifactContext,
   type DeepReducerContext,
 } from "./src/artifact-context.js";
 import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/deep-scan/parent-sandbox.js";
 import { registerCompactWorkerArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { MCP_APP_VERSION } from "./src/version.js";
+import { version as MCP_APP_VERSION } from "./package.json";
+import { isRecord } from "./src/record.js";
 
 /** Build the narrow worker-only MCP from coordinator-inherited state. */
 export async function createCodexSecurityArtifactWriterServer(
@@ -30,24 +33,35 @@ export async function createCodexSecurityArtifactWriterServer(
     );
   }
 
-  const context = await createWorkerArtifactContext({
-    root,
-    repoRoot,
+  /**
+   * Bind a lightweight worker to host-supplied state, never model-supplied paths.
+   */
+  const scanId = environment.CODEX_SECURITY_SCAN_ID
+    ? environment.CODEX_SECURITY_SCAN_ID
+    : undefined;
+  const scope = environment.CODEX_SECURITY_SCOPE
+    ? environment.CODEX_SECURITY_SCOPE
+    : undefined;
+  const pluginRoot = environment.CODEX_SECURITY_PLUGIN_ROOT
+    ? environment.CODEX_SECURITY_PLUGIN_ROOT
+    : undefined;
+  const pythonCommand = environment.CODEX_SECURITY_PYTHON_COMMAND
+    ? environment.CODEX_SECURITY_PYTHON_COMMAND
+    : undefined;
+  // Preserve the asynchronous context boundary before server construction.
+  const context: ArtifactContext = await (async () => ({
+    root: await canonicalDirectory(root, "Codex Security worker artifact root"),
+    repoRoot: await canonicalDirectory(
+      repoRoot,
+      "Codex Security worker target root",
+    ),
     layout,
-    ...(environment.CODEX_SECURITY_SCAN_ID
-      ? { scanId: environment.CODEX_SECURITY_SCAN_ID }
-      : {}),
-    ...(environment.CODEX_SECURITY_SCOPE
-      ? { scope: environment.CODEX_SECURITY_SCOPE }
-      : {}),
-    ...(environment.CODEX_SECURITY_PLUGIN_ROOT
-      ? { pluginRoot: environment.CODEX_SECURITY_PLUGIN_ROOT }
-      : {}),
-    ...(environment.CODEX_SECURITY_PYTHON_COMMAND
-      ? { pythonCommand: environment.CODEX_SECURITY_PYTHON_COMMAND }
-      : {}),
-    ...(deepReducer ? { deepReducer } : {}),
-  });
+    ...defined("scanId", scanId),
+    ...defined("scope", scope),
+    ...defined("pluginRoot", pluginRoot),
+    ...defined("pythonCommand", pythonCommand),
+    ...defined("deepReducer", deepReducer),
+  }))();
   const server = new McpServer(
     { name: "codex-security-artifacts", version: MCP_APP_VERSION },
     {
@@ -84,15 +98,13 @@ function parseReducerContext(value: string): DeepReducerContext {
     );
   }
   if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed) ||
-    typeof (parsed as Record<string, unknown>).scanRoot !== "string" ||
-    !Array.isArray((parsed as Record<string, unknown>).claimedWorkers)
+    !isRecord(parsed) ||
+    typeof parsed.scanRoot !== "string" ||
+    !Array.isArray(parsed.claimedWorkers)
   ) {
     throw new Error(
       "The coordinator-bound Deep reducer context is incomplete.",
     );
   }
-  return parsed as DeepReducerContext;
+  return parsed as unknown as DeepReducerContext;
 }

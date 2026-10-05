@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, hash } from "node:crypto";
+import { isNonEmptyString } from "./value.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
@@ -7,10 +8,12 @@ import {
   realpath,
   type FileHandle,
 } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import { ContractValidationError } from "./errors.js";
+import { ContractValidationError, abortReason } from "./errors.js";
+import { isRecord } from "./record.js";
 import type {
+  ContractObject as JsonRecord,
   CoverageDocument,
   FindingsDocument,
   ScanManifest,
@@ -20,6 +23,7 @@ import {
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { isWithin as isContained } from "./trusted-executable.js";
 import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 const DOCUMENTS = {
@@ -119,29 +123,25 @@ export async function loadContractWithScanDirectory(
       options.signal,
     );
     let validate: ReturnType<typeof ajv.compile>;
-    try {
-      validate = ajv.compile(schema);
-    } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
-    }
-    let payload: unknown =
-      filename === "findings.json"
-        ? findingsPayload
-        : payloads[filename as keyof typeof payloads];
+    let payload: unknown;
     let valid: boolean;
     try {
-      const result = validate(payload);
-      if (typeof result !== "boolean") {
-        throw new Error("asynchronous JSON Schema validation is unsupported");
-      }
-      valid = result;
-      if (!valid && filename === "findings.json") {
-        payload = legacySealedFindingsForValidation(payload);
-        const compatibleResult = validate(payload);
-        if (typeof compatibleResult !== "boolean") {
+      validate = ajv.compile(schema);
+      payload =
+        filename === "findings.json"
+          ? findingsPayload
+          : payloads[filename as keyof typeof payloads];
+      const validatePayload = (payload: unknown) => {
+        const result = validate(payload);
+        if (typeof result !== "boolean") {
           throw new Error("asynchronous JSON Schema validation is unsupported");
         }
-        valid = compatibleResult;
+        return result;
+      };
+      valid = validatePayload(payload);
+      if (!valid && filename === "findings.json") {
+        payload = normalizePersistedFindings(payload);
+        valid = validatePayload(payload);
       }
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
@@ -208,35 +208,22 @@ export async function loadContractWithScanDirectory(
   };
 }
 
-export async function requireCanonicalScanDirectory(
-  scanDirectory: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return (await requireScanRoot(scanDirectory, signal)).path;
-}
-
-type JsonRecord = Record<string, unknown>;
-
-function legacySealedFindingsForValidation(payload: unknown): unknown {
+/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+export function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
-  if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
+  if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
-    if (!isJsonRecord(finding)) continue;
+    if (!isRecord(finding)) continue;
     const legacyEvidence = finding["code_evidence"];
     if (Array.isArray(legacyEvidence)) {
       const compatibleEvidence: JsonRecord[] = [];
       for (const evidence of legacyEvidence) {
-        if (!isJsonRecord(evidence)) continue;
+        if (!isRecord(evidence)) continue;
         const id = evidence["id"];
         const code = evidence["code"];
-        if (
-          typeof id !== "string" ||
-          id.length === 0 ||
-          typeof code !== "string" ||
-          code.length === 0
-        ) {
+        if (!isNonEmptyString(id) || !isNonEmptyString(code)) {
           continue;
         }
         compatibleEvidence.push(evidence);
@@ -273,12 +260,12 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
       ],
     ] satisfies Array<[string, string[]]>) {
       const section = finding[sectionName];
-      if (!isJsonRecord(section)) continue;
+      if (!isRecord(section)) continue;
       normalizeLegacyStringLists(section, listFields);
     }
 
     const legacyRootCause = finding["root_cause"];
-    if (isJsonRecord(legacyRootCause)) {
+    if (isRecord(legacyRootCause)) {
       removeUnsupportedLegacyStrings(legacyRootCause, [
         "summary",
         "code",
@@ -293,18 +280,24 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
     }
 
     const validation = finding["validation"];
-    if (isJsonRecord(validation)) {
-      normalizeLegacyStringOrList(validation, "evidence");
+    if (isRecord(validation)) {
+      if (
+        typeof validation["evidence"] !== "string" ||
+        validation["evidence"].length === 0
+      ) {
+        normalizeLegacyStringLists(validation, ["evidence"]);
+      }
       removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
-      removeUnsupportedLegacyNullableStrings(validation, [
-        "status",
-        "disposition",
-        "result",
-      ]);
+      removeUnsupportedLegacyStrings(
+        validation,
+        ["status", "disposition", "result"].filter(
+          (field) => validation[field] !== null,
+        ),
+      );
     }
 
     const attackPath = finding["attackPath"];
-    if (!isJsonRecord(attackPath)) continue;
+    if (!isRecord(attackPath)) continue;
     removeUnsupportedLegacyStrings(attackPath, ["summary"]);
     for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
       const detail = attackPath[field];
@@ -316,7 +309,7 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
         if (detail.length === 0) delete attackPath[field];
         continue;
       }
-      if (!isJsonRecord(detail)) {
+      if (!isRecord(detail)) {
         if (field in attackPath) delete attackPath[field];
         continue;
       }
@@ -336,22 +329,18 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
     }
     for (const field of ["impact", "likelihood"]) {
       const detail = attackPath[field];
-      if (isJsonRecord(detail)) {
+      if (isRecord(detail)) {
         removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
       } else if (
         detail !== undefined &&
         detail !== null &&
-        (typeof detail !== "string" || detail.length === 0)
+        !isNonEmptyString(detail)
       ) {
         delete attackPath[field];
       }
     }
   }
   return compatible;
-}
-
-function isJsonRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeLegacyStringLists(
@@ -362,32 +351,13 @@ function normalizeLegacyStringLists(
     if (!(field in section)) continue;
     const value = section[field];
     if (Array.isArray(value)) {
-      section[field] = value.filter(
-        (item): item is string => typeof item === "string" && item.length > 0,
-      );
-    } else if (typeof value === "string" && value.length > 0) {
+      section[field] = value.filter(isNonEmptyString);
+    } else if (isNonEmptyString(value)) {
       section[field] = [value];
     } else {
       delete section[field];
     }
   }
-}
-
-function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
-  if (!(field in section)) return;
-  const value = section[field];
-  if (typeof value === "string") {
-    if (value.length === 0) delete section[field];
-    return;
-  }
-  if (!Array.isArray(value)) {
-    delete section[field];
-    return;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === "string" && item.length > 0,
-  );
-  section[field] = normalized;
 }
 
 function removeUnsupportedLegacyStrings(
@@ -397,21 +367,6 @@ function removeUnsupportedLegacyStrings(
   for (const field of fields) {
     if (
       field in section &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
-      delete section[field];
-    }
-  }
-}
-
-function removeUnsupportedLegacyNullableStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (
-      field in section &&
-      section[field] !== null &&
       (typeof section[field] !== "string" || section[field].length === 0)
     ) {
       delete section[field];
@@ -491,7 +446,8 @@ function validateCanonicalContract(
       }
     }
 
-    const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    const fingerprint = `codex-security/v1:sha256:${hash(
+      "sha256",
       [
         "codex-security/v1",
         manifest.scan.target.targetId,
@@ -500,8 +456,9 @@ function validateCanonicalContract(
         finding.identity.instance ?? "",
       ].join("\0"),
     )}`;
-    const findingId = `csf_${sha256Text(fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${sha256Text(
+    const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
+    const occurrenceId = `occ_${hash(
+      "sha256",
       [manifest.scan.id, fingerprint].join("\0"),
     ).slice(0, 24)}`;
     if (finding.findingId !== findingId) {
@@ -520,10 +477,6 @@ function validateCanonicalContract(
       );
     }
   }
-}
-
-function sha256Text(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export async function requireScanFile(
@@ -581,17 +534,11 @@ async function requireCheckedScanFile(
     }
     const parents = [{ path: scanDir, metadata: rootMetadata }];
     throwIfAborted(signal);
-    if (
-      !parents[0]!.metadata.isDirectory() ||
-      parents[0]!.metadata.isSymbolicLink()
-    ) {
-      throw new Error("unsafe scan directory");
-    }
     for (const part of parts.slice(0, -1)) {
       current = join(current, part);
       const metadata = await lstat(current);
       throwIfAborted(signal);
-      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      if (!metadata.isDirectory()) {
         throw new Error("unsafe parent");
       }
       parents.push({ path: current, metadata });
@@ -599,7 +546,7 @@ async function requireCheckedScanFile(
     const path = join(scanDir, ...parts);
     const metadata = await lstat(path);
     throwIfAborted(signal);
-    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    if (!metadata.isFile()) {
       throw new ContractValidationError(
         `${context}: expected a regular non-symlink file.`,
       );
@@ -775,15 +722,15 @@ function validateExpectation(
   }
 
   if (requested.kind === "paths") {
-    const actual = scan.scope.includePaths.map(safeScopePath);
-    if (
-      actual.length !== new Set(actual).size ||
-      !sameSet(new Set(actual), new Set(requested.paths))
-    ) {
-      throw new ContractValidationError(
-        "Manifest include paths do not match the requested path target.",
-      );
+    const actualPaths = scan.scope.includePaths.map(safeScopePath);
+    const actual = new Set(actualPaths);
+    if (actualPaths.length === actual.size) {
+      const expected = new Set(requested.paths);
+      if (actual.size === expected.size && actual.isSubsetOf(expected)) return;
     }
+    throw new ContractValidationError(
+      "Manifest include paths do not match the requested path target.",
+    );
   }
 }
 
@@ -814,13 +761,10 @@ async function requireScanRoot(
     throwIfAborted(signal);
     if (
       !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
       !current.isDirectory() ||
-      current.isSymbolicLink() ||
       metadata.dev !== current.dev ||
       metadata.ino !== current.ino ||
       !returned.isDirectory() ||
-      returned.isSymbolicLink() ||
       metadata.dev !== returned.dev ||
       metadata.ino !== returned.ino
     ) {
@@ -857,7 +801,6 @@ async function verifyScanRoot(
     throwIfAborted(signal);
     if (
       !current.isDirectory() ||
-      current.isSymbolicLink() ||
       current.dev !== root.metadata.dev ||
       current.ino !== root.metadata.ino
     ) {
@@ -878,7 +821,7 @@ function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
     value.trim().length === 0 ||
-    !isWellFormedUnicode(value) ||
+    Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
@@ -935,10 +878,7 @@ async function readScanJson(
   );
   try {
     const bytes = await file.readFile({ signal });
-    documentDigests.set(
-      relativePath,
-      createHash("sha256").update(bytes).digest("hex"),
-    );
+    documentDigests.set(relativePath, hash("sha256", bytes));
     return parseJson(join(scanDir, relativePath), bytes);
   } catch (error) {
     throwIfAborted(signal);
@@ -1012,7 +952,7 @@ function validateParsedJson(value: unknown, context: string): void {
     return;
   }
   if (typeof value === "string") {
-    if (!isWellFormedUnicode(value)) {
+    if (!value.isWellFormed()) {
       throw new ContractValidationError(
         `${context}: expected well-formed Unicode JSON strings.`,
       );
@@ -1027,7 +967,7 @@ function validateParsedJson(value: unknown, context: string): void {
   }
   if (isRecord(value)) {
     for (const [key, item] of Object.entries(value)) {
-      if (!isWellFormedUnicode(key)) {
+      if (!key.isWellFormed()) {
         throw new ContractValidationError(
           `${context}: expected well-formed Unicode JSON keys.`,
         );
@@ -1035,10 +975,6 @@ function validateParsedJson(value: unknown, context: string): void {
       validateParsedJson(item, `${context}.<property>`);
     }
   }
-}
-
-function isWellFormedUnicode(value: string): boolean {
-  return Buffer.from(value, "utf8").toString("utf8") === value;
 }
 
 function createValidator(): Ajv2020 {
@@ -1120,7 +1056,6 @@ async function openCheckedScanFile(
       throwIfAborted(signal);
       if (
         !current.isDirectory() ||
-        current.isSymbolicLink() ||
         current.dev !== parent.metadata.dev ||
         current.ino !== parent.metadata.ino
       ) {
@@ -1133,7 +1068,6 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !current.isFile() ||
-      current.isSymbolicLink() ||
       current.dev !== checked.metadata.dev ||
       current.ino !== checked.metadata.ino
     ) {
@@ -1171,7 +1105,6 @@ export async function sameCheckedFileDevice(
   if (
     !openedIdentity.isFile() ||
     !checkedIdentity.isFile() ||
-    checkedIdentity.isSymbolicLink() ||
     openedIdentity.ino !== checkedIdentity.ino
   ) {
     return false;
@@ -1195,10 +1128,7 @@ export async function sameCheckedFileDevice(
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
-  throw (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
+  throw abortReason(signal);
 }
 
 function validRfc3339DateTime(value: string): boolean {
@@ -1265,11 +1195,8 @@ function schemaError(
           .join(".");
   const keyword = first?.keyword ?? "unknown";
   const count = errors.length;
-  const format = first?.params["format"];
-  const detail =
-    keyword === "format" && format === "date-time" ? "; date-time" : "";
   return new ContractValidationError(
-    `${filename}:${location}: schema validation failed (${keyword}${detail}; ${count} ${count === 1 ? "error" : "errors"}).`,
+    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
   );
 }
 
@@ -1280,29 +1207,13 @@ function sameArray(left: readonly string[], right: readonly string[]): boolean {
   );
 }
 
-function sameSet(
-  left: ReadonlySet<string>,
-  right: ReadonlySet<string>,
-): boolean {
-  return (
-    left.size === right.size && [...left].every((value) => right.has(value))
-  );
-}
-
-function isContained(root: string, candidate: string): boolean {
-  const child = relative(root, candidate);
-  return (
-    child === "" ||
-    (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function nodeErrorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String(error.code)
     : undefined;
+}
+
+/** @internal */
+export function sha256Text(value: string): string {
+  return hash("sha256", value);
 }

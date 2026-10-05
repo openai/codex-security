@@ -1,0 +1,43 @@
+name: workflow-quality
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: GitHub Actions checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install ShellCheck and zizmor
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: shellcheck@0.11.0,zizmor@1.30.1
+      - name: Install actionlint
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+          printf '%s\n' "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+      - name: Check workflow syntax and shell scripts
+        env:
+          # Enforce correctness diagnostics without changing existing shell style.
+          SHELLCHECK_OPTS: --severity=warning
+        run: |
+          actionlint -color
+          shellcheck docker/verify-container-compose.sh
+      - name: Check workflow security
+        run: zizmor --offline --strict-collection --min-severity medium --format github --config .github/zizmor.yml .github

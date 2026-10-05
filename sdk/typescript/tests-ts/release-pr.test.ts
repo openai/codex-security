@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { gitText } from "./support/shell.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -219,10 +219,9 @@ class Fixture {
       if (content === null) {
         this.git("update-index", "--force-remove", "--", path);
       } else {
-        const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        const blob = gitText(["hash-object", "-w", "--stdin"], {
           cwd: this.directory,
           input: content,
-          encoding: "utf8",
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
         this.git("update-index", "--add", "--cacheinfo", "100644", blob, path);
