@@ -13,6 +13,7 @@ providers:
       approval_policy: never
       additional_directories:
         - "{{target_repo}}"
+        - "{{triage_node_root}}"
       cli_config:
         default_permissions: triage_runtime_only
         permissions:
@@ -26,6 +27,7 @@ providers:
           memories: false
           plugins: false
       cli_env:
+        CODEX_MCP_NODE_PATH: "{{triage_node_path}}"
         HTTP_PROXY: "{{env.HTTP_PROXY}}"
         HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
         ALL_PROXY: "{{env.ALL_PROXY}}"

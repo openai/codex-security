@@ -42,9 +42,9 @@ try {
     assert.doesNotMatch(config, /sandbox_mode|network_access_enabled/);
     if (configName.includes("calibration")) {
       assert.match(config, /additional_directories:\n\s+- "\{\{target_repo\}\}"/);
-    } else {
-      assert.doesNotMatch(config, /additional_directories/);
     }
+    assert.match(config, /- "\{\{triage_node_root\}\}"/);
+    assert.match(config, /CODEX_MCP_NODE_PATH: "\{\{triage_node_path\}\}"/);
   }
   process.env.CALIBRATION_TARGET_ROOT = path.join(ambient, "default targets");
   for (const customRoot of ["", path.join(ambient, "custom targets # space")]) {
@@ -53,6 +53,8 @@ try {
       process.env.TRIAGE_RUNTIME_ROOT = path.join(ambient, runtimeName);
       vars = runtimeVars(vars);
       assert.equal(vars.triage_runtime_root, process.env.TRIAGE_RUNTIME_ROOT);
+      assert.equal(vars.triage_node_path, fs.realpathSync(process.execPath));
+      assert.equal(vars.triage_node_root, path.dirname(vars.triage_node_path));
       assert.equal(vars.target_repo, path.join(customRoot || process.env.CALIBRATION_TARGET_ROOT, vars.calibration_repo));
     }
   }
