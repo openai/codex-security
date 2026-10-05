@@ -58,3 +58,14 @@ export function nodeCommand() {
     }).trim(),
   };
 }
+
+export async function readSubprocess(
+  child: Bun.Subprocess<"ignore", "pipe" | "ignore", "pipe">,
+) {
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { status, stdout, stderr };
+}

@@ -8,7 +8,7 @@ import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const originalClaimToken = "22222222-2222-4222-8222-222222222222";
 const replacementClaimToken = "33333333-3333-4333-8333-333333333333";
-const temporaryDirectories = createTemporaryDirectories();
+const temporaryDirectories = createTemporaryDirectories(true);
 
 afterEach(temporaryDirectories.cleanup);
 

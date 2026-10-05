@@ -119,8 +119,9 @@ export async function runArtifactHelper(
   );
   let stderr = "";
   let stdout = "";
-  invocation.stderr.on("data", (chunk: Buffer) => {
-    stderr = `${stderr}${chunk.toString("utf8")}`.slice(-64 * 1024);
+  invocation.stderr.setEncoding("utf8");
+  invocation.stderr.on("data", (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-64 * 1024);
   });
   const forwarded =
     options.output === undefined
