@@ -609,12 +609,20 @@ def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, a
     ]
 
 
-@pytest.mark.parametrize("comment", ["/* reason */", "/* one */ /* two */"])
-def test_javascript_regex_after_comment_preserves_the_following_method(
-    tmp_path: Path, comment: str
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "return /* reason */ /=>/;",
+        "return /* one */ /* two */ /=>/;",
+        "const ratio = { valueOf() { return 12; } } /* units */ / 2;",
+        "const ratio = {} /* scale */ / { valueOf() { return 12 / 2; } };",
+    ],
+)
+def test_javascript_comment_context_preserves_the_following_method(
+    tmp_path: Path, statement: str
 ) -> None:
     source = f"""class Service {{
-  check() {{ return {comment} /=>/; }} // note
+  check() {{ {statement} }} // note
   authorize() {{}}
 }}
 """
@@ -691,6 +699,9 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
         "this.#if() / { valueOf() { return 12 / 2; } }",
         "this.#else / { valueOf() { return 12 / 2; } }",
         "a\u0301if() / { valueOf() { return 12 / 2; } }",
+        "a\u03011.if() / { valueOf() { return 12 / 2; } }",
+        "a\u200d1.if() / { valueOf() { return 12 / 2; } }",
+        r"a\u{301}1.if() / { valueOf() { return 12 / 2; } }",
         r"a\u{301}if() / { valueOf() { return 12 / 2; } }",
         "a\u0301else / { valueOf() { return 12 / 2; } }",
         r"a\u{301}else / { valueOf() { return 12 / 2; } }",

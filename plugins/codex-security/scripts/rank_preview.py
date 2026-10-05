@@ -242,7 +242,7 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> bool:
+def javascript_identifier_continues(masked: list[str], start: int) -> bool:
     if start > 0 and (
         ("_" + masked[start - 1]).isidentifier() or masked[start - 1] in "$\u200c\u200d"
     ):
@@ -253,6 +253,12 @@ def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> b
             escape -= 1
         if "".join(masked[max(0, escape - 3) : escape]) == "\\u{":
             return True
+    return False
+
+
+def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> bool:
+    if javascript_identifier_continues(masked, start):
+        return True
     while start > 0 and (masked[start - 1].isspace() or masked[start - 1] == "\ufeff"):
         start -= 1
     if start == 0 or masked[start - 1] not in ".#":
@@ -279,7 +285,8 @@ def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> b
     return (
         start == end
         or masked[start] not in "0123456789"
-        or (start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$.#"))
+        or javascript_identifier_continues(masked, start)
+        or (start > 0 and masked[start - 1] in ".#")
     )
 
 
@@ -294,13 +301,18 @@ def javascript_regex_end(
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
     previous = start - 1
+    skipped_comment = False
     while previous >= 0:
         if text[previous] in " \t\r\ufeff":
             previous -= 1
         elif previous in block_comment_starts:
             previous = block_comment_starts[previous] - 1
+            skipped_comment = True
         else:
             break
+    # A comment after an object expression must not turn division into a regex.
+    if skipped_comment and previous >= 0 and text[previous] == "}" and not after_control:
+        return None
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
         keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
