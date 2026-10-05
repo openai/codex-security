@@ -4,9 +4,6 @@ export function shardTestFiles(
   count: number,
   durations: Readonly<Record<string, number>> = {},
 ) {
-  if (!Number.isSafeInteger(count) || count < 1) {
-    throw new Error("The test shard count must be a positive integer.");
-  }
   const shards = Array.from({ length: count }, () => ({
     files: [] as string[],
     seconds: 0,

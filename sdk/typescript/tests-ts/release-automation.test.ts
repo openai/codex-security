@@ -4065,6 +4065,7 @@ describe("GitHub release workflow safeguards", () => {
       windows: [
         "static-checks",
         "plugin-host",
+        "plugin-source",
         "windows-test",
         "windows-verify",
       ],
