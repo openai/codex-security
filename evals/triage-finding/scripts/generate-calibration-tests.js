@@ -108,7 +108,7 @@ function testYaml(testCase, variant, args) {
     "  vars:",
     `    case_id: ${generatedCaseId}`,
     `    calibration_repo: ${generatedCaseId}`,
-    `    calibration_repo_root: ${quote(args.repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(__dirname, "../../..", args.repoRoot))}`,
+    `    calibration_repo_root: ${quote(args.repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(args.repoRoot))}`,
     `    source_type_under_test: ${testCase.source_type}`,
     `    expected_ids: ${variantCaseId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,

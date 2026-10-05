@@ -68,10 +68,10 @@ execFileSync(
     "--variant",
     "vulnerable",
     "--repo-root",
-    path.join(tmpDir, "custom targets # space"),
+    "custom targets # space",
   ],
   {
-    cwd: evalDir,
+    cwd: tmpDir,
     stdio: "pipe",
   },
 );
