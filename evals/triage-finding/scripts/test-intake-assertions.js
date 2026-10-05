@@ -43,6 +43,8 @@ for (const text of [
   '{"verdict":"confirmed"}',
   '{"verdict":"needs_review"}',
   '{"verdict":"not_actionable"}',
+  "```json\n{'verdict': 'confirmed'}\n```",
+  "{'schema_version': 'triage-finding/v0', 'findings': []}",
   '{"ver\\u0064ict":"needs\\u005freview"}',
 ]) {
   assert.equal(hasTriageJson(text), true, text);
@@ -102,7 +104,7 @@ for (const text of [
 }
 
 for (const emphasis of ["**", "*", "__", "_", "***"]) {
-  for (const normalization of ["source_type: advisory", "source_type: `advisory`", '"source_type": "advisory"', "normalize as advisory", "normalize as `advisory`", "`source_type: advisory`", "`normalize as advisory`"]) {
+  for (const normalization of ["source_type: advisory", "source_type: `advisory`", '"source_type": "advisory"', "normalize as advisory", "normalize as `advisory`", "`source_type: advisory`", "`normalize as advisory`", "Normalize as advisory.", "Normalize as advisory: preserve the identifier", "Normalization: source_type: advisory"]) {
     expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}${normalization}${emphasis}.`, githubContext("dependabot_malware"));
   }
   expectPass(github, `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}source_type: advisory_other${emphasis}`, githubContext("dependabot_malware"), false);

@@ -3,10 +3,10 @@ function outputText(output) {
 }
 
 function hasTriageJson(text) {
-  for (const [, key, literal] of text.matchAll(/("(?:\\.|[^"\\])*")\s*:\s*("(?:\\.|[^"\\])*")/g)) {
+  for (const [, key, literal] of text.matchAll(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g)) {
     try {
-      const name = JSON.parse(key);
-      const value = JSON.parse(literal);
+      const name = JSON.parse(key.replace(/^'|'$/g, '"'));
+      const value = JSON.parse(literal.replace(/^'|'$/g, '"'));
       if (name === "schema_version" && value === "triage-finding/v0") return true;
       if (name === "verdict" && ["confirmed", "needs_review", "not_actionable"].includes(value)) return true;
     } catch {
