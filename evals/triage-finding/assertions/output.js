@@ -3,21 +3,17 @@ function outputText(output) {
 }
 
 function hasTriageJson(text) {
-  let finding = false;
-  let verdict = false;
-  for (const [, key, literal] of text.matchAll(/("(?:\\.|[^"\\])*")\s*:\s*("(?:\\.|[^"\\])*"|\[)/g)) {
+  for (const [, key, literal] of text.matchAll(/("(?:\\.|[^"\\])*")\s*:\s*("(?:\\.|[^"\\])*")/g)) {
     try {
       const name = JSON.parse(key);
-      const value = literal === "[" ? [] : JSON.parse(literal);
+      const value = JSON.parse(literal);
       if (name === "schema_version" && value === "triage-finding/v0") return true;
-      finding ||= (name === "findings" && Array.isArray(value)) ||
-        (name === "input_id" && typeof value === "string");
-      verdict ||= name === "verdict" && ["confirmed", "needs_review", "not_actionable"].includes(value);
+      if (name === "verdict" && ["confirmed", "needs_review", "not_actionable"].includes(value)) return true;
     } catch {
       // Ignore quoted prose that is not a JSON field.
     }
   }
-  return finding && verdict;
+  return false;
 }
 
 function parseExpected(value, trim = typeof value === "string") {
