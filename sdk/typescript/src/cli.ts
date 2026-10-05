@@ -6324,9 +6324,14 @@ function validateCliArguments(
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
+    const canonicalOption = option.replace(
+      /[A-Z]/g,
+      (letter) => `-${letter.toLowerCase()}`,
+    );
     if (
       equals >= 0 ||
-      (!VALUE_OPTIONS.has(option) && !(scanImport && option === "--json"))
+      (!VALUE_OPTIONS.has(canonicalOption) &&
+        !(scanImport && option === "--json"))
     )
       continue;
     const next = argv[index + 1];
