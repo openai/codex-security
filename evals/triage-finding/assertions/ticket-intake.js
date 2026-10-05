@@ -8,7 +8,7 @@ const expectedPatterns = {
 };
 
 const expectedSubissuePatterns = {
-  direct_confirmation: [/SEC-294/i, /SEC-295/i, /2\s+(?:direct\s+)?sub-issues|two\s+(?:direct\s+)?sub-issues/i, /include|import/i, /ask|would you|do you want/i],
+  direct_confirmation: [/SEC-294/i, /SEC-295/i, /(?:2|two)\s+(?:direct\s+)?(?:sub-issues|children)/i, /include|import/i, /ask|would you|do you want/i],
   next_depth: [/SEC-296/i, /next (?:level|depth)|deeper|grandchild/i, /include|import/i, /ask|would you|do you want/i],
   ambiguous_parent: [/parent/i, /independent|standalone|separate/i, /include|triage/i, /ask|would you|do you want/i],
   over_limit: [/250/i, /narrow|smaller|filter|depth|status|label/i, /not.*truncate|cannot.*truncate|stop/i],
@@ -18,9 +18,16 @@ module.exports = (output, context) => {
   const text = outputText(output);
   const behavior = String(context.vars.expected_ticket_failure || "");
   const subissueBehavior = String(context.vars.expected_linear_subissues || "");
-  const patterns = expectedPatterns[behavior] || [];
-  const subissuePatterns = expectedSubissuePatterns[subissueBehavior] || [];
+  const patterns = Object.hasOwn(expectedPatterns, behavior) ? expectedPatterns[behavior] : [];
+  const subissuePatterns = Object.hasOwn(expectedSubissuePatterns, subissueBehavior) ? expectedSubissuePatterns[subissueBehavior] : [];
   const failures = [];
+
+  if ((!behavior && !subissueBehavior) || (behavior && !Object.hasOwn(expectedPatterns, behavior))) {
+    failures.push(`unknown expected_ticket_failure: ${behavior}`);
+  }
+  if (subissueBehavior && !Object.hasOwn(expectedSubissuePatterns, subissueBehavior)) {
+    failures.push(`unknown expected_linear_subissues: ${subissueBehavior}`);
+  }
 
   for (const pattern of patterns) {
     if (!pattern.test(text)) failures.push(`missing recovery detail matching ${pattern}`);

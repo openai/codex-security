@@ -107,4 +107,36 @@ assertFails(
   /fixed.*not_actionable|negative/,
 );
 
+function findingFor(inputId, verdict, rank, rankQueue = verdict) {
+  const finding = JSON.parse(outputFor({ inputId, sourceType, verdict }).split("```json")[1].split("```")[0]).findings[0];
+  finding.exploitability_stack_rank = { ...finding.exploitability_stack_rank, rank, rank_queue: rankQueue };
+  return finding;
+}
+
+const queueFindings = [
+  findingFor("confirmed-1", "confirmed", 1),
+  findingFor("review-1", "needs_review", 1),
+  findingFor("confirmed-2", "confirmed", 2),
+  findingFor("closed", "not_actionable", null, null),
+];
+const contextFor = (findings) => ({
+  vars: {
+    expected_ids: findings.map((finding) => finding.input_id),
+    expected_source_types: findings.map((finding) => finding.source_type),
+    expected_verdicts: findings.map((finding) => finding.verdict),
+  },
+});
+const queueContext = contextFor(queueFindings);
+const queueOutput = (findings) => JSON.stringify({ schema_version: "triage-finding/v0", findings });
+assertPasses("independent verdict queues", queueOutput(queueFindings), queueContext);
+for (const [verdict, wrongQueue] of [["confirmed", "needs_review"], ["needs_review", "confirmed"], ["confirmed", null]]) {
+  const findings = [findingFor("mismatch", verdict, 1, wrongQueue)];
+  assertFails("queue matches verdict", queueOutput(findings), contextFor(findings), /rank_queue must match verdict/);
+}
+for (const rank of [1, 3]) {
+  const findings = structuredClone(queueFindings);
+  findings[2].exploitability_stack_rank.rank = rank;
+  assertFails("ranks remain unique and contiguous", queueOutput(findings), queueContext, /ranks must be contiguous/);
+}
+
 console.log("triage-io assertion tests passed");

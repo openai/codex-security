@@ -1,17 +1,28 @@
 const { outputText: textFor, hasTriageJson } = require("./output");
 
-function containsAll(text, patterns) {
-  return patterns.every((pattern) => pattern.test(text));
+function repositoryName(value) {
+  const path = value.includes("://") ? new URL(value).pathname : value.replace(/^(?:[^@/]+@)?[^/:]+:/, "");
+  return path.replace(/^\/|\/$/g, "").replace(/\.git$/, "");
 }
 
 function endpointPattern(path, queryParts = []) {
-  const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const queryPatterns = queryParts.map((part) => new RegExp(part, "i"));
-  return (text) => new RegExp(escapedPath, "i").test(text) && containsAll(text, queryPatterns);
+  return (text, context) => {
+    const repository = repositoryName(context.vars.target_repo);
+    const paths = [path, path.replace("{owner}/{repo}", repository)];
+    return paths.some((candidate) => escapedLiteralPattern(candidate).test(text)) &&
+      queryParts.every((part) => escapedLiteralPattern(part).test(text));
+  };
 }
 
 function escapedLiteralPattern(value) {
   return new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+}
+
+function normalizesAs(text, sourceType) {
+  const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)\\s*:\\s*|\x60?normalize as\\s+)`;
+  const value = `(?:"${sourceType}"|'${sourceType}'|\x60${sourceType}\x60|${sourceType})`;
+  const normalization = field + value + "\x60?";
+  return new RegExp(`(?:^|[\\s{,(\\[])(?:${normalization}|(\\*+|_+)${normalization}\\1)(?=$|[\\s\x60,}.;!?\\)\\]])`, "i").test(text);
 }
 
 const checks = {
@@ -54,41 +65,41 @@ const checks = {
     return failures;
   },
 
-  dependabot_malware: (text) => {
+  dependabot_malware: (text, context) => {
     const hasEndpoint = endpointPattern("/repos/{owner}/{repo}/dependabot/alerts", [
       "classification=malware",
       "state=open",
       "per_page=100",
-    ])(text);
+    ])(text, context);
     return [
       ...(!hasEndpoint
         ? ["must use Dependabot alerts endpoint with classification=malware, state=open, and per_page=100"]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!normalizesAs(text, "advisory")
         ? ["must say Dependabot malware normalizes as advisory"]
         : []),
     ];
   },
 
-  code_scanning: (text) => {
+  code_scanning: (text, context) => {
     const hasAlerts = endpointPattern("/repos/{owner}/{repo}/code-scanning/alerts", [
       "state=open",
       "per_page=100",
-    ])(text);
-    const hasInstances = /code-scanning\/alerts\/\{alert_number\}\/instances/i.test(text);
+    ])(text, context);
+    const hasInstances = /code-scanning\/alerts\/(?:\{alert_number\}|\d+)\/instances/i.test(text);
     return [
       ...(!hasAlerts ? ["must use code scanning alerts endpoint with state=open and per_page=100"] : []),
       ...(!hasInstances ? ["must fetch code scanning alert instances per alert"] : []),
-      ...(!/source_type:\s*`?sarif`?|normalize as `?sarif`?/i.test(text)
+      ...(!normalizesAs(text, "sarif")
         ? ["must say code scanning normalizes as sarif"]
         : []),
     ];
   },
 
-  advisories_private_reports: (text) => {
+  advisories_private_reports: (text, context) => {
     const hasEndpoint = endpointPattern("/repos/{owner}/{repo}/security-advisories", [
       "per_page=100",
-    ])(text);
+    ])(text, context);
     const hasEachState = ["triage", "draft", "published", "closed"].every((state) =>
       new RegExp(`state=${state}`, "i").test(text),
     );
@@ -101,22 +112,26 @@ const checks = {
       ...(!/triage.*private vulnerability reports?|private vulnerability reports?.*triage/is.test(text)
         ? ["must identify state=triage as private vulnerability reports"]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!normalizesAs(text, "advisory")
         ? ["must say advisories/private reports normalize as advisory"]
         : []),
     ];
   },
 
-  connector_rest_only: (text) => {
-    return [
-      ...(!/GitHub Connector.*token|connector.*auth token|token.*GitHub Connector/is.test(text)
-        ? ["must allow GitHub Connector only as an auth token source"]
-        : []),
-      ...(!/REST/i.test(text) ? ["must state that finding retrieval uses REST"] : []),
-      ...(!/do not use.*GitHub Connector.*(fetch|retrieve|data|findings)|GitHub Connector.*not.*(fetch|retrieve|data|findings)/is.test(text)
-        ? ["must say not to use the GitHub Connector for finding retrieval"]
-        : []),
-    ];
+  explicit_connector: (text, context) => {
+    const repository = repositoryName(context.vars.target_repo);
+    let decision;
+    try {
+      decision = JSON.parse(text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, "$1"));
+    } catch {
+      return ["must return the connector decision as a JSON object"];
+    }
+    const failures = [];
+    if (Object.keys(decision ?? {}).length !== 3 || Object.keys(decision?.scope ?? {}).length !== 2) failures.push("must return only transport, fallback, and scope with only account and repository");
+    if (decision?.transport !== "github_connector_read_only") failures.push("must retrieve findings through the requested read-only GitHub Connector");
+    if (decision?.fallback !== "explain_and_request_rest_approval") failures.push("must explain the limitation and request approval before REST fallback");
+    if (decision?.scope?.account !== "user_specified_or_approved" || decision?.scope?.repository !== repository) failures.push("must scope the REST fallback to the specified account and exact repository");
+    return failures;
   },
 
   explicit_issue: (text) => {
@@ -127,7 +142,7 @@ const checks = {
       ...(!/not.*\ball\b|exclude.*\ball\b|do not include.*\ball\b/is.test(text)
         ? ["must say GitHub Issues are not included in all/default source selection"]
         : []),
-      ...(!/source_type:\s*`?freeform`?|normalize as `?freeform`?/i.test(text)
+      ...(!normalizesAs(text, "freeform")
         ? ["must say explicit GitHub Issues normalize as freeform"]
         : []),
     ];
@@ -137,7 +152,7 @@ const checks = {
 module.exports = (output, context) => {
   const text = textFor(output);
   const behavior = String(context.vars.expected_github_rest_behavior || "");
-  const check = checks[behavior];
+  const check = Object.hasOwn(checks, behavior) ? checks[behavior] : undefined;
   const failures = check ? check(text, context) : [`unknown expected_github_rest_behavior: ${behavior}`];
 
   return {

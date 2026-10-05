@@ -3,12 +3,17 @@ function outputText(output) {
 }
 
 function hasTriageJson(text) {
-  return (
-    /```(?:json)?\s*[\s\S]*?```/i.test(text) ||
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i.test(text) ||
-    /["']findings["']\s*:/i.test(text) ||
-    /["']verdict["']\s*:/i.test(text)
-  );
+  for (const [, key, literal] of text.matchAll(/("(?:\\.|[^"\\])*")\s*:\s*("(?:\\.|[^"\\])*")/g)) {
+    try {
+      const name = JSON.parse(key);
+      const value = JSON.parse(literal);
+      if (name === "schema_version" && value === "triage-finding/v0") return true;
+      if (name === "verdict" && ["confirmed", "needs_review", "not_actionable"].includes(value)) return true;
+    } catch {
+      // Ignore quoted prose that is not a JSON field.
+    }
+  }
+  return false;
 }
 
 function parseExpected(value, trim = typeof value === "string") {
