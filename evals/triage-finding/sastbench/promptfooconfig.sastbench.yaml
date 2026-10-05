@@ -43,7 +43,7 @@ providers:
           plugins: false
 
 extensions:
-  - file://./assertions/sastbench-metrics.js:afterEach
+  - file://./assertions/sastbench-metrics.mts:afterEach
 
 defaultTest:
   assert:
@@ -51,7 +51,7 @@ defaultTest:
       value: file://../schemas/triage-result-v0.schema.json
       metric: schema_valid
     - type: javascript
-      value: file://./assertions/sastbench-verdict.js
+      value: file://./assertions/sastbench-verdict.mts
       metric: strict_case_correct
 
 # The afterEach extension emits additive counters for every row. Representative
@@ -115,4 +115,4 @@ derivedMetrics:
   - name: execution_or_parse_error_rate
     value: "execution_or_parse_error / max(positive_cases + negative_cases, 1)"
 
-tests: file://./scripts/generate-sastbench-tests.js:generateTests
+tests: file://./scripts/sastbench-lib.mts:generateTests
