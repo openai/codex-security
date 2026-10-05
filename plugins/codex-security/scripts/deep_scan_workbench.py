@@ -9,7 +9,6 @@ import os
 import shutil
 import sqlite3
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -755,12 +754,6 @@ def begin_deep_scan_for_target(
         scan_id = str(uuid.uuid4())
         timestamp = dependencies().now()
         target_id = dependencies().ensure_security_target(connection, target_path)
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{dependencies().safe_segment(revision)}_{dependencies().compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -798,7 +791,6 @@ def begin_deep_scan_for_target(
             handoff_status="delivered",
             model=model,
             reasoning_effort=reasoning_effort,
-            scan_dir=scan_dir,
         )
         scan = dependencies().require_scan(connection, scan_id)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)

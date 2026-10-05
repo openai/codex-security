@@ -33,7 +33,7 @@ def _text(value: Any, fallback: str) -> str:
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
-        part if index % 2 else re.sub(r"([\\`*\[\]<>])", r"\\\1", part)
+        part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
         for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
     )
 
@@ -408,16 +408,16 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
 
 
-def _code_fence(code: str) -> str:
+def _code_fence(code: str, minimum: int = 3) -> str:
     longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", code)), default=0)
-    return "`" * max(3, longest_run + 1)
+    return "`" * max(minimum, longest_run + 1)
 
 
 def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
-        location = _text(_code_evidence_location(item), "")
+        location = " ".join(_code_evidence_location(item).split())
         explanation = _text(item.get("explanation"), "")
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
@@ -425,7 +425,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         fence = _code_fence(code)
         heading = f"**{label}**"
         if location:
-            heading += f" — `{location}`"
+            marker = _code_fence(location, minimum=1)
+            padding = " " if location.startswith("`") or location.endswith("`") else ""
+            heading += f" — {marker}{padding}{location}{padding}{marker}"
         lines.extend(["", heading])
         if explanation:
             lines.extend(["", explanation])

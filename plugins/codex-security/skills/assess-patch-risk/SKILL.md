@@ -35,7 +35,7 @@ Read [references/risk-rubric.md](references/risk-rubric.md) before assigning rat
 Return exactly one recommendation:
 
 - `merge`: source evidence supports the patch and no decision-critical defect or unknown remains;
-- `revise`: the patch, its tests, or a material documentation contract must change;
+- `revise`: the patch, its tests, or a material documentation contract must change because of an established defect; record it as a contradicted `materialBoundaries` result or a failed `validation` entry. Source inspection can establish a documentation-contract failure; a runtime test failure is not required;
 - `no_op`: evidence shows the patch has no required live effect or belongs elsewhere;
 - `block`: affirmative evidence establishes a material safety failure; or
 - `hold_for_evidence`: unavailable evidence can still change the decision.

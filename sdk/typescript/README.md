@@ -1069,7 +1069,7 @@ Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
 command shims such as `codex.cmd` fall back to the bundled executable.
 
-Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
+Python lookup order: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
@@ -1618,7 +1618,7 @@ The SDK accepts finding IDs, titles, summaries, and source locations directly:
 ```ts
 import { suggestOwners } from "@openai/codex-security";
 
-const owners = await suggestOwners("/path/to/repo", result.findings, {
+const owners = await suggestOwners("/path/to/repo", result.findings.findings, {
   reasoningEffort: "high",
 });
 ```

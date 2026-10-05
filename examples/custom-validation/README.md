@@ -6,10 +6,11 @@ cross-account access, saves the evidence, and stops the server. It uses the
 SDK's supported Node.js version (including 22.13) and TypeScript compiler, with no
 extra packages or Docker.
 
-From the repository root, build the CLI and run the demo:
+The local SDK bundle requires the source-matched native payloads for all supported platforms under `plugins/codex-security/native/prebuilt`; obtain those build artifacts before running this setup. See the [native build guide](../../plugins/codex-security/native/README.md). From the repository root, build the plugin and CLI, then run the demo:
 
 ```bash
 pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 node examples/custom-validation/run.mjs
 ```

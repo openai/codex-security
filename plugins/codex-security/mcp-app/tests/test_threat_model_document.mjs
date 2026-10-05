@@ -62,10 +62,17 @@ for (const complete of [true, undefined]) {
       try {
         const { context, draft } = draftFixture(root, "deep");
         context.pluginRoot = pluginRoot;
+        context.targetContract.target.requiredSnapshotDigest =
+          "codex-security-snapshot/v1:sha256:" + "a".repeat(64);
         await recordCodexSecurityScanDraft(context, {
           ...draft({ deferred: [{ reason: "Earlier unfinished review." }] }),
           threatModel,
         });
+        assert.ok(
+          (await readFile(join(root, "threatmodel.md"), "utf8")).includes(
+            `Snapshot: ${context.targetContract.target.requiredSnapshotDigest}`,
+          ),
+        );
         // A final Deep result replaces old review documents without parsing them.
         await writeFile(join(root, "findings.json"), "unfinished findings");
         await writeFile(join(root, "coverage.json"), "unfinished coverage");
@@ -368,7 +375,7 @@ test("overlapping draft projections retain the latest committed model", async (t
     pluginRoot,
     pythonCommand: "fixture-python",
     targetRevision: "example-revision",
-    targetContract: { requiredSnapshotDigest: "example-snapshot" },
+    targetContract: { target: { requiredSnapshotDigest: "example-snapshot" } },
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
   const latestModel = { format: "markdown", content: "# Latest model\n" };
@@ -394,7 +401,7 @@ test("overlapping draft projections retain the latest committed model", async (t
     assert.equal(input.provenance.revision, context.targetRevision);
     assert.equal(
       input.provenance.snapshotDigest,
-      context.targetContract.requiredSnapshotDigest,
+      context.targetContract.target.requiredSnapshotDigest,
     );
     const latest = recordCodexSecurityWorkerScanDraft(context, {
       scanId,

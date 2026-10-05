@@ -93,7 +93,7 @@ Use one GitHub transport and identity for all source checks. When tracking in Gi
 
 With the CLI:
 
-- set `GH_HOST=<host>` explicitly for `gh repo view <host>/<owner>/<repo>`, and use `gh api --hostname <host>` for every commit and path lookup; never inherit an ambient host, use `curl`, or use direct HTTP
+- use the fully qualified `gh repo view https://<host>/<owner>/<repo>`, and use `gh api --hostname <host>` for every commit and path lookup; never inherit an ambient host, use `curl`, or use direct HTTP
 - for a batch, prefer one non-truncated tree lookup over one contents request per path when supported
 - validate owner and repository as separate path segments; encode the contents path and `ref`, not the slash in `owner/repository`
 - pass the complete endpoint as one shell-quoted argument
@@ -107,7 +107,7 @@ When GitHub is the tracking provider, pick one transport and use it from duplica
 
 For CLI runs, use `gh repo view` to confirm the canonical repository, visibility, and viewer permission. Also confirm issue availability for issue runs. Missing fields, authentication warnings, a host mismatch, insufficient permission, or ambiguous repository resolution block the run.
 
-For GitHub advisory runs, `<host>` is exactly `github.com`: run `gh auth status --hostname github.com`, run repository metadata checks as `GH_HOST=github.com gh repo view github.com/<owner>/<repo>`, and use `gh api --hostname github.com` for every request through exact readback.
+For GitHub advisory runs, `<host>` is exactly `github.com`: run `gh auth status --hostname github.com`, run repository metadata checks as `gh repo view https://github.com/<owner>/<repo>`, and use `gh api --hostname github.com` for every request through exact readback.
 
 Shell-quote every repository locator, search query, title, and metadata value. Never concatenate scan content into shell source or use `eval`. Never combine app observations with CLI writes. If the transport, account, hostname, or repository changes, show a new preview and ask for approval again.
 

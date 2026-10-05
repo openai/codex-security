@@ -644,7 +644,7 @@ def test_projection_includes_exact_target_identity() -> None:
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "- Target kind: git_diff" in markdown
+    assert "- Target kind: git\\_diff" in markdown
     assert "- Target ID: repo-1" in markdown
     assert "- Revision range: base-sha...head-sha" in markdown
     assert "- Snapshot digest: codex-security-snapshot/v1:sha256:" in markdown
@@ -871,3 +871,23 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+def test_projection_preserves_identifier_text_and_code_path_spelling() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["title"] = "__proto__ pollution"
+    finding["validation"] = {"evidenceRefs": ["source"]}
+    finding["codeEvidence"] = [
+        {
+            "id": "source",
+            "label": "Source control",
+            "path": "app/api/[id]/route.ts",
+            "startLine": 7,
+            "code": "handle(request)",
+            "explanation": "A source-backed operation.",
+        }
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "\\_\\_proto\\_\\_ pollution" in markdown
+    assert "`app/api/[id]/route.ts:7`" in markdown
