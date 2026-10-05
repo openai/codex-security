@@ -77,6 +77,7 @@
 - reuse parsing and Git helpers ([#1222](https://github.com/openai/codex-security/pull/1222))
 - bump the codex group across 3 directories with 2 updates ([#1220](https://github.com/openai/codex-security/pull/1220))
 - reuse migration repair declarations ([#1225](https://github.com/openai/codex-security/pull/1225))
+- share provenance verification plumbing ([#1233](https://github.com/openai/codex-security/pull/1233))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
