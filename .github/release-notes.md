@@ -78,6 +78,8 @@
 - bump the codex group across 3 directories with 2 updates ([#1220](https://github.com/openai/codex-security/pull/1220))
 - reuse migration repair declarations ([#1225](https://github.com/openai/codex-security/pull/1225))
 - share provenance verification plumbing ([#1233](https://github.com/openai/codex-security/pull/1233))
+- consolidate internal runtime helpers ([#1230](https://github.com/openai/codex-security/pull/1230))
+- share container Compose smoke checks ([#1231](https://github.com/openai/codex-security/pull/1231))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

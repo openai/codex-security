@@ -74,7 +74,8 @@ jobs:
                 plugin_changed=true
               fi
               case "$path" in
-                .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml)
+                .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
+                  docker/verify-container-compose.sh)
                   workflow_quality=true
                   ;;
               esac
@@ -83,10 +84,8 @@ jobs:
                   .github/actions/download-native/* | Dockerfile | \
                   Dockerfile.dockerignore | compose.yaml | compose.apparmor.yaml | \
                   compose.findings.yaml | compose.runner.yaml | docker/* | \
-                  plugins/codex-security/* | sdk/typescript/*)
-                  container_validate=true
-                  ;;
-                .github/workflows/container-ci.yml | .github/workflows/container-release.yml | \
+                  plugins/codex-security/* | sdk/typescript/* | \
+                  .github/workflows/container-ci.yml | .github/workflows/container-release.yml | \
                   .github/workflows/container-validate.yml)
                   container_validate=true
                   ;;

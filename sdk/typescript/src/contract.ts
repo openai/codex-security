@@ -288,11 +288,12 @@ export function normalizePersistedFindings(payload: unknown): unknown {
         normalizeLegacyStringLists(validation, ["evidence"]);
       }
       removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
-      removeUnsupportedLegacyNullableStrings(validation, [
-        "status",
-        "disposition",
-        "result",
-      ]);
+      removeUnsupportedLegacyStrings(
+        validation,
+        ["status", "disposition", "result"].filter(
+          (field) => validation[field] !== null,
+        ),
+      );
     }
 
     const attackPath = finding["attackPath"];
@@ -366,21 +367,6 @@ function removeUnsupportedLegacyStrings(
   for (const field of fields) {
     if (
       field in section &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
-      delete section[field];
-    }
-  }
-}
-
-function removeUnsupportedLegacyNullableStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (
-      field in section &&
-      section[field] !== null &&
       (typeof section[field] !== "string" || section[field].length === 0)
     ) {
       delete section[field];
