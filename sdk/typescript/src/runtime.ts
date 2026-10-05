@@ -2369,6 +2369,14 @@ export async function createMarketplace(
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
+  await writeMarketplaceManifest(marketplace, signal);
+  return marketplace;
+}
+
+async function writeMarketplaceManifest(
+  marketplace: string,
+  signal?: AbortSignal,
+): Promise<void> {
   throwIfSignalAborted(signal);
   const manifestPath = join(
     marketplace,
@@ -2384,7 +2392,6 @@ export async function createMarketplace(
     signal,
   });
   throwIfSignalAborted(signal);
-  return marketplace;
 }
 
 export function resolveCodexCommand(
@@ -2485,10 +2492,6 @@ export async function bootstrapPlugin(
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
   const stagedMatches =
     staged?.version === version &&
-    (await readFile(
-      join(marketplace, ".agents", "plugins", "marketplace.json"),
-      "utf8",
-    ).catch(nullIfMissingFileError)) === MARKETPLACE_MANIFEST &&
     (await pluginContentsMatch(root, stagedRoot, options.signal));
 
   if (!stagedMatches) {
@@ -2496,6 +2499,14 @@ export async function bootstrapPlugin(
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);
+  } else if (
+    (await readFile(
+      join(marketplace, ".agents", "plugins", "marketplace.json"),
+      "utf8",
+    ).catch(nullIfMissingFileError)) !== MARKETPLACE_MANIFEST
+  ) {
+    await rm(join(marketplace, ".agents"), { recursive: true, force: true });
+    await writeMarketplaceManifest(marketplace, options.signal);
   }
 
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(

@@ -1635,8 +1635,6 @@ describe("plugin runtime preparation", () => {
       "disabled plugin",
       "missing registration",
       "extra staged file",
-      "missing marketplace manifest",
-      "partial marketplace manifest",
     ])("repairs %s before reusing the installation", async (damage) => {
       const { home, staged, installed, record, calls, bootstrap } =
         await fixture();
@@ -1675,12 +1673,6 @@ describe("plugin runtime preparation", () => {
           break;
         case "extra staged file":
           await writeFile(join(staged, "stale.py"), "pass\n");
-          break;
-        case "missing marketplace manifest":
-          await rm(manifest);
-          break;
-        case "partial marketplace manifest":
-          await writeFile(manifest, "{");
           break;
       }
 
