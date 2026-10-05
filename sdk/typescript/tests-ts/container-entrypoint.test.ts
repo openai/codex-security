@@ -1,6 +1,6 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -68,7 +68,7 @@ async function runEntrypoint(
 async function runVersionVerifier(
   response: string,
   failure = false,
-): Promise<SpawnSyncReturns<string>> {
+): Promise<SpawnSyncReturns<string> & { workflowOutput: string }> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
   );
@@ -94,17 +94,21 @@ async function runVersionVerifier(
     );
 
     const endpoint = "orgs/openai/packages/container/codex-security";
-    return spawnSync("sh", [versionVerifier, endpoint, "0.1.4"], {
+    const output = join(root, "output");
+    await writeFile(output, "");
+    const result = spawnSync("sh", [versionVerifier, endpoint, "0.1.4"], {
       encoding: "utf8",
       env: {
         ...process.env,
         EXPECTED_ENDPOINT: endpoint,
         GH_FIXTURE_FAILURE: failure ? "1" : "0",
         GH_FIXTURE_RESPONSE: response,
+        GITHUB_OUTPUT: output,
         PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
       },
       timeout: 10_000,
     });
+    return { ...result, workflowOutput: await readFile(output, "utf8") };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -260,6 +264,22 @@ describe("immutable customer container releases", () => {
 
       expect(result.status).toBe(0);
       expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("");
+      expect(result.workflowOutput).toBe("publish_latest=true\n");
+    },
+  );
+
+  testPosix(
+    "publishes older stable versions without moving latest backwards",
+    async () => {
+      for (const tags of [["0.1.5", "latest"], ["0.10.0"], ["1.0.0"]]) {
+        const result = await runVersionVerifier(
+          `[]\n${JSON.stringify([{ metadata: { container: { tags } } }])}`,
+        );
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("");
+        expect(result.workflowOutput).toBe("publish_latest=false\n");
+      }
     },
   );
 
