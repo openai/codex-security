@@ -220,7 +220,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
   });
