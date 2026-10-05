@@ -1,4 +1,3 @@
-import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { once } from "node:events";
 import {
   appendFile,
@@ -83,6 +82,7 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
