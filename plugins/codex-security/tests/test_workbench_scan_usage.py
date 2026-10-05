@@ -480,6 +480,27 @@ def test_completion_marks_unverifiable_workers_partial(
     assert usage["totalTokens"] == 16
 
 
+@pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
+def test_completion_reads_usage_from_literal_home(tmp_path: Path, home_variable: str) -> None:
+    fixture = _start_scan(tmp_path)
+    home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
+    fixture.environment["CODEX_SQLITE_HOME"] = str(home)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [_token_event(fixture.started_at + timedelta(microseconds=1), 12, 3)],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    if home_variable == "CODEX_HOME":
+        fixture.environment["CODEX_HOME"] = str(home)
+        fixture.environment["CODEX_SQLITE_HOME"] = ""
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 15
+
+
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]

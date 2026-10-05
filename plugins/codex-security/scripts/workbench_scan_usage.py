@@ -219,11 +219,13 @@ def _codex_state_database() -> Path | None:
         path = Path(configured_database).expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
-    configured_home = os.environ.get("CODEX_HOME", "").strip()
-    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
-    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "").strip()
+    configured_home = os.environ.get("CODEX_HOME", "")
+    codex_home = (
+        Path(configured_home).expanduser() if configured_home.strip() else Path.home() / ".codex"
+    )
+    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "")
     search_roots = [
-        *([Path(configured_sqlite_home).expanduser()] if configured_sqlite_home else []),
+        *([Path(configured_sqlite_home).expanduser()] if configured_sqlite_home.strip() else []),
         codex_home,
         codex_home / "sqlite",
     ]

@@ -1387,6 +1387,47 @@ describe("skill authentication", () => {
     },
   );
 
+  for (const nullAuth of [false, true]) {
+    test.each(["validate", "patch", "verify-fix"] as const)(
+      `%s forwards a provider's OpenAI-named key (null auth: ${nullAuth})`,
+      async (command) => {
+        const stdout = capture();
+        const stderr = capture();
+        const status = await runCodexSkillCommand(
+          [
+            "-e",
+            'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({key:process.env.OPENAI_API_KEY})}}))',
+          ],
+          {
+            command,
+            auth: "api-key",
+            modelProvider: "gateway",
+            codexOverrides: {
+              model_provider: "gateway",
+              model_providers: {
+                gateway: {
+                  env_key: "OPENAI_API_KEY",
+                  ...(nullAuth ? { auth: null } : {}),
+                },
+              },
+            },
+            stdout: stdout.stream,
+            stderr: stderr.stream,
+          },
+          { command: process.execPath },
+          {
+            CODEX_HOME: join(stateDirectory, "ambient"),
+            OPENAI_API_KEY: "SYNTHETIC_PROVIDER_KEY",
+          },
+        );
+        expect(status, stderr.text()).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual({
+          key: "SYNTHETIC_PROVIDER_KEY",
+        });
+      },
+    );
+  }
+
   test("rejects a missing custom provider API key before launch", async () => {
     const result = await runProviderSkill({
       overrides: [
