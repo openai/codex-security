@@ -170,7 +170,8 @@ describe("CLI", () => {
           verbose: { type: "boolean" },
           showCost: { type: "boolean", default: false },
           effort: {
-            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            type: "string",
+            minLength: 1,
           },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
@@ -863,6 +864,43 @@ describe("CLI", () => {
       else process.env["USERPROFILE"] = previousUserProfile;
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("surfaces unsupported effort errors without substituting settings or retrying", async () => {
+    const model = "synthetic-future-model";
+    const effort = "synthetic-future-effort";
+    const message = `Provider does not support reasoning effort '${effort}' for model '${model}'.`;
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const run = mock(async () => {
+      throw new CodexSecurityError(message);
+    });
+    const createSecurity = mock((_config: CodexSecurityConfig) =>
+      fakeSecurity(run),
+    );
+    deps.createSecurity = createSecurity;
+
+    expect(
+      await main(
+        ["scan", ".", "--model", model, "--effort", effort, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(createSecurity).toHaveBeenCalledTimes(1);
+    expect(createSecurity.mock.lastCall?.[0].codexOverrides).toEqual({
+      model,
+      model_reasoning_effort: effort,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
   });
 
   test.each([
@@ -2315,8 +2353,22 @@ describe("CLI", () => {
       ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort", "none"], { model_reasoning_effort: "none" }],
+      [["--effort", "ultra"], { model_reasoning_effort: "ultra" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
       [["--effort", "max"], { model_reasoning_effort: "max" }],
+      [
+        [
+          "--model",
+          "synthetic-future-model",
+          "--effort",
+          "synthetic-future-effort",
+        ],
+        {
+          model: "synthetic-future-model",
+          model_reasoning_effort: "synthetic-future-effort",
+        },
+      ],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2705,10 +2757,7 @@ describe("CLI", () => {
         ["scan", ".", "--provider", "fireworks"],
         "--model is required when using --provider fireworks",
       ],
-      [
-        ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, xhigh, or max",
-      ],
+      [["scan", ".", "--effort="], "--effort must not be empty"],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],

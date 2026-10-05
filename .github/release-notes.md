@@ -100,6 +100,22 @@
 - send the app-server initialized notification ([#1282](https://github.com/openai/codex-security/pull/1282))
 - require owned temporary artifact storage ([#1278](https://github.com/openai/codex-security/pull/1278))
 - parse existing option values consistently ([#1248](https://github.com/openai/codex-security/pull/1248))
+- load helpers with Python safe path ([#1240](https://github.com/openai/codex-security/pull/1240))
+- describe automatic sample PR scans ([#1183](https://github.com/openai/codex-security/pull/1183))
+- preserve finding occurrences and literal apostrophes ([#1247](https://github.com/openai/codex-security/pull/1247))
+- wait for npm registry visibility ([#1239](https://github.com/openai/codex-security/pull/1239))
+- resolve parents of new artifact storage roots ([#1241](https://github.com/openai/codex-security/pull/1241))
+- run entrypoints through symlinked paths ([#1256](https://github.com/openai/codex-security/pull/1256))
+- inherit Deep Scan worker service tiers ([#1238](https://github.com/openai/codex-security/pull/1238))
+- update Codex CLI and SDK to 0.162.0-alpha.15 ([#1303](https://github.com/openai/codex-security/pull/1303))
+- upgrade native napi build and derive dependencies ([#1302](https://github.com/openai/codex-security/pull/1302))
+- bump node from 22-bookworm-slim to 26-bookworm-slim ([#1300](https://github.com/openai/codex-security/pull/1300))
+- update GitHub CLI and Docker-in-Docker features ([#1299](https://github.com/openai/codex-security/pull/1299))
+- bump @linear/sdk from 96.0.0 to 97.0.0 in /sdk/typescript ([#1305](https://github.com/openai/codex-security/pull/1305))
+- keep scan readers available during registration ([#1272](https://github.com/openai/codex-security/pull/1272))
+- update MCP SDK to 1.31.0 for plugin and evals ([#1304](https://github.com/openai/codex-security/pull/1304))
+- pass reasoning effort through to Codex ([#1237](https://github.com/openai/codex-security/pull/1237))
+- include Vyper sources in scan inventories ([#1306](https://github.com/openai/codex-security/pull/1306))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
