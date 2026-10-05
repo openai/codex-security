@@ -4,13 +4,9 @@ const { compile } = require("json-schema-to-typescript");
 const { format } = require("prettier");
 
 const packageRoot = resolve(__dirname, "..");
-const schemas = [
-  join(packageRoot, "_bundled_plugin", "schemas"),
-  resolve(packageRoot, "../../plugins/codex-security/schemas"),
-].find(existsSync);
+const schemas = resolve(packageRoot, "../../plugins/codex-security/schemas");
 
-if (schemas === undefined)
-  throw new Error("Could not find the plugin schemas.");
+if (!existsSync(schemas)) throw new Error("Could not find the plugin schemas.");
 
 function withoutAllOf(value) {
   if (Array.isArray(value)) return value.map(withoutAllOf);

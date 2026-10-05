@@ -1,0 +1,23 @@
+packages:
+  - .
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - openai
+  - "@openai/*"
+trustLockfile: true
+
+overrides:
+  "@huggingface/transformers@4.2.0>sharp": 0.35.4
+  "@openai/codex": "$@openai/codex-sdk"
+  "@openai/codex-sdk": "$@openai/codex-sdk"
+  "@opencode-ai/sdk": "$@opencode-ai/sdk"
+  "onnxruntime-node@1.24.3>adm-zip": 0.6.0
+
+allowBuilds:
+  "@playwright/browser-chromium": false
+  "@swc/core": false
+  better-sqlite3: true
+  esbuild: false
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false

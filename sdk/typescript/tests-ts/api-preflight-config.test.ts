@@ -1,12 +1,6 @@
+import { pythonExecutable } from "./support/python.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -22,8 +16,12 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { TestClient } from "./support/api-client.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-preflight-",
+);
 const EXTERNAL_PROVIDER_CASES = [
   [
     "OpenRouter",
@@ -41,29 +39,14 @@ const EXTERNAL_PROVIDER_CASES = [
   ],
 ] as const;
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-preflight-")),
-  );
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 function runPreflight(
   config: string,
   profile: string,
   options: readonly string[] = [],
 ): { status: number | null; payload: Record<string, unknown> } {
-  const interpreter =
-    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  const interpreter = pythonExecutable(false);
   expect(interpreter).not.toBeNull();
   const result = spawnSync(
     interpreter!,
@@ -87,6 +70,51 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([
+    ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["deep", "openai.gpt-daybreak-blue-5.6-sol"],
+    ["standard", "openai.gpt-5.6-cyber"],
+    ["deep", "openai.gpt-5.6-cyber"],
+  ] as const)(
+    "accepts a cost limit for a %s Bedrock %s scan without starting inference",
+    async (mode, model) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model_provider: "amazon-bedrock",
+            model,
+          },
+        },
+        {
+          environment: {
+            AWS_PROFILE: "synthetic-bedrock-profile",
+            AWS_REGION: "us-east-2",
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+          prepareRuntime: async () => {
+            throw new Error("Local preflight must not start the runtime");
+          },
+        },
+      );
+      await expect(
+        client.preflight(repository, { mode, maxCostUsd: 1 }),
+      ).resolves.toMatchObject({
+        mode,
+        modelProvider: "amazon-bedrock",
+        model,
+        maxCostUsd: 1,
+        authentication: {
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        },
+      });
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "loads trusted project config through a Windows path alias",
     async () => {
@@ -104,11 +132,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter =
-        process.env["PYTHON"] ??
-        Bun.which("python3") ??
-        Bun.which("python") ??
-        Bun.which("py");
+      const interpreter = pythonExecutable();
       expect(interpreter).not.toBeNull();
       const result = spawnSync(
         interpreter!,
@@ -136,7 +160,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("ignores unrelated runtime settings for profiles without parent-runtime requirements", async () => {
+  test("rejects invalid runtime settings only for relevant security profiles", async () => {
     const root = await temporaryDirectory();
     const config = join(root, "empty.toml");
     await writeFile(config, "");
@@ -148,30 +172,34 @@ describe("CodexSecurity preflight configuration", () => {
           "--effective-config",
           "agents.max_threads=8",
         ],
-        context: { owner: "native", version: "v2", agent_max_threads: 8 },
         error: "agents.max_threads cannot be set",
+        profiles: ["deep_security_scan", "security_diff_scan", "security_scan"],
       },
       {
         args: ["--effective-config", "multiagent_config.max_concurrency=8"],
-        context: { owner: "unknown", version: "unknown" },
         error: "does not prove bridge ownership",
+        profiles: ["security_scan"],
       },
     ];
 
-    for (const { args, context, error } of settings) {
-      for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+    for (const { args, error, profiles } of settings) {
+      for (const profile of profiles) {
         const result = runPreflight(config, profile, args);
-        expect(result.status).toBe(0);
+        expect(result.status).toBe(2);
         expect(result.payload).toMatchObject({
-          multi_agent_context: context,
-          profile,
-          status: "ready",
+          error: expect.stringContaining(error),
+          status: "error",
         });
       }
+    }
 
-      const required = runPreflight(config, "security_scan", args);
-      expect(required.status).toBe(2);
-      expect(required.payload["error"]).toContain(error);
+    for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+      expect(
+        runPreflight(config, profile, [
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({ status: 0, payload: { status: "ready" } });
     }
   });
 
@@ -260,8 +288,8 @@ describe("CodexSecurity preflight configuration", () => {
     ];
 
     expect(runPreflight(config, "available", conflictingNative)).toMatchObject({
-      status: 0,
-      payload: { status: "ready" },
+      status: 2,
+      payload: { error: expect.stringContaining("agents.max_threads") },
     });
     for (const profile of ["mode", "root_agents", "root_features"]) {
       expect(runPreflight(config, profile, conflictingNative)).toMatchObject({
@@ -302,7 +330,10 @@ describe("CodexSecurity preflight configuration", () => {
           "--effective-config",
           "multiagent_config.max_concurrency=8",
         ]),
-      ).toMatchObject({ status: 0, payload: { status: "ready" } });
+      ).toMatchObject({
+        status: 0,
+        payload: { status: "ready" },
+      });
     }
 
     for (const [version, additional] of [
@@ -324,10 +355,17 @@ describe("CodexSecurity preflight configuration", () => {
           ...additional,
         ],
       );
-      expect(conflictingNativeRuntime.status).toBe(2);
-      expect(conflictingNativeRuntime.payload["error"]).toContain(
-        "agents.max_threads",
-      );
+      if (version === "v2") {
+        expect(conflictingNativeRuntime).toMatchObject({
+          status: 0,
+          payload: { status: "ready" },
+        });
+      } else {
+        expect(conflictingNativeRuntime.status).toBe(2);
+        expect(conflictingNativeRuntime.payload["error"]).toContain(
+          "agents.max_threads",
+        );
+      }
     }
 
     const forged = runPreflight(config, "deep_security_scan", [
@@ -357,7 +395,7 @@ describe("CodexSecurity preflight configuration", () => {
     );
   });
 
-  test("uses a root-read filesystem profile with only writable workspaces", () => {
+  test("separates writable scans from repository-scoped policy reads", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -386,6 +424,13 @@ describe("CodexSecurity preflight configuration", () => {
             ":workspace_roots": "write",
           },
         },
+        codex_security_policy: {
+          filesystem: {
+            ":minimal": "read",
+            ":workspace_roots": "read",
+          },
+          network: { enabled: false },
+        },
       },
     });
     expect(original).toMatchObject({
@@ -410,7 +455,21 @@ describe("CodexSecurity preflight configuration", () => {
           [credentialHome]: "read",
         },
       },
+      codex_security_policy: {
+        filesystem: {
+          ":minimal": "read",
+          ":workspace_roots": "read",
+        },
+        network: { enabled: false },
+      },
     });
+    const policyFilesystem = (
+      (config["permissions"] as JsonObject)[
+        "codex_security_policy"
+      ] as JsonObject
+    )["filesystem"] as JsonObject;
+    expect(policyFilesystem).not.toHaveProperty(":root");
+    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {
@@ -610,8 +669,7 @@ describe("CodexSecurity preflight configuration", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const interpreter = pythonExecutable(false);
     expect(interpreter).not.toBeNull();
     const output = execFileSync(
       interpreter!,

@@ -8,11 +8,31 @@ Codex Security is a thin wrapper around Codex and its security plugin.
   approved path.
 - Do not add arbitrary limits or extra checks without a real problem to solve.
 - Do not let optional logging or progress updates stop the main task.
-- Keep protections for credentials, unsafe paths, and settings the user explicitly requests.
+- Keep credential access, storage, and configuration protections, unsafe-path
+  checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
 - Mention another `openai/` repository in comments or pull request descriptions
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
+
+When changing `plugins/codex-security`, run its portable source checks before
+submitting the change:
+
+```bash
+python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+pnpm --dir sdk/typescript run build:ci
+node .github/scripts/check_plugin_source_compatibility.mjs
+node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+```
+
+## Deep Scan worker settings
+
+When changing runtime settings, authentication, environment forwarding,
+permissions, or executable selection, trace the change through Deep Scan
+discovery and reducer workers, including resumed workers. Extend the worker
+launch tests to verify inherited values and intentional overrides at the
+child-process boundary. Keep per-scan settings isolated from concurrent scans.
 
 ## Avoid speculative defenses
 
@@ -20,10 +40,28 @@ Codex Security is a thin wrapper around Codex and its security plugin.
   hypothetical problems. State the concrete failure it fixes.
 - When extending an existing command, preserve its output behavior. Do not
   introduce a new sanitization policy for names, paths, or status messages.
-- Keep existing credential, unsafe-path, and scan-integrity protections.
-  Do not extend them to unrelated values without a demonstrated need.
+- Keep existing protections for credential access, storage, and configuration,
+  unsafe paths, and scan integrity. Do not extend them to unrelated values
+  without a demonstrated need.
 - Do not invent a restriction and then add tests whose only purpose is to
   enforce that restriction.
+
+## Preserve diagnostic text
+
+- Do not add or reintroduce wrapper-owned secret or credential redaction,
+  including as a security-review follow-up. This applies to CLI and SDK
+  diagnostics, verbose logs, progress displays, saved failures, publication
+  receipts, and patch-risk reports and summaries.
+- Do not mask credential-shaped substrings, replace messages with `[redacted]`,
+  or suppress diagnostic details solely because they might contain credentials.
+  Do not add redaction flags, environment variables, or opt-out settings.
+- Keep terminal-control escaping, unsafe-path and link validation, credential
+  access, storage, and configuration controls, and upstream Codex protections.
+  These do not authorize adding message redaction in this wrapper. This policy
+  does not require changing authentication advice or serializing internal
+  request objects.
+- Continue reviewing public changes and artifacts for sensitive information
+  before publication as required below.
 
 ## Public CLI changes
 

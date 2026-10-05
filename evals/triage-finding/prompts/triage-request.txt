@@ -1,0 +1,15 @@
+{{invocation_preamble}}
+
+Repository path to inspect:
+{{target_repo}}
+
+Input type under test:
+{{source_type_under_test}}
+
+Case id:
+{{case_id}}
+
+Finding input:
+{{finding_input}}
+
+{{eval_instructions}}

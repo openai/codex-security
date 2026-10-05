@@ -123,6 +123,38 @@ describe("bundled finding previews", () => {
     });
   });
 
+  test("preserves nested attack-path string arrays without relaxing section depth", () => {
+    const original = {
+      supported: {
+        attackPath: {
+          dataflow: { evidenceRefs: ["source-to-sink"] },
+          reachability: { preconditions: ["The handler is reachable."] },
+        },
+      },
+      tooDeep: {
+        attackPath: {
+          dataflow: {
+            nested: { evidenceRefs: ["must remain depth-limited"] },
+          },
+        },
+      },
+    };
+
+    expect(projectFindingDetails(original)).toEqual({
+      projected: {
+        supported: original.supported,
+        tooDeep: {
+          attackPath: {
+            dataflow: {
+              nested: { evidenceRefs: [null] },
+            },
+          },
+        },
+      },
+      original,
+    });
+  });
+
   test("preserves counter-evidence under the validation preview budget", () => {
     const original = {
       finding: {
