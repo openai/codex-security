@@ -8515,7 +8515,9 @@ async function executeScan(
         )
           return;
         deepProgress = update;
-        deepConsolidating ||= update.consolidating === true;
+        deepConsolidating =
+          update.consolidating === true ||
+          (deepConsolidating && update.active === 0);
         phase = deepConsolidating ? "consolidating results" : "discovery";
         const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
         if (dashboard !== null) {
