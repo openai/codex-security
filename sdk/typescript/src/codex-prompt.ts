@@ -1,6 +1,5 @@
 export function shellEnvironmentReference(name: string, suffix = ""): string {
-  const prefix = process.platform === "win32" ? "$env:" : "$";
-  return `"${prefix}${name}${suffix}"`;
+  return `"${process.platform === "win32" ? "$env:" : "$"}${name}${suffix}"`;
 }
 
 export function pluginPythonCommand(): string {

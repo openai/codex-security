@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Text as digest } from "./contract.js";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -8,6 +9,8 @@ import {
   readFile,
   readlink,
   realpath,
+  rename,
+  rm,
   stat,
 } from "node:fs/promises";
 import {
@@ -23,10 +26,15 @@ import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt } from "./codex-prompt.js";
+import type { ScanModelConfiguration } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import type { ThreatModel } from "./models.js";
+import { writeThreatModel } from "./artifact-export.js";
 import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import { resolvePluginPython, type ProcessEnvironment } from "./runtime.js";
 import {
+  nullIfMissingFile,
+  nullIfMissingPath,
   abortable,
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
@@ -115,11 +123,10 @@ export async function securityPolicyProtectedRoots(
   return [...new Set([roots.at(-1) ?? target.repository, ...metadata.flat()])];
 }
 
-export interface SecurityPolicyPreflight extends SecurityPolicyTarget {
+export interface SecurityPolicyPreflight
+  extends SecurityPolicyTarget, ScanModelConfiguration {
   outputDir: string | null;
   authentication: ScanAuthentication;
-  model: string;
-  reasoningEffort: string;
   maxCostUsd?: number;
 }
 
@@ -161,7 +168,8 @@ export interface SecurityPolicyDraft
   outputDir: string;
   draftPath: string;
   specificationPath: string;
-  threatModelPath: string;
+  threatModelPath: string | null;
+  threatModel: ThreatModel;
   content: string;
   customPlugin: boolean;
   // Only an explicit in-memory selection can choose executable plugin code.
@@ -226,10 +234,7 @@ export async function resolveSecurityPolicyTarget(
 }
 
 export async function readSecurityPolicy(path: string): Promise<string | null> {
-  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const metadata = await lstat(path).catch(nullIfMissingFile);
   if (metadata === null) return null;
   if (!metadata.isFile()) {
     throw new CodexSecurityError(
@@ -292,10 +297,7 @@ export async function readSecurityPolicySnapshot(
   );
   const previousContent = await readSecurityPolicy(target.targetPath);
   const canonicalTarget = await realpath(target.targetPath).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    },
+    nullIfMissingFile,
   );
   const inherited: [string, string][] = [];
   let directory = target.repository;
@@ -303,10 +305,7 @@ export async function readSecurityPolicySnapshot(
     signal?.throwIfAborted();
     const path = join(directory, "SECURITY.md");
     const policyPath = relative(target.repository, path).split(sep).join("/");
-    let metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    let metadata = await lstat(path).catch(nullIfMissingPath);
     if (metadata?.isSymbolicLink()) {
       const alias = await policyLinkSnapshot(
         path,
@@ -333,10 +332,7 @@ export async function readSecurityPolicySnapshot(
         );
       const links = { links: alias.links, destination: alias.destination };
       inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
-      metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      });
+      metadata = await stat(path).catch(nullIfMissingPath);
     }
     if (metadata?.isFile()) {
       const normalized = await normalizeTarget(
@@ -396,12 +392,7 @@ async function policyLinkSnapshot(
     const relativePath = policyRelativePath(repository, canonical);
     if (!(await stat(parent)).isDirectory())
       return { links, destination: null, status: "missing" };
-    const metadata = await lstat(canonical).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
-    );
+    const metadata = await lstat(canonical).catch(nullIfMissingPath);
     if (metadata !== null || links.length > 0)
       await requirePolicyOutsideGitMetadata(
         canonical,
@@ -475,14 +466,8 @@ async function securityPolicyPaths(
     }
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
-      const metadata = await lstat(directory).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-          throw error;
-        },
-      );
       // Keep directory links distinct from their destinations.
-      if (metadata?.isDirectory()) {
+      if ((await lstat(directory).catch(nullIfMissingPath))?.isDirectory()) {
         directory = await realpath(directory);
         policyRelativePath(repository, directory);
       }
@@ -499,10 +484,7 @@ async function securityPolicyPaths(
     if (await isGitMetadataDirectory(directory, signal)) {
       gitDirectories.add(directory);
       const common = await readFile(join(directory, "commondir"), "utf8").catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
+        nullIfMissingFile,
       );
       if (common !== null)
         gitDirectories.add(
@@ -513,20 +495,12 @@ async function securityPolicyPaths(
     if (
       !knownRoots.has(directory) &&
       entries.some((entry) => entry.name.toLowerCase() === ".git") &&
-      (await lstat(join(directory, ".git")).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
-      )) !== null
+      (await lstat(join(directory, ".git")).catch(nullIfMissingFile)) !== null
     ) {
       await addRoot(directory);
     }
     const path = join(directory, "SECURITY.md");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    const metadata = await lstat(path).catch(nullIfMissingPath);
     if (
       (metadata?.isFile() || metadata?.isSymbolicLink()) &&
       !reportingPaths.has(path)
@@ -537,10 +511,7 @@ async function securityPolicyPaths(
       if (!entry.isDirectory() || entry.name === ".git") continue;
       if (entry.name.toLowerCase() === ".git") {
         const metadata = await realpath(join(directory, ".git")).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          },
+          nullIfMissingFile,
         );
         if (
           metadata !== null &&
@@ -668,10 +639,7 @@ async function requirePolicyOutsideGitMetadata(
   });
   if (root === null || relative(root, parent) !== "") return;
   const marker = await lstat(join(root, ".git"));
-  const candidate = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const candidate = await lstat(path).catch(nullIfMissingFile);
   if (
     candidate !== null &&
     candidate.dev === marker.dev &&
@@ -769,7 +737,10 @@ export async function runSecurityPolicyStages(options: {
   model: string;
   reasoningEffort: string;
   pluginVersion: string;
+  pythonPath?: string;
+  protectedRoot?: string;
   signal: AbortSignal;
+  onWarning?: (message: string) => void;
   onStage?: SecurityPolicyOptions["onStage"];
   answerQuestions?: SecurityPolicyOptions["answerQuestions"];
   run(
@@ -786,7 +757,7 @@ export async function runSecurityPolicyStages(options: {
     signal,
   );
   const specificationPath = join(outputDir, "project-spec.md");
-  const threatModelPath = join(outputDir, "THREAT_MODEL.md");
+  const threatModelPath = join(outputDir, "threatmodel.md");
   const draftPath = join(outputDir, "SECURITY.md");
   const common = [
     "Generate security-policy evidence for exactly the selected component. This is not a vulnerability scan.",
@@ -814,6 +785,7 @@ export async function runSecurityPolicyStages(options: {
     stage: SecurityPolicyStage,
     instructions: string,
     path: string,
+    save?: (result: SecurityPolicyStageResult) => Promise<void>,
   ) => {
     signal.throwIfAborted();
     options.onStage?.(stage);
@@ -822,7 +794,9 @@ export async function runSecurityPolicyStages(options: {
     const hasDocument = result.markdown.trim().length > 0;
     if (hasDocument) {
       validatePolicyContent(result.markdown, stage);
-      await writePolicyArtifact(path, result.markdown, signal);
+      if (save === undefined)
+        await writePolicyArtifact(path, result.markdown, signal);
+      else await save(result);
     }
     if (result.blockedReason !== null) {
       throw new CodexSecurityError(
@@ -871,6 +845,64 @@ export async function runSecurityPolicyStages(options: {
       : "No additional owner clarification was supplied.",
     "Carry unanswered questions and unresolved policy decisions forward explicitly.",
   ].join("\n");
+  const retainedThreatModel: Extract<ThreatModel, { format: "markdown" }> = {
+    format: "markdown",
+    content: "",
+    scope: { includePaths: [target.scope], excludePaths: [] },
+    origin: "generated",
+  };
+  const manifest = {
+    documentType: "codex-security.policy-draft",
+    schemaVersion: "1.0",
+    repository: target.repository,
+    scope: target.scope,
+    createdAt: new Date().toISOString(),
+    revision: options.revision,
+    previousPolicySha256:
+      previousContent === null ? null : digest(previousContent),
+    inheritedPolicySha256,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    pluginVersion: options.pluginVersion,
+    customPlugin: options.pluginPath !== undefined,
+    status: "threat_model_ready",
+    threatModel: retainedThreatModel,
+    reviewNotes: [] as string[],
+  };
+  const saveManifest = async (): Promise<void> => {
+    const temporary = join(outputDir, `.policy-draft-${randomUUID()}.json`);
+    try {
+      await writePolicyArtifact(
+        temporary,
+        `${JSON.stringify(manifest, null, 2)}\n`,
+        signal,
+      );
+      await rename(temporary, join(outputDir, MANIFEST_NAME));
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  };
+  const saveModelDocument = async (): Promise<string | null> => {
+    let warning: string;
+    try {
+      warning = await writeThreatModel(outputDir, {
+        pluginRoot: options.pluginRoot,
+        pythonPath: options.pythonPath,
+        protectedRoot: options.protectedRoot,
+        signal,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      warning = `Could not save threatmodel.md; the retained threat model remains exportable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (warning) {
+      try {
+        options.onWarning?.(warning);
+      } catch {}
+    }
+    signal.throwIfAborted();
+    return warning ? null : threatModelPath;
+  };
   const threatModel = await run(
     "threat_model",
     [
@@ -881,11 +913,24 @@ export async function runSecurityPolicyStages(options: {
       "Do not read or replace a shared repository-model cache. This model is specific to the selected component and supplied context.",
     ].join("\n"),
     threatModelPath,
+    async (result) => {
+      retainedThreatModel.content = result.markdown;
+      manifest.status =
+        result.blockedReason === null ? "threat_model_ready" : "blocked";
+      manifest.reviewNotes = [
+        ...architecture.reviewNotes,
+        ...architecture.questions,
+        ...result.reviewNotes,
+        ...result.questions,
+      ];
+      await saveManifest();
+      await saveModelDocument();
+    },
   );
   const policy = await run(
     "policy",
     [
-      `Read the completed specification at ${jsonForPrompt(specificationPath)} and threat model at ${jsonForPrompt(threatModelPath)}.`,
+      `Read the completed specification at ${jsonForPrompt(specificationPath)} and the retained threatModel.content in ${jsonForPrompt(join(outputDir, MANIFEST_NAME))}.`,
       "Retain their full repository-relative citations where they support policy decisions; do not shorten nested source paths.",
       ownerContext,
       `Threat-model questions and review notes (JSON data): ${jsonForPrompt({ questions: threatModel.questions, reviewNotes: threatModel.reviewNotes })}`,
@@ -912,33 +957,18 @@ export async function runSecurityPolicyStages(options: {
     options.gitMetadataPaths,
   );
   await requireSecurityPolicyRepositoryBinding(target, signal);
-  const manifest = {
-    documentType: "codex-security.policy-draft",
-    schemaVersion: "1.0",
-    repository: target.repository,
-    scope: target.scope,
-    createdAt: new Date().toISOString(),
-    revision: options.revision,
-    previousPolicySha256:
-      previousContent === null ? null : digest(previousContent),
-    inheritedPolicySha256,
-    model: options.model,
-    reasoningEffort: options.reasoningEffort,
-    pluginVersion: options.pluginVersion,
-    customPlugin: options.pluginPath !== undefined,
-    reviewNotes,
-  };
-  await writePolicyArtifact(
-    join(outputDir, MANIFEST_NAME),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    signal,
-  );
+  manifest.status = "completed";
+  manifest.reviewNotes = reviewNotes;
+  await saveManifest();
+  const savedThreatModelPath = await saveModelDocument();
+
   return {
     ...target,
     outputDir,
     draftPath,
     specificationPath,
-    threatModelPath,
+    threatModelPath: savedThreatModelPath,
+    threatModel: retainedThreatModel,
     content: policy.markdown,
     previousContent,
     inheritedPolicySha256,
@@ -1087,8 +1117,4 @@ function diffLabel(path: string): string {
   )
     return path;
   return formatSecurityPolicyText(JSON.stringify(path));
-}
-
-function digest(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }

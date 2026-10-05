@@ -202,9 +202,7 @@ test("preserves the operation error when recording a failed stage also fails", a
     workbench.run,
   );
   await expect(
-    workflow.run("publish", async () => {
-      throw failure;
-    }),
+    workflow.run("publish", (Promise.reject<never>).bind(Promise, failure)),
   ).rejects.toBe(failure);
   workbench.assertDone();
 });

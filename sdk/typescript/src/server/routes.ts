@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
 import { FindingsError } from "./errors.js";
 import { dashboardQuery, serveDashboard } from "./dashboard.js";
-import type { FindingsService } from "./findings-service.js";
+import type { FindingEmbedder } from "./embeddings.js";
+import type { FindingsStore } from "./storage.js";
 import {
   findingSearchScope,
   pagination,
@@ -13,7 +14,8 @@ import {
 export async function handleFindingsRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  service: FindingsService,
+  store: FindingsStore,
+  embedder: FindingEmbedder,
   validate: ValidateFunction<FindingsRequest>,
 ): Promise<void> {
   try {
@@ -29,13 +31,13 @@ export async function handleFindingsRequest(
       json(
         response,
         200,
-        await service.dashboard(dashboardQuery(url.searchParams)),
+        await store.dashboard(dashboardQuery(url.searchParams)),
       );
       return;
     }
     if (route === "GET /v1/findings") {
       console.log(route);
-      json(response, 200, await service.list(pagination(url.searchParams)));
+      json(response, 200, await store.list(pagination(url.searchParams)));
       return;
     }
     const candidates = /^\/v1\/finding\/([^/]+)\/potential-duplicates$/.exec(
@@ -46,7 +48,7 @@ export async function handleFindingsRequest(
       json(
         response,
         200,
-        await service.potentialDuplicates(
+        await store.findPotentialDuplicates(
           candidates[1]!,
           findingSearchScope(url.searchParams),
         ),
@@ -58,7 +60,7 @@ export async function handleFindingsRequest(
     );
     if (request.method === "GET" && dedupeGroups) {
       console.log("GET /v1/finding/:id/dedupe-groups");
-      json(response, 200, await service.listDedupeGroups(dedupeGroups[1]!));
+      json(response, 200, await store.listDedupeGroups(dedupeGroups[1]!));
       return;
     }
     if (route === "POST /v1/dedupe-groups") {
@@ -70,7 +72,7 @@ export async function handleFindingsRequest(
           "Expected {groups: [[findingId, ...], ...]} with at least two distinct finding IDs per group.",
         );
       }
-      json(response, 201, await service.storeDedupeGroups(input.groups));
+      json(response, 201, await store.storeDedupeGroups(input.groups));
       return;
     }
     if (route === "POST /v1/bulk/findings") {
@@ -82,10 +84,17 @@ export async function handleFindingsRequest(
           "Expected {findings: [...]} with an optional nonempty repositoryId, using the existing Finding schema.",
         );
       }
+      const embeddings = await embedder.embed(input.findings);
       json(
         response,
         201,
-        await service.insert(input.findings, input.repositoryId),
+        await store.insert(
+          input.findings.map((finding, index) => ({
+            finding,
+            embedding: embeddings[index]!,
+          })),
+          input.repositoryId,
+        ),
       );
       return;
     }
@@ -109,6 +118,17 @@ export async function handleFindingsRequest(
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
+  const mediaType = request.headers["content-type"]
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (mediaType !== "application/json") {
+    request.resume();
+    throw new FindingsError(
+      "invalid_request",
+      "Request body must use application/json.",
+    );
+  }
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   try {
