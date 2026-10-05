@@ -1114,6 +1114,7 @@ type FindingVerification = z.infer<typeof findingVerificationSchema>;
 interface SkillRunOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
+  serviceTier?: JsonValue;
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -7309,6 +7310,8 @@ async function runSkill(
       "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
     );
   }
+  if (options.serviceTier !== undefined)
+    overrides["service_tier"] = options.serviceTier;
   const { model, reasoningEffort } = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
@@ -7494,6 +7497,9 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...(options.serviceTier === undefined
+        ? []
+        : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
       ...codex
         .filter(
           (value) =>
@@ -8143,6 +8149,7 @@ async function executeScan(
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
+  let patchServiceTier: JsonValue | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8168,6 +8175,9 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
+    patchServiceTier = resolveCodexProfile(effectiveConfiguration)[
+      "service_tier"
+    ];
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
@@ -8809,6 +8819,7 @@ async function executeScan(
         dependencies,
         {
           ...providerOptions,
+          serviceTier: patchServiceTier,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
