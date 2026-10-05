@@ -195,7 +195,7 @@ describe("bundled plugin build", () => {
       const packageRoot = join(root, "sdk", "typescript");
       const source = join(root, "plugins", "codex-security");
       const destination = join(packageRoot, "_bundled_plugin");
-      for (const script of ["build-plugin", "plugin-contract"]) {
+      for (const script of ["build-plugin", "plugin-contract", "is-main"]) {
         await writeFixture(
           packageRoot,
           `scripts/${script}.mjs`,
