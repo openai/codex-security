@@ -1,4 +1,4 @@
-const { outputText } = require("./output");
+const { outputText, hasTriageJson } = require("./output");
 
 function matchedFormatNames(text) {
   const supportedFormats = [
@@ -35,19 +35,8 @@ module.exports = (output) => {
     );
   }
 
-  if (/```(?:json)?\s*[\s\S]*?```/i.test(text)) {
-    failures.push("response must not return a fenced JSON block when no finding was supplied");
-  }
-
-  for (const pattern of [
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i,
-    /["']findings["']\s*:/i,
-    /["']verdict["']\s*:/i,
-  ]) {
-    if (pattern.test(text)) {
-      failures.push("response must not emit a triage result JSON object when no finding was supplied");
-      break;
-    }
+  if (hasTriageJson(text)) {
+    failures.push("response must not emit a triage result JSON object when no finding was supplied");
   }
 
   return {

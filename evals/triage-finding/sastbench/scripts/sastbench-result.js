@@ -13,12 +13,10 @@ function extractTriageResult(
   );
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  const candidates =
-    fencedBlocks.length > 0
-      ? fencedBlocks
-      : start >= 0 && end >= start
-        ? [text.slice(start, end + 1)]
-        : [];
+  const candidates = [
+    ...fencedBlocks,
+    ...(start >= 0 && end >= start ? [text.slice(start, end + 1)] : []),
+  ];
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
