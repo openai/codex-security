@@ -3305,15 +3305,10 @@ describe("CodexSecurity orchestration", () => {
               await copyCompletedScan(root);
               await Promise.all([
                 writeUsageSession(codexHome, "thread-1", usage),
-                writeUsageSession(
-                  codexHome,
-                  "worker-thread",
-                  usage,
-                  "thread-1",
-                  undefined,
-                  undefined,
-                  "parent_thread_id",
-                ),
+                writeUsageSession(codexHome, "worker-thread", usage, {
+                  parent: "thread-1",
+                  parentField: "parent_thread_id",
+                }),
                 writeUsageSession(codexHome, "unrelated-thread", usage),
               ]);
               const marker = (
@@ -4177,10 +4172,7 @@ describe("CodexSecurity orchestration", () => {
               codexHome,
               "worker-thread",
               { input_tokens: 100, output_tokens: 0 },
-              "scan-thread",
-              undefined,
-              undefined,
-              "parent_thread_id",
+              { parent: "scan-thread", parentField: "parent_thread_id" },
             );
             await firstApproval;
             await appendUsage(path, 1_700);
@@ -4403,10 +4395,7 @@ describe("CodexSecurity orchestration", () => {
                 cached_input_tokens: 100,
                 output_tokens: 20,
               },
-              "scan-thread",
-              undefined,
-              undefined,
-              "parent_thread_id",
+              { parent: "scan-thread", parentField: "parent_thread_id" },
             ),
           ]);
           await (options.signal.aborted

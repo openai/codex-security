@@ -151,10 +151,17 @@ export async function writeSession(
   home: string,
   threadId: string,
   usage: Record<string, number>,
-  parentThreadId?: string,
-  workingDirectory?: string,
-  timestamp?: string,
-  parentField: SessionParentField = "source",
+  {
+    parent,
+    cwd,
+    timestamp,
+    parentField = "source",
+  }: {
+    parent?: string;
+    cwd?: string;
+    timestamp?: string;
+    parentField?: SessionParentField;
+  } = {},
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -166,11 +173,9 @@ export async function writeSession(
         type: "session_meta",
         payload: {
           id: threadId,
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+          ...(cwd === undefined ? {} : { cwd }),
           ...(timestamp === undefined ? {} : { timestamp }),
-          ...(parentThreadId === undefined
-            ? {}
-            : parentMetadata(parentThreadId, parentField)),
+          ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
         },
       }),
       JSON.stringify({
