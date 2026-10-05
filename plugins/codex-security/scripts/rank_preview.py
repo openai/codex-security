@@ -242,157 +242,14 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_identifier_continues(masked: list[str], start: int) -> bool:
-    if start > 0 and (
-        masked[start - 1].isalnum()
-        or masked[start - 1] in "_$"
-        or (
-            not masked[start - 1].isascii()
-            and not masked[start - 1].isspace()
-            and masked[start - 1] != "\ufeff"
-        )
-    ):
-        return True
-    if start > 0 and masked[start - 1] == "}":
-        escape = start - 1
-        while escape > 0 and masked[escape - 1] in "0123456789abcdefABCDEF":
-            escape -= 1
-        if "".join(masked[max(0, escape - 3) : escape]) == "\\u{":
-            return True
-    return False
-
-
-def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> bool:
-    if javascript_identifier_continues(masked, start):
-        return True
-    while start > 0 and (masked[start - 1].isspace() or masked[start - 1] == "\ufeff"):
-        start -= 1
-    if start == 0 or masked[start - 1] not in ".#":
-        return False
-    if masked[start - 1] == "#":
-        return True
-    # A decimal literal can end in a dot before a new statement, unlike a member access.
-    end = start - 1
-    start = end
-    while start > 0 and masked[start - 1] in "0123456789_":
-        start -= 1
-    if start > 2 and masked[start - 1] in "+-" and masked[start - 2] in "eE":
-        mantissa_end = start - 2
-        start = mantissa_end
-        while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_.$"):
-            start -= 1
-        return (
-            re.fullmatch(
-                r"(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9][0-9_]*)",
-                "".join(masked[start:mantissa_end]),
-            )
-            is not None
-        )
-    return (
-        start == end
-        or masked[start] not in "0123456789"
-        or javascript_identifier_continues(masked, start)
-        or (start > 0 and masked[start - 1] in ".#")
-    )
-
-
-def javascript_regex_end(
-    text: str,
-    start: int,
-    masked: list[str],
-    failed_scans: set[tuple[int, bool]],
-    after_control: bool,
-    block_comment_starts: dict[int, int],
-    suffix: str,
-) -> int | None:
-    if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
-        return None
-    previous = start - 1
-    skipped_comment = False
-    skipped_bangs = False
-    while previous >= 0:
-        if previous in block_comment_starts:
-            previous = block_comment_starts[previous] - 1
-            skipped_comment = True
-        elif text[previous] in " \t\r\ufeff" or (
-            text[previous] == "\n" and skipped_comment and not skipped_bangs
-        ):
-            previous -= 1
-        elif (
-            text[previous] == "!" and skipped_comment and suffix in {".cts", ".mts", ".ts", ".tsx"}
-        ):
-            previous -= 1
-            skipped_bangs = True
-        else:
-            break
-    # Newly skipped trivia after an object must not turn division into a regex.
-    if (
-        (skipped_comment or "\ufeff" in text[previous + 1 : start])
-        and previous >= 0
-        and text[previous] == "}"
-        and not after_control
-    ):
-        return None
-    if skipped_bangs and previous >= 0 and masked[previous] != text[previous]:
-        return None
-    prefix_operators = "=(:,[!&|?{};\n" + ("+-*/%~^<>" if skipped_bangs else "")
-    if not after_control and previous >= 0 and text[previous] not in prefix_operators:
-        if text[max(0, previous - 1) : previous + 1] != "=>":
-            word_start = previous + 1
-            while javascript_identifier_continues(masked, word_start):
-                word_start -= 1
-            keywords = {"case", "return", "throw", "else"}
-            if skipped_comment and "\n" in text[previous + 1 : start]:
-                keywords |= {"break", "continue", "debugger"}
-            if skipped_bangs:
-                keywords |= {"typeof", "void", "delete", "await", "yield", "instanceof", "in"}
-            if "".join(
-                masked[word_start : previous + 1]
-            ) not in keywords or javascript_keyword_has_identifier_prefix(masked, word_start):
-                return None
-
-    index = start + 1
-    in_character_class = False
-    visited = []
-    while index < len(text):
-        state = (index, in_character_class)
-        if state in failed_scans:
-            break
-        visited.append(state)
-        char = text[index]
-        if char == "\n":
-            break
-        if char == "\\" and index + 1 < len(text):
-            index += 2
-            continue
-        if char == "[":
-            in_character_class = True
-        elif char == "]":
-            in_character_class = False
-        elif char == "/" and not in_character_class:
-            index += 1
-            while index < len(text) and text[index].isalpha():
-                index += 1
-            return index
-        index += 1
-    # Reuse failed suffixes without mistaking a division expression for a regex.
-    failed_scans.update(visited)
-    return None
-
-
-def mask_c_style_source(text: str, suffix: str) -> str:
+def mask_c_style_source(text: str, suffix: str) -> str | None:
     masked: list[str] = []
     index = 0
     block_comment_depth = 0
-    block_comment_start = 0
-    block_comment_starts: dict[int, int] = {}
     in_line_comment = False
     quote = ""
     raw_terminator = ""
     heredoc_terminator = ""
-    failed_regex_scans: set[tuple[int, bool]] = set()
-    control_parentheses: list[bool] = []
-    after_control = False
     while index < len(text):
         char = text[index]
         next_char = text[index + 1] if index + 1 < len(text) else ""
@@ -415,8 +272,6 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             elif char == "*" and next_char == "/":
                 masked.extend((" ", " "))
                 block_comment_depth -= 1
-                if block_comment_depth == 0:
-                    block_comment_starts[index + 1] = block_comment_start
                 index += 2
             else:
                 masked.append(" ")
@@ -527,15 +382,6 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 heredoc_terminator = heredoc_match.group(1)
                 index += len(token)
                 continue
-        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(
-                text, index, masked, failed_regex_scans, after_control, block_comment_starts, suffix
-            )
-            if regex_end is not None:
-                masked.extend(" " * (regex_end - index))
-                index = regex_end
-                after_control = False
-                continue
         if char == "/" and next_char == "/":
             masked.extend((" ", " "))
             in_line_comment = True
@@ -544,7 +390,6 @@ def mask_c_style_source(text: str, suffix: str) -> str:
         if char == "/" and next_char == "*":
             masked.extend((" ", " "))
             block_comment_depth = 1
-            block_comment_start = index
             index += 2
             continue
         if char == "#" and suffix == ".php" and next_char != "[":
@@ -552,23 +397,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             in_line_comment = True
             index += 1
             continue
-        if suffix in JAVASCRIPT_EXTENSIONS:
-            if char == "(":
-                end = len(masked)
-                while end > 0 and (masked[end - 1].isspace() or masked[end - 1] == "\ufeff"):
-                    end -= 1
-                start = end
-                while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$"):
-                    start -= 1
-                keyword = "".join(masked[start:end])
-                control_parentheses.append(
-                    keyword in {"if", "while", "for", "with"}
-                    and not javascript_keyword_has_identifier_prefix(masked, start)
-                )
-            if char == ")":
-                after_control = bool(control_parentheses) and control_parentheses.pop()
-            elif not char.isspace() and char not in "\ufeff!":
-                after_control = False
+        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
+            # Regex literals and division need grammar context; sample the original source.
+            return None
         if char in {'"', "'", "`"}:
             quote = char
             masked.append(" ")
@@ -833,7 +664,10 @@ def strip_leading_annotations(original: str, masked: str) -> tuple[str, str, lis
 
 def brace_language_outline(text: str, suffix: str) -> list[str]:
     original_lines = text.splitlines()
-    masked_lines = mask_c_style_source(text, suffix).splitlines()
+    masked = mask_c_style_source(text, suffix)
+    if masked is None:
+        return []
+    masked_lines = masked.splitlines()
     outline: dict[str, None] = {}
     type_stack: list[tuple[str, int]] = []
     function_depths: list[int] = []

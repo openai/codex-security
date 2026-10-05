@@ -578,222 +578,99 @@ def test_kotlin_companion_object_lists_factory_method(tmp_path: Path) -> None:
     assert "method Service.visible" in preview
 
 
-def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Path) -> None:
-    source = r"""class Service {
-  pattern = /\{/;
-  visible() {}
-}
-"""
-
-    preview = generate_preview(tmp_path, "service.ts", source)
-
-    assert "method Service.visible" in preview
-
-
-@pytest.mark.parametrize(
-    "arrow", ["() => ", "input=>", "input => ", "input=>\ufeff", "input=> /* reason */ "]
-)
-def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, arrow: str) -> None:
-    source = f"""class Service {{
-  makeMatcher() {{ const matcher = {arrow}/if(enabled)/; }} // note
-  authorize(request) {{}}
-}}
-"""
-
-    preview = generate_preview(tmp_path, "service.js", source)
-
-    assert preview.splitlines() == [
-        "class Service",
-        "method Service.makeMatcher",
-        "method Service.authorize",
-    ]
-
-
 @pytest.mark.parametrize(
     "statement",
     [
-        "return /* reason */ /=>/;",
-        "return /* one */ /* two */ /=>/;",
-        "return\ufeff /{/.test(input);",
-        "if (ready) {} /{/.test(input);",
-        "const ratio = { valueOf() { return 12; } } /* units */ / 2;",
-        "const ratio = {} /* scale */ / { valueOf() { return 12 / 2; } };",
-        "const ratio = value\n/* units */ / { valueOf() { return 12 / 2; } };",
-        "return ! /{/.test(input);",
-        "return ! /* reason */ /{/.test(input);",
-        "return !! /* reason */ /{/.test(input);",
-        "return ! /* outer */ ! /* inner */ /{/.test(input);",
-        "return ! // reason \n /{/.test(input);",
-        "if (ready) ! /* reason */ /{/.test(input);",
-        "return 1 + ! /* reason */ /{/.test(input);",
-        "return value / ! /* reason */ /{/.test(input);",
-        "return typeof ! /* reason */ /{/.test(input);",
-        "while (true) { break\n /}/.test('x'); }",
-        "while (true) { break\n /* note */ /}/.test('x'); }",
-        "while (true) { continue\n /}/.test('x'); }",
-        "while (true) { continue\n /* note */ /}/.test('x'); }",
-        "debugger\n /}/.test('x');",
-        "debugger\n /* note */ /}/.test('x');",
-        "let value\n /}/.test('x');",
-        "var value\n /}/.test('x');",
-        "if (ready) {} ! /{/.test(input);",
-        "if (ready) {} /* reason */ ! /{/.test(input);",
-        "if (ready) {} /* reason */ !! /{/.test(input);",
-        "const value = 12\n ! /{/.test(input);",
+        "yield /if(enabled)/;",
+        "yield /foo|if(enabled)/;",
+        "yield /foo:if(enabled)/;",
+        "yield /* pattern */ /else/.test(input) ? { ratio: count / total } : null;",
+        "yield /while(enabled)/;",
+        "const matcher = () => /if(enabled)/;",
+        "if (enabled) /{/.test(input);",
+        "if (enabled) {} else /{/.test(input);",
+        "return object.if(enabled) / { valueOf() { return count / total; } };",
+        "return value /* units */ / { valueOf() { return count / total; } };",
     ],
 )
-@pytest.mark.parametrize("filename", ["service.js", "service.ts"])
-def test_javascript_comment_context_preserves_the_following_method(
-    tmp_path: Path, statement: str, filename: str
+def test_javascript_ambiguous_syntax_preserves_source(tmp_path: Path, statement: str) -> None:
+    source = f"function* patterns() {{ {statement} }} // note\nfunction authorize() {{}}"
+
+    assert generate_preview(tmp_path, "example.js", source) == source
+
+
+def test_javascript_yield_identifier_preserves_division_source(tmp_path: Path) -> None:
+    source = (
+        "function ratio() { var yield = 12; return yield / divisor; } // note\n"
+        "function authorize() {}"
+    )
+
+    assert generate_preview(tmp_path, "example.js", source) == source
+
+
+@pytest.mark.parametrize("operator", ["++", "--"])
+def test_typescript_postfix_assertion_preserves_division_source(
+    tmp_path: Path, operator: str
 ) -> None:
-    source = f"""class Service {{
-  check() {{ {statement} }} // note
-  authorize() {{}}
-}}
-"""
+    source = (
+        "class Service {\n"
+        f"calculate() {{ return count{operator}! /* known value */ / "
+        "(() => { return count / total; })(); }\n"
+        "authorize() {}\n}"
+    )
 
-    preview = generate_preview(tmp_path, filename, source)
+    assert generate_preview(tmp_path, "example.ts", source) == source
 
-    assert preview.splitlines() == [
+
+@pytest.mark.parametrize(
+    "suffix", [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"]
+)
+def test_javascript_family_uses_source_for_slash_expressions(tmp_path: Path, suffix: str) -> None:
+    source = "function ratio() { return count / total; }\nfunction authorize() {}"
+
+    assert generate_preview(tmp_path, f"example{suffix}", source) == source
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "return 1;",
+        'return "a/b";',
+        "return 'a/b';",
+        "return `a/b`;",
+        "/* /if(enabled)/ */ return 1;",
+        "// /if(enabled)/\nreturn 1;",
+    ],
+)
+def test_javascript_simple_and_quoted_sources_keep_outlines(tmp_path: Path, body: str) -> None:
+    source = f"class Service {{\ncheck() {{ {body} }}\nauthorize() {{}}\n}}"
+
+    assert generate_preview(tmp_path, "example.js", source).splitlines() == [
         "class Service",
         "method Service.check",
         "method Service.authorize",
     ]
 
 
-@pytest.mark.parametrize(
-    "operand",
-    [
-        "numerator! /* guaranteed */",
-        "numerator!! /* guaranteed */",
-        "numerator!\n/* guaranteed */",
-        "numerator /* first */ ! /* guaranteed */",
-        "12! /* guaranteed */",
-        '"12"! /* guaranteed */',
-        "`12`! /* guaranteed */",
-        "/12/! /* guaranteed */",
-        "numerator[0]! /* guaranteed */",
-        "numerator()! /* guaranteed */",
-        "{}! /* guaranteed */",
-        "object.return! /* guaranteed */",
-    ],
-)
-def test_typescript_postfix_assertion_preserves_division(tmp_path: Path, operand: str) -> None:
-    source = f"""class Service {{
-  calculate() {{ return {operand} / (() => {{ return count / total; }})(); }}
-  visible() {{}}
-}}
-"""
+def test_javascript_source_sample_respects_preview_budget(tmp_path: Path) -> None:
+    source = (
+        "function first() { return count / total; }\n"
+        + ("// " + "é" * 128 + "\n") * 100
+        + "function last() {}\n"
+    )
+    path = tmp_path / "example.js"
+    path.write_text(source, encoding="utf-8")
 
-    preview = generate_preview(tmp_path, "service.ts", source)
+    preview, binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
 
-    assert preview.splitlines() == [
-        "class Service",
-        "method Service.calculate",
-        "method Service.visible",
-    ]
+    assert binary is False
+    assert len(preview.encode("utf-8")) <= DEFAULT_PREVIEW_BYTES
+    assert "function first()" in preview
+    assert "function last()" in preview
+    assert "..." in preview
 
 
-@pytest.mark.parametrize(
-    "condition",
-    [
-        "if (ready)",
-        "if /* condition */ (check(value))",
-        "while (ready)",
-        "if (ready) {} else",
-        "if\ufeff(ready)",
-        "if\u00a0(ready)",
-        "if\u2003(ready)",
-        "if (ready)\ufeff",
-    ],
-)
-def test_javascript_regex_after_control_flow_preserves_declarations(
-    tmp_path: Path, condition: str
-) -> None:
-    source = f"function before() {{}}\n{condition} /{{/.test(value);\nfunction after() {{}}\n"
-
-    preview = generate_preview(tmp_path, "example.js", source)
-
-    assert preview.splitlines() == ["function before", "function after"]
-
-
-@pytest.mark.parametrize(
-    "number", ["1.", "1_000.", "value-1.", "value+1.", "e-1.", "E+10.", "value1e-1.", "0..e-1."]
-)
-@pytest.mark.parametrize("statement", ["return /{/.test(input)", "if (input) /{/.test(input)"])
-def test_javascript_decimal_before_keyword_preserves_the_following_method(
-    tmp_path: Path, number: str, statement: str
-) -> None:
-    source = f"""class Service {{
-  check(input) {{
-    this.count = {number}
-    {statement};
-  }}
-  authorize(request) {{}}
-}}
-"""
-
-    preview = generate_preview(tmp_path, "service.js", source)
-
-    assert "method Service.check" in preview
-    assert "method Service.authorize" in preview
-
-
-@pytest.mark.parametrize(
-    "expression",
-    [
-        "{} / [1, 2]",
-        "{}\ufeff / { valueOf() { return 12 / 2; } }",
-        "{} \ufeff \t / { valueOf() { return 12 / 2; } }",
-        "{} /* reason */ \ufeff / { valueOf() { return 12 / 2; } }",
-        '"12" /* reason */ / { valueOf() { return 12 / 2; } }',
-        "`12` /* reason */ / { valueOf() { return 12 / 2; } }",
-        "/12/ /* reason */ / { valueOf() { return 12 / 2; } }",
-        "object.if(ready) / { value: count / total }",
-        "object.\ufeffif(ready) / { value: count / total }",
-        "object.else / { value: count / total }",
-        "object.\ufeffelse / { value: count / total }",
-        "object. else / { value: count / total }",
-        "object./* member */else / { value: count / total }",
-        "object1.\nreturn / { value: count / total }",
-        "1e1.\nreturn / { value: count / total }",
-        "1e+10.if(ready) / { value: count / total }",
-        "1e-10.if(ready) / { value: count / total }",
-        "this.#if() / { valueOf() { return 12 / 2; } }",
-        "this.#else / { valueOf() { return 12 / 2; } }",
-        "a\u0301if() / { valueOf() { return 12 / 2; } }",
-        "a\u309bif() / { valueOf() { return 12 / 2; } }",
-        "a\u309belse / { valueOf() { return 12 / 2; } }",
-        r"a\u{309b}if() / { valueOf() { return 12 / 2; } }",
-        r"a\u309bif() / { valueOf() { return 12 / 2; } }",
-        "a\u03011.if() / { valueOf() { return 12 / 2; } }",
-        "a\u200d1.if() / { valueOf() { return 12 / 2; } }",
-        r"a\u{301}1.if() / { valueOf() { return 12 / 2; } }",
-        r"a\u{301}if() / { valueOf() { return 12 / 2; } }",
-        "a\u0301else / { valueOf() { return 12 / 2; } }",
-        r"a\u{301}else / { valueOf() { return 12 / 2; } }",
-        "a\u200dif() / { valueOf() { return 12 / 2; } }",
-        r"a\u{00000301}if() / { valueOf() { return 12 / 2; } }",
-    ],
-)
-def test_javascript_division_preserves_the_following_method(
-    tmp_path: Path, expression: str
-) -> None:
-    source = f"""class Service {{
-  #if() {{ return 12; }}
-  #else = 12;
-  calculate() {{ const value = {expression}; }}
-  visible() {{}}
-}}
-"""
-
-    preview = generate_preview(tmp_path, "service.js", source)
-
-    assert "method Service.calculate" in preview
-    assert "method Service.visible" in preview
-
-
-def test_unterminated_javascript_regex_scans_take_linear_work() -> None:
+def test_javascript_slash_fallback_does_not_scan_regex_suffixes() -> None:
     class CountedSource(str):
         reads = 0
 
@@ -804,7 +681,7 @@ def test_unterminated_javascript_regex_scans_take_linear_work() -> None:
     reads = []
     for repetitions in (1000, 2000):
         source = CountedSource(",/[" * repetitions)
-        assert mask_c_style_source(source, ".js") == source
+        assert mask_c_style_source(source, ".js") is None
         reads.append(source.reads)
 
     assert reads[1] < 3 * reads[0]
