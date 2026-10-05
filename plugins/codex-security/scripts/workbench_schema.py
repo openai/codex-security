@@ -944,10 +944,12 @@ def apply_migrations(
     migrations: tuple[tuple[int, str, str], ...],
     now: Callable[[], str],
     backfill_security_targets: Callable[[sqlite3.Connection], None],
+    *,
+    immediate: bool = False,
 ) -> None:
     connection.commit()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    with connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -963,59 +965,15 @@ def apply_migrations(
         }
         should_backfill_targets = False
         for version, name, sql in migrations:
-            if version in applied:
-                if version == 2:
-                    add_column_if_missing(
-                        connection, "workspaces", "capability_preflight_json", "TEXT"
-                    )
-                elif version == 6:
-                    repair_thread_scoped_workspaces_migration(connection)
-                elif version == 11:
-                    repair_deep_scan_migration(connection)
-                elif version == 12:
-                    add_column_if_missing(connection, "scans", "continuation_thread_id", "TEXT")
-                elif version == 13:
-                    add_column_if_missing(
-                        connection,
-                        "scan_progress",
-                        "scope_file_count",
-                        "INTEGER CHECK (scope_file_count >= 0)",
-                    )
-                elif version == 16:
-                    should_backfill_targets = repair_stable_targets_migration(connection)
-                elif version == 26:
-                    add_column_if_missing(
-                        connection,
-                        "scans",
-                        "completion_warnings_json",
-                        "TEXT NOT NULL DEFAULT '[]'",
-                    )
-                elif version == 28:
-                    add_column_if_missing(
-                        connection,
-                        "deep_scan_runs",
-                        "max_time_hours",
-                        "REAL NOT NULL DEFAULT 96",
-                    )
-                elif version == 31:
-                    add_column_if_missing(
-                        connection,
-                        "scans",
-                        "retained_source_digests_json",
-                        "TEXT",
-                    )
-                elif version == 32:
-                    add_column_if_missing(
-                        connection,
-                        "deep_scan_runs",
-                        "publication_error_message",
-                        "TEXT",
-                    )
-                continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
+            elif version in applied:
+                if version in (2, 12, 13, 26, 28, 31, 32):
+                    repair_additive_migration(connection, version)
+                elif version == 11:
+                    repair_deep_scan_migration(connection)
             else:
                 for statement in sql_statements(sql):
                     connection.execute(statement)
@@ -1023,18 +981,15 @@ def apply_migrations(
                     migrate_finding_workflow_columns(connection)
                 elif version == 39:
                     migrate_finding_workflow_review_columns(connection)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, now()),
-            )
+            if version not in applied:
+                connection.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                    (version, name, now()),
+                )
         if 27 in applied:
             repair_deep_scan_failure_counter_migration(connection)
         if should_backfill_targets:
             backfill_security_targets(connection)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def normalize_pre_release_execution_profile_migrations(
@@ -1121,8 +1076,7 @@ def normalize_pre_release_execution_profile_migrations(
         connection.execute(
             f"ALTER TABLE {table} RENAME COLUMN reasoning_effort TO legacy_reasoning_effort"
         )
-    add_column_if_missing(connection, "scans", "model", "TEXT")
-    add_column_if_missing(connection, "scans", "reasoning_effort", "TEXT")
+    repair_additive_migration(connection, 25)
     connection.execute(
         """
         UPDATE scans
@@ -1146,196 +1100,68 @@ def normalize_pre_release_execution_profile_migrations(
         )
 
 
-def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
-    normalize_mirror_lineage_migrations(connection)
+def move_pre_release_migration(
+    connection: sqlite3.Connection, old_version: int, new_version: int, name: str
+) -> None:
+    migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = ?", (old_version,)
+    ).fetchone()
+    if migration is None or migration["name"] != name:
+        return
+    if (
+        connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (new_version,)
+        ).fetchone()
+        is not None
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported pre-release migration history."
+        )
     connection.execute(
-        "UPDATE schema_migrations SET version = 40 WHERE version = 33 AND name = ?",
-        ("index finding identity and comparison history",),
+        "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
+        (new_version, old_version, name),
     )
 
-    completion_warning_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 25"
-    ).fetchone()
-    if (
-        completion_warning_migration is not None
-        and completion_warning_migration["name"] == "persist scan completion warnings"
-    ):
-        if (
-            connection.execute("SELECT 1 FROM schema_migrations WHERE version = 26").fetchone()
-            is not None
-        ):
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 26 WHERE version = 25 AND name = ?",
-            ("persist scan completion warnings",),
-        )
 
-    phase_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 12"
-    ).fetchone()
-    if (
-        phase_progress_migration is not None
-        and phase_progress_migration["name"] == "phase-specific scan progress"
-    ):
-        target_migration = connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 20"
-        ).fetchone()
-        if target_migration is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
-            ("phase-specific scan progress",),
-        )
+def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+    normalize_mirror_lineage_migrations(connection)
+    move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
+
+    move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
+    move_pre_release_migration(connection, 12, 20, "phase-specific scan progress")
 
     normalize_pre_release_execution_profile_migrations(connection, timestamp)
 
-    preflight_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 13"
-    ).fetchone()
-    if (
-        preflight_progress_migration is not None
-        and preflight_progress_migration["name"] == "current scan preflight state"
+    move_pre_release_migration(connection, 13, 21, "current scan preflight state")
+
+    for version, legacy_names in (
+        (18, {"scan target summaries"}),
+        (19, {"structured scan guidance context", "idempotent scan lifecycle requests"}),
+        (20, {"retain superseded scan lifecycle requests", "threat model publication receipts"}),
+        (21, {"scan progress projection and activity", "deep coordinator manifest receipts"}),
+        (22, {"dynamic scan execution profiles"}),
     ):
-        target_migration = connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 21"
+        migration = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = ?", (version,)
         ).fetchone()
-        if target_migration is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
+        if migration is None or migration["name"] not in legacy_names:
+            continue
+        _, name, sql = next(migration for migration in MIGRATIONS if migration[0] == version)
+        if version == 18:
+            connection.execute(
+                "UPDATE scans SET handoff_claimed_at = NULL, handoff_claim_token = NULL "
+                "WHERE handoff_status = 'delivered'"
             )
+        elif version == 19:
+            for statement in sql_statements(sql):
+                connection.execute(
+                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                )
+        else:
+            repair_additive_migration(connection, version)
         connection.execute(
-            "UPDATE schema_migrations SET version = 21 WHERE version = 13 AND name = ?",
-            ("current scan preflight state",),
-        )
-
-    delivered_claim_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 18"
-    ).fetchone()
-    if (
-        delivered_claim_migration is not None
-        and delivered_claim_migration["name"] == "scan target summaries"
-    ):
-        connection.execute(
-            "UPDATE scans SET handoff_claimed_at = NULL, handoff_claim_token = NULL "
-            "WHERE handoff_status = 'delivered'"
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 18 AND name = ?",
-            ("clear legacy delivered handoff claims", "scan target summaries"),
-        )
-
-    setup_preferences_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 19"
-    ).fetchone()
-    legacy_setup_preferences_migrations = {
-        "structured scan guidance context",
-        "idempotent scan lifecycle requests",
-    }
-    if (
-        setup_preferences_migration is not None
-        and setup_preferences_migration["name"] in legacy_setup_preferences_migrations
-    ):
-        migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 19)
-        for statement in sql_statements(migration_sql):
-            connection.execute(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 19 AND name = ?",
-            ("persist setup workspace preference", setup_preferences_migration["name"]),
-        )
-
-    phase_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 20"
-    ).fetchone()
-    legacy_phase_progress_migrations = {
-        "retain superseded scan lifecycle requests",
-        "threat model publication receipts",
-    }
-    if (
-        phase_progress_migration is not None
-        and phase_progress_migration["name"] in legacy_phase_progress_migrations
-    ):
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "phase_items_total",
-            "INTEGER NOT NULL DEFAULT 0 CHECK (phase_items_total >= 0)",
-        )
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "phase_items_completed",
-            "INTEGER NOT NULL DEFAULT 0 "
-            "CHECK (phase_items_completed >= 0 AND phase_items_completed <= phase_items_total)",
-        )
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "phase_progress_unit",
-            "TEXT CHECK (phase_progress_unit IS NULL OR phase_progress_unit IN ("
-            "'checks', 'threat_surfaces', 'review_receipts', 'candidate_findings', "
-            "'validated_findings', 'report_artifacts'))",
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 20 AND name = ?",
-            ("phase-specific scan progress", phase_progress_migration["name"]),
-        )
-
-    preflight_progress_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 21"
-    ).fetchone()
-    legacy_preflight_progress_migrations = {
-        "scan progress projection and activity",
-        "deep coordinator manifest receipts",
-    }
-    if (
-        preflight_progress_migration is not None
-        and preflight_progress_migration["name"] in legacy_preflight_progress_migrations
-    ):
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "preflight_issues_json",
-            "TEXT NOT NULL DEFAULT '[]'",
-        )
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "preflight_checks_total",
-            "INTEGER NOT NULL DEFAULT 0 CHECK (preflight_checks_total >= 0)",
-        )
-        add_column_if_missing(
-            connection,
-            "scan_progress",
-            "preflight_checks_completed",
-            "INTEGER NOT NULL DEFAULT 0 CHECK (preflight_checks_completed >= 0 "
-            "AND preflight_checks_completed <= preflight_checks_total)",
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 21 AND name = ?",
-            ("current scan preflight state", preflight_progress_migration["name"]),
-        )
-
-    scan_recipe_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 22"
-    ).fetchone()
-    if (
-        scan_recipe_migration is not None
-        and scan_recipe_migration["name"] == "dynamic scan execution profiles"
-    ):
-        add_column_if_missing(connection, "scans", "recipe_json", "TEXT")
-        add_column_if_missing(
-            connection,
-            "scans",
-            "parent_scan_id",
-            "TEXT REFERENCES scans(id) ON DELETE SET NULL",
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 22 AND name = ?",
-            ("replayable scan launch recipes", "dynamic scan execution profiles"),
+            "UPDATE schema_migrations SET name = ? WHERE version = ? AND name = ?",
+            (name, version, migration["name"]),
         )
 
     migration = connection.execute(
@@ -1371,7 +1197,7 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
             "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
             (new_version, old_version, expected[old_version]),
         )
-    add_column_if_missing(connection, "workspaces", "capability_preflight_json", "TEXT")
+    repair_additive_migration(connection, 2)
     add_column_if_missing(connection, "scans", "target_snapshot_digest", "TEXT")
     connection.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -1444,24 +1270,17 @@ def repair_deep_scan_migration(connection: sqlite3.Connection) -> None:
 
 
 def repair_deep_scan_failure_counter_migration(connection: sqlite3.Connection) -> None:
+    threshold_column, count_column, _backfill = sql_statements(
+        next(sql for version, _, sql in MIGRATIONS if version == 27)
+    )
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")}
     threshold_missing = "stop_after_consecutive_errors" not in columns
-    add_column_if_missing(
-        connection,
-        "deep_scan_runs",
-        "stop_after_consecutive_errors",
-        "INTEGER NOT NULL DEFAULT 1 CHECK (stop_after_consecutive_errors >= 1)",
-    )
+    add_migration_column(connection, threshold_column)
     if threshold_missing:
         connection.execute(
             "UPDATE deep_scan_runs SET stop_after_consecutive_errors = stop_after_no_new"
         )
-    add_column_if_missing(
-        connection,
-        "deep_scan_runs",
-        "consecutive_errors",
-        "INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0)",
-    )
+    add_migration_column(connection, count_column)
 
 
 def repair_thread_scoped_workspaces_migration(connection: sqlite3.Connection) -> None:
@@ -1490,21 +1309,8 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
 
     migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
     for statement in sql_statements(migration_sql):
-        if statement.startswith("ALTER TABLE workspaces"):
-            add_column_if_missing(
-                connection,
-                "workspaces",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
-            continue
-        if statement.startswith("ALTER TABLE scans"):
-            add_column_if_missing(
-                connection,
-                "scans",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
+        if statement.startswith(("ALTER TABLE workspaces", "ALTER TABLE scans")):
+            add_migration_column(connection, statement)
             continue
         statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
         statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
@@ -1520,6 +1326,19 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
         """
     )
     return True
+
+
+def repair_additive_migration(connection: sqlite3.Connection, version: int) -> None:
+    sql = next(sql for migration_version, _, sql in MIGRATIONS if migration_version == version)
+    for statement in sql_statements(sql):
+        add_migration_column(connection, statement)
+
+
+def add_migration_column(connection: sqlite3.Connection, statement: str) -> None:
+    _, _, table, _, _, column, definition = statement.removesuffix(";").split(None, 6)
+    # Preserve the compact declarations used by historical repairs, including CHECK errors.
+    definition = " ".join(definition.split()).replace("( ", "(").replace(" )", ")")
+    add_column_if_missing(connection, table, column, definition)
 
 
 def add_column_if_missing(
@@ -1543,9 +1362,5 @@ def sql_statements(script: str) -> list[str]:
     return statements
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

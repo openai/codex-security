@@ -45,6 +45,36 @@ make extra model calls; see [Progress and cost](#progress-and-cost).
 Keep results outside the repository and restrict access: reports can contain
 source code, vulnerability details, and reproduction steps.
 
+### Select a Cyber access program
+
+For the built-in OpenAI provider, select `standard`, `daybreak_blue`, or
+`daybreak_red` per scan:
+
+```ts
+await security.run("/path/to/repository", {
+  auth: "api-key",
+  cyberAccessProgram: "daybreak_blue",
+});
+```
+
+```sh
+codex-security scan . --auth api-key --cyber-access-program daybreak_blue
+```
+
+`scan-components` accepts the same flag. Project files use
+`scan.cyber_access_program`, including for bulk scans. An explicit CLI or SDK
+selection overrides the project setting. Omission preserves Codex defaults;
+`standard` explicitly selects the standard program.
+
+The selection applies to Deep Scan discovery and reducer workers, resumed
+workers, custom validation, and post-scan turns. Saved scan recipes retain it
+for resume and rerun. Automatic component planning and finding matching also
+use the selected program. API-key selection enables Codex's experimental Cyber
+support unless the effective native configuration explicitly disables
+`features.api_key_cyber_access_programs`.
+Explicit disables and API entitlement failures remain errors. Selecting a
+program does not grant access; the API verifies the key's entitlement.
+
 ### Validate an existing finding
 
 ```ts
@@ -218,11 +248,13 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-Use device authentication on remote or headless machines:
+On remote or headless machines, use device auth if your workspace allows it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
+
+If device auth is disabled, [sign in over SSH](#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -233,6 +265,28 @@ printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
+
+### Remote login with SSH forwarding
+
+Use an SSH tunnel when device auth is disabled.
+
+On your local machine, replace `user@remote-host` with your SSH address and run:
+
+```bash
+ssh -L 1455:localhost:1455 user@remote-host
+```
+
+Run login in that SSH session:
+
+```bash
+npx @openai/codex-security login
+```
+
+Open the sign-in URL in your local browser. Keep SSH connected until login finishes.
+
+See the [authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh).
+
+### Native command authentication and other providers
 
 SDK callers can select native command authentication through
 `codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
@@ -252,16 +306,68 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+```
 
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+### Amazon Bedrock
+
+Bedrock uses Codex's native provider; no custom connector or adapter is needed.
+Choose an AWS identity and a region with access to the exact Bedrock model ID:
+
+```bash
+export AWS_PROFILE="security-scan"
 export AWS_REGION="us-east-2"
 npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
-Bedrock also accepts AWS access keys, profiles, web identity, container
-credentials, and the default AWS credential chain. Set `AWS_REGION` and choose
-a Bedrock model with `--model`; OpenAI models such as `openai.gpt-5.6-luna`
-support `--max-cost`.
+For an AWS account with approved Daybreak Blue access in `us-east-2`:
+
+```bash
+npx @openai/codex-security scan . --provider amazon-bedrock \
+  --model openai.gpt-daybreak-blue-5.6-sol --effort high
+```
+
+For separately approved Daybreak Red model access in the same region:
+
+```bash
+npx @openai/codex-security scan . --provider amazon-bedrock \
+  --model openai.gpt-5.6-cyber --effort high
+```
+
+Both require OpenAI approval/enrollment followed by AWS model-access provisioning.
+Red requires separate Red approval and the model-specific approval for
+GPT-5.6-Cyber; Blue access does not include it. Contact your AWS account team.
+See the AWS model cards for
+[Blue](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html)
+and [Red](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html),
+and [OpenAI's access overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview).
+
+Run the exports and CLI command in the same shell, job, or container. Environment
+changes in another terminal or a completed subprocess do not reach the scan.
+Instead of a profile, you can use `AWS_BEARER_TOKEN_BEDROCK`, AWS access keys, web
+identity, container credentials, or the default AWS credential chain. Temporary
+access keys require all three of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+and `AWS_SESSION_TOKEN`. Set `AWS_REGION` for the selected model's region and
+avoid mixing a profile with unrelated credential environment variables.
+
+Once model access is provisioned, native Bedrock scans, including Deep Scan
+workers, use AWS authentication without a separate `codex-security login` or
+OpenAI API key. AWS still controls whether that identity can invoke the model.
+Reading local reports, `scans show`, and `export` requires no cloud login.
+[Publishing to Cloud](#publish-findings-to-cloud) is a separate operation that
+requires ChatGPT credentials; AWS inference credentials do not grant that access.
+
+`info` and `scan --dry-run` inspect local configuration and inputs. They do not
+verify AWS credentials or invoke the model. A model-metadata or OpenAI access
+advisory does not establish Bedrock access; use the actual inference result.
+An AWS authentication error or model-access denial must be resolved for the
+selected AWS identity, model, and region. See the
+[Bedrock verification guide](../../docs/bedrock.md) for a live scan recipe.
+
+OpenAI models such as `openai.gpt-5.6-luna` support `--max-cost`. The exact
+`openai.gpt-daybreak-blue-5.6-sol` ID has AWS Standard commercial in-region price
+estimates, including short/long-context ranges and the included AWS fee. These
+estimates enable `--max-cost`; they are not billing totals or a guaranteed bill
+limit. This pricing entry does not change other Bedrock models' estimates.
 
 Bedrock scans, including Deep Scan workers, default to
 `model_reasoning_summary = "none"` because some Bedrock models reject
@@ -270,7 +376,10 @@ settings in `--codex` overrides or the selected Codex profile take precedence.
 For standard scans on older CLI versions, append
 `--codex 'model_reasoning_summary="none"'` to your scan command if Bedrock
 reports that `reasoning.summary` is unsupported. Deep scans require a CLI
-version that forwards this setting to workers.
+version that forwards this setting to discovery and reducer workers, including
+resumed workers. Version `0.1.27` and later includes that fix.
+
+### OpenAI credentials
 
 On Windows, set the API key in PowerShell:
 
@@ -429,13 +538,13 @@ npx @openai/codex-security policy . --path services/api \
 
 The artifact directory contains:
 
-| File                   | Purpose                                                   |
-| ---------------------- | --------------------------------------------------------- |
-| `SECURITY.md`          | Editable policy draft.                                    |
-| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
-| `project-spec.md`      | System description and security boundaries.               |
-| `previous-SECURITY.md` | Original policy used for the diff.                        |
-| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+| File                   | Purpose                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                                                  |
+| `threatmodel.md`       | Detailed threat model with source references.                                           |
+| `project-spec.md`      | System description and security boundaries.                                             |
+| `previous-SECURITY.md` | Original policy used for the diff.                                                      |
+| `policy-draft.json`    | Target, policy hashes, revision, retained threat model, stage status, and review notes. |
 
 Keep supporting documents private until reviewed for disclosure. A generated
 threat scenario is neither owner approval nor a confirmed vulnerability.
@@ -488,7 +597,12 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 ```
 
-Use `scan --help` for options, `--version` for the installed version, and
+Use `--help` to browse commands by task, or `<command> --help` (or `-h`) for
+options and examples. `scan --help` groups options by scope, Deep Scan, results,
+and patching; `publish scan --help` groups destination settings. `scans` and
+`findings` run `list` when no subcommand is given.
+
+Use `--version` for the installed version, and
 `info --json` for package, plugin, runtime, and model details. `--dry-run`
 runs local preflight checks. `info -c FILE --json` inspects resolved configuration
 and its sources without a repository or runtime.
@@ -855,14 +969,30 @@ max_concurrent_threads_per_session = 9
 sandbox = "unelevated"
 ```
 
-Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
-for reasoning effort. Repeat `--codex KEY=VALUE` for other TOML settings:
+Use `--model MODEL` to choose a model and `--effort EFFORT`
+for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
+`policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
+`scans match`, and `scans compare`.
+
+Model IDs and reasoning effort values are passed through to Codex unchanged.
+The wrapper accepts values such as `minimal`, `none`, and `high`, as
+well as future values, without requiring a wrapper update. Supported combinations
+depend on the model, inference provider, installed Codex version, and credentials.
+Codex and provider errors are reported without substituting another model or effort.
+Omitting these flags preserves each command's defaults: scans, policy generation,
+validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
+matching and severity classification use Codex's configured model and `medium` effort.
+
+Repeat `--codex KEY=VALUE` for other TOML settings on commands that support it:
 
 ```bash
 npx @openai/codex-security scan . \
-  --model gpt-5.6-terra \
+  --model gpt-6.1-sol \
   --effort high \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
+
+npx @openai/codex-security patch issues.md --model gpt-6-astra --effort max
+npx @openai/codex-security verify-fix issues.md --model gpt-6.1-sol --effort high
 ```
 
 The thread limit of `9` includes the parent and up to eight delegated workers.
@@ -879,9 +1009,39 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
-`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
-other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--auth`, `--model`, and `--effort`.
+Their `--codex` overrides are limited to `model`, `model_reasoning_effort`,
+`model_provider`, `model_providers`, and `analytics.enabled`.
+Use the same provider settings as `scan` when routing a standalone patch
+through a custom inference gateway:
+
+```bash
+npx @openai/codex-security patch "Security issue" \
+  --model gateway-model \
+  --codex 'model_provider="gateway"' \
+  --codex 'model_providers.gateway.name="Gateway"' \
+  --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
+  --codex 'model_providers.gateway.wire_api="responses"' \
+  --codex 'model_providers.gateway.env_key="GATEWAY_API_KEY"'
+```
+
+Set the selected provider's API-key environment variable before running the
+command; `--auth api-key` uses that configured variable. For `patch` and
+`verify-fix`, provider overrides preserve unspecified fields from the provider's
+existing Codex configuration. With `auto` or `api-key` authentication, a configured
+`env_key` takes precedence over OpenAI account authentication, matching native Codex.
+Explicit `--auth chatgpt` omits the selected custom provider's API-key environment
+variable, clears any configured `experimental_bearer_token`, and selects stored
+account authentication in its runtime configuration, even if the provider normally
+uses only an API key or bearer token. The original environment and
+Codex configuration remain unchanged.
+Model, effort, and provider settings also apply to
+`patch --assess-patch-risk`.
+Sandbox, approval, and plugin settings remain controlled by the command.
+
+`scans resume` and `scans rerun` retain the saved scan's settings. `dedupe` uses
+separate screening and review models, so it does not expose a single model/effort
+override.
 
 Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
 built-in metrics for a command:
@@ -918,7 +1078,7 @@ restrictions.
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                      |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
 | `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
@@ -938,6 +1098,24 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
+
+### Troubleshooting
+
+By default, scans show progress, state transitions, warnings, and summaries.
+Add `--verbose` or set
+`CODEX_SECURITY_LOG_LEVEL=debug` to include lifecycle, configuration, retry,
+and worker diagnostics on stderr. `LOG_LEVEL=debug` is the fallback when
+`CODEX_SECURITY_LOG_LEVEL` is unset or blank.
+
+```bash
+npx @openai/codex-security scan . --verbose
+```
+
+Codex Security preserves diagnostic text, including credential-shaped values,
+in CLI output, stored failures, publication receipts, and patch-risk summaries.
+Verbosity controls the amount of diagnostic detail. Native Codex and upstream
+SDK output may already have been redacted before reaching Codex Security.
+Review output and artifacts for sensitive information before sharing them.
 
 ### Progress and cost
 
@@ -967,6 +1145,8 @@ means an upper estimate is unavailable, including models without verified
 long-context rates. `cost.pricing` records the price source, verification date,
 processing tier, short-context rates, and verified long-context rates when known.
 Models without known short-context prices still have no cost estimate.
+GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna have verified standard prices for cost
+estimates and `--max-cost` limits.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
@@ -1583,7 +1763,16 @@ retaining stable finding identities. Ctrl-C keeps comparisons already saved.
 Only high-confidence duplicates are grouped; uncertain and independently
 related findings stay separate. Matching preserves triage and sealed artifacts.
 
-Codex is called only when a new decision is needed, using existing authentication.
+Codex runs only for new matching decisions, using existing authentication.
+`scans match` and `scans compare` accept `--model` and `--effort`; the defaults
+are Codex's configured model and `medium` effort. Cached matches are reused
+even when these flags change. To recompute all matches:
+
+```bash
+npx @openai/codex-security scans match --all --force \
+  --model gpt-6.1-sol --effort high
+```
+
 Scans without sealed artifacts are skipped, but their confirmed links can still
 be reused. Older custom plugins save confirmed and uncertain matches; use the
 bundled plugin for related links and large comparisons.
@@ -1633,13 +1822,79 @@ contain them. Press `d` during a scan for details, then `a` for all sources,
 
 ### Exports and CI
 
-`export` writes CSV, JSON, or SARIF from a completed, sealed scan, defaulting to
-the current repository's latest completed scan. It doesn't start Codex or load
-credentials. Use `--output -` for stdout and `--source-root PATH` to add SARIF
-source-line fingerprints. `export --help` lists all options.
+`export` reads saved results without starting Codex or loading credentials.
+It defaults to the current repository's latest completed scan. Select a result
+directory positionally, or use `--scan ID` with a scan ID or unique prefix;
+these source selectors cannot be combined. `--artifact findings` is the default
+and requires sealed results. Findings support `--export-format csv|json|sarif`,
+with `sarif` as the default. Use `--source-root PATH` to add SARIF source-line
+fingerprints.
+
+Standard, Deep, Diff, and policy workflows save threat models with
+their results. They also write `threatmodel.md`; if that file cannot be written,
+the saved model remains available for export. Component and bulk scans keep a
+separate model for each child run. New documents record the model and scan
+scopes and identify provisional or recovered content. Some results have no
+saved model.
+
+Use `--artifact threat-model` to export the retained model as Markdown. The
+format is `md` and the default destination is `./threatmodel.md`. Explicitly
+selected results can expose a saved model before scan completion or after a
+later failure. Policy result directories and historical saved Markdown models
+are also supported. A historical document in a sealed scan must be listed in
+the manifest with a matching digest. A missing model returns an error; export
+does not substitute an older run or generate a new model.
+
+```bash
+codex-security export --artifact threat-model
+codex-security export --scan SCAN_ID --artifact threat-model --output docs/threatmodel.md
+codex-security export /path/to/policy-results --artifact threat-model --output -
+codex-security scan . --knowledge-base docs/threatmodel.md
+```
+
+`--output -` emits only artifact content, with diagnostics on stderr. Markdown
+and CSV stdout cannot be combined with JSON command output. Exporting into a
+repository does not make the document automatic scan input; use the existing
+`--knowledge-base` option when you want to provide it as context.
+
+`ScanResult.threatModel` contains the saved structured model or Markdown.
+`threatModelPath` points to its current document, including supported historical
+filenames. Either can be null. The model remains exportable when the document
+could not be written. Scan JSON and policy results expose these fields. History
+reports model availability, provenance, and the document path without including
+the model body. Policy generation saves its model before drafting `SECURITY.md`,
+so a later drafting failure does not discard it.
+
+SDK scan methods verify model paths before returning them. A manually
+constructed `ScanResult` uses the `threatModelPath` supplied in its options, or
+`null` if omitted.
+
+The SDK offers the same offline export without an authenticated session:
+
+```ts
+import { exportArtifact } from "@openai/codex-security";
+
+const exported = await exportArtifact({
+  source: { directory: "/path/to/scan-results" }, // Or { scanId: "SCAN_ID" }.
+  artifact: "threat-model",
+  output: "/path/to/threatmodel.md",
+});
+console.log(exported.path, exported.provenance);
+```
+
+`exportArtifact` also supports findings with `format: "csv" | "json" | "sarif"`.
+For threat-model file exports, returned provenance belongs to the same saved
+snapshot as the exported document. `output: "-"` streams to stdout and returns
+null path/provenance. `pythonPath` selects the helper interpreter and `signal`
+cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+CSV escapes spreadsheet formula prefixes and literal leading apostrophes with
+an extra apostrophe; import removes that escape. Older CSV exports cannot
+distinguish some literal apostrophes from escapes. Use the JSON export when
+recovering those values from an older scan. Distinct CSV occurrence IDs are
+retained even when their finding IDs match, including when publishing CSV.
 
 For CI, save output outside the checkout and set a severity threshold:
 
@@ -1763,9 +2018,10 @@ npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
-`--scan latest` selects the current repository's latest scan. Patch commands
-support `--json`, including literal-text and file inputs. Change
-the model with `--codex 'model="gpt-5.6-sol"'` or effort with `--effort high`.
+`--scan latest` selects the current repository's latest completed scan. Patch
+commands support `--json`, including literal-text and file inputs. Change
+the model with `--model gpt-6.1-sol` or effort with `--effort high`.
+The existing `--codex 'model="..."'` syntax is also supported.
 Each finding gets its own saved Codex desktop task.
 
 Before patching, the CLI runs a command with the task's sandbox policy. If the
@@ -1940,6 +2196,12 @@ an authenticated proxy. It does not add authentication or broaden the default
 network binding.
 
 ### API
+
+Mutation requests to `POST /v1/bulk/findings` and `POST /v1/dedupe-groups` require
+`Content-Type: application/json`; charset parameters are accepted. Other media
+types, including a missing content type, return HTTP 400 `invalid_request`
+before embedding or storage. The API remains unauthenticated and requires an
+authenticated TLS proxy before sharing access.
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
@@ -2530,8 +2792,8 @@ Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 without a state override, the service uses the same default state directory as
 the CLI. These settings also work on Windows.
 
-HTTP routing, orchestration, embedding generation, and the SQLite adapter live
-separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
+HTTP routing, embedding generation, and the SQLite adapter live
+separately under `src/server/`. `startFindingsServer` receives a `FindingEmbedder`
 whose `embed(findings)` method returns one `{ model, vector }` per finding in
 input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
@@ -2568,6 +2830,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
+Use device login only if your workspace allows it.
 With a published image, run from the Codex Security repository root:
 
 ```bash

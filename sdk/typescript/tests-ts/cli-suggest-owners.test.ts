@@ -1,25 +1,27 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { resolving } from "./support/promises.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { FindingsDocument } from "../src/models.js";
 import type { OwnerSuggestions } from "../src/suggest-owners.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "owner-cli-",
+  false,
+);
+afterEach(cleanup);
 
 async function input() {
-  const directory = await mkdtemp(join(tmpdir(), "owner-cli-"));
-  directories.push(directory);
+  const directory = await temporaryDirectory();
   const contents = await readFile(
     join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
     "utf8",
@@ -44,8 +46,8 @@ test("accepts exported findings, forwards model settings, and leaves the input u
   const { directory, contents, document } = await input();
   await mkdir(join(directory, "source repo"));
   const deps = dependencies({ currentDirectory: directory });
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   deps.suggestOwners = async (repository, findings, options, surface) => {
     expect(repository).toBe(join(directory, "source repo"));
     expect(findings).toEqual(document.findings);
@@ -59,7 +61,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
     return report;
   };
   expect(
-    await main(
+    await runCli(
       [
         "suggest-owners",
         "findings.json",
@@ -71,8 +73,6 @@ test("accepts exported findings, forwards model settings, and leaves the input u
         "high",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       deps,
     ),
     stderr.text(),
@@ -86,7 +86,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
 test("uses the current repository by default and emits a partial report with exit code 2", async () => {
   const { directory } = await input();
   const deps = dependencies({ currentDirectory: directory });
-  const stdout = capture();
+  const stdout = captureCli(main, "stdout");
   deps.suggestOwners = async (repository, findings, options) => {
     expect(repository).toBe(directory);
     expect(options!.model).toBeUndefined();
@@ -107,12 +107,7 @@ test("uses the current repository by default and emits a partial report with exi
     };
   };
   expect(
-    await main(
-      ["suggest-owners", "findings.json", "--json"],
-      stdout.stream,
-      capture().stream,
-      deps,
-    ),
+    await stdout.run(["suggest-owners", "findings.json", "--json"], deps),
   ).toBe(2);
   expect(JSON.parse(stdout.text()).results[0].status).toBe("error");
 });
@@ -124,27 +119,19 @@ test("rejects invalid input and extra arguments before model execution", async (
     '{"findings":[{"title":"Incomplete"}]}',
   );
   const deps = dependencies({ currentDirectory: directory });
-  let called = false;
-  deps.suggestOwners = async () => {
-    called = true;
-    return report;
-  };
+  const suggestOwners = mock(resolving(report));
+  deps.suggestOwners = suggestOwners;
   for (const args of [
     [],
     ["invalid.json"],
     ["findings.json", "extra"],
     ["findings.json", "--source-root"],
   ]) {
-    expect(
-      await main(
-        ["suggest-owners", ...args],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCapturedCli(main, ["suggest-owners", ...args], deps)).toBe(
+      2,
+    );
   }
-  expect(called).toBe(false);
+  expect(suggestOwners).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -162,14 +149,23 @@ test.each([
       return report;
     };
     expect(
-      await main(
-        ["suggest-owners", "findings.json"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
+      await runCapturedCli(main, ["suggest-owners", "findings.json"], deps),
     ).toBe(code);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   },
 );
+
+test("reports owner lookup errors without changing the diagnostic or leaving listeners", async () => {
+  const { directory } = await input();
+  const signals = new FakeSignals();
+  const deps = dependencies({ currentDirectory: directory, signals });
+  deps.suggestOwners = async () => {
+    throw new Error("Owner lookup failed.");
+  };
+  const stderr = captureCli(main, "stderr");
+  expect(await stderr.run(["suggest-owners", "findings.json"], deps)).toBe(2);
+  expect(stderr.text()).toBe("codex-security: Owner lookup failed.\n");
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});

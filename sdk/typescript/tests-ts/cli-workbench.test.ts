@@ -1,26 +1,32 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
-import { DiffTarget } from "../src/index.js";
+import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
 import {
   matchScanFindings,
   type ScanComparisonInput,
 } from "../src/scan-comparison.js";
 import {
-  capture,
+  savedRecipe,
   dependencies,
   FakeSignals,
   fakeResult,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
       {
@@ -33,10 +39,8 @@ describe("CLI workbench", () => {
       { findings: [{ title: "Finding 2" }], nextOffset: null },
     ];
     expect(
-      await main(
+      await stdout.run(
         ["findings", "list", "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           onWorkbench: (args) => responses[calls.push(args) - 1]!,
         }),
@@ -56,10 +60,9 @@ describe("CLI workbench", () => {
       findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
     });
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["findings", "--json"],
-        capture().stream,
-        capture().stream,
         dependencies({ onWorkbench: () => ({ repositories: [] }) }),
       ),
     ).toBe(0);
@@ -71,15 +74,8 @@ describe("CLI workbench", () => {
           confirmedInLatestScan,
         })),
       });
-      const stderr = capture();
-      expect(
-        await main(
-          ["scan"],
-          capture().stream,
-          stderr.stream,
-          dependencies({ result }),
-        ),
-      ).toBe(0);
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(["scan"], dependencies({ result }))).toBe(0);
       expect(stderr.text()).toContain(
         confirmed.length
           ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
@@ -106,28 +102,21 @@ describe("CLI workbench", () => {
       ],
     ];
     for (const [argv, expected] of cases) {
-      let invocation: readonly string[] | undefined;
-      const deps = dependencies({
-        onWorkbench: (args) => {
-          invocation = args;
-          return { scans: [{ scanId: "scan-1" }] };
-        },
+      const onWorkbench = mock((_args: readonly string[]) => {
+        return { scans: [{ scanId: "scan-1" }] };
       });
-      deps.createSecurity = () => {
-        throw new Error("history must not initialize Codex");
-      };
-      expect(await main(argv, capture().stream, capture().stream, deps)).toBe(
-        0,
-      );
-      expect(invocation).toEqual(expected);
+      const deps = dependencies({
+        onWorkbench,
+      });
+      deps.createSecurity = throwing("history must not initialize Codex");
+      expect(await runCapturedCli(main, argv, deps)).toBe(0);
+      expect(onWorkbench.mock.lastCall?.[0]).toEqual(expected);
     }
 
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["scan", "scans", "--dry-run", "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies(),
       ),
     ).toBe(0);
@@ -191,7 +180,17 @@ describe("CLI workbench", () => {
         { scanId: "legacy" },
       ],
       [
-        ["scans", "compare", "before", "after", "--json"],
+        [
+          "scans",
+          "compare",
+          "before",
+          "after",
+          "--model",
+          "synthetic-model",
+          "--effort",
+          "high",
+          "--json",
+        ],
         [
           "compare-scans",
           "--before-scan-id",
@@ -209,7 +208,17 @@ describe("CLI workbench", () => {
         { comparable: true, summary: { persisting: 1, resolved: 1 } },
       ],
       [
-        ["scans", "match", "before", "after", "--json"],
+        [
+          "scans",
+          "match",
+          "before",
+          "after",
+          "--model",
+          "synthetic-model",
+          "--effort",
+          "high",
+          "--json",
+        ],
         [
           "compare-scans",
           "--before-scan-id",
@@ -228,30 +237,23 @@ describe("CLI workbench", () => {
       ],
     ];
     for (const [argv, expected, response, output] of cases) {
-      const calls: Array<readonly string[]> = [];
-      const stdout = capture();
-      const deps = dependencies({
-        onWorkbench: (args) => {
-          calls.push(args);
-          return response;
-        },
+      const calls = mock((_args: readonly string[]) => {
+        return response;
       });
-      deps.createSecurity = () => {
-        throw new Error("history must not initialize Codex");
-      };
-      deps.matchFindings = async () => {
-        throw new Error("saved matches must not initialize Codex");
-      };
-      expect(await main(argv, stdout.stream, capture().stream, deps)).toBe(0);
-      expect(calls).toEqual([expected]);
+      const stdout = captureCli(main, "stdout");
+      const deps = dependencies({
+        onWorkbench: calls,
+      });
+      deps.createSecurity = throwing("history must not initialize Codex");
+      deps.matchFindings = rejecting("saved matches must not initialize Codex");
+      expect(await stdout.run(argv, deps)).toBe(0);
+      expect(calls.mock.calls.map(([value]) => value)).toEqual([expected]);
       expect(JSON.parse(stdout.text())).toEqual(output);
     }
   });
 
   test("shows saved scan activity without starting Codex", async () => {
-    const state = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-cli-logs-")),
-    );
+    const state = await temporaryDirectory("codex-security-cli-logs-", true);
     try {
       const sessions = join(state, "codex-home", "sessions", "2026", "08");
       const scanDirectory = join(state, "scans", "scan-1");
@@ -324,7 +326,7 @@ describe("CLI workbench", () => {
       );
 
       const calls: Array<readonly string[]> = [];
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       const deps = dependencies({
         environment: { CODEX_SECURITY_STATE_DIR: state },
         onWorkbench: (args): JsonObject => {
@@ -348,16 +350,9 @@ describe("CLI workbench", () => {
           };
         },
       });
-      deps.createSecurity = () => {
-        throw new Error("logs must not initialize Codex");
-      };
+      deps.createSecurity = throwing("logs must not initialize Codex");
       expect(
-        await main(
-          ["scans", "logs", "scan-1", "--json"],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
+        await stdout.run(["scans", "logs", "scan-1", "--json"], deps),
       ).toBe(0);
       expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
       expect(stdout.text()).toContain("SYNTHETIC_KEY");
@@ -365,15 +360,8 @@ describe("CLI workbench", () => {
       expect(stdout.text()).not.toContain("PRIVATE LATER SESSION");
 
       calls.length = 0;
-      const latest = capture();
-      expect(
-        await main(
-          ["scans", "logs", "--json"],
-          latest.stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
+      const latest = captureCli(main, "stdout");
+      expect(await latest.run(["scans", "logs", "--json"], deps)).toBe(0);
       expect(calls).toEqual([
         ["list-scans", "--repository", "/current/repository", "--limit", "1"],
         ["get-scan", "--scan-id", "scan-1"],
@@ -385,12 +373,10 @@ describe("CLI workbench", () => {
   });
 
   test("explains when a saved scan has no associated session", async () => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scans", "logs", "scan-1"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           onWorkbench: () => ({
             scan: { scanId: "scan-1", targetPath: "/repo" },
@@ -426,13 +412,11 @@ describe("CLI workbench", () => {
     ] as const) {
       const calls: Array<readonly string[]> = [];
       let comparisonInput: string | undefined;
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
 
       expect(
-        await main(
+        await stdout.run(
           ["scans", command, ...scanIds, "--json"],
-          stdout.stream,
-          capture().stream,
           dependencies({
             onWorkbench: (args, input): JsonObject => {
               calls.push(args);
@@ -479,13 +463,76 @@ describe("CLI workbench", () => {
     }
   });
 
+  test.each([
+    ["match", ["before", "after"]],
+    ["match", ["--all"]],
+    ["compare", ["before", "after"]],
+  ] as const)(
+    "forwards optional model settings for scans %s %j",
+    async (command, scanArgs) => {
+      for (const selection of [
+        [],
+        ["--model", "synthetic-model", "--effort", "high"],
+      ]) {
+        const selections: Array<{
+          model?: string;
+          reasoningEffort?: string;
+        }> = [];
+        const before = [{ occurrenceId: "before" }];
+        const after = [{ occurrenceId: "after" }];
+        expect(
+          await runCapturedCli(
+            main,
+            ["scans", command, ...scanArgs, ...selection, "--json"],
+            dependencies({
+              onWorkbench: (args): JsonObject => {
+                if (args[0] === "compare-scans") {
+                  return {
+                    matchingCached: false,
+                    matchingInputs: { before, after },
+                  };
+                }
+                if (args[0] === "list-unmatched-scan-pairs") {
+                  return {
+                    repository: "/current/repository",
+                    scanCount: 2,
+                    unavailableScans: 0,
+                    skippedPairs: 0,
+                    batches: [
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
+                    ],
+                  };
+                }
+                return {};
+              },
+              onMatch: async (_input, options) => {
+                selections.push({
+                  model: options?.model,
+                  reasoningEffort: options?.reasoningEffort,
+                });
+                return { matches: [], uncertain: [] };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(selections).toEqual([
+          selection.length === 0
+            ? { model: undefined, reasoningEffort: undefined }
+            : { model: "synthetic-model", reasoningEffort: "high" },
+        ]);
+      }
+    },
+  );
+
   test("requires two completed scans for a default comparison", async () => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scans", "compare"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           onWorkbench: () => ({
             scans: [{ scanId: "scan-1" }],
@@ -500,13 +547,11 @@ describe("CLI workbench", () => {
 
   test("reports automatic matching failures without saving a comparison", async () => {
     const calls: string[] = [];
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
 
     expect(
-      await main(
+      await stderr.run(
         ["scans", "compare", "before", "after"],
-        capture().stream,
-        stderr.stream,
         dependencies({
           onWorkbench: (args) => {
             calls.push(args[0]!);
@@ -515,9 +560,7 @@ describe("CLI workbench", () => {
               matchingInputs: { before: [], after: [] },
             };
           },
-          onMatch: async () => {
-            throw new Error("Root-cause matching failed.");
-          },
+          onMatch: rejecting("Root-cause matching failed."),
         }),
       ),
     ).toBe(2);
@@ -528,13 +571,11 @@ describe("CLI workbench", () => {
   test.each([false, true])(
     "keeps matching progress on stderr with TTY=%p",
     async (isTTY) => {
-      const stdout = capture();
-      const stderr = capture(isTTY);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: isTTY });
+
       expect(
-        await main(
+        await runCli(
           ["scans", "match", "before", "after", "--json"],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             onWorkbench: (args): JsonObject =>
               args[0] === "compare-scans"
@@ -577,12 +618,10 @@ describe("CLI workbench", () => {
     async (args, signal, expectedExit) => {
       const signals = new FakeSignals();
       const commands: string[] = [];
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["scans", "match", ...args, "--json"],
-          capture().stream,
-          stderr.stream,
           dependencies({
             signals,
             environment: { CODEX_SECURITY_STATE_DIR: "/synthetic/state" },
@@ -628,8 +667,8 @@ describe("CLI workbench", () => {
     "reports cancellation during a %s instead of success",
     async (stage) => {
       const signals = new FakeSignals();
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       let observedSignal: AbortSignal | undefined;
       const target =
         stage === "cached comparison"
@@ -639,10 +678,8 @@ describe("CLI workbench", () => {
             : "save-scan-comparison";
       const args = stage === "matching plan" ? ["--all"] : ["before", "after"];
       expect(
-        await main(
+        await runCli(
           ["scans", "match", ...args, "--json"],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             signals,
             onWorkbench: (command, _input, signal): JsonObject => {
@@ -677,49 +714,40 @@ describe("CLI workbench", () => {
     "debounces matching %s and allows a later %s to terminate a blocked workbench",
     async (first, second, delay, expectedExit) => {
       const signals = new FakeSignals();
-      let began!: () => void;
-      const started = new Promise<void>((resolve) => {
-        began = resolve;
-      });
-      let finish!: (value: JsonObject) => void;
-      const pending = new Promise<JsonObject>((resolve) => {
-        finish = resolve;
-      });
+      const started = Promise.withResolvers<void>();
+      const pending = Promise.withResolvers<JsonObject>();
       let observedSignal: AbortSignal | undefined;
-      const forced: string[] = [];
+      const forced = mock((_signal: string) => {});
       let now = 0;
       const deps = dependencies({
         signals,
         onWorkbench: async (_args, _input, signal) => {
           observedSignal = signal;
-          began();
-          return await pending;
+          started.resolve();
+          return await pending.promise;
         },
       });
       deps.now = () => now;
-      deps.forceExit = (signal) => {
-        forced.push(signal);
-      };
-      const running = main(
+      deps.forceExit = forced;
+      const running = runCapturedCli(
+        main,
         ["scans", "match", "before", "after", "--json"],
-        capture().stream,
-        capture().stream,
         deps,
       );
-      await started;
+      await started.promise;
       signals.emit(first);
       expect(observedSignal?.aborted).toBe(true);
       signals.emit(first);
-      expect(forced).toEqual([]);
+      expect(forced).not.toHaveBeenCalled();
       now = delay;
       signals.emit(second);
-      expect(forced).toEqual([second]);
+      expect(forced.mock.calls.map(([value]) => value)).toEqual([second]);
       expect(
         [...signals.listeners.values()].every(
           (listeners) => listeners.size === 0,
         ),
       ).toBe(true);
-      finish({ matchingCached: true, summary: {} });
+      pending.resolve({ matchingCached: true, summary: {} });
       expect(await running).toBe(expectedExit);
     },
   );
@@ -754,14 +782,48 @@ describe("CLI workbench", () => {
     ];
     const calls: Array<readonly string[]> = [];
     const inputs: Array<string | undefined> = [];
-    let matcherCalls = 0;
-    const stdout = capture();
+    const matcherCalls = mock<typeof matchScanFindings>(async (input) => {
+      return input.after[0]?.occurrenceId === "b"
+        ? {
+            matches: [
+              {
+                beforeOccurrenceIds: ["a"],
+                afterOccurrenceIds: ["b"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+            ],
+            uncertain: [],
+          }
+        : {
+            matches: [
+              {
+                beforeOccurrenceIds: ["a", "b"],
+                afterOccurrenceIds: ["c"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+              {
+                beforeOccurrenceIds: ["a-shared"],
+                afterOccurrenceIds: ["c-shared"],
+                confidence: "high",
+                reason: "Same root cause.",
+              },
+            ],
+            uncertain: [
+              {
+                beforeOccurrenceId: "b-shared",
+                afterOccurrenceId: "c-shared",
+                reason: "Possibly the same root cause.",
+              },
+            ],
+          };
+    });
+    const stdout = captureCli(main, "stdout");
 
     expect(
-      await main(
+      await stdout.run(
         ["scans", "match", "--all", "--force", "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           onWorkbench: (args, input): JsonObject => {
             calls.push(args);
@@ -776,48 +838,11 @@ describe("CLI workbench", () => {
                 }
               : {};
           },
-          onMatch: async (input) => {
-            matcherCalls += 1;
-            return input.after[0]?.occurrenceId === "b"
-              ? {
-                  matches: [
-                    {
-                      beforeOccurrenceIds: ["a"],
-                      afterOccurrenceIds: ["b"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                  ],
-                  uncertain: [],
-                }
-              : {
-                  matches: [
-                    {
-                      beforeOccurrenceIds: ["a", "b"],
-                      afterOccurrenceIds: ["c"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                    {
-                      beforeOccurrenceIds: ["a-shared"],
-                      afterOccurrenceIds: ["c-shared"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                  ],
-                  uncertain: [
-                    {
-                      beforeOccurrenceId: "b-shared",
-                      afterOccurrenceId: "c-shared",
-                      reason: "Possibly the same root cause.",
-                    },
-                  ],
-                };
-          },
+          onMatch: matcherCalls,
         }),
       ),
     ).toBe(0);
-    expect(matcherCalls).toBe(2);
+    expect(matcherCalls).toHaveBeenCalledTimes(2);
     expect(calls[0]).toEqual([
       "list-unmatched-scan-pairs",
       "--repository",
@@ -879,10 +904,9 @@ describe("CLI workbench", () => {
     let saved: string | undefined;
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["scans", "match", "--all", "--json"],
-        capture().stream,
-        capture().stream,
         dependencies({
           onWorkbench: (args, input): JsonObject => {
             if (args[0] === "save-scan-comparison") saved = input;
@@ -931,10 +955,9 @@ describe("CLI workbench", () => {
     const matchedInputs: ScanComparisonInput[] = [];
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["scans", "match", "--all", "--json"],
-        capture().stream,
-        capture().stream,
         dependencies({
           onWorkbench: (args): JsonObject =>
             args[0] === "list-unmatched-scan-pairs"
@@ -1017,18 +1040,11 @@ describe("CLI workbench", () => {
           : {};
       },
     });
-    deps.matchFindings = async () => {
-      throw new Error("empty comparisons must not start Codex");
-    };
+    deps.matchFindings = rejecting("empty comparisons must not start Codex");
 
-    expect(
-      await main(
-        ["scans", "match", "--all"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCapturedCli(main, ["scans", "match", "--all"], deps)).toBe(
+      0,
+    );
     expect(calls[1]!.at(-1)).toBe("--matches-json-stdin");
     expect(JSON.parse(comparisonInput!)).toEqual({
       matches: [],
@@ -1039,13 +1055,11 @@ describe("CLI workbench", () => {
   test("projects historical uncertainty per scan without losing a known match", async () => {
     const calls: Array<readonly string[]> = [];
     const inputs: Array<string | undefined> = [];
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["scans", "match", "--all", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           onWorkbench: (args, input): JsonObject => {
             calls.push(args);
@@ -1143,13 +1157,16 @@ describe("CLI workbench", () => {
       const before = [{ occurrenceId: "old", findingId: "identity-old" }];
       const after = [{ occurrenceId: "new", findingId: "identity-new" }];
       const calls: Array<readonly string[]> = [];
-      let modelCalls = 0;
+      const run = mock<
+        () => Promise<{ finalResponse: string }>
+      >().mockResolvedValue({
+        finalResponse: JSON.stringify({ matches: [], uncertain: [] }),
+      });
       let saved: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scans", "match", "before", "after", ...(force ? ["--force"] : [])],
-          capture().stream,
-          capture().stream,
           dependencies({
             onWorkbench: (args, input): JsonObject => {
               calls.push(args);
@@ -1173,22 +1190,14 @@ describe("CLI workbench", () => {
                 ...options,
                 codex: {
                   startThread: () => ({
-                    async run() {
-                      modelCalls += 1;
-                      return {
-                        finalResponse: JSON.stringify({
-                          matches: [],
-                          uncertain: [],
-                        }),
-                      };
-                    },
+                    run,
                   }),
                 },
               }),
           }),
         ),
       ).toBe(0);
-      expect(modelCalls).toBe(0);
+      expect(run).toHaveBeenCalledTimes(0);
       expect(saved).toMatchObject({
         matches: [
           { beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["new"] },
@@ -1210,35 +1219,59 @@ describe("CLI workbench", () => {
       ["scans", "match", "before", "after", "--all"],
       ["scans", "compare", "before", "after", "--force"],
     ]) {
-      let calls = 0;
+      const onWorkbench = mock<() => {}>().mockReturnValue({});
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           args,
-          capture().stream,
-          capture().stream,
           dependencies({
-            onWorkbench: () => {
-              calls += 1;
-              return {};
-            },
+            onWorkbench,
           }),
         ),
       ).toBe(2);
-      expect(calls).toBe(0);
+      expect(onWorkbench).toHaveBeenCalledTimes(0);
     }
   });
+
+  test.each(["scan-original", undefined])(
+    "rejects Markdown rerun output before loading scan %p",
+    async (scanId) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const onWorkbench = mock<() => {}>().mockReturnValue({});
+
+      expect(
+        await runCli(
+          [
+            "scans",
+            "rerun",
+            ...(scanId === undefined ? [] : [scanId]),
+            "--format",
+            "md",
+          ],
+          dependencies({
+            onWorkbench,
+          }),
+        ),
+      ).toBe(2);
+      expect(onWorkbench).toHaveBeenCalledTimes(0);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Markdown output is not supported for scan results.",
+      );
+    },
+  );
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["scans", "rerun"],
-        capture().stream,
-        capture().stream,
         dependencies({
           onTurn: (_repository, options) => {
-            parentScanId = (options as { parentScanId?: string }).parentScanId;
+            parentScanId = options.parentScanId;
           },
           onWorkbench: (args): JsonObject =>
             args[0] === "list-scans"
@@ -1258,9 +1291,8 @@ describe("CLI workbench", () => {
   });
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
-    let config: CodexSecurityConfig | undefined;
-    let repository: string | undefined;
-    let options: Record<string, unknown> | undefined;
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
+    const onTurn = mock<(repository: string, options: ScanOptions) => void>();
     const knowledgeBasePath = resolve("/original/security.md");
     const savedConfig = {
       approval_policy: "on-request",
@@ -1270,18 +1302,12 @@ describe("CLI workbench", () => {
       agents: { max_threads: 6 },
     };
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["scans", "rerun", "scan-original"],
-        capture().stream,
-        capture().stream,
         dependencies({
-          onConfig: (value) => {
-            config = value;
-          },
-          onTurn: (value, runOptions) => {
-            repository = value;
-            options = runOptions as Record<string, unknown>;
-          },
+          onConfig,
+          onTurn,
           onWorkbench: () => ({
             recipe: {
               repository: "/original/repository",
@@ -1303,9 +1329,9 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(config?.codexOverrides).toEqual(savedConfig);
-    expect(repository).toBe("/original/repository");
-    expect(options).toMatchObject({
+    expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
+    expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
+    expect(onTurn.mock.lastCall?.[1]).toMatchObject({
       target: ["src", "packages/core"],
       mode: "deep",
       parentScanId: "scan-original",
@@ -1338,28 +1364,18 @@ describe("CLI workbench", () => {
         ],
       ];
     for (const [target, expected] of references) {
-      let runOptions: Record<string, unknown> | undefined;
+      const onTurn = mock<(repository: string, options: ScanOptions) => void>();
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scans", "rerun", "scan-original"],
-          capture().stream,
-          capture().stream,
           dependencies({
-            onTurn: (_repository, value) => {
-              runOptions = value as Record<string, unknown>;
-            },
-            onWorkbench: () => ({
-              recipe: {
-                repository: "/original/repository",
-                target,
-                mode: "standard",
-                config: {},
-              },
-            }),
+            onTurn,
+            onWorkbench: () => savedRecipe({}, target),
           }),
         ),
       ).toBe(0);
-      expect(runOptions?.["target"]).toEqual(expected);
+      expect(onTurn.mock.lastCall?.[1]?.target).toEqual(expected);
     }
   });
 
@@ -1370,7 +1386,7 @@ describe("CLI workbench", () => {
   ] as const)(
     "preserves %s scan approval policy when rerunning saved scans",
     async (_scenario, savedApprovalPolicy, expectedApprovalPolicy) => {
-      let config: CodexSecurityConfig | undefined;
+      const onConfig = mock<(config: CodexSecurityConfig) => void>();
       const savedConfig = {
         model: "gpt-original",
         ...(savedApprovalPolicy === undefined
@@ -1379,26 +1395,16 @@ describe("CLI workbench", () => {
       };
 
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scans", "rerun", "scan-original"],
-          capture().stream,
-          capture().stream,
           dependencies({
-            onConfig: (value) => {
-              config = value;
-            },
-            onWorkbench: () => ({
-              recipe: {
-                repository: "/original/repository",
-                target: { kind: "repository", paths: [] },
-                mode: "standard",
-                config: savedConfig,
-              },
-            }),
+            onConfig,
+            onWorkbench: () => savedRecipe(savedConfig),
           }),
         ),
       ).toBe(0);
-      expect(config?.codexOverrides).toEqual({
+      expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual({
         ...savedConfig,
         approval_policy: expectedApprovalPolicy,
       });
@@ -1406,25 +1412,19 @@ describe("CLI workbench", () => {
   );
 
   test("preserves workbench failures and does not initialize Codex", async () => {
-    const stderr = capture();
-    let started = false;
+    const stderr = captureCli(main, "stderr");
+    const onRun = mock();
     expect(
-      await main(
+      await stderr.run(
         ["scans", "show", "missing"],
-        capture().stream,
-        stderr.stream,
         dependencies({
-          onRun: () => {
-            started = true;
-          },
-          onWorkbench: () => {
-            throw new Error(`Scan lookup failed ${SYNTHETIC_CREDENTIALS}`);
-          },
+          onRun,
+          onWorkbench: throwing(`Scan lookup failed ${SYNTHETIC_CREDENTIALS}`),
         }),
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
     expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
-    expect(started).toBe(false);
+    expect(onRun).not.toHaveBeenCalled();
   });
 });

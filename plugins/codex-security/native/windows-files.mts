@@ -38,106 +38,96 @@ export function windowsFileSystem(native: WindowsBinding) {
     );
   }
 
-  function open(
+  function withFile<T>(
     path: Buffer,
-    access = 0,
+    access: number,
+    action: (handle: WindowsHandle) => T,
     disposition: number = flags.OPEN_EXISTING,
     follow = true,
-  ): WindowsHandle {
+  ): T {
     const result = native.openWindowsFile(
       operationPath(path),
       access,
       flags.FILE_SHARE_READ | flags.FILE_SHARE_WRITE | flags.FILE_SHARE_DELETE,
       disposition,
-      flags.FILE_FLAG_BACKUP_SEMANTICS |
+      (access === flags.GENERIC_READ ? 0 : flags.FILE_FLAG_BACKUP_SEMANTICS) |
         (follow ? 0 : flags.FILE_FLAG_OPEN_REPARSE_POINT),
     );
     check(result.error, path);
-    return result.handle!;
-  }
-
-  function finalPath(path: Buffer): Buffer {
-    const handle = open(path);
+    const handle = result.handle!;
     try {
-      const result = handle.finalPath(0);
-      check(result.error, path);
-      return result.path;
+      return action(handle);
     } finally {
       check(handle.close(), path);
     }
   }
 
-  function realpath(path: Buffer): Buffer {
-    let normalizedText: string;
-    if (pathText(path).startsWith("\\\\?\\")) {
-      // Verbatim paths bypass Win32 dot parsing; normalize only below their root.
-      const text = pathText(path).replaceAll("/", "\\");
-      const root =
-        /^\\\\\?\\(?:UNC\\[^\\]+\\[^\\]+(?:\\|$)|[^\\]+\\)/iu.exec(text)?.[0] ??
-        win32.parse(text).root;
-      normalizedText =
-        root +
-        win32.join("\\", text.slice(root.length)).slice(1).replace(/\\+$/u, "");
-    } else {
-      const text = pathText(absolute(path));
-      const root = win32.parse(text).root;
-      normalizedText = root + text.slice(root.length).replace(/\\+$/u, "");
+  function realpath(path: Buffer, strict = true): Buffer {
+    let current = operationPath(path);
+    const missing: string[] = [];
+    while (true) {
+      try {
+        return withFile(current, 0, (handle) => {
+          const result = handle.finalPath(0);
+          check(result.error, current);
+          if (!missing.length) return result.path;
+          // Join filename components directly so a:stream remains a filename.
+          return widePath(
+            `${pathText(result.path).replace(/\\$/u, "")}\\${missing.reverse().join("\\")}`,
+          );
+        });
+      } catch (error) {
+        if (strict || (error as NodeJS.ErrnoException).code !== "ENOENT")
+          throw error;
+        try {
+          withFile(current, 0, () => {}, flags.OPEN_EXISTING, false);
+        } catch (sourceError) {
+          if ((sourceError as NodeJS.ErrnoException).code !== "ENOENT")
+            throw sourceError;
+          const text = pathText(current);
+          const parent = win32.dirname(text);
+          if (parent === text) throw error;
+          missing.push(win32.basename(text));
+          current = widePath(parent);
+          continue;
+        }
+        // An existing entry that cannot be followed is not a missing output.
+        throw error;
+      }
     }
-    const normalized = widePath(normalizedText);
-    const resolved = finalPath(normalized);
-    if (pathText(normalized).startsWith("\\\\?\\")) return resolved;
-    const text = pathText(resolved);
-    const shortened = text.startsWith("\\\\?\\UNC\\")
-      ? `\\\\${text.slice(8)}`
-      : text.startsWith("\\\\?\\")
-        ? text.slice(4)
-        : text;
-    // Like pathlib, remove the device prefix only if that spelling resolves too.
-    const candidate = widePath(shortened);
-    try {
-      if (finalPath(candidate).equals(resolved)) return candidate;
-    } catch {
-      // Extended paths can be valid when their ordinary spelling is not.
-    }
-    return resolved;
   }
 
   function stat(path: Buffer, follow = true) {
-    const handle = open(
+    return withFile(
       path,
       flags.FILE_READ_ATTRIBUTES,
+      (handle) => {
+        const info = handle.attributes();
+        check(info.error, path);
+        const type = handle.fileType();
+        check(type.error, path);
+        const link = !follow && info.reparseTag === 0xa000000c;
+        const directory =
+          (info.attributes & flags.FILE_ATTRIBUTE_DIRECTORY) !== 0;
+        return {
+          isDirectory: () => !link && directory,
+          isFile: () => !link && !directory && type.value === 1,
+          isSymbolicLink: () => link,
+          isReparsePoint: () =>
+            (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0,
+        };
+      },
       flags.OPEN_EXISTING,
       follow,
     );
-    try {
-      const info = handle.attributes();
-      check(info.error, path);
-      const type = handle.fileType();
-      check(type.error, path);
-      const link = !follow && info.reparseTag === 0xa000000c;
-      const directory =
-        (info.attributes & flags.FILE_ATTRIBUTE_DIRECTORY) !== 0;
-      return {
-        isDirectory: () => !link && directory,
-        isFile: () => !link && !directory && type.value === 1,
-        isSymbolicLink: () => link,
-        isReparsePoint: () =>
-          (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0,
-      };
-    } finally {
-      check(handle.close(), path);
-    }
   }
 
   function identity(path: Buffer) {
-    const handle = open(path, flags.FILE_READ_ATTRIBUTES);
-    try {
+    return withFile(path, flags.FILE_READ_ATTRIBUTES, (handle) => {
       const result = handle.identity();
       check(result.error, path);
       return { volume: result.volume, fileId: result.fileId };
-    } finally {
-      check(handle.close(), path);
-    }
+    });
   }
 
   function entriesWithTypes(path: Buffer) {
@@ -155,9 +145,8 @@ export function windowsFileSystem(native: WindowsBinding) {
   }
 
   function readInto(path: Buffer, buffer: Buffer): number {
-    const handle = open(path, flags.GENERIC_READ);
-    let length = 0;
-    try {
+    return withFile(path, flags.GENERIC_READ, (handle) => {
+      let length = 0;
       while (length < buffer.length) {
         const result = handle.read(
           buffer,
@@ -168,32 +157,75 @@ export function windowsFileSystem(native: WindowsBinding) {
         if (result.value === 0) break;
         length += result.value;
       }
-    } finally {
-      check(handle.close(), path);
-    }
-    return length;
+      return length;
+    });
   }
 
-  function writeFile(path: Buffer, buffer: Buffer): void {
-    const handle = open(path, flags.GENERIC_WRITE, flags.CREATE_ALWAYS);
-    let offset = 0;
-    try {
-      while (offset < buffer.length) {
-        const result = handle.write(
-          buffer,
-          offset,
-          Math.min(buffer.length - offset, 0xffffffff),
-        );
+  function readFile(path: Buffer): Buffer {
+    return withFile(path, flags.GENERIC_READ, (handle) => {
+      const chunks: Buffer[] = [];
+      while (true) {
+        const chunk = Buffer.alloc(64 * 1024);
+        const result = handle.read(chunk, 0, chunk.length);
         check(result.error, path);
-        if (result.value === 0)
-          throw new Error(
-            `Windows file write made no progress: ${pathText(path)}`,
-          );
-        offset += result.value;
+        if (result.value === 0) return Buffer.concat(chunks);
+        chunks.push(chunk.subarray(0, result.value));
       }
-    } finally {
-      check(handle.close(), path);
-    }
+    });
+  }
+
+  function writeFile(
+    path: Buffer,
+    data: Buffer | Iterable<Buffer>,
+    exclusive = false,
+  ): void {
+    withFile(
+      path,
+      flags.GENERIC_WRITE,
+      (handle) => {
+        for (const buffer of Buffer.isBuffer(data) ? [data] : data) {
+          let offset = 0;
+          while (offset < buffer.length) {
+            const result = handle.write(
+              buffer,
+              offset,
+              Math.min(buffer.length - offset, 0xffffffff),
+            );
+            check(result.error, path);
+            if (result.value === 0)
+              throw new Error(
+                `Windows file write made no progress: ${pathText(path)}`,
+              );
+            offset += result.value;
+          }
+        }
+      },
+      exclusive ? flags.CREATE_NEW : flags.CREATE_ALWAYS,
+    );
+  }
+
+  function rename(source: Buffer, destination: Buffer): void {
+    withFile(
+      source,
+      flags.DELETE,
+      (handle) => {
+        check(handle.rename(operationPath(destination), true), destination);
+      },
+      flags.OPEN_EXISTING,
+      false,
+    );
+  }
+
+  function unlink(path: Buffer): void {
+    withFile(
+      path,
+      flags.DELETE,
+      (handle) => {
+        check(handle.setDisposition(true), path);
+      },
+      flags.OPEN_EXISTING,
+      false,
+    );
   }
 
   return {
@@ -204,6 +236,9 @@ export function windowsFileSystem(native: WindowsBinding) {
     entriesWithTypes,
     mkdir,
     readInto,
+    readFile,
     writeFile,
+    rename,
+    unlink,
   };
 }

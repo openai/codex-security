@@ -1,15 +1,6 @@
+import { findingFingerprint, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  chmod,
-  cp,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
@@ -27,25 +18,20 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "classify-scan-",
+  false,
+);
 const destination = { destination: "linear", teamId: "team-example" } as const;
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "classify-scan-"));
-  directories.push(root);
+  const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDirectory, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   const manifest = JSON.parse(
     await readFile(join(scanDirectory, "scan-manifest.json"), "utf8"),
@@ -55,17 +41,7 @@ async function fixture() {
   ) as FindingsDocument;
   const other = structuredClone(document.findings[0]!);
   other.identity.instance = "second-instance";
-  const sha256 = (input: string | Buffer) =>
-    createHash("sha256").update(input).digest("hex");
-  const fingerprint = `codex-security/v1:sha256:${sha256(
-    [
-      "codex-security/v1",
-      manifest.scan.target.targetId,
-      other.ruleId,
-      other.identity.anchor,
-      other.identity.instance,
-    ].join("\0"),
-  )}`;
+  const fingerprint = findingFingerprint(manifest.scan.target.targetId, other);
   other.fingerprints.primary = fingerprint;
   other.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
   other.occurrenceId = `occ_${sha256([manifest.scan.id, fingerprint].join("\0")).slice(0, 24)}`;
@@ -289,9 +265,9 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
     await readFile(manifestPath, "utf8"),
   ) as ScanManifest;
   for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = createHash("sha256")
-      .update(await readFile(join(scanDirectory, artifact.path)))
-      .digest("hex");
+    artifact.sha256 = sha256(
+      await readFile(join(scanDirectory, artifact.path)),
+    );
   await writeFile(manifestPath, JSON.stringify(manifest));
   await expect(
     prepareScanPublication(scanDirectory, { ...destination, environment }),

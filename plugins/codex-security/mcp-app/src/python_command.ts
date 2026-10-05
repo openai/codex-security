@@ -67,8 +67,7 @@ export async function isUsablePythonExecutable(
   platform: PythonPlatform,
 ): Promise<boolean> {
   try {
-    const candidateStat = await fs.stat(candidate);
-    if (!candidateStat.isFile()) {
+    if (!(await fs.stat(candidate)).isFile()) {
       return false;
     }
     if (platform !== "win32") {

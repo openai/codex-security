@@ -19,15 +19,9 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         deep,
         "_dependencies",
-        deep.DeepScanDependencies(
-            **{
-                name: workbench_api[
-                    "preserve_stopped_results_after_transition"
-                    if name == "preserve_stopped_results"
-                    else name
-                ]
-                for name in deep.DeepScanDependencies.__dataclass_fields__
-            }
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
         ),
     )
 
