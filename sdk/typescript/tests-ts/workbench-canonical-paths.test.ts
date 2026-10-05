@@ -3,9 +3,11 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-canonical-paths-",
+);
 const testCaseSensitive = process.platform === "linux" ? test : test.skip;
 const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
@@ -83,14 +85,7 @@ const realFilesystemProbe = [
   "print(json.dumps(checks))",
 ].join("\n");
 
-afterEach(temporaryDirectories.cleanup);
-
-async function temporaryDirectory(): Promise<string> {
-  const directory = await temporaryDirectories.create(
-    "codex-security-canonical-paths-",
-  );
-  return directory;
-}
+afterEach(cleanup);
 
 function runPythonProbe(
   program: string,

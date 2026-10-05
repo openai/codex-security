@@ -17,7 +17,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "GitHub source infers attached Codex project repository"
   metadata:
@@ -40,7 +40,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "GitHub Dependabot malware uses REST malware classification"
   metadata:
@@ -61,7 +61,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "GitHub code scanning uses REST alerts and instances"
   metadata:
@@ -84,7 +84,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "GitHub advisories include private report triage state"
   metadata:
@@ -105,7 +105,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "Explicit GitHub Connector request preserves the selected transport"
   metadata:
@@ -132,7 +132,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts
 
 - description: "Explicit GitHub Issue is supported outside all-source intake"
   metadata:
@@ -153,4 +153,4 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/github-rest-intake.js
+      value: file://./assertions/github-rest-intake.mts

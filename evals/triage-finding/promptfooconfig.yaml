@@ -37,7 +37,7 @@ evaluateOptions:
 
 defaultTest:
   options:
-    transformVars: file://./scripts/runtime-vars.js
+    transformVars: file://./scripts/runtime-vars.mts
   vars:
     invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security findings."
     eval_instructions: |-
@@ -57,7 +57,7 @@ defaultTest:
     - type: contains-json
       value: file://./schemas/triage-result-v0.schema.json
     - type: javascript
-      value: file://./assertions/triage-io.js
+      value: file://./assertions/triage-io.mts
 
 tests:
   - file://./tests/input-types.yaml
