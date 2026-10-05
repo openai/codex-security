@@ -14,7 +14,7 @@ from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_toml import tomllib
+from workbench.runtime_toml import tomllib
 from workbench_constants import positive_int
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_toml import tomllib
+from workbench.runtime_toml import tomllib
 
 DEFAULTS = json.loads(
     Path(__file__).with_name("deep_scan_defaults.json").read_text(encoding="utf-8")
