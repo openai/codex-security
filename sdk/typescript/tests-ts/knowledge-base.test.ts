@@ -112,6 +112,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");
     expect(documents).toContain("Prioritize SSRF.");
+    expect(documents).not.toContain("Repository metadata.");
     expect(knowledgeBase.path.startsWith(root)).toBe(false);
     if (process.platform !== "win32") {
       expect((await stat(knowledgeBase.path)).mode & 0o777).toBe(0o700);
