@@ -5794,11 +5794,16 @@ export async function main(
   let notice: UpdateNotice | undefined;
   try {
     await cli.serve(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      argv.flatMap((argument) => {
+        if (
+          !/^--(?:format|filter-output|token-limit|token-offset)=/u.test(
+            argument,
+          )
+        )
+          return [argument];
+        const separator = argument.indexOf("=");
+        return [argument.slice(0, separator), argument.slice(separator + 1)];
+      }),
       {
         stdout: frameworkCapture.stream.write,
         exit: (code) => {
@@ -6182,6 +6187,8 @@ function validateCliArguments(
       "validate",
       "verify-fix",
       "suggest-owners",
+      "classify-severity",
+      "dedupe",
       "patch",
       "login",
       "logout",
@@ -9379,12 +9386,12 @@ export function parseCodexOverrides(
   }
   for (const value of values) {
     const separator = value.indexOf("=");
-    const key = separator < 0 ? "" : value.slice(0, separator);
+    const key = separator < 0 ? "" : value.slice(0, separator).trim();
     const literal = separator < 0 ? "" : value.slice(separator + 1);
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    const parts = key.split(".");
+    const parts = key.split(".").map((part) => part.trim());
     if (
       parts.some(
         (part) =>
