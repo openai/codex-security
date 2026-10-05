@@ -1387,9 +1387,11 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      await expect(client.run(repository)).rejects.toThrow(
-        `Set ${apiKey} to run a scan through ${name}.`,
-      );
+      for (const operation of ["preflight", "run"] as const) {
+        await expect(client[operation](repository)).rejects.toThrow(
+          `Set ${apiKey} to run a scan through ${name}.`,
+        );
+      }
       expect(prepareRuntime).not.toHaveBeenCalled();
       await client.close();
     },
@@ -5202,6 +5204,20 @@ describe("CodexSecurity orchestration", () => {
                   async runStreamed() {
                     if (++scansStarted === 2) concurrentScans.resolve();
                     await concurrentScans.promise;
+                    const workerConfig = parseToml(
+                      await readFile(
+                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(workerConfig["model_provider"]).toBe(
+                      provider ?? "openai",
+                    );
+                    if (provider !== undefined) {
+                      expect(workerConfig["model_providers"]).toEqual({
+                        [provider]: OPENROUTER_CODEX_PROVIDER,
+                      });
+                    }
                     throw new Error("parallel API-key scan reached");
                   },
                 }),
@@ -5959,6 +5975,84 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("Windows shim fallback restores bundled tools in the child environment", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "Windows shim fallback restores bundled tools in the child environment",
+      )
+    )
+      return;
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const executable = join(
+      root,
+      "vendor",
+      "synthetic-target",
+      "bin",
+      "codex.exe",
+    );
+    const bundledTools = join(dirname(dirname(executable)), "codex-path");
+    const inheritedTools = join(root, "operator-tools");
+    await mkdir(bundledTools, { recursive: true });
+    await mkdir(inheritedTools);
+    const originalPlatform = Object.getOwnPropertyDescriptor(
+      process,
+      "platform",
+    )!;
+    let childPath: string | undefined;
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          CODEX_CLI_PATH: join(root, "codex.cmd"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+        prepareRuntime: runtimePreparer(codexHome, () => ({
+          environment: {
+            CODEX_HOME: codexHome,
+            CODEX_CLI_PATH: executable,
+            PATH: inheritedTools,
+          },
+        })),
+        resolveCodexCommand: () => ({ command: executable }),
+        resolvePluginPython: async () => {
+          Object.defineProperty(process, "platform", {
+            value: "win32",
+            configurable: true,
+          });
+          return "/managed/python";
+        },
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              childPath = execFileSync(
+                process.execPath,
+                ["-e", "console.log(process.env.PATH)"],
+                { env: options.env, encoding: "utf8" },
+              ).trim();
+              throw new Error("child environment captured");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(client.run(repository)).rejects.toThrow(
+        "child environment captured",
+      );
+      expect(childPath?.split(delimiter)).toEqual([
+        bundledTools,
+        inheritedTools,
+      ]);
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      await client.close();
+    }
+  });
+
   test.each(["native", "shim"])(
     "uses one spawnable Codex executable for scans and nested workers (%s)",
     async (kind) => {
@@ -6015,7 +6109,17 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env?.["CODEX_CLI_PATH"]).toBe(
         selectedExecutable,
       );
-      expect(createCodex.mock.lastCall?.[0]?.env?.["PATH"]).toBe(searchPath);
+      const bundledTools = join(
+        dirname(dirname(selectedExecutable)),
+        "codex-path",
+      );
+      expect(createCodex.mock.lastCall?.[0]?.env?.["PATH"]).toBe(
+        process.platform === "win32" &&
+          kind === "shim" &&
+          existsSync(bundledTools)
+          ? [bundledTools, searchPath].join(delimiter)
+          : searchPath,
+      );
       await client.close();
     },
   );
@@ -6410,6 +6514,107 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     ).toBe(false);
     await client.close();
   });
+
+  test("respects an external logout when reusing an API-key runtime", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const ambientHome = join(root, "ambient-home");
+    await mkdir(ambientHome);
+    if (process.platform !== "win32") await chmod(codexHome, 0o700);
+    await writeFile(
+      join(ambientHome, "auth.json"),
+      '{"auth_mode":"chatgpt"}\n',
+    );
+    const fakeCodex = join(root, "logged-out.mjs");
+    await writeFile(
+      fakeCodex,
+      'console.error("Not logged in"); process.exit(1);',
+    );
+    const fake = nodeCodex(fakeCodex);
+    const createCodex = mock(throwing("scan reached"));
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          OPENAI_API_KEY: "synthetic-key",
+        },
+        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
+          CODEX_HOME: codexHome,
+          ...fake.environment,
+        })),
+        resolveCodexCommand: () => fake.command,
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex,
+      },
+    );
+    try {
+      await expect(client.run(repository)).rejects.toThrow("scan reached");
+      await runtime.setCodexSecurityCredentialLogout(codexHome, true);
+      await expect(
+        client.run(repository, { auth: "chatgpt" }),
+      ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+      expect(createCodex).toHaveBeenCalledTimes(1);
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test.each(["standard", "deep"] as const)(
+    "refreshes inherited environment for a reused %s runtime",
+    async (mode) => {
+      const { root, repository, scanDir } = await scanDirectories();
+      const environment: Record<string, string> = {
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "synthetic-first-key",
+        AWS_REGION: "synthetic-first-region",
+        REMOVED_SETTING: "first-value",
+      };
+      const observed: CodexOptions[] = [];
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment,
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            observed.push(options);
+            throw new Error("environment captured");
+          },
+        },
+      );
+      try {
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "environment captured",
+        );
+        environment["OPENAI_API_KEY"] = "synthetic-second-key";
+        environment["AWS_REGION"] = "synthetic-second-region";
+        delete environment["REMOVED_SETTING"];
+        environment["ADDED_SETTING"] = "second-value";
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "environment captured",
+        );
+        expect(observed.map((value) => value.apiKey)).toEqual([
+          "synthetic-first-key",
+          "synthetic-second-key",
+        ]);
+        expect(observed[1]?.env).toMatchObject({
+          AWS_REGION: "synthetic-second-region",
+          ADDED_SETTING: "second-value",
+        });
+        expect(observed[1]?.env).not.toHaveProperty("REMOVED_SETTING");
+        expect(observed[0]?.env).toMatchObject({
+          AWS_REGION: "synthetic-first-region",
+          REMOVED_SETTING: "first-value",
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("uses a rotated environment API key on the next scan", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();

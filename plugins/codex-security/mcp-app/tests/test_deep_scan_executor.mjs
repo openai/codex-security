@@ -1,6 +1,7 @@
 import { assertFlagPair } from "./assertions.mjs";
 import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
 import { mock } from "node:test";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
 import {
@@ -1116,7 +1117,39 @@ async function testWorkerRuntimeSettings() {
           'env_key = "SYNTHETIC_GATEWAY_KEY"',
         ].join("\n"),
       );
-      await writeFile(configPath, configuration);
+      const workerConfigurations = Array.from({ length: 4 }, (_, index) => {
+        const provider = index === 0 ? "openai" : `synthetic.gateway.${index}`;
+        const providerConfig =
+          index === 0
+            ? undefined
+            : {
+                name: `Synthetic gateway ${index}`,
+                base_url: `https://gateway-${index}.example.test/v1`,
+                wire_api: "responses",
+                auth: {
+                  type: "command",
+                  command: "synthetic-auth",
+                  args: [String(index)],
+                },
+              };
+        return {
+          path: `${configPath}.${index}`,
+          provider,
+          providerConfig,
+          configuration: {
+            ...parseToml(configuration),
+            model_provider: provider,
+            model_providers: providerConfig
+              ? { [provider]: providerConfig }
+              : {},
+          },
+        };
+      });
+      await Promise.all(
+        workerConfigurations.map((entry) =>
+          writeFile(entry.path, stringifyToml(entry.configuration)),
+        ),
+      );
       await writeFile(promptPath, "synthetic worker configuration fixture");
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = codexHome;
@@ -1178,6 +1211,8 @@ async function testWorkerRuntimeSettings() {
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_SECURITY_CONFIG_PATH =
+                workerConfigurations[index].path;
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1233,7 +1268,7 @@ async function testWorkerRuntimeSettings() {
             );
             assert.equal(
               workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
-              configPath,
+              workerConfigurations[index].path,
             );
             assert.equal(
               workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
@@ -1278,7 +1313,35 @@ async function testWorkerRuntimeSettings() {
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,
             );
-            assert.equal(invocation.configPath, configPath);
+            assert.equal(
+              invocation.configPath,
+              workerConfigurations[index].path,
+            );
+            const selectedProvider = workerConfigurations[index];
+            assert.ok(
+              invocation.argv.includes(
+                `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+              ),
+            );
+            if (selectedProvider.providerConfig) {
+              const providerOverride = invocation.argv.find((arg) =>
+                arg.startsWith("model_providers="),
+              );
+              assert.ok(
+                providerOverride,
+                "worker must retain its selected provider configuration",
+              );
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(parseToml(providerOverride).model_providers),
+                ),
+                {
+                  [selectedProvider.provider]: selectedProvider.providerConfig,
+                },
+              );
+            } else {
+              assert.ok(invocation.argv.includes("model_providers={}"));
+            }
             assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
@@ -1305,12 +1368,28 @@ async function testWorkerRuntimeSettings() {
               await readFile(launch.markerPath, "utf8"),
             );
             assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+            const selectedProvider = workerConfigurations.find((entry) =>
+              preflight.argv.includes(
+                `model_provider=${JSON.stringify(entry.provider)}`,
+              ),
+            );
+            assert.ok(
+              selectedProvider,
+              "worker preflight must use the same isolated provider",
+            );
             assert.equal(
               workerPermissionProfileOverride(launch.args),
               workerPermissionProfileOverride(workerLaunches[0].args),
             );
           }
-          await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
+          await Promise.all(
+            workerConfigurations.map((entry) =>
+              writeFile(
+                entry.path,
+                'model_reasoning_summary = "detailed"\nmodel_provider = "changed"\n',
+              ),
+            ),
+          );
         }
       }
     }
@@ -2247,7 +2326,7 @@ async function fakeCodexFixture(
       `const accountResult = ${JSON.stringify(accountResult)};`,
       `const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};`,
       "if (process.argv.includes('app-server')) {",
-      "  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
+      "  const preflight = { argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };",
       "  writeFileSync(preflightMarkerPath, JSON.stringify(preflight));",
       "  let buffer = '';",
       "  process.stdin.setEncoding('utf8');",

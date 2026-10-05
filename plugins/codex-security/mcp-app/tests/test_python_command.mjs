@@ -73,6 +73,7 @@ assert.equal(
   await resolvePythonCommand({
     configuredPython: "",
     homeDirectory: unixHome,
+    cacheDirectory: "",
     isUsableExecutable: async (candidate) => {
       checkedUnixCandidates.push(candidate);
       return false;
@@ -82,6 +83,23 @@ assert.equal(
   "python3",
 );
 assert.deepEqual(checkedUnixCandidates, unixCandidates);
+
+for (const platform of ["darwin", "linux"]) {
+  const managedPython = path.posix.join(
+    "/custom/cache",
+    "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+  );
+  assert.equal(
+    await resolvePythonCommand({
+      configuredPython: "",
+      homeDirectory: unixHome,
+      cacheDirectory: "/custom/cache",
+      platform,
+      isUsableExecutable: async (candidate) => candidate === managedPython,
+    }),
+    managedPython,
+  );
+}
 
 let overrideProbeCount = 0;
 assert.equal(

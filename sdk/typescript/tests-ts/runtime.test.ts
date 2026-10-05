@@ -1639,6 +1639,8 @@ describe("plugin runtime preparation", () => {
       "invalid record",
       "disabled plugin",
       "missing registration",
+      "missing marketplace manifest",
+      "incomplete marketplace manifest",
       "extra staged file",
     ])("repairs %s before reusing the installation", async (damage) => {
       const { home, staged, installed, record, calls, bootstrap } =
@@ -1668,6 +1670,29 @@ describe("plugin runtime preparation", () => {
         case "missing registration":
           await writeFile(join(home, "config.toml"), "");
           break;
+        case "missing marketplace manifest":
+          await rm(
+            join(
+              home,
+              "sdk-marketplace",
+              ".agents",
+              "plugins",
+              "marketplace.json",
+            ),
+          );
+          break;
+        case "incomplete marketplace manifest":
+          await writeFile(
+            join(
+              home,
+              "sdk-marketplace",
+              ".agents",
+              "plugins",
+              "marketplace.json",
+            ),
+            "{",
+          );
+          break;
         case "extra staged file":
           await writeFile(join(staged, "stale.py"), "pass\n");
           break;
@@ -1677,6 +1702,17 @@ describe("plugin runtime preparation", () => {
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
       expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
       expect(existsSync(join(staged, "stale.py"))).toBe(false);
+      expect(
+        existsSync(
+          join(
+            home,
+            "sdk-marketplace",
+            ".agents",
+            "plugins",
+            "marketplace.json",
+          ),
+        ),
+      ).toBe(true);
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
         installedPath: installed,
         version: "1.2.3",
@@ -6098,6 +6134,20 @@ describe("runtime directories and plugin Python boundary", () => {
         managedRuntimeRoots: [managedRoot],
       }),
     ).toBe(managed);
+    const cacheDirectory = join(root, "custom-cache");
+    const cachedPython = join(
+      cacheDirectory,
+      "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+    );
+    await mkdir(dirname(cachedPython), { recursive: true });
+    await copyFile(managed, cachedPython);
+    await chmod(cachedPython, 0o700);
+    expect(
+      await resolvePluginPython({
+        environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
+        homeDirectory: join(root, "unused-home"),
+      }),
+    ).toBe(cachedPython);
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,

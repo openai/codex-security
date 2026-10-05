@@ -13,7 +13,6 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { rejecting } from "./support/errors.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -87,7 +86,35 @@ describe("CodexSecurity orchestration", () => {
             return {
               startThread: () => ({
                 id: null,
-                runStreamed: rejecting("synthetic command-auth scan started"),
+                async runStreamed() {
+                  if (!profile) {
+                    const workerConfig = parseToml(
+                      await readFile(
+                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(workerConfig["model_provider"]).toBe(
+                      "synthetic.provider",
+                    );
+                    expect(workerConfig["model_providers"]).toEqual({
+                      "synthetic.provider": {
+                        ...overrides.model_providers["synthetic.provider"],
+                        auth: { ...auth, cwd: home },
+                      },
+                    });
+                    if (process.platform !== "win32") {
+                      expect(
+                        (
+                          await stat(
+                            options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                          )
+                        ).mode & 0o777,
+                      ).toBe(0o600);
+                    }
+                  }
+                  throw new Error("synthetic command-auth scan started");
+                },
               }),
             };
           },

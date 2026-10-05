@@ -62,6 +62,27 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
+  test("directory knowledge bases omit Git metadata while direct files remain explicit", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(join(root, ".git"));
+    const metadata = join(root, ".git", "config");
+    await writeFile(
+      metadata,
+      "[http]\nextraheader = synthetic-authorization\n",
+    );
+    await writeFile(join(root, "guide.md"), "Documented application behavior.");
+    const directory = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(directory.path);
+    expect(await extractedDocuments(directory.path)).toEqual([
+      "Documented application behavior.",
+    ]);
+    const explicit = await prepareKnowledgeBase([metadata]);
+    temporaryDirectories.track(explicit.path);
+    expect(await extractedDocuments(explicit.path)).toEqual([
+      await readFile(metadata, "utf8"),
+    ]);
+  });
+
   test("prepares nested supported documents and retains requested source roots", async () => {
     const root = await temporaryDirectory();
     const nested = join(root, "architecture", "threats");

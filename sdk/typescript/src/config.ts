@@ -159,6 +159,10 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
 
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
+  if (value === null)
+    throw new ConfigurationError(
+      "Codex TOML overrides cannot contain null values.",
+    );
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)

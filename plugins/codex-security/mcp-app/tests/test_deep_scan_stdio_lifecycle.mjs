@@ -661,6 +661,7 @@ async function testDeepScanStdioLifecycle() {
         "start_codex_security_deep_scan",
         { scanId: resumedScanId, handoffClaimToken },
         resumedThreadId,
+        { model: "gpt-5.6-sol", reasoning_effort: "high" },
       ),
     );
     let partial;
@@ -740,6 +741,7 @@ async function testDeepScanStdioLifecycle() {
     ]);
     await writeFile(restartControlPath, "after-restart");
 
+    const resumedStartIndex = (await readJsonLines(startLogPath)).length;
     const restartedServer = startServer(serverBundlePath, environment);
     try {
       assertNoError(
@@ -759,9 +761,20 @@ async function testDeepScanStdioLifecycle() {
           "start_codex_security_deep_scan",
           { scanId: resumedScanId, handoffClaimToken },
           resumedThreadId,
+          { model: "gpt-6.1-sol", reasoning_effort: "max" },
         ),
       );
       assertNoError(resumed);
+      const modelRows = await execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          "import sqlite3,sys,json; c=sqlite3.connect(sys.argv[1]); print(json.dumps(c.execute('SELECT model, reasoning_effort FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()))",
+          path.join(stateDir, "workbench.sqlite3"),
+          resumedScanId,
+        ],
+      );
+      assert.deepEqual(JSON.parse(modelRows.stdout), ["gpt-6.1-sol", "max"]);
       const instructions = resumed.result.structuredContent.instructions;
       assert.match(
         instructions,
@@ -861,7 +874,18 @@ async function testDeepScanStdioLifecycle() {
       const executions = (await readJsonLines(startLogPath)).slice(
         restartStartIndex,
       );
-      for (const execution of executions) {
+      for (const [index, execution] of executions.entries()) {
+        const afterRestart = index + restartStartIndex >= resumedStartIndex;
+        assertFlagPair(
+          execution.argv,
+          "--model",
+          afterRestart ? "gpt-6.1-sol" : "gpt-5.6-sol",
+        );
+        assert.ok(
+          execution.argv.includes(
+            `model_reasoning_effort=${JSON.stringify(afterRestart ? "max" : "high")}`,
+          ),
+        );
         assert.equal(
           execution.argv.includes(
             `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,

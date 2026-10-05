@@ -16,7 +16,7 @@ import {
   win32,
 } from "node:path";
 import { Codex, type CyberAccessProgram } from "@openai/codex-sdk";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
   classifyCodexWorkerError,
@@ -52,6 +52,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  providerOverrides?: string[];
   reasoningSummary?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
@@ -83,6 +84,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
+      configOverrides.push(...(runtimeSettings.providerOverrides ?? []));
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -489,6 +491,22 @@ async function workerRuntimeSettings(
   const settings: CodexSdkWorkerRuntimeSettings = {
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
   };
+  const provider =
+    isRecord(profile) && profile.model_provider !== undefined
+      ? profile.model_provider
+      : config.model_provider;
+  if (typeof provider === "string") {
+    settings.providerOverrides = [`model_provider=${JSON.stringify(provider)}`];
+    const providers = config.model_providers;
+    if (isRecord(providers)) {
+      const selected = Object.hasOwn(providers, provider)
+        ? { [provider]: providers[provider] }
+        : {};
+      settings.providerOverrides.push(
+        `model_providers=${inlineToml(selected)}`,
+      );
+    }
+  }
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
     settings.cyberAccessProgram =
@@ -507,6 +525,17 @@ async function workerRuntimeSettings(
     }
   }
   return settings;
+}
+
+// Raw TOML preserves provider IDs and command-auth environment keys containing dots.
+function inlineToml(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
+      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .join(",")}}`;
+  }
+  return stringifyToml({ value }).slice("value = ".length).trim();
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {

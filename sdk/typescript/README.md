@@ -2736,6 +2736,8 @@ CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve -
 Export `OPENAI_API_KEY` or `CODEX_API_KEY` to import findings with embeddings.
 Startup and listing need no key. The service does not load `.env` or authenticate
 requests; keep it on loopback or behind an authenticated TLS proxy.
+JSON POST requests must send `Content-Type: application/json`; an optional charset
+parameter is accepted.
 
 For a source build, first prepare the
 [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)

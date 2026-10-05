@@ -5,6 +5,7 @@ import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
+  inlineToml,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -29,6 +30,16 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("inline Codex overrides reject null values instead of emitting invalid TOML", () => {
+  for (const value of [null, { args: null }, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  const provider = { fixture: { args: ["fixture", 4], enabled: true } };
+  expect(parse(`model_providers = ${inlineToml(provider)}`)).toEqual({
+    model_providers: provider,
+  });
+});
 
 function runPinnedCodex(
   codexHome: string,

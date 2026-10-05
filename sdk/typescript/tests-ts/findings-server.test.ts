@@ -906,6 +906,7 @@ test("imports persist repository associations and keep untagged findings in expl
     (
       await fetch(`${base}/v1/bulk/findings`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ findings: [findings[2]] }),
       })
     ).status,
@@ -959,6 +960,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
   ]) {
     const response = await fetch(`${base}/v1/bulk/findings`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body,
     });
     expect(response.status).toBe(400);
@@ -1092,4 +1094,41 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", original.findingId],
     ["repository-history", finding(2).findingId],
   ]);
+});
+
+test("JSON API rejects simple browser POSTs before embedding or storing findings", async () => {
+  const { store } = await fixture();
+  let embedded = 0;
+  const base = await start(store, {
+    async embed(findings) {
+      embedded += findings.length;
+      return embedder.embed(findings);
+    },
+  });
+  const body = JSON.stringify({
+    findings: [finding()],
+    repositoryId: "synthetic-browser-qa",
+  });
+  for (const contentType of [
+    undefined,
+    "text/plain",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+  ]) {
+    const response = await fetch(`${base}/v1/bulk/findings`, {
+      method: "POST",
+      ...(contentType ? { headers: { "Content-Type": contentType } } : {}),
+      body,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+  }
+  expect(embedded).toBe(0);
+  const accepted = await fetch(`${base}/v1/bulk/findings`, {
+    method: "POST",
+    headers: { "Content-Type": "Application/JSON; charset=utf-8" },
+    body,
+  });
+  expect(accepted.status).toBe(201);
+  expect(embedded).toBe(1);
 });

@@ -65,6 +65,7 @@ import {
   scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
+  type JsonValue,
   type ScanModelConfiguration,
   writeCodexConfig,
 } from "./config.js";
@@ -2686,13 +2687,20 @@ export class CodexSecurity {
     )
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
+    const configuredCodexPath = environmentValue(
+      this.#dependencies.environment,
+      "CODEX_CLI_PATH",
+    );
     let codexPathOverride =
-      environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
-      undefined
+      configuredCodexPath === undefined
         ? undefined
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
-    if (process.platform === "win32" && codexPathOverride === undefined) {
+    if (
+      process.platform === "win32" &&
+      (configuredCodexPath === undefined ||
+        !/\.(?:exe|com)$/iu.test(configuredCodexPath))
+    ) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
       sdkEnvironment = bundledCodexSdkEnvironment(
         codexPathOverride,
@@ -2774,11 +2782,6 @@ export class CodexSecurity {
         authentication.method === "api_key"
           ? environmentApiKey(this.#dependencies.environment, modelProvider)
           : null;
-      if (externalProvider !== null && apiKey === null) {
-        throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
-        );
-      }
       const scanEnvironment = selectedScanEnvironment(
         commandAuth
           ? withoutOpenAiApiKeys(this.#dependencies.environment)
@@ -2827,8 +2830,19 @@ export class CodexSecurity {
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       if (runtime.configPath !== undefined) {
+        const selectedProvider = modelProvider ?? "openai";
+        const providers = effectiveConfig["model_providers"];
         await writeCodexConfig(runtime.configPath, {
           ...preflightConfig,
+          // Workers share the credential home, whose selected provider can change
+          // when another scan starts. Keep their provider in this private file.
+          model_provider: selectedProvider as JsonValue,
+          model_providers:
+            typeof selectedProvider === "string" &&
+            isRecord(providers) &&
+            Object.hasOwn(providers, selectedProvider)
+              ? { [selectedProvider]: providers[selectedProvider]! }
+              : {},
           ...(options.cyberAccessProgram === undefined
             ? {}
             : {
@@ -2860,7 +2874,8 @@ export class CodexSecurity {
         const ambientHome =
           environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
           join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
+        runtime.credentialsAvailable = await initialCredentialsAvailable(
+          scanEnvironment,
           ambientHome,
           runtime.codexHome,
         );
@@ -2994,6 +3009,11 @@ export class CodexSecurity {
         signal,
       },
     );
+    runtime.environment = {
+      ...withoutCodexHome(environment),
+      CODEX_HOME: runtime.codexHome,
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
+    };
     runtime.deepScanConfigPath =
       runtime.bootstrapWorkspace !== undefined &&
       (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
@@ -4253,6 +4273,12 @@ export function scanAuthentication(
     return { method: "stored_credentials", verified: false };
   }
   const key = environmentApiKeyEntry(environment, modelProvider);
+  if (key === null && isExternalModelProvider(modelProvider)) {
+    const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    throw new AuthenticationRequiredError(
+      `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+    );
+  }
   if (
     auth === "api-key" &&
     key === null &&
