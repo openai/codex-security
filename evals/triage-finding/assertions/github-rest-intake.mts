@@ -147,8 +147,10 @@ const checks: Record<
       ...(answer?.source_type !== "sarif"
         ? ["must normalize code scanning as sarif"]
         : []),
-      ...(hasTriageJson(text)
-        ? ["must not emit triage JSON during source intake"]
+      ...(Object.keys(answer ?? {}).length !== 3 || hasTriageJson(text)
+        ? [
+            "must return only alerts, instances, and source_type without triage JSON",
+          ]
         : []),
     ];
   },

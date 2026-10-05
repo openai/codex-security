@@ -177,6 +177,7 @@ for (const invalid of [
   [],
   {},
   { ...codeScanning, source_type: "advisory" },
+  { ...codeScanning, findings: [] },
   { ...codeScanning, schema_version: "triage-finding/v0", findings: [] },
   { ...codeScanning, findings: [{ verdict: "confirmed" }] },
   { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
