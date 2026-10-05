@@ -25,19 +25,16 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { capture } from "./cli-fixtures.js";
 
-const fixtures: Array<Awaited<ReturnType<typeof workflowFixture>>> = [];
-afterEach(async () => {
-  await Promise.all(
-    fixtures.splice(0).map((fixture) => fixture[Symbol.asyncDispose]()),
-  );
-});
+const temporaryDirectories = createTemporaryDirectories();
+afterEach(temporaryDirectories.cleanup);
 
 async function fixture() {
   const value = await workflowFixture();
-  fixtures.push(value);
+  temporaryDirectories.track(value.root);
   const { environment, document, scanDir, repository } = value;
   const workbenchOptions = {
     environment,

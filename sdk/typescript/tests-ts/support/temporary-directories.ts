@@ -1,7 +1,3 @@
-import { chmod, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-import { copyCompletedScanFixture } from "../plugin-root.js";
 import {
   createTemporaryDirectories,
   temporaryDirectory as createPluginTemporaryDirectory,
@@ -17,13 +13,6 @@ export function createApiTestFixtures(
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,
-    async copyCompletedScan(root: string): Promise<string> {
-      const scanDir = join(root, "scan");
-      await copyCompletedScanFixture(scanDir);
-      await chmod(scanDir, 0o700);
-      await writeFile(join(scanDir, "report.md"), "# Scan report\n");
-      return scanDir;
-    },
     temporaryDirectory(directoryPrefix = prefix): Promise<string> {
       return temporaryDirectories.create(directoryPrefix);
     },
