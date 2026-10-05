@@ -6,6 +6,7 @@ import os
 import runpy
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -3824,7 +3825,8 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes"
+                os.name == "nt" or sys.platform == "darwin",
+                reason="Windows and macOS filesystems cannot retain arbitrary non-UTF-8 bytes",
             ),
         ),
     ],
