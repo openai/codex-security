@@ -3,8 +3,9 @@ import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runCapturedCli, captureCli } from "./support/cli-run.js";
 
 describe("CLI scan prompts", () => {
   test("loads scan, validation, and post-scan prompt files", async () => {
@@ -20,7 +21,8 @@ describe("CLI scan prompts", () => {
       ]);
       let options: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "scan",
             ".",
@@ -32,8 +34,6 @@ describe("CLI scan prompts", () => {
             "follow-up.md",
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           dependencies({
             currentDirectory: root,
             onTurn: (_repository, value) => (options = value),
@@ -99,12 +99,10 @@ describe("CLI scan prompts", () => {
           ],
         ] as const) {
           const onTurn = mock();
-          const stderr = capture();
+          const stderr = captureCli(main, "stderr");
           expect(
-            await main(
+            await stderr.run(
               ["scan", target, option, input, "--json"],
-              capture().stream,
-              stderr.stream,
               dependencies({
                 currentDirectory: directory,
                 onTurn,
@@ -123,10 +121,9 @@ describe("CLI scan prompts", () => {
         ] as const) {
           let selected: unknown;
           expect(
-            await main(
+            await runCapturedCli(
+              main,
               ["scan", target, option, external, "--json"],
-              capture().stream,
-              capture().stream,
               dependencies({
                 currentDirectory: directory,
                 onTurn: (_repository, value) => (selected = value),
@@ -185,7 +182,8 @@ describe("CLI scan prompts", () => {
       ]);
       let options: unknown;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "bulk-scan",
             "repositories.csv",
@@ -199,8 +197,6 @@ describe("CLI scan prompts", () => {
             "follow-up.md",
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           dependencies({
             currentDirectory: root,
             onTurn: (_repository, value) => (options = value),
@@ -239,19 +235,15 @@ describe("CLI scan prompts", () => {
           },
         }),
       });
-      const error = capture();
-      expect(
-        await main(
-          ["scans", "rerun", "saved", "--json"],
-          capture().stream,
-          error.stream,
-          deps,
-        ),
-      ).toBe(2);
+      const error = captureCli(main, "stderr");
+      expect(await error.run(["scans", "rerun", "saved", "--json"], deps)).toBe(
+        2,
+      );
       expect(error.text()).toContain("--validation-prompt-file");
       expect(onTurn.mock.lastCall?.[1]).toBeUndefined();
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "scans",
             "rerun",
@@ -260,8 +252,6 @@ describe("CLI scan prompts", () => {
             "validation.md",
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -270,10 +260,9 @@ describe("CLI scan prompts", () => {
       });
       await writeFile(join(root, "validation.md"), " \n");
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["scan", ".", "--validation-prompt-file", "validation.md", "--json"],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(2);

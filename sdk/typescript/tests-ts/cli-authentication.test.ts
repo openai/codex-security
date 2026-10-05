@@ -41,6 +41,12 @@ import {
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
+
 let stateDirectory: string;
 
 beforeEach(async () => {
@@ -77,15 +83,15 @@ describe("CLI authentication", () => {
       ["logout"],
     ] as const;
     for (const argv of cases) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const deps = dependencies();
       deps.prepareAuthenticationHome = async () =>
         join(stateDirectory, "codex-home");
       const runCodex = mock<typeof deps.runCodex>(resolving(17));
       deps.createSecurity = throwing("must not initialize Codex Security");
       deps.runCodex = runCodex;
-      expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(17);
+      expect(await runCli(argv, deps)).toBe(17);
       expect(runCodex.mock.lastCall?.[0]).toEqual([argv[0], ...argv.slice(1)]);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
@@ -100,8 +106,8 @@ describe("CLI authentication", () => {
     );
 
     for (const argv of [["login"], ["login", "status"], ["logout"]] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { runCli } = createCliTest(main);
+
       const deps = dependencies({
         environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
       });
@@ -113,7 +119,7 @@ describe("CLI authentication", () => {
         return 0;
       };
 
-      expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(0);
+      expect(await runCli(argv, deps)).toBe(0);
       expect(forwarded).toEqual([...argv]);
       expect(environment?.["CODEX_HOME"]).toBe(expectedHome);
       expect(environment?.["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
@@ -134,8 +140,8 @@ describe("CLI authentication", () => {
         const expectedHome = join(actualState, "codex-home");
 
         for (const argv of [["login", "status"], ["logout"]] as const) {
-          const stdout = capture();
-          const stderr = capture();
+          const { runCli } = createCliTest(main);
+
           const deps = dependencies({
             environment: { CODEX_SECURITY_STATE_DIR: linkedState },
           });
@@ -146,7 +152,7 @@ describe("CLI authentication", () => {
             return 0;
           };
 
-          expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(0);
+          expect(await runCli(argv, deps)).toBe(0);
           expect(forwardedHome).toBe(expectedHome);
         }
 
@@ -154,16 +160,14 @@ describe("CLI authentication", () => {
           await codexSecurityCredentialAllowsAmbientImport(expectedHome),
         ).toBe(false);
 
-        const stdout = capture();
-        const stderr = capture();
+        const { runCli } = createCliTest(main);
+
         const deps = dependencies({
           environment: { CODEX_SECURITY_STATE_DIR: linkedState },
         });
         deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
         deps.runCodex = async () => 0;
-        expect(await main(["login"], stdout.stream, stderr.stream, deps)).toBe(
-          0,
-        );
+        expect(await runCli(["login"], deps)).toBe(0);
         expect(
           await codexSecurityCredentialAllowsAmbientImport(expectedHome),
         ).toBe(true);
@@ -178,15 +182,10 @@ describe("CLI authentication", () => {
       [{ OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" }, "OPENAI_API_KEY"],
       [{ Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" }, "CODEX_API_KEY"],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
-          ["login", "status"],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ environment }),
-        ),
+        await runCli(["login", "status"], dependencies({ environment })),
       ).toBe(0);
       expect(stderr.text()).toContain(
         `Effective scan authentication: API key from ${expectedSource}.`,
@@ -222,17 +221,9 @@ describe("CLI authentication", () => {
         "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(
-        await main(
-          argv,
-          stdout.stream,
-          stderr.stream,
-          dependencies({ environment }),
-        ),
-      ).toBe(0);
+      expect(await runCli(argv, dependencies({ environment }))).toBe(0);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
         "ChatGPT login succeeded. Interactive scans will ask which account to use;",
@@ -268,14 +259,11 @@ describe("CLI authentication", () => {
         "remove OPENAI_API_KEY and CODEX_API_KEY from the environment",
       ],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
-        await main(
+        await runCli(
           ["login", "--with-access-token"],
-          stdout.stream,
-          stderr.stream,
           dependencies({ environment }),
         ),
       ).toBe(0);
@@ -300,13 +288,11 @@ describe("CLI authentication", () => {
       [["login", "--with-api-key"], 0],
       [["login", "--with-access-token"], 2],
     ] as const) {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
 
       expect(
-        await main(
+        await stderr.run(
           argv,
-          capture().stream,
-          stderr.stream,
           dependencies({ environment, onCodex: () => exitCode }),
         ),
       ).toBe(exitCode);
@@ -317,14 +303,11 @@ describe("CLI authentication", () => {
   });
 
   test("does not warn after access-token login without an overriding API key", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["login", "--with-access-token"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ environment: {} }),
       ),
     ).toBe(0);
@@ -340,13 +323,11 @@ describe("CLI authentication", () => {
       [["scan"], "auto"],
     ] as const) {
       const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
 
       expect(
-        await main(
+        await stderr.run(
           argv,
-          capture().stream,
-          stderr.stream,
           dependencies({
             environment: { OPENAI_API_KEY: "synthetic-private-key" },
             onTurn,
@@ -374,8 +355,8 @@ describe("CLI authentication", () => {
       [{ AWS_PROFILE: "synthetic-bedrock-profile" }, "AWS_PROFILE"],
       [{}, "default_credential_chain"],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture(false);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
+
       const deps = dependencies({ environment });
       deps.createSecurity = () =>
         fakeSecurity(async (_repository, options) => {
@@ -388,7 +369,7 @@ describe("CLI authentication", () => {
         });
 
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             "--provider",
@@ -398,8 +379,6 @@ describe("CLI authentication", () => {
             "--json",
             "--verbose",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -453,8 +432,8 @@ describe("CLI authentication", () => {
   ] as const)(
     "preserves Bedrock failure details and recovery advice: %s",
     async (detail, expected, classification) => {
-      const stderr = capture(false);
-      const stdout = capture();
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
+
       const deps = dependencies({
         environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
       });
@@ -469,7 +448,7 @@ describe("CLI authentication", () => {
         });
 
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             "--codex",
@@ -478,8 +457,6 @@ describe("CLI authentication", () => {
             "--verbose",
             "--full-output",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -495,7 +472,7 @@ describe("CLI authentication", () => {
   );
 
   test("explains refreshing temporary AWS profile credentials without a stored OpenAI login", async () => {
-    const stderr = capture(false);
+    const stderr = captureCli(main, "stderr", false);
     const deps = dependencies({
       environment: { AWS_PROFILE: "synthetic-profile" },
     });
@@ -514,10 +491,8 @@ describe("CLI authentication", () => {
       close: async () => {},
     });
     expect(
-      await main(
+      await stderr.run(
         ["scan", "--codex", 'model_provider="amazon-bedrock"'],
-        capture().stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -559,8 +534,8 @@ describe("CLI authentication", () => {
   ] as const)(
     "preserves command-authenticated Bedrock diagnostics in stderr and JSON: %s",
     async (detail, expected, classification) => {
-      const stderr = capture(false);
-      const stdout = capture();
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
+
       const deps = dependencies();
       deps.createSecurity = () => ({
         run: async (_repository, options) => {
@@ -571,7 +546,7 @@ describe("CLI authentication", () => {
         close: async () => {},
       });
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             "--codex",
@@ -582,8 +557,6 @@ describe("CLI authentication", () => {
             "--verbose",
             "--full-output",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -613,7 +586,7 @@ describe("CLI authentication", () => {
       [["scans", "rerun", "scan-original", "--verbose"], "chatgpt"],
       [["scans", "rerun", "scan-original", "--verbose"], "api-key"],
     ] as const) {
-      const stderr = capture(true);
+      const stderr = captureCli(main, "stderr", true);
       const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
       let question = "";
       let choices: readonly { label: string; value: string }[] = [];
@@ -635,7 +608,7 @@ describe("CLI authentication", () => {
         },
       };
 
-      expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
+      expect(await stderr.run(argv, deps)).toBe(0);
       expect(onTurn.mock.results.at(-1)?.value).toBe(selection);
       expect(question).toBe("How would you like to authenticate this scan?");
       expect(choices).toEqual([
@@ -688,14 +661,11 @@ describe("CLI authentication", () => {
   });
 
   test("does not hide or relabel a failed ChatGPT login", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
 
     expect(
-      await main(
+      await runCli(
         ["login"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
           onCodex: () => 17,
@@ -772,8 +742,10 @@ describe("CLI authentication", () => {
         inputInteractive: false,
       },
     ]) {
-      const stdout = capture();
-      const stderr = capture(scenario.terminal);
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: scenario.terminal,
+      });
+
       const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
       let prompts = 0;
       const hasStoredChatGPTSignIn = mock(resolving(scenario.stored));
@@ -809,9 +781,7 @@ describe("CLI authentication", () => {
         },
       };
 
-      expect(
-        await main(scenario.argv, stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      expect(await runCli(scenario.argv, deps)).toBe(0);
       expect(prompts).toBe(0);
       if (scenario.argv.includes("--json") || scenario.argv.includes("jsonl")) {
         expect(hasStoredChatGPTSignIn).toHaveBeenCalledTimes(0);
@@ -828,18 +798,11 @@ describe("CLI authentication", () => {
   });
 
   test("rejects explicit API-key authentication before initializing a scan when no key is set", async () => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     const deps = dependencies();
     deps.createSecurity = throwing("must not initialize Codex Security");
 
-    expect(
-      await main(
-        ["scan", "--auth", "api-key"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await stderr.run(["scan", "--auth", "api-key"], deps)).toBe(2);
     expect(stderr.text()).toContain(
       "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY.",
     );
@@ -848,13 +811,11 @@ describe("CLI authentication", () => {
   });
 
   test("keeps stored-login status unchanged when no environment key is set", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["login", "status"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ environment: { OPENAI_API_KEY: "   " } }),
       ),
     ).toBe(0);
@@ -862,17 +823,15 @@ describe("CLI authentication", () => {
   });
 
   test("reports effective environment credentials without a stored sign-in", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stderr, runCli } = createCliTest(main);
+
     const environment: NodeJS.ProcessEnv = {
       OPENAI_API_KEY: "synthetic-primary-key",
       CODEX_API_KEY: "synthetic-secondary-key",
     };
     expect(
-      await main(
+      await runCli(
         ["login", "status"],
-        stdout.stream,
-        stderr.stream,
         dependencies({ environment, onCodex: () => 1 }),
       ),
     ).toBe(0);
@@ -880,31 +839,27 @@ describe("CLI authentication", () => {
     expect(stderr.text()).not.toContain("synthetic");
 
     delete environment["OPENAI_API_KEY"];
-    const rotated = capture();
+    const rotated = captureCli(main, "stderr");
     expect(
-      await main(
+      await rotated.run(
         ["login", "status"],
-        capture().stream,
-        rotated.stream,
         dependencies({ environment, onCodex: () => 1 }),
       ),
     ).toBe(0);
     expect(rotated.text()).toContain("API key from CODEX_API_KEY");
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["login", "status"],
-        capture().stream,
-        capture().stream,
         dependencies({ environment: {}, onCodex: () => 1 }),
       ),
     ).toBe(1);
 
     expect(
-      await main(
+      await runCapturedCli(
+        main,
         ["login", "status"],
-        capture().stream,
-        capture().stream,
         dependencies({
           environment: { OPENAI_API_KEY: "synthetic-key" },
           onCodex: () => 17,
@@ -1005,8 +960,8 @@ describe("CLI authentication", () => {
   }, 60_000);
 
   test("reports selected scan credentials without contaminating JSON output", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
     const deps = dependencies();
     deps.createSecurity = () =>
       fakeSecurity(async (_repository, options) => {
@@ -1019,9 +974,7 @@ describe("CLI authentication", () => {
         return fakeResult();
       });
 
-    expect(
-      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "Authentication: API key from OPENAI_API_KEY.",
@@ -1043,8 +996,10 @@ describe("CLI authentication", () => {
           "cannot access the configured model",
         ],
       ] as const) {
-        const stdout = capture();
-        const stderr = capture(false);
+        const { stdout, stderr, runCli } = createCliTest(main, {
+          stderr: false,
+        });
+
         const deps = dependencies({ environment });
         deps.createSecurity = () =>
           fakeSecurity(async (_repository, options) => {
@@ -1056,9 +1011,7 @@ describe("CLI authentication", () => {
             throw new CodexSecurityError(detail);
           });
 
-        expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(
-          2,
-        );
+        expect(await runCli(["scan"], deps)).toBe(2);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toContain(expected);
         expect(stderr.text()).toContain(source);
@@ -1078,8 +1031,10 @@ describe("CLI authentication", () => {
         "Your access token could not be refreshed because your refresh token was already used.",
         "Your access token could not be refreshed because your refresh token was revoked.",
       ]) {
-        const stdout = capture();
-        const stderr = capture(false);
+        const { stdout, stderr, runCli } = createCliTest(main, {
+          stderr: false,
+        });
+
         const deps = dependencies({
           environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
           onRun: () => {
@@ -1090,12 +1045,7 @@ describe("CLI authentication", () => {
         });
 
         expect(
-          await main(
-            ["scan", ".", "--auth", auth, "--json"],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
+          await runCli(["scan", ".", "--auth", auth, "--json"], deps),
         ).toBe(2);
         expect(JSON.parse(stdout.text())).toMatchObject({
           status: "failed",
@@ -1122,8 +1072,8 @@ describe("CLI authentication", () => {
       "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
       "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
     ]) {
-      const stdout = capture();
-      const stderr = capture(false);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
+
       const deps = dependencies({
         onRun: () => {
           throw new CodexSecurityError(
@@ -1132,9 +1082,7 @@ describe("CLI authentication", () => {
         },
       });
 
-      expect(
-        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(2);
+      expect(await runCli(["scan", "--json"], deps)).toBe(2);
       expect(JSON.parse(stdout.text())).toMatchObject({
         status: "failed",
         code: "SCAN_FAILED",
@@ -1147,8 +1095,8 @@ describe("CLI authentication", () => {
   });
 
   test("prints the ChatGPT recovery hint on noninteractive scan output", async () => {
-    const stdout = capture();
-    const stderr = capture(false);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
+
     const deps = dependencies();
     deps.createSecurity = () =>
       fakeSecurity(async (_repository, options) => {
@@ -1160,9 +1108,7 @@ describe("CLI authentication", () => {
         return fakeResult();
       });
 
-    expect(
-      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
+    expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain("API key from OPENAI_API_KEY");
     expect(stderr.text()).toContain("retry with --auth chatgpt");
@@ -1181,13 +1127,11 @@ describe("CLI authentication", () => {
         "403 model access denied for org-private",
       ],
     ] as const) {
-      const stderr = capture(false);
+      const stderr = captureCli(main, "stderr", false);
       const deps = dependencies({ environment });
       deps.createSecurity = () => failingSecurity(message);
 
-      expect(await main(["scan"], capture().stream, stderr.stream, deps)).toBe(
-        2,
-      );
+      expect(await stderr.run(["scan"], deps)).toBe(2);
       expect(stderr.text()).toContain(source);
       expect(stderr.text()).toContain("--auth chatgpt");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
@@ -1206,8 +1150,8 @@ describe("CLI authentication", () => {
         "Authentication: API key from CODEX_API_KEY.",
       ],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const deps = dependencies();
       deps.createSecurity = () =>
         fakeSecurity(async (_repository, options) => {
@@ -1215,9 +1159,7 @@ describe("CLI authentication", () => {
           return fakeResult();
         });
 
-      expect(
-        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      expect(await runCli(["scan", "--json"], deps)).toBe(0);
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("env -u");
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -1225,18 +1167,16 @@ describe("CLI authentication", () => {
   });
 
   test("keeps selected dry-run authentication metadata safe and machine readable", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const authentication = {
       method: "api_key" as const,
       source: "CODEX_API_KEY" as const,
       verified: false as const,
     };
     expect(
-      await main(
+      await runCli(
         ["scan", "repo", "--dry-run", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: { CODEX_API_KEY: "synthetic-private-key" },
           preflight: { ...fakePreflight("repo"), authentication },
@@ -1259,8 +1199,8 @@ describe("CLI authentication", () => {
         '{"auth_mode":"chatgpt"}\n',
       );
 
-      const stdout = capture();
-      const stderr = capture();
+      const { runCli } = createCliTest(main);
+
       let forwardedHome: string | undefined;
       const deps = dependencies({
         environment: {
@@ -1273,9 +1213,7 @@ describe("CLI authentication", () => {
         return 0;
       };
 
-      expect(
-        await main(["login", "status"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      expect(await runCli(["login", "status"], deps)).toBe(0);
       expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
       expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
         true,
@@ -1302,8 +1240,8 @@ describe("CLI authentication", () => {
       });
       await setCodexSecurityCredentialLogout(credentialHome, true);
 
-      const stdout = capture();
-      const stderr = capture();
+      const { runCli } = createCliTest(main);
+
       const deps = dependencies({
         environment: {
           CODEX_HOME: ambientHome,
@@ -1312,9 +1250,7 @@ describe("CLI authentication", () => {
       });
       deps.runCodex = async () => 0;
 
-      expect(
-        await main(["login", "status"], stdout.stream, stderr.stream, deps),
-      ).toBe(0);
+      expect(await runCli(["login", "status"], deps)).toBe(0);
       expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1356,9 +1292,9 @@ describe("skill authentication", () => {
         { mode: 0o600 },
       );
     }
-    const stdout = capture();
-    const stderr = capture();
-    const status = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const status = await runCli(
       [
         command,
         "Synthetic issue",
@@ -1366,8 +1302,6 @@ describe("skill authentication", () => {
         auth,
         ...overrides.flatMap((value) => ["--codex", value]),
       ],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         currentDirectory: repository,
         environment: {
@@ -1991,12 +1925,10 @@ describe("skill authentication", () => {
   test.each(["validate", "patch", "verify-fix"])(
     "%s advertises scan auth modes",
     async (command) => {
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           [command, "--schema", "--format", "json"],
-          stdout.stream,
-          capture().stream,
           dependencies(),
         ),
       ).toBe(0);
@@ -2004,15 +1936,8 @@ describe("skill authentication", () => {
         enum: ["auto", "chatgpt", "api-key"],
         default: "auto",
       });
-      const help = capture();
-      expect(
-        await main(
-          [command, "--help"],
-          help.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
+      const help = captureCli(main, "stdout");
+      expect(await help.run([command, "--help"], dependencies())).toBe(0);
       expect(help.text()).toContain("--auth");
     },
   );
@@ -2060,12 +1985,10 @@ describe("skill authentication", () => {
   test.each(["validate", "patch", "verify-fix"])(
     "%s rejects missing explicit API-key authentication before launch",
     async (command) => {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           [command, "Synthetic issue", "--auth", "api-key"],
-          capture().stream,
-          stderr.stream,
           dependencies({
             onCodex: (_args, output, environment, input) =>
               runCodexSkillCommand(
@@ -2154,8 +2077,8 @@ describe("skill authentication", () => {
       }
       const usesSessionKey = auth !== "chatgpt" && provider === undefined;
       const requestLog = join(stateDirectory, "requests.jsonl");
-      const stderr = capture();
-      const stdout = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const environment = {
         CODEX_HOME: ambientHome,
         ...(provider === undefined || auth === "chatgpt"
@@ -2182,7 +2105,7 @@ describe("skill authentication", () => {
           : {}),
       };
       expect(
-        await main(
+        await runCli(
           [
             "patch",
             "Synthetic issue",
@@ -2201,8 +2124,6 @@ describe("skill authentication", () => {
                 ]
               : []),
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             environment,
             currentDirectory: repository,
@@ -2536,11 +2457,9 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
         join(alias, "component"),
         nestedRepository,
       ]) {
-        const stderr = capture();
-        const status = await main(
+        const stderr = captureCli(main, "stderr");
+        const status = await stderr.run(
           [command, "Synthetic issue", "--auth", "chatgpt"],
-          capture().stream,
-          stderr.stream,
           dependencies({
             currentDirectory: target,
             environment: {

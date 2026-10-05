@@ -401,10 +401,6 @@ export function App() {
     });
     setOffset(0);
   }
-  const counts: Record<DashboardView, number | undefined> = {
-    findings: overview?.findings,
-    groups: overview?.groups,
-  };
   return (
     <div className="dashboard-shell">
       <header className="app-header">
@@ -434,7 +430,7 @@ export function App() {
                 onClick={() => navigate(tab.id)}
               >
                 <span>{tab.label}</span>
-                <span className="nav-count">{count(counts[tab.id])}</span>
+                <span className="nav-count">{count(overview?.[tab.id])}</span>
               </Button>
             ))}
           </nav>

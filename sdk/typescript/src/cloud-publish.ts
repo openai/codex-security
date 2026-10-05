@@ -165,9 +165,6 @@ async function publishCloudPayload(
   findings: Finding[],
   dependencies: CloudPublicationDependencies,
 ): Promise<CloudPublicationResult> {
-  if (findings.length === 0) {
-    throw new CodexSecurityError("There are no findings to publish.");
-  }
   dependencies.signal?.throwIfAborted();
   if (dependencies.dryRun) {
     return {

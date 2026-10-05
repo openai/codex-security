@@ -1,3 +1,4 @@
+import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
@@ -39,7 +40,6 @@ import {
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
 import {
-  capture,
   dependencies,
   fakePreflight,
   fakeResult,
@@ -183,9 +183,9 @@ async function cli(
   args: string[],
   overrides: Partial<ReturnType<typeof dependencies>> = {},
 ) {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(
     [
       "scan-components",
       paths.repository,
@@ -194,8 +194,6 @@ async function cli(
       ...args,
       "--json",
     ],
-    stdout.stream,
-    stderr.stream,
     { ...dependencies({ currentDirectory: paths.root }), ...overrides },
   );
   return { code, stdout: stdout.text(), stderr: stderr.text() };
@@ -545,10 +543,10 @@ test.each([
   "CLI component presentation: %s, flags: %j",
   async (presentation, costFlags) => {
     const paths = await fixture();
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
     const signals = new FakeSignals();
-    const code = await main(
+    const code = await runCli(
       [
         "scan-components",
         paths.repository,
@@ -560,8 +558,6 @@ test.each([
         ...costFlags,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({
           currentDirectory: paths.root,
@@ -625,10 +621,10 @@ test.each([
 test("CLI escapes component failure controls while preserving the saved error", async () => {
   const paths = await fixture();
   const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   expect(
-    await main(
+    await runCli(
       [
         "scan-components",
         paths.repository,
@@ -638,8 +634,6 @@ test("CLI escapes component failure controls while preserving the saved error", 
         paths.outputDir,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ currentDirectory: paths.root }),
         createSecurity: client(rejecting(failure)),
@@ -658,10 +652,10 @@ test("CLI escapes component failure controls while preserving the saved error", 
 
 test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
   const paths = await fixture();
-  const stdout = capture();
-  const stderr = capture(true);
+  const { stderr, runCli } = createCliTest(main, { stderr: true });
+
   const signals = new FakeSignals();
-  const code = await main(
+  const code = await runCli(
     [
       "scan-components",
       paths.repository,
@@ -675,8 +669,6 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
       paths.outputDir,
       "--json",
     ],
-    stdout.stream,
-    stderr.stream,
     {
       ...dependencies({ currentDirectory: paths.root, signals }),
       createSecurity: client(async (_repository, options) => {

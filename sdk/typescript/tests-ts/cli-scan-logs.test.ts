@@ -14,6 +14,7 @@ import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function fixture() {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
@@ -102,16 +103,11 @@ describe("saved logs JSON output", () => {
         ["--format", "json"],
         ["--format=json"],
       ]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            ["scans", "logs", "scan-1", ...args],
-            stdout.stream,
-            stderr.stream,
-            f.deps,
-          ),
-        ).toBe(0);
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+          0,
+        );
         const expected = await referenceOutput(["--json"], f.logs);
         expect(Object.keys(JSON.parse(expected))).toEqual([
           "scanId",
@@ -157,16 +153,11 @@ describe("saved logs JSON output", () => {
   )("preserves Incur output for %j", async (args) => {
     const f = await fixture();
     try {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["scans", "logs", "scan-1", ...args],
-          stdout.stream,
-          stderr.stream,
-          f.deps,
-        ),
-      ).toBe(0);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+        0,
+      );
       const expected = await referenceOutput(
         args.flatMap((arg) =>
           arg === "--format=json" ? ["--format", "json"] : [arg],
@@ -195,15 +186,10 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output"],
     ].map((args) => [args]),
   )("preserves invalid-option failure for %j", async (args) => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scans", "logs", "scan-1", ...args],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scans", "logs", "scan-1", ...args], dependencies()),
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).not.toBe("");

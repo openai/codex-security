@@ -36,6 +36,8 @@ jobs:
         env:
           # Enforce correctness diagnostics without changing existing shell style.
           SHELLCHECK_OPTS: --severity=warning
-        run: actionlint -color
+        run: |
+          actionlint -color
+          shellcheck docker/verify-container-compose.sh
       - name: Check workflow security
         run: zizmor --offline --strict-collection --min-severity medium --format github --config .github/zizmor.yml .github

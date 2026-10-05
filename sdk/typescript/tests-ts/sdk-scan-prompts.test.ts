@@ -1,9 +1,10 @@
+import { captureCli } from "./support/cli-run.js";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { completedCodex, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -55,11 +56,9 @@ test.each([
     expect(recipe).toBeDefined();
     const requiresInstructions = scenario === "instructions";
     const onRun = mock();
-    const stderr = capture();
-    const exit = await main(
+    const stderr = captureCli(main, "stderr");
+    const exit = await stderr.run(
       ["scans", "rerun", "saved", "--json"],
-      capture().stream,
-      stderr.stream,
       dependencies({
         currentDirectory: repository,
         onWorkbench: async () => ({ recipe: recipe! }),

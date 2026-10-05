@@ -15,6 +15,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { createCliTest } from "./support/cli-run.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
@@ -179,11 +180,9 @@ test("serve exposes help and schema without starting the service", async () => {
     ["serve", "--help"],
     ["serve", "--schema", "--json"],
   ]) {
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      0,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(await runCli(args, dependencies())).toBe(0);
     if (args.includes("--schema")) {
       expect(JSON.parse(stdout.text())).toMatchObject({
         options: {
@@ -204,11 +203,9 @@ test("serve rejects positional arguments and JSON output", async () => {
     ["serve", "repository"],
     ["serve", "--json"],
   ]) {
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      2,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("serve");
   }
@@ -216,12 +213,10 @@ test("serve rejects positional arguments and JSON output", async () => {
 
 test("serve rejects missing or invalid ports", async () => {
   for (const value of [undefined, "invalid", "-1", "65536", "1.5"]) {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const args = ["serve", "--port", ...(value === undefined ? [] : [value])];
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      2,
-    );
+    expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("port");
   }
