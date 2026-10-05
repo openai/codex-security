@@ -656,6 +656,12 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
         "1e-10.if(ready) / { value: count / total }",
         "this.#if() / { valueOf() { return 12 / 2; } }",
         "this.#else / { valueOf() { return 12 / 2; } }",
+        "a\u0301if() / { valueOf() { return 12 / 2; } }",
+        r"a\u{301}if() / { valueOf() { return 12 / 2; } }",
+        "a\u0301else / { valueOf() { return 12 / 2; } }",
+        r"a\u{301}else / { valueOf() { return 12 / 2; } }",
+        "a\u200dif() / { valueOf() { return 12 / 2; } }",
+        r"a\u{00000301}if() / { valueOf() { return 12 / 2; } }",
     ],
 )
 def test_javascript_division_preserves_the_following_method(

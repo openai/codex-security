@@ -242,7 +242,17 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_keyword_follows_member_access(masked: list[str], start: int) -> bool:
+def javascript_keyword_has_identifier_prefix(masked: list[str], start: int) -> bool:
+    if start > 0 and (
+        ("_" + masked[start - 1]).isidentifier() or masked[start - 1] in "$\u200c\u200d"
+    ):
+        return True
+    if start > 0 and masked[start - 1] == "}":
+        escape = start - 1
+        while escape > 0 and masked[escape - 1] in "0123456789abcdefABCDEF":
+            escape -= 1
+        if "".join(masked[max(0, escape - 3) : escape]) == "\\u{":
+            return True
     while start > 0 and masked[start - 1].isspace():
         start -= 1
     if start == 0 or masked[start - 1] not in ".#":
@@ -290,7 +300,7 @@ def javascript_regex_end(
         keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
         if keyword is None:
             return None
-        if javascript_keyword_follows_member_access(masked, previous + 1 - len(keyword.group())):
+        if javascript_keyword_has_identifier_prefix(masked, previous + 1 - len(keyword.group())):
             return None
 
     index = start + 1
@@ -498,7 +508,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 keyword = "".join(masked[start:end])
                 control_parentheses.append(
                     keyword in {"if", "while", "for", "with"}
-                    and not javascript_keyword_follows_member_access(masked, start)
+                    and not javascript_keyword_has_identifier_prefix(masked, start)
                 )
             if char == ")":
                 after_control = bool(control_parentheses) and control_parentheses.pop()
