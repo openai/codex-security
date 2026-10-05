@@ -1126,10 +1126,12 @@ async function testWorkerRuntimeSettings() {
                 name: `Synthetic gateway ${index}`,
                 base_url: `https://gateway-${index}.example.test/v1`,
                 wire_api: "responses",
+                experimental_bearer_token: `synthetic-bearer-${index}`,
                 auth: {
                   type: "command",
                   command: "synthetic-auth",
                   args: [String(index)],
+                  env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                 },
               };
         return {
