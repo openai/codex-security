@@ -590,7 +590,9 @@ def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Pa
     assert "method Service.visible" in preview
 
 
-@pytest.mark.parametrize("arrow", ["() => ", "input=>", "input => ", "input=>\ufeff"])
+@pytest.mark.parametrize(
+    "arrow", ["() => ", "input=>", "input => ", "input=>\ufeff", "input=> /* reason */ "]
+)
 def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, arrow: str) -> None:
     source = f"""class Service {{
   makeMatcher() {{ const matcher = {arrow}/if(enabled)/; }} // note
@@ -603,6 +605,25 @@ def test_javascript_arrow_regex_preserves_the_following_method(tmp_path: Path, a
     assert preview.splitlines() == [
         "class Service",
         "method Service.makeMatcher",
+        "method Service.authorize",
+    ]
+
+
+@pytest.mark.parametrize("comment", ["/* reason */", "/* one */ /* two */"])
+def test_javascript_regex_after_comment_preserves_the_following_method(
+    tmp_path: Path, comment: str
+) -> None:
+    source = f"""class Service {{
+  check() {{ return {comment} /=>/; }} // note
+  authorize() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "service.js", source)
+
+    assert preview.splitlines() == [
+        "class Service",
+        "method Service.check",
         "method Service.authorize",
     ]
 
@@ -654,6 +675,9 @@ def test_javascript_decimal_before_keyword_preserves_the_following_method(
     "expression",
     [
         "{} / [1, 2]",
+        '"12" /* reason */ / { valueOf() { return 12 / 2; } }',
+        "`12` /* reason */ / { valueOf() { return 12 / 2; } }",
+        "/12/ /* reason */ / { valueOf() { return 12 / 2; } }",
         "object.if(ready) / { value: count / total }",
         "object.\ufeffif(ready) / { value: count / total }",
         "object.else / { value: count / total }",

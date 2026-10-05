@@ -289,12 +289,18 @@ def javascript_regex_end(
     masked: list[str],
     failed_scans: set[tuple[int, bool]],
     after_control: bool,
+    block_comment_starts: dict[int, int],
 ) -> int | None:
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
     previous = start - 1
-    while previous >= 0 and text[previous] in " \t\r\ufeff":
-        previous -= 1
+    while previous >= 0:
+        if text[previous] in " \t\r\ufeff":
+            previous -= 1
+        elif previous in block_comment_starts:
+            previous = block_comment_starts[previous] - 1
+        else:
+            break
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
         keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$|=>$", prefix)
@@ -338,6 +344,8 @@ def mask_c_style_source(text: str, suffix: str) -> str:
     masked: list[str] = []
     index = 0
     block_comment_depth = 0
+    block_comment_start = 0
+    block_comment_starts: dict[int, int] = {}
     in_line_comment = False
     quote = ""
     raw_terminator = ""
@@ -367,6 +375,8 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             elif char == "*" and next_char == "/":
                 masked.extend((" ", " "))
                 block_comment_depth -= 1
+                if block_comment_depth == 0:
+                    block_comment_starts[index + 1] = block_comment_start
                 index += 2
             else:
                 masked.append(" ")
@@ -478,7 +488,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 index += len(token)
                 continue
         if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index, masked, failed_regex_scans, after_control)
+            regex_end = javascript_regex_end(
+                text, index, masked, failed_regex_scans, after_control, block_comment_starts
+            )
             if regex_end is not None:
                 masked.extend(" " * (regex_end - index))
                 index = regex_end
@@ -492,6 +504,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
         if char == "/" and next_char == "*":
             masked.extend((" ", " "))
             block_comment_depth = 1
+            block_comment_start = index
             index += 2
             continue
         if char == "#" and suffix == ".php" and next_char != "[":
