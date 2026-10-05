@@ -1078,11 +1078,11 @@ describe("semantic scan comparison", () => {
       config,
       codex,
       model: "explicit-model",
-      reasoningEffort: "max",
+      reasoningEffort: "future-effort",
     });
     expect(calls.threadOptions).toMatchObject({
       model: "explicit-model",
-      modelReasoningEffort: "max",
+      modelReasoningEffort: "future-effort",
     });
   });
 

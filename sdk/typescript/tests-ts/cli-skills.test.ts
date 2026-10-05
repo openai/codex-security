@@ -955,7 +955,11 @@ describe("CLI skill commands", () => {
   test.each(["validate", "patch", "verify-fix"] as const)(
     "selects the model and reasoning effort directly for %s",
     async (command) => {
-      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+      for (const [model, effort] of [
+        ["gpt-6-astra", "max"],
+        ["gpt-6.1-sol", "max"],
+        ["synthetic-future-model", "synthetic-future-effort"],
+      ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
         expect(
@@ -967,7 +971,7 @@ describe("CLI skill commands", () => {
                 ? ["--model", model]
                 : [`--model=${model}`]),
               "--effort",
-              "max",
+              effort,
             ],
             dependencies({
               onCodex: (args, output) => {
@@ -992,14 +996,11 @@ describe("CLI skill commands", () => {
           stderr.text(),
         ).toBe(0);
         expect(invocation).toContain(`model="${model}"`);
-        expect(invocation).toContain('model_reasoning_effort="max"');
+        expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
       }
 
       for (const [options, message] of [
-        [
-          ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, xhigh, or max",
-        ],
+        [["--effort="], "--effort must not be empty"],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
           "--effort conflicts with --codex model_reasoning_effort",

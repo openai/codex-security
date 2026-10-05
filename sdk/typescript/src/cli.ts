@@ -307,14 +307,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 
-const MODEL_REASONING_EFFORTS = [
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const MODEL_OPTIONS = modelOptions();
@@ -985,12 +977,11 @@ function modelOptions(
 ) {
   return z.object({
     model: optionValue("--model").optional().describe(modelDescription),
-    effort: z
-      .enum(MODEL_REASONING_EFFORTS, {
-        error: "--effort must be minimal, low, medium, high, xhigh, or max.",
-      })
+    effort: optionValue("--effort")
       .optional()
-      .describe(effortDescription),
+      .describe(
+        `${effortDescription} Passed through to Codex; supported values depend on the model, provider, and Codex version.`,
+      ),
   });
 }
 
