@@ -379,6 +379,11 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             quote = '@"'
             index += 2
             continue
+        if suffix == ".go" and char == "`":
+            masked.append(" ")
+            raw_terminator = "`"
+            index += 1
+            continue
         triple_quote = text[index : index + 3]
         if triple_quote in {'"""', "'''"}:
             masked.extend((" ", " ", " "))
