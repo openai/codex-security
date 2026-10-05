@@ -427,7 +427,11 @@ test(
     const exec = await readJson(join(directory, "exec.json"));
     assert.equal(preflight.cwd, prepared.repo);
     assert.equal(exec.effectiveCwd, prepared.repo);
-    assert.deepEqual(preflight.config, exec.config);
+    assert.equal(exec.config.model_provider, undefined);
+    assert.deepEqual(preflight.config, {
+      ...exec.config,
+      model_provider: "openai",
+    });
     assert.deepEqual(exec.config.features, {
       memories: false,
       apps: false,
