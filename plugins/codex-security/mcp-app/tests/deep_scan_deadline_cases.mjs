@@ -6,7 +6,6 @@ export async function testDeepScanDeadlines({
   FakeStore,
   FakeExecutor,
   createCoordinator,
-  deferred,
   immediateClock,
   eventually,
 }) {

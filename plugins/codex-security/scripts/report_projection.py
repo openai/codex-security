@@ -32,18 +32,10 @@ def _text(value: Any, fallback: str) -> str:
         return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
-    rendered: list[str] = []
-    cursor = 0
-    for match in re.finditer(r"(?<!`)`([^`\n]+)`(?!`)", normalized):
-        rendered.append(_escape_markdown_text(normalized[cursor : match.start()]))
-        rendered.append(f"`{match.group(1)}`")
-        cursor = match.end()
-    rendered.append(_escape_markdown_text(normalized[cursor:]))
-    return "".join(rendered)
-
-
-def _escape_markdown_text(value: str) -> str:
-    return re.sub(r"([\\`*\[\]<>])", r"\\\1", value)
+    return "".join(
+        part if index % 2 else re.sub(r"([\\`*\[\]<>])", r"\\\1", part)
+        for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
+    )
 
 
 def _strings(value: Any) -> list[str]:
@@ -147,12 +139,9 @@ def _deep_finding_groups(
 
 
 def _deep_group_titles(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
-    titles: list[str] = []
-    for _, finding, _ in group:
-        title = _cell(_deep_title_parts(finding)[0])
-        if title not in titles:
-            titles.append(title)
-    return "<br>".join(titles)
+    return "<br>".join(
+        dict.fromkeys(_cell(_deep_title_parts(finding)[0]) for _, finding, _ in group)
+    )
 
 
 def _deep_group_levels(

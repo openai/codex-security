@@ -23,6 +23,7 @@ from workbench_test_support import (
     initialize_git_repository,
     run_workbench,
     start_delivered_scan,
+    start_workspace_scan,
     write_completed_contract,
 )
 
@@ -401,15 +402,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         "--mode",
         "standard",
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
         scan_dir,
@@ -1573,6 +1566,16 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
         assert connection.execute(
             "SELECT name FROM schema_migrations WHERE version = 20"
         ).fetchone() == ("phase-specific scan progress",)
+        with pytest.raises(sqlite3.IntegrityError) as invalid_unit:
+            connection.execute(
+                "UPDATE scan_progress SET phase_progress_unit = 'invalid' WHERE scan_id = ?",
+                (scan_id,),
+            )
+        assert str(invalid_unit.value) == (
+            "CHECK constraint failed: phase_progress_unit IS NULL OR phase_progress_unit IN ("
+            "'checks', 'threat_surfaces', 'review_receipts', 'candidate_findings', "
+            "'validated_findings', 'report_artifacts')"
+        )
 
 
 @pytest.mark.parametrize(

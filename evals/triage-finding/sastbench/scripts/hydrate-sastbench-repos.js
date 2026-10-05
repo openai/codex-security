@@ -179,6 +179,7 @@ if (require.main === module) {
 
 module.exports = {
   runGit,
+  gitOutput,
   DEFAULT_CACHE_ROOT,
   parseArgs,
   repositoryCacheId,

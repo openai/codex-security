@@ -31,7 +31,9 @@ assert.equal(
   extractTriageResult(JSON.stringify(triageResult("not_actionable"))).findings[0].verdict,
   "not_actionable",
 );
-assert.throws(() => extractTriageResult("no json"), /triage-finding\/v0/);
+assert.throws(() => extractTriageResult("no json"), {
+  message: "Could not find a parseable triage-finding/v0 JSON result",
+});
 assert.throws(
   () => parseCaseOutcome(JSON.stringify(triageResult("confirmed", "wrong")), "sastbench-000000"),
   /input_id mismatch/,

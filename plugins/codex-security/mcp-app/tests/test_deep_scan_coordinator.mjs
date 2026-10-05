@@ -1,5 +1,4 @@
 import { sourceReferences } from "./support/source-references.mjs";
-import { deferred } from "./deferred.mjs";
 import { createTemporaryDirectories } from "./support/temporary-directories.mjs";
 import { once } from "node:events";
 import { mock } from "node:test";
@@ -49,6 +48,13 @@ const recordSleeps = (sleeps) => async (delayMs, signal) => {
   assert.equal(signal.aborted, false);
   sleeps.push(delayMs);
 };
+
+function recordingClock(sleeps) {
+  return {
+    now: immediateClock.now,
+    sleep: async (delayMs) => sleeps.push(delayMs),
+  };
+}
 
 const temporaryDirectories = createTemporaryDirectories(true);
 async function testCappedQueueAndSerialDedup() {
@@ -816,10 +822,7 @@ async function testCybersecurityRefusalReplacesOnlyRefusedDiscovery() {
   const sleeps = [];
   const coordinator = createCoordinator(fixture, store, executor, {
     retryDelaysMs: [1, 3, 9],
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
 
@@ -863,10 +866,7 @@ async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmed
     const coordinator = createCoordinator(fixture, store, executor, {
       random: () => 0,
       retryDelaysMs: [1, 3, 9],
-      clock: {
-        now: immediateClock.now,
-        sleep: async (delayMs) => sleeps.push(delayMs),
-      },
+      clock: recordingClock(sleeps),
     });
     coordinator.start();
 
@@ -917,10 +917,7 @@ async function testRateLimitAndUnrelatedRefusalsRetainTransientRecovery() {
     const coordinator = createCoordinator(fixture, store, executor, {
       random: () => 0,
       retryDelaysMs: [1, 3, 9],
-      clock: {
-        now: immediateClock.now,
-        sleep: async (delayMs) => sleeps.push(delayMs),
-      },
+      clock: recordingClock(sleeps),
     });
     coordinator.start();
 
@@ -1181,10 +1178,7 @@ async function testConfigurationFailureDoesNotRetry(
   });
   const sleeps = [];
   const coordinator = createCoordinator(fixture, store, executor, {
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -1446,10 +1440,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   const coordinator = createCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
 
@@ -1603,10 +1594,7 @@ async function testInvalidReducerResultRetriesFromSnapshot(
   const coordinator = createCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -1671,10 +1659,7 @@ async function testMissingReducerResultResumesExistingThread(
   const coordinator = createCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
 
@@ -2158,10 +2143,7 @@ async function testReducerTraceabilityRetryNamesExactMissingSource() {
   const coordinator = createCoordinator(fixture, store, executor, {
     retryDelaysMs: [1, 3, 9],
     random: () => 0,
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -2201,10 +2183,7 @@ async function testThreeValidationAttemptsKeepPriorPromptsImmutable() {
   const coordinator = createCoordinator(fixture, store, executor, {
     retryDelaysMs: [1, 3, 9],
     random: () => 0,
-    clock: {
-      now: immediateClock.now,
-      sleep: async (delayMs) => sleeps.push(delayMs),
-    },
+    clock: recordingClock(sleeps),
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -4300,8 +4279,8 @@ const {
   DeepScanCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
-  deferred,
   immediateClock,
+  recordingClock,
   workerIdFromPrompt,
   promptContext,
 });
@@ -4323,7 +4302,6 @@ try {
     FakeStore,
     FakeExecutor,
     createCoordinator,
-    deferred,
     eventually,
   });
   await testDirectReducerCannotDropAcceptedFinding();
@@ -4333,7 +4311,6 @@ try {
     FakeStore,
     FakeExecutor,
     createCoordinator,
-    deferred,
     immediateClock,
     eventually,
   });
