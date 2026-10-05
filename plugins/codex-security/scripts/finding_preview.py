@@ -187,6 +187,10 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 ("level",),
                 ((("level",), FINDING_LEVEL_BYTES),),
             )
+    if "taxonomy" in prepared:
+        prepared["taxonomy"] = bounded_finding_section(
+            prepared["taxonomy"], FINDING_SUMMARY_BYTES, ("cwe",), ()
+        )
     metadata_keys = (
         "ruleId",
         "status",

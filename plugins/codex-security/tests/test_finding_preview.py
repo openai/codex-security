@@ -46,9 +46,10 @@ def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
         ("confidence", {"rationale": "x" * 20_000, "level": "high"}),
         ("identity", {"anchor": "x" * 20_000}),
         ("ruleId", "x" * 20_000),
+        ("taxonomy", {"category": "x" * 1_800, "cwe": ["CWE-79"]}),
         ("taxonomy", {"category": "x" * 20_000, "cwe": ["CWE-79"]}),
     ],
-    ids=["severity", "confidence", "identity", "rule", "taxonomy"],
+    ids=["severity", "confidence", "identity", "rule", "taxonomy-short", "taxonomy-long"],
 )
 def test_verbose_finding_metadata_retains_diagnostics_and_report(
     metadata: str, value: object
@@ -71,6 +72,8 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(
         key: value for key, value in finding.items() if key != metadata
     }
     assert bounded[metadata]
+    if metadata == "taxonomy":
+        assert bounded[metadata]["cwe"] == value["cwe"]
     if metadata in {"severity", "confidence"}:
         assert bounded[metadata]["level"] == "high"
         assert bounded[metadata]["rationale"]
