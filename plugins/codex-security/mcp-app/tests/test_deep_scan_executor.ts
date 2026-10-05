@@ -1071,6 +1071,7 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "XDG_CACHE_HOME",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
@@ -1131,8 +1132,26 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           path: `${configPath}.${index}`,
           provider,
           providerConfig,
+          serviceTier: [undefined, "flex", "priority", "priority"][index],
           configuration: {
             ...parseToml(configuration),
+            ...(index === 0
+              ? {}
+              : { service_tier: index === 3 ? "priority" : "flex" }),
+            ...(index === 2
+              ? {
+                  profile: "selected",
+                  profiles: {
+                    selected: {
+                      ...((
+                        parseToml(configuration).profiles as
+                          Record<string, object> | undefined
+                      )?.selected ?? {}),
+                      service_tier: "priority",
+                    },
+                  },
+                }
+              : {}),
             ...(provider === undefined
               ? {}
               : {
@@ -1219,6 +1238,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
+              process.env.XDG_CACHE_HOME = path.join(
+                fixture.root,
+                `cache-${index}`,
+              );
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1294,7 +1317,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
               model_reasoning_effort: reasoningEffort,
+              service_tier: workerConfigurations[index].serviceTier,
             });
+            assert.equal(
+              invocation.cacheDirectory,
+              path.join(fixture.root, `cache-${index}`),
+            );
             assertFlagPair(invocation.argv, "--model", model);
             assert.equal(
               invocation.argv.includes("resume"),
@@ -1370,6 +1398,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same isolated provider",
             );
+            assertConfigOverrides(preflight.argv, {
+              service_tier: selectedProvider.serviceTier,
+            });
+            assert.equal(
+              preflight.cacheDirectory,
+              path.join(
+                fixture.root,
+                `cache-${workerConfigurations.indexOf(selectedProvider)}`,
+              ),
+            );
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 preflight.argv.some(
@@ -1409,7 +1447,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             workerConfigurations.map((entry) =>
               writeFile(
                 entry.path,
-                'model_reasoning_summary = "detailed"\nmodel_provider = "changed"\n',
+                'model_reasoning_summary = "detailed"\nmodel_provider = "changed"\nservice_tier = "changed"\n',
               ),
             ),
           );
@@ -2253,7 +2291,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2294,7 +2332,7 @@ if (process.argv.includes('app-server')) {
 const stdin = (await process.stdin.toArray()).join('');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

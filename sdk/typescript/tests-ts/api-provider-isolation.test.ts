@@ -89,7 +89,7 @@ async function loadWorkerSettings(root: string) {
     pathToFileURL(bundledPath).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      providerOverrides?: string[];
+      configOverrides?: string[];
     }>;
   };
 
@@ -153,7 +153,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   const actual = await effectiveProvider(
                     environment,
                     repository,
-                    settings.providerOverrides ?? [],
+                    settings.configOverrides ?? [],
                   );
                   expect(actual).toMatchObject(provider);
                   expect(actual.http_headers ?? {}).toEqual(
@@ -233,7 +233,7 @@ test("workers preserve native provider inheritance without an explicit selection
     );
     const settings = await workerRuntimeSettings(environment);
     expect(
-      settings.providerOverrides?.some((value) =>
+      settings.configOverrides?.some((value) =>
         value.startsWith("model_provider="),
       ),
     ).not.toBe(true);
@@ -241,7 +241,7 @@ test("workers preserve native provider inheritance without an explicit selection
       await effectiveProvider(
         environment,
         root,
-        settings.providerOverrides ?? [],
+        settings.configOverrides ?? [],
       ),
     ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
   }

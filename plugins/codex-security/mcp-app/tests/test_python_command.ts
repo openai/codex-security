@@ -28,6 +28,7 @@ for (const [candidateIndex, expectedCandidate] of windowsCandidates.entries()) {
     await resolvePythonCommand({
       configuredPython: "",
       homeDirectory: windowsHome,
+      cacheDirectory: "",
       isUsableExecutable: async (candidate: string) => {
         checkedCandidates.push(candidate);
         return candidate === expectedCandidate;
@@ -45,6 +46,7 @@ assert.equal(
   await resolvePythonCommand({
     configuredPython: "",
     homeDirectory: windowsHome,
+    cacheDirectory: "",
     isUsableExecutable: async () => false,
     platform: "win32",
   }),
@@ -80,16 +82,23 @@ assert.equal(
 );
 assert.deepEqual(checkedUnixCandidates, unixCandidates);
 
-for (const platform of ["darwin", "linux"] as const) {
-  const managedPython = path.posix.join(
-    "/custom/cache",
-    "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+for (const platform of ["darwin", "linux", "win32"] as const) {
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  const cacheDirectory =
+    platform === "win32" ? "D:\\Custom Cache" : "/custom/cache";
+  const managedPython = paths.join(
+    cacheDirectory,
+    "codex-runtimes",
+    "codex-primary-runtime",
+    "dependencies",
+    "python",
+    ...(platform === "win32" ? ["python.exe"] : ["bin", "python3"]),
   );
   assert.equal(
     await resolvePythonCommand({
       configuredPython: "",
       homeDirectory: unixHome,
-      cacheDirectory: "/custom/cache",
+      cacheDirectory,
       platform,
       isUsableExecutable: async (candidate) => candidate === managedPython,
     }),

@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
@@ -62,6 +64,42 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
+  test.each(["win32", "linux"])(
+    "matches case-variant Git metadata using %s filename rules",
+    async (platform) => {
+      const root = await temporaryDirectory();
+      await mkdir(join(root, ".GIT"));
+      await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
+      await writeFile(join(root, "guide.md"), "Synthetic guide");
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `
+      Object.defineProperty(process, "platform", { value: process.argv[1] });
+      const { prepareKnowledgeBase } = await import(process.argv[2]);
+      const { readdir, readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const prepared = await prepareKnowledgeBase([process.argv[3]]);
+      try {
+        console.log(JSON.stringify(await Promise.all((await readdir(prepared.path)).map(name => readFile(join(prepared.path, name), "utf8")))));
+      } finally { await prepared.cleanup(); }
+    `,
+          platform,
+          fileURLToPath(new URL("../src/knowledge-base.ts", import.meta.url)),
+          root,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).sort()).toEqual(
+        platform === "win32"
+          ? ["Synthetic guide"]
+          : ["Synthetic guide", "Synthetic metadata"],
+      );
+    },
+  );
+
   test("directory knowledge bases omit Git metadata while direct files remain explicit", async () => {
     const root = await temporaryDirectory();
     await mkdir(join(root, ".git"));

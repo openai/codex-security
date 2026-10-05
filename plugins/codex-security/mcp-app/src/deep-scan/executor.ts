@@ -52,7 +52,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
-  providerOverrides?: string[];
+  configOverrides?: string[];
   reasoningSummary?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
@@ -84,7 +84,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
-      configOverrides.push(...(runtimeSettings.providerOverrides ?? []));
+      configOverrides.push(...(runtimeSettings.configOverrides ?? []));
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -496,7 +496,7 @@ async function workerRuntimeSettings(
       ? profile.model_provider
       : config.model_provider;
   if (typeof provider === "string") {
-    settings.providerOverrides = [`model_provider=${JSON.stringify(provider)}`];
+    settings.configOverrides = [`model_provider=${JSON.stringify(provider)}`];
   }
   const providers = config.model_providers;
   if (isRecord(providers)) {
@@ -506,8 +506,17 @@ async function workerRuntimeSettings(
           ? { [provider]: providers[provider] }
           : {}
         : providers;
-    (settings.providerOverrides ??= []).push(
+    (settings.configOverrides ??= []).push(
       `model_providers=${inlineToml(selected)}`,
+    );
+  }
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
+  if (typeof serviceTier === "string") {
+    (settings.configOverrides ??= []).push(
+      `service_tier=${JSON.stringify(serviceTier)}`,
     );
   }
   const security = config.codex_security;
