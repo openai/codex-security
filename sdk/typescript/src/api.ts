@@ -1368,13 +1368,19 @@ export class CodexSecurity {
       );
       checkOpen();
 
-      const workerRuntimeConfig = selectedWorkerRuntimeConfig(
-        effectiveConfig,
-        modelProvider,
-        scanDir,
-        runtime.environment,
-      );
-      const workerSnapshot = { ...workerRuntimeConfig };
+      const { environment: workerEnvironment, ...workerRuntimeConfig } =
+        selectedWorkerRuntimeConfig(
+          effectiveConfig,
+          modelProvider,
+          scanDir,
+          runtime.environment,
+        );
+      const workerSnapshot: JsonObject = {
+        ...workerRuntimeConfig,
+        ...(workerEnvironment === undefined
+          ? {}
+          : { environment: workerEnvironment }),
+      };
       delete workerSnapshot["model_providers"];
       if (runtime.providerProfile !== undefined) {
         workerSnapshot["native_profile"] = runtime.providerProfile.name;
@@ -4867,7 +4873,7 @@ async function pluginSupportsWorkerProviderSnapshot(
   return (
     isRecord(manifest) &&
     isRecord(manifest["codexSecurity"]) &&
-    manifest["codexSecurity"]["workerProviderSnapshot"] === 3
+    manifest["codexSecurity"]["workerProviderSnapshot"] === 4
   );
 }
 
@@ -4880,7 +4886,33 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
-  const providers = config["model_providers"];
+  const providers = resolved["model_providers"];
+  const providerEnvironmentNames = isRecord(providers)
+    ? Object.values(providers)
+        .flatMap((providerConfig) =>
+          isRecord(providerConfig)
+            ? [
+                providerConfig["env_key"],
+                ...(isRecord(providerConfig["env_http_headers"])
+                  ? Object.values(providerConfig["env_http_headers"])
+                  : []),
+              ]
+            : [],
+        )
+        .filter((name): name is string => typeof name === "string")
+    : [];
+  const providerEnvironment = Object.fromEntries(
+    providerEnvironmentNames.flatMap((name) => {
+      const value =
+        environment[name] ??
+        (process.platform === "win32"
+          ? Object.entries(environment).find(
+              ([key]) => key.toUpperCase() === name.toUpperCase(),
+            )?.[1]
+          : undefined);
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
   const instructionsFile = resolved["model_instructions_file"];
   if (typeof instructionsFile === "string") {
     resolved["model_instructions_file"] = resolve(
@@ -4895,6 +4927,9 @@ function selectedWorkerRuntimeConfig(
         .map((key) => [key, resolved[key]!]),
     ),
     ...(provider === undefined ? {} : { model_provider: provider }),
+    ...(Object.keys(providerEnvironment).length === 0
+      ? {}
+      : { environment: providerEnvironment }),
     ...(isRecord(providers)
       ? {
           model_providers:

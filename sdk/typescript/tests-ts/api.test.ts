@@ -3719,6 +3719,9 @@ describe("CodexSecurity orchestration", () => {
             name: "Synthetic provider",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
+            env_http_headers: {
+              "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+            },
             auth: { command: "synthetic-auth" },
           },
         },
@@ -3744,6 +3747,11 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            environment: {
+              SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
+            },
+          })),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -3796,6 +3804,12 @@ describe("CodexSecurity orchestration", () => {
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
             expect(options?.config?.codexOverrides).toMatchObject(
               providerConfig,
+            );
+            expect(
+              options?.config?.codexOverrides?.["environment"],
+            ).toBeUndefined();
+            expect(options?.environment?.["SYNTHETIC_MATCH_HEADER"]).toBe(
+              "synthetic-comparison-header",
             );
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;

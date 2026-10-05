@@ -4,7 +4,7 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -123,6 +123,7 @@ async function loadWorkerSettings(root: string) {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
       configOverrides?: string[];
       nativeProfile?: string;
+      environment?: Record<string, string>;
     }>;
   };
 
@@ -152,10 +153,19 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
         name: `Synthetic ${index}`,
         base_url: `https://provider-${index}.example.test/v1`,
         wire_api: "responses",
-        env_key: "OPENROUTER_API_KEY",
+        env_key: "SYNTHETIC_CUSTOM_API_KEY",
+        env_http_headers: {
+          "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+          "X-Synthetic-Missing": "SYNTHETIC_UNSET",
+        },
         ...(index === 1
           ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
           : {}),
+      };
+      const providerEnvironment = {
+        SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
+        SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+        SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
       };
       clients.push(
         new TestClient(
@@ -163,14 +173,22 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
             pluginPath: PLUGIN_ROOT,
             codexOverrides: {
               model_provider: "openrouter",
-              model_providers: { openrouter: provider },
+              model_providers: {
+                openrouter: provider,
+                "required.gateway": {
+                  name: "Managed selection",
+                  wire_api: "responses",
+                  env_key: "SYNTHETIC_REQUIRED_KEY",
+                },
+              },
             },
           },
           {
             environment: {
               CODEX_SECURITY_STATE_DIR: state,
-              OPENROUTER_API_KEY:
-                index === 0 ? "synthetic-key-A" : "synthetic-key-B",
+              OPENROUTER_API_KEY: "synthetic-sdk-account-key",
+              ...providerEnvironment,
+              SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
             },
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scan,
@@ -187,7 +205,33 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                     "utf8",
                   );
                   expect(preflight).not.toContain("synthetic-key-");
+                  expect(preflight).not.toContain("synthetic-header-");
+                  const workerSnapshotPath =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const workerSnapshot = parseToml(
+                    await readFile(workerSnapshotPath, "utf8"),
+                  );
+                  expect(workerSnapshot["worker_runtime"]).toMatchObject({
+                    environment: providerEnvironment,
+                  });
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "environment"
+                    ],
+                  ).toEqual(providerEnvironment);
+                  if (process.platform !== "win32") {
+                    expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
+                      0o600,
+                    );
+                  }
+                  expect(
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ).not.toContain("synthetic-key-");
                   const settings = await workerRuntimeSettings(environment);
+                  expect(settings.environment).toEqual(providerEnvironment);
                   const actual = await effectiveProvider(
                     environment,
                     repository,
@@ -198,8 +242,8 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   expect(actual.http_headers ?? {}).toEqual(
                     provider.http_headers ?? {},
                   );
-                  expect(environment["OPENROUTER_API_KEY"]).toBe(
-                    index === 0 ? "synthetic-key-A" : "synthetic-key-B",
+                  expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
+                    providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
                   );
                   const saved = await readFile(
                     join(sharedHome, "config.toml"),
@@ -207,6 +251,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   );
                   expect(saved).not.toContain("model_providers");
                   expect(saved).not.toContain("synthetic-key-");
+                  expect(saved).not.toContain("synthetic-header-");
                   throw new Error("synthetic provider configuration checked");
                 },
               }),
@@ -348,7 +393,7 @@ test.each(legacyProviders)(
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.codexSecurity = { workerProviderSnapshot: true };
+    manifest.codexSecurity = { workerProviderSnapshot: 3 };
     await writeFile(manifestPath, JSON.stringify(manifest));
     let launched = false;
     const client = new TestClient(
