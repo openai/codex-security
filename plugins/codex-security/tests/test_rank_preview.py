@@ -558,12 +558,16 @@ def test_javascript_regex_after_control_flow_preserves_declarations(
         "object.else / { value: count / total }",
         "object. else / { value: count / total }",
         "object./* member */else / { value: count / total }",
+        "this.#if() / { valueOf() { return 12 / 2; } }",
+        "this.#else / { valueOf() { return 12 / 2; } }",
     ],
 )
 def test_javascript_division_preserves_the_following_method(
     tmp_path: Path, expression: str
 ) -> None:
     source = f"""class Service {{
+  #if() {{ return 12; }}
+  #else = 12;
   calculate() {{ const value = {expression}; }}
   visible() {{}}
 }}

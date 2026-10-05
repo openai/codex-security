@@ -255,13 +255,13 @@ def javascript_regex_end(
         previous -= 1
     if not after_control and previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
         prefix = text[max(0, previous - 8) : previous + 1]
-        keyword = re.search(r"(?<![\w.$])(?:case|return|throw|else)$", prefix)
+        keyword = re.search(r"(?<![\w.$#])(?:case|return|throw|else)$", prefix)
         if keyword is None:
             return None
         previous -= len(keyword.group())
         while previous >= 0 and masked[previous].isspace():
             previous -= 1
-        if previous >= 0 and masked[previous] == ".":
+        if previous >= 0 and masked[previous] in ".#":
             return None
 
     index = start + 1
@@ -463,7 +463,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                     start -= 1
                 control_parentheses.append(
                     keyword in {"if", "while", "for", "with"}
-                    and (start == 0 or masked[start - 1] != ".")
+                    and (start == 0 or masked[start - 1] not in ".#")
                 )
             if char == ")":
                 after_control = bool(control_parentheses) and control_parentheses.pop()
