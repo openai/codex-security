@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 import { binaryPath } from "./binding.mjs";
 import { libc } from "./platform.mjs";
 
@@ -43,7 +42,7 @@ function isMain() {
     return (
       process.argv[1] !== undefined &&
       process.argv[1] !== "-" &&
-      pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
     );
   } catch {
     return false;

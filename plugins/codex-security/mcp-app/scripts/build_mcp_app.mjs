@@ -2,7 +2,6 @@
 import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
@@ -129,7 +128,7 @@ function isMain() {
     return (
       process.argv[1] !== undefined &&
       process.argv[1] !== "-" &&
-      pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
     );
   } catch {
     return false;
