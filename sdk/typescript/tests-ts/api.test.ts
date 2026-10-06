@@ -3720,6 +3720,7 @@ describe("CodexSecurity orchestration", () => {
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
             auth: { command: "synthetic-auth" },
+            env_http_headers: { "X-Synthetic": "SYNTHETIC_COMPARISON_HEADER" },
           },
         },
       };
@@ -3744,6 +3745,11 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            environment: {
+              SYNTHETIC_COMPARISON_HEADER: "synthetic-comparison-header",
+            },
+          })),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -3797,6 +3803,15 @@ describe("CodexSecurity orchestration", () => {
             expect(options?.config?.codexOverrides).toMatchObject(
               providerConfig,
             );
+            expect(options?.environment?.["SYNTHETIC_COMPARISON_HEADER"]).toBe(
+              "synthetic-comparison-header",
+            );
+            expect(options?.config?.codexOverrides).not.toHaveProperty(
+              "environment",
+            );
+            expect(
+              JSON.stringify(options?.config?.codexOverrides),
+            ).not.toContain("synthetic-comparison-header");
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");

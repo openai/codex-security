@@ -1374,19 +1374,6 @@ export class CodexSecurity {
         scanDir,
         runtime.environment,
       );
-      const workerSnapshot = { ...workerRuntimeConfig };
-      delete workerSnapshot["model_providers"];
-      if (runtime.providerProfile !== undefined) {
-        workerSnapshot["native_profile"] = runtime.providerProfile.name;
-      }
-      if (deepScanConfiguration !== undefined) {
-        await writeDeepScanConfig(
-          runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml"),
-          deepScanConfiguration,
-          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
-        );
-      }
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -1921,6 +1908,44 @@ export class CodexSecurity {
         options.auth,
         git,
       );
+      if (deepScanConfiguration !== undefined) {
+        const workerSnapshot = { ...workerRuntimeConfig };
+        const providers = workerSnapshot["model_providers"];
+        const definition =
+          isRecord(providers) && typeof modelProvider === "string"
+            ? providers[modelProvider]
+            : undefined;
+        const providerEnvironment: JsonObject = {};
+        if (isRecord(definition)) {
+          const headers = definition["env_http_headers"];
+          for (const name of [
+            definition["env_key"],
+            ...(isRecord(headers) ? Object.values(headers) : []),
+          ]) {
+            if (typeof name !== "string") continue;
+            const key =
+              process.platform === "win32"
+                ? Object.keys(environment)
+                    .sort()
+                    .find((key) => key.toUpperCase() === name.toUpperCase())
+                : name;
+            const value = key === undefined ? undefined : environment[key];
+            if (value !== undefined) providerEnvironment[name] = value;
+          }
+        }
+        if (Object.keys(providerEnvironment).length > 0)
+          workerSnapshot["environment"] = providerEnvironment;
+        delete workerSnapshot["model_providers"];
+        if (runtime.providerProfile !== undefined)
+          workerSnapshot["native_profile"] = runtime.providerProfile.name;
+        await writeDeepScanConfig(
+          runtime.deepScanConfigPath ??
+            join(runtimeHome, "codex-security", "config.toml"),
+          deepScanConfiguration,
+          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
+        );
+        checkOpen();
+      }
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
@@ -4881,25 +4906,6 @@ function selectedWorkerRuntimeConfig(
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   const providers = resolved["model_providers"];
-  const definition =
-    isRecord(providers) && provider !== undefined
-      ? providers[provider]
-      : undefined;
-  const providerEnvironment: JsonObject = {};
-  if (isRecord(definition)) {
-    const headers = definition["env_http_headers"];
-    for (const name of [
-      definition["env_key"],
-      ...(isRecord(headers) ? Object.values(headers) : []),
-    ]) {
-      if (typeof name !== "string") continue;
-      const value =
-        process.platform === "win32"
-          ? environmentValue(environment, name)
-          : environment[name];
-      if (value !== undefined) providerEnvironment[name] = value;
-    }
-  }
   const instructionsFile = resolved["model_instructions_file"];
   if (typeof instructionsFile === "string") {
     resolved["model_instructions_file"] = resolve(
@@ -4914,9 +4920,6 @@ function selectedWorkerRuntimeConfig(
         .map((key) => [key, resolved[key]!]),
     ),
     ...(provider === undefined ? {} : { model_provider: provider }),
-    ...(Object.keys(providerEnvironment).length === 0
-      ? {}
-      : { environment: providerEnvironment }),
     ...(isRecord(providers)
       ? {
           model_providers:
