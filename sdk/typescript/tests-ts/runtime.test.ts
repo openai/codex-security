@@ -1940,8 +1940,15 @@ for await (const line of createInterface({ input: process.stdin })) {
           break;
       }
 
+      const expectedInstalls =
+        damage === "missing marketplace manifest" ||
+        damage === "incomplete marketplace manifest"
+          ? 1
+          : 2;
       await bootstrap();
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+        expectedInstalls,
+      );
       expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
       expect(existsSync(join(staged, "stale.py"))).toBe(false);
       expect(await readFile(manifest, "utf8")).toBe(expectedManifest);
@@ -1950,7 +1957,9 @@ for await (const line of createInterface({ input: process.stdin })) {
         version: "1.2.3",
       });
       await bootstrap();
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+        expectedInstalls,
+      );
     });
   });
 
