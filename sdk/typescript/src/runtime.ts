@@ -2380,6 +2380,7 @@ export async function createMarketplace(
       ".mcp.json",
       "scripts/launch_codex_security_mcp",
       "scripts/launch_codex_security_mcp.cmd",
+      "mcp/server.mjs",
     ]) {
       const file = join(pluginDestination, path);
       if (!(await lstat(file).catch(nullIfMissingFileError))?.isFile())
@@ -2444,7 +2445,8 @@ async function legacyPluginMcpConfiguration(
   if (
     !isRecord(server) ||
     (server["command"] !== "./scripts/launch_codex_security_mcp" &&
-      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
+      !isLegacyNodeMcpServer(server))
   ) {
     return;
   }
@@ -2452,15 +2454,31 @@ async function legacyPluginMcpConfiguration(
   if (environment !== undefined && !Array.isArray(environment)) return;
   if (
     Array.isArray(environment) &&
-    environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+    environment.includes("CODEX_SECURITY_PLUGIN_ROOT") &&
+    !isLegacyNodeMcpServer(server)
   ) {
     return;
   }
-  server["env_vars"] = [
-    ...(Array.isArray(environment) ? environment : []),
-    "CODEX_SECURITY_PLUGIN_ROOT",
-  ];
+  if (
+    !Array.isArray(environment) ||
+    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+  ) {
+    server["env_vars"] = [
+      ...(Array.isArray(environment) ? environment : []),
+      "CODEX_SECURITY_PLUGIN_ROOT",
+    ];
+  }
   return Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`);
+}
+
+function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
+  const command = server["command"];
+  return (
+    typeof command === "string" &&
+    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
+    Array.isArray(server["args"]) &&
+    server["args"][0] === "./mcp/server.mjs"
+  );
 }
 
 function projectLegacyPluginFile(
@@ -2469,6 +2487,18 @@ function projectLegacyPluginFile(
   mcpConfiguration: Buffer,
 ): Buffer {
   if (path === ".mcp.json") return mcpConfiguration;
+  const configuration = JSON.parse(mcpConfiguration.toString()) as {
+    mcpServers: Record<string, Record<string, unknown>>;
+  };
+  if (isLegacyNodeMcpServer(configuration.mcpServers[PLUGIN_NAME]!)) {
+    if (path !== "mcp/server.mjs") return contents;
+    return Buffer.from(
+      'import { runMain } from "node:module";\n' +
+        'import { join } from "node:path";\n' +
+        'process.argv[1] = join(process.env.CODEX_SECURITY_PLUGIN_ROOT, "mcp", "server.mjs");\n' +
+        "runMain(process.argv[1]);\n",
+    );
+  }
   if (path === "scripts/launch_codex_security_mcp") {
     return Buffer.from(
       '#!/bin/sh\nexec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n',
@@ -2756,7 +2786,8 @@ async function pluginContentsMatch(
     const projected =
       projectedPath === ".mcp.json" ||
       projectedPath === "scripts/launch_codex_security_mcp" ||
-      projectedPath === "scripts/launch_codex_security_mcp.cmd";
+      projectedPath === "scripts/launch_codex_security_mcp.cmd" ||
+      projectedPath === "mcp/server.mjs";
     if (
       (!projected && sourceMetadata.size !== destinationMetadata.size) ||
       (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
