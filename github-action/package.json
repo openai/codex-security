@@ -24,7 +24,7 @@
     "@actions/io": "3.0.2"
   },
   "devDependencies": {
-    "@types/node": "24.13.4",
+    "@types/node": "26.6.3",
     "esbuild": "0.28.2",
     "prettier": "3.9.9",
     "tsx": "4.23.15",
