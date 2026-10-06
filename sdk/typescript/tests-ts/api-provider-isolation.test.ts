@@ -185,7 +185,13 @@ test.each(["direct", "null profile"])(
                 ...(selection === "null profile"
                   ? {
                       profile: "review",
-                      profiles: { review: { model_provider: null } },
+                      profiles: {
+                        review: {
+                          model_provider: null,
+                          model: null,
+                          model_reasoning_effort: null,
+                        },
+                      },
                     }
                   : {}),
                 model_provider: "openrouter",

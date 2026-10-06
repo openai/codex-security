@@ -257,8 +257,13 @@ describe("Codex configuration", () => {
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
+      [{ model: 12 }, "model must be a nonempty string"],
       [
         { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+      [
+        { model_reasoning_effort: false },
         "reasoning effort must be a nonempty string",
       ],
     ] as const) {
@@ -267,6 +272,19 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("still requires root model and effort when the profile omits them", async () => {
+    for (const field of ["model", "model_reasoning_effort"]) {
+      const config = await mergedCodexConfig({
+        codexOverrides: {
+          [field]: null,
+          profile: "review",
+          profiles: { review: { model: null, model_reasoning_effort: null } },
+        },
+      });
+      expect(() => scanModelConfiguration(config)).toThrow(ConfigurationError);
     }
   });
 

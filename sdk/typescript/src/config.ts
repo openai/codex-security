@@ -85,10 +85,8 @@ export function scanModelConfiguration(
     );
   }
   const reasoningEffort =
-    selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model_reasoning_effort")
-      ? selectedProfile["model_reasoning_effort"]
-      : config["model_reasoning_effort"];
+    selectedProfile?.["model_reasoning_effort"] ??
+    config["model_reasoning_effort"];
   if (
     typeof reasoningEffort !== "string" ||
     reasoningEffort.trim().length === 0
@@ -102,10 +100,7 @@ export function scanModelConfiguration(
 
 export function scanModel(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
-  return selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model")
-    ? selectedProfile["model"]
-    : config["model"];
+  return selectedProfile?.["model"] ?? config["model"];
 }
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
