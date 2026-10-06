@@ -1555,6 +1555,12 @@ describe("CodexSecurity orchestration", () => {
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
       AWS_REGION: "us-east-2",
     };
+    const prepareRuntime = mock(
+      unauthenticatedRuntime(codexHome, () => ({
+        ...environment,
+        GIT_SSH_COMMAND: "synthetic-ssh --runtime",
+      })),
+    );
     const client = new TestClient(
       {
         codexOverrides: {
@@ -1575,9 +1581,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         environment,
-        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-          ...environment,
-        })),
+        prepareRuntime,
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -1622,6 +1626,7 @@ describe("CodexSecurity orchestration", () => {
     expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
       AWS_REGION: "us-east-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --runtime",
     });
     expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
       model_reasoning_summary: "none",
@@ -1664,10 +1669,17 @@ describe("CodexSecurity orchestration", () => {
       AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
       AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
       AWS_REGION: "us-west-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --runtime",
     });
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "AWS_BEARER_TOKEN_BEDROCK",
     );
+    environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
+    await client.run(repository);
+    expect(createCodex.mock.lastCall?.[0]?.env?.["GIT_SSH_COMMAND"]).toBe(
+      "synthetic-ssh --caller",
+    );
+    expect(prepareRuntime).toHaveBeenCalledTimes(1);
     await client.close();
   });
 

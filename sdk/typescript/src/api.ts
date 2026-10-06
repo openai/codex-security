@@ -485,6 +485,7 @@ export class CodexSecurity {
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
   #runtime: PreparedRuntime | null = null;
+  #runtimeCallerEnvironmentKeys = new Set<string>();
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
   #closePromise: Promise<void> | null = null;
@@ -1299,11 +1300,7 @@ export class CodexSecurity {
       releaseCredentialHome = session.releaseCredentialHome;
       let git: InspectedExecutable = {
         executable: null,
-        environment: selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          modelProvider,
-        ),
+        environment: session.scanEnvironment,
       };
       for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
         git = await inspectTrustedExecutable(
@@ -2762,7 +2759,7 @@ export class CodexSecurity {
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
       }
-      const scanEnvironment = {
+      let scanEnvironment = {
         ...selectedScanEnvironment(
           commandAuth
             ? withoutOpenAiApiKeys(this.#dependencies.environment)
@@ -2784,6 +2781,11 @@ export class CodexSecurity {
       }
       this.#requireOpen();
       if (this.#runtime === null) {
+        this.#runtimeCallerEnvironmentKeys = new Set(
+          Object.keys(this.#dependencies.environment).map((name) =>
+            name.toUpperCase(),
+          ),
+        );
         this.#runtime = await this.#prepareRuntime(
           signal,
           temporaryRoot,
@@ -2805,6 +2807,23 @@ export class CodexSecurity {
         );
       }
       const runtime = this.#runtime;
+      // Retain launch-only runtime additions without restoring stale caller values.
+      const runtimeEnvironment = Object.fromEntries(
+        Object.entries(runtime.environment).filter(
+          ([name]) =>
+            !this.#runtimeCallerEnvironmentKeys.has(name.toUpperCase()),
+        ),
+      );
+      scanEnvironment = {
+        ...selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(runtimeEnvironment)
+            : runtimeEnvironment,
+          options.auth,
+          modelProvider,
+        ),
+        ...scanEnvironment,
+      };
       const effectiveConfig = scanCyberAccessConfig(
         requestedConfig,
         options.cyberAccessProgram,
