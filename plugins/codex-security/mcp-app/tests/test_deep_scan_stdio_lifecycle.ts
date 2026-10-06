@@ -62,6 +62,10 @@ async function testDeepScanStdioLifecycle() {
     "fail-next-cancel-scan",
   );
   const cancelLogPath = path.join(fixtureRoot, "cancel-scan-calls.jsonl");
+  const workbenchLaunchLogPath = path.join(
+    fixtureRoot,
+    "workbench-launches.jsonl",
+  );
   const serverBundlePath = path.join(
     installedPluginRoot,
     "mcp",
@@ -138,6 +142,7 @@ model_reasoning_summary = "none"
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
     FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL: cancelFailureControlPath,
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
+    FAKE_WORKBENCH_LAUNCH_LOG: workbenchLaunchLogPath,
     FAKE_CODEX_EXIT_LOG: exitLogPath,
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
@@ -281,6 +286,16 @@ model_reasoning_summary = "none"
       ),
       true,
     );
+
+    // Another client can replace this shared install while the scan is active.
+    await writeFile(
+      path.join(installedPluginRoot, "scripts", "workbench_db.py"),
+      "raise RuntimeError('synthetic replacement plugin helper')\n",
+    );
+    await rm(path.join(installedPluginRoot, "references"), {
+      recursive: true,
+    });
+    await rm(path.join(installedPluginRoot, "schemas"), { recursive: true });
 
     // Discovery progress is admitted once the first complete Standard worker is active.
     const discoveryProgress = await server.request(
@@ -920,6 +935,17 @@ model_reasoning_summary = "none"
         "utf8",
       );
       assert.ok(report.length > 0);
+      const helperLaunches = await readLogLines(workbenchLaunchLogPath);
+      for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
+        const launches = helperLaunches.filter(
+          (launch) => launch.args[1] === command,
+        );
+        assert.ok(launches.length > 0);
+        for (const launch of launches) {
+          assert.equal(launch.args[0], workbenchPath);
+          assert.equal(launch.cwd, pluginRoot);
+        }
+      }
       const executions = (await readLogLines(startLogPath)).slice(
         restartStartIndex,
       );
@@ -1198,6 +1224,7 @@ async function writePythonWrapper(executablePath: string) {
 import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (args[1] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');

@@ -90,6 +90,7 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
@@ -7014,21 +7015,87 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await expect(client.close()).resolves.toBeUndefined();
   });
 
-  test("attempts all runtime directory cleanup and preserves failures from close", async () => {
+  test("retains provider profiles for close when replacement cleanup fails", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const prepared = preparedRuntime(codexHome);
+    const createCodex = mock(throwing("synthetic scan reached"));
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "synthetic-provider",
+          model_providers: {
+            "synthetic-provider": {
+              name: "Synthetic provider",
+              base_url: "https://provider.example.test/v1",
+              wire_api: "responses",
+              requires_openai_auth: false,
+              http_headers: {
+                "X-Synthetic-Token": "synthetic-private-value",
+              },
+            },
+          },
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => prepared,
+        createCodex,
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { mode: "standard" }),
+      ).rejects.toThrow("synthetic scan reached");
+      const previous = prepared.providerProfile!;
+      const cleanup = previous.cleanup;
+      const failure = new Error("synthetic raw profile cleanup failure");
+      let cleanups = 0;
+      previous.cleanup = async () => {
+        if (++cleanups === 1) throw failure;
+        await cleanup();
+      };
+      await expect(client.run(repository, { mode: "standard" })).rejects.toBe(
+        failure,
+      );
+      expect(createCodex).toHaveBeenCalledTimes(1);
+      const profiles = (await readdir(codexHome)).filter((name) =>
+        name.endsWith(".config.toml"),
+      );
+      await client.close();
+      expect(existsSync(previous.path)).toBe(false);
+      expect(cleanups).toBe(2);
+      expect(profiles).toEqual([`${previous.name}.config.toml`]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("attempts all runtime cleanup and preserves failures from close", async () => {
     if (
       runTestInSubprocess(
         import.meta.path,
-        "attempts all runtime directory cleanup and preserves failures from close",
+        "attempts all runtime cleanup and preserves failures from close",
       )
     ) {
       return;
     }
-    for (const failures of [["deep"], ["bootstrap"], ["deep", "bootstrap"]]) {
+    for (const failures of [
+      ["profile"],
+      ["deep"],
+      ["bootstrap"],
+      ["deep", "bootstrap"],
+      ["profile", "deep", "bootstrap"],
+    ]) {
       const { root, repository, codexHome } = await runtimeDirectories();
       const bootstrapWorkspace = join(root, "bootstrap-workspace");
       const deepScanConfigDirectory = join(codexHome, "worker-config");
       await mkdir(bootstrapWorkspace);
       await mkdir(deepScanConfigDirectory, { recursive: true });
+      const prepared = {
+        ...preparedRuntime(codexHome),
+        bootstrapWorkspace,
+        deepScanConfigDirectory,
+      };
       const client = new TestClient(
         {},
         {
@@ -7036,50 +7103,61 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             CODEX_SECURITY_STATE_DIR: join(root, "state"),
             OPENAI_API_KEY: "ambient-key",
           },
-          prepareRuntime: runtimePreparer(codexHome, () => ({
-            bootstrapWorkspace,
-            deepScanConfigDirectory,
-          })),
+          prepareRuntime: async () => prepared,
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
           createCodex: () => fail("scan reached"),
         },
       );
       await expect(client.run(repository)).rejects.toThrow("scan reached");
+      const profile = await createProviderProfile(codexHome, {
+        model_providers: {
+          "synthetic-provider": {
+            name: "Synthetic provider",
+            http_headers: { "X-Synthetic-Token": "synthetic-private-value" },
+          },
+        },
+      });
+      prepared.providerProfile = profile;
       const originalRm = fsPromises.rm;
-      const deepFailure = new Error("synthetic raw worker cleanup failure");
-      const bootstrapFailure = new Error(
-        "synthetic raw bootstrap cleanup failure",
-      );
+      const cleanupFailures: Record<string, Error> = {
+        profile: new Error("synthetic raw profile cleanup failure"),
+        deep: new Error("synthetic raw worker cleanup failure"),
+        bootstrap: new Error("synthetic raw bootstrap cleanup failure"),
+      };
       const attempted: string[] = [];
       mockFs(() => ({
         rm: async (...args: Parameters<typeof originalRm>) => {
           const path = String(args[0]);
           attempted.push(path);
+          if (path === profile.path && failures.includes("profile"))
+            throw cleanupFailures["profile"];
           if (path === deepScanConfigDirectory && failures.includes("deep"))
-            throw deepFailure;
+            throw cleanupFailures["deep"];
           if (path === bootstrapWorkspace && failures.includes("bootstrap"))
-            throw bootstrapFailure;
+            throw cleanupFailures["bootstrap"];
           return await originalRm(...args);
         },
       }));
       try {
         const error = await client.close().catch((error: unknown) => error);
         if (failures.length === 1) {
-          expect(error).toBe(
-            failures[0] === "deep" ? deepFailure : bootstrapFailure,
-          );
+          expect(error).toBe(cleanupFailures[failures[0]!]);
         } else {
           expect(error).toBeInstanceOf(AggregateError);
-          expect((error as AggregateError).errors).toEqual([
-            deepFailure,
-            bootstrapFailure,
-          ]);
+          expect((error as AggregateError).errors).toEqual(
+            failures.map((name) => cleanupFailures[name]),
+          );
         }
         expect(attempted).toEqual([
+          profile.path,
           deepScanConfigDirectory,
           bootstrapWorkspace,
         ]);
+        expect(existsSync(profile.path)).toBe(failures.includes("profile"));
+        expect(existsSync(deepScanConfigDirectory)).toBe(
+          failures.includes("deep"),
+        );
         expect(existsSync(bootstrapWorkspace)).toBe(
           failures.includes("bootstrap"),
         );

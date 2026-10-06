@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -392,12 +392,37 @@ const legacyProviders: Array<[string, JsonObject]> = [
       },
     },
   ],
-  ["explicit OpenAI", { model_provider: "openai" }],
   [
-    "profile-selected OpenAI",
+    "OpenAI with custom definitions",
+    {
+      model_provider: "openai",
+      model_providers: {
+        synthetic: {
+          name: "Synthetic",
+          wire_api: "responses",
+          base_url: "https://gateway.example.test/v1",
+          env_key: "SYNTHETIC_OPENAI_API_KEY",
+        },
+      },
+    },
+  ],
+  [
+    "profile OpenAI with custom definitions",
     {
       profile: "selected",
-      profiles: { selected: { model_provider: "openai" } },
+      profiles: {
+        selected: {
+          model_provider: "openai",
+          model_providers: {
+            synthetic: {
+              name: "Synthetic",
+              wire_api: "responses",
+              base_url: "https://gateway.example.test/v1",
+              env_key: "SYNTHETIC_OPENAI_API_KEY",
+            },
+          },
+        },
+      },
     },
   ],
   [
@@ -455,11 +480,22 @@ test.each(legacyProviders)(
   },
 );
 
-test.each(["standard", "deep", "standard with explicit provider"] as const)(
+test.each([
+  ["standard", "standard", {}],
+  ["deep", "deep", {}],
+  ["standard with explicit provider", "standard", legacyProviders[0]![1]],
+  ["deep with explicit OpenAI", "deep", { model_provider: "openai" }],
+  [
+    "deep with profile-selected OpenAI",
+    "deep",
+    {
+      profile: "selected",
+      profiles: { selected: { model_provider: "openai" } },
+    },
+  ],
+] as const)(
   "keeps older custom plugins working for %s scans",
-  async (scenario) => {
-    const mode = scenario === "deep" ? "deep" : "standard";
-    const explicitProvider = scenario === "standard with explicit provider";
+  async (_scenario, mode, overrides) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -474,7 +510,7 @@ test.each(["standard", "deep", "standard with explicit provider"] as const)(
     const client = new TestClient(
       {
         pluginPath: plugin,
-        ...(explicitProvider ? { codexOverrides: legacyProviders[0]![1] } : {}),
+        codexOverrides: overrides,
       },
       {
         environment: {
@@ -495,9 +531,9 @@ test.each(["standard", "deep", "standard with explicit provider"] as const)(
                   "utf8",
                 ),
               );
-              expect(config["model_provider"]).toBe(
-                explicitProvider ? "openrouter" : undefined,
-              );
+              expect(
+                resolveCodexProfile(config as JsonObject)["model_provider"],
+              ).toBe(resolveCodexProfile(overrides)["model_provider"]);
               throw new Error("synthetic compatible scan started");
             },
           }),

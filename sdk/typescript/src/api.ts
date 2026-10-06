@@ -2616,8 +2616,12 @@ export class CodexSecurity {
     );
     const runtime = this.#runtime;
     this.#runtime = null;
-    await runtime?.providerProfile?.cleanup();
     const cleanupErrors: unknown[] = [];
+    try {
+      await runtime?.providerProfile?.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     for (const directory of [
       runtime?.deepScanConfigDirectory,
       runtime?.bootstrapWorkspace,
@@ -2897,10 +2901,10 @@ export class CodexSecurity {
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      const providers = effectiveConfig["model_providers"];
+      const providers = resolveCodexProfile(effectiveConfig)["model_providers"];
       if (
         deepScan &&
-        (typeof modelProvider === "string" ||
+        ((typeof modelProvider === "string" && modelProvider !== "openai") ||
           (isRecord(providers) && Object.keys(providers).length > 0)) &&
         (runtime.deepScanConfigPath === undefined ||
           !(await pluginSupportsWorkerProviderSnapshot(
@@ -2926,12 +2930,11 @@ export class CodexSecurity {
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       if (isRecord(providers) && Object.keys(providers).length > 0) {
-        const previousProfile = runtime.providerProfile;
+        await runtime.providerProfile?.cleanup();
         runtime.providerProfile = await createProviderProfile(
           runtimeHome,
           effectiveConfig,
         );
-        await previousProfile?.cleanup();
       } else {
         await runtime.providerProfile?.cleanup();
         delete runtime.providerProfile;
