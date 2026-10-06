@@ -1,17 +1,23 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import * as fsPromises from "node:fs/promises";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { dirname, join } from "node:path";
+import { expect, spyOn, test } from "bun:test";
 import { bootstrapPlugin } from "../src/runtime.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 test.each(["unchanged", "missing", "truncated"] as const)(
   "%s manifest preserves active workers",
-  checkWorkerReuse,
+  (metadata) => checkWorkerReuse(metadata),
 );
 
-async function checkWorkerReuse(metadata: string) {
+test.each(["missing", "truncated"] as const)(
+  "concurrent %s manifest repairs preserve active workers",
+  (metadata) => checkWorkerReuse(metadata, true),
+);
+
+async function checkWorkerReuse(metadata: string, concurrent = false) {
   const root = await temporaryDirectory("codex-security-plugin-worker-", true);
   try {
     const selected = join(root, "plugin");
@@ -79,14 +85,46 @@ async function checkWorkerReuse(metadata: string) {
       expect(ready).toBe("ready");
       if (metadata === "missing") await rm(manifest);
       else if (metadata === "truncated") await writeFile(manifest, "{");
-      const second = await bootstrapPlugin(home, selected, options);
+      const originalWrite = fsPromises.writeFile;
+      let writes = 0;
+      let releaseWrites = () => {};
+      const bothWriting = new Promise<void>((resolve) => {
+        releaseWrites = resolve;
+      });
+      const write = concurrent
+        ? spyOn(fsPromises, "writeFile").mockImplementation(async (...args) => {
+            // Both repairs reach the filesystem before either write completes.
+            if (dirname(String(args[0])) === dirname(manifest)) {
+              if (++writes === 2) releaseWrites();
+              await bothWriting;
+            }
+            return originalWrite(...args);
+          })
+        : undefined;
+      try {
+        const results = await Promise.allSettled(
+          Array.from({ length: concurrent ? 2 : 1 }, () =>
+            bootstrapPlugin(home, selected, options),
+          ),
+        );
+        for (const result of results) {
+          expect(result.status).toBe("fulfilled");
+          if (result.status === "fulfilled") {
+            expect(result.value.installedRoot).toBe(first.installedRoot);
+          }
+        }
+      } finally {
+        write?.mockRestore();
+      }
       const response = once(worker, "message");
       worker.send("read");
       const [content] = await Promise.race([response, exited]);
       expect(content).toBe(helper);
-      expect(second.installedRoot).toBe(first.installedRoot);
       expect(installs).toBe(1);
       expect(await readFile(manifest, "utf8")).toBe(expectedManifest);
+      expect(await fsPromises.readdir(dirname(manifest))).toEqual([
+        "marketplace.json",
+      ]);
       await bootstrapPlugin(home, selected, options);
       expect(installs).toBe(1);
     } finally {

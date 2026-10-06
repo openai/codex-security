@@ -2385,13 +2385,20 @@ async function writeMarketplaceManifest(
     "marketplace.json",
   );
   await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
-  await writeFile(manifestPath, MARKETPLACE_MANIFEST, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-    signal,
-  });
-  throwIfSignalAborted(signal);
+  const temporary = `${manifestPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, MARKETPLACE_MANIFEST, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal,
+    });
+    throwIfSignalAborted(signal);
+    await rename(temporary, manifestPath);
+    throwIfSignalAborted(signal);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export function resolveCodexCommand(
@@ -2505,7 +2512,6 @@ export async function bootstrapPlugin(
       "utf8",
     ).catch(nullIfMissingFileError)) !== MARKETPLACE_MANIFEST
   ) {
-    await rm(join(marketplace, ".agents"), { recursive: true, force: true });
     await writeMarketplaceManifest(marketplace, options.signal);
   }
 
