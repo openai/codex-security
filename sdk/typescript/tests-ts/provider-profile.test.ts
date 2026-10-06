@@ -38,73 +38,182 @@ const config = {
   model_providers: { "synthetic.gateway": provider },
 };
 
-test("native startup receives provider metadata while credentials stay private", async () => {
-  const home = await temporaryDirectory();
-  const sharedConfig = 'approval_policy = "never"\n';
-  await writeFile(join(home, "config.toml"), sharedConfig);
-  const script = join(home, "native startup.mjs");
-  await writeFile(
-    script,
-    `import { readFileSync } from "node:fs";
+const startupProvider = {
+  ...provider,
+  requires_openai_auth: true,
+  base_url: "https://provider.example.test/v1",
+  env_key: "SYNTHETIC_API_KEY",
+  auth: {
+    command: "synthetic-auth",
+    args: ["synthetic-command-secret"],
+  },
+};
+const startupProviders = { "synthetic.gateway": startupProvider };
+
+test.each([
+  [
+    "explicit custom",
+    { ...config, model_providers: startupProviders },
+    "synthetic.gateway",
+    true,
+  ],
+  [
+    "selected profile",
+    {
+      model_provider: "openai",
+      model_providers: startupProviders,
+      profile: "cloud.production",
+      profiles: { "cloud.production": { model_provider: "synthetic.gateway" } },
+    },
+    "synthetic.gateway",
+    true,
+  ],
+  [
+    "explicit OpenAI without definitions",
+    { model_provider: "openai" },
+    "openai",
+    false,
+  ],
+  [
+    "explicit OpenAI with empty definitions",
+    { model_provider: "openai", model_providers: {} },
+    "openai",
+    false,
+  ],
+  ["inherited provider", {}, undefined, false],
+  [
+    "inherited provider with metadata",
+    { model_providers: startupProviders },
+    undefined,
+    true,
+  ],
+  ["empty provider definitions", { model_providers: {} }, undefined, false],
+  ["explicit empty selection", { model_provider: "" }, "", false],
+] as const)(
+  "native startup preserves %s selection and private credentials",
+  async (_case, settings, selection, metadata) => {
+    const home = await temporaryDirectory();
+    const inherited = "synthetic.inherited";
+    const sharedConfig = `approval_policy = "never"\ncli_auth_credentials_store = "file"\nmodel_provider = "${inherited}"\n${selection === undefined ? `[model_providers."${inherited}"]\nname = "Synthetic inherited"\nwire_api = "responses"\nrequires_openai_auth = false\n` : ""}`;
+    await writeFile(join(home, "config.toml"), sharedConfig);
+    const script = join(home, "native startup.mjs");
+    await writeFile(
+      script,
+      `import { readFileSync } from "node:fs";
     import { join } from "node:path";
     console.log(JSON.stringify({
       args: process.argv.slice(2),
       home: process.env.CODEX_HOME,
       config: readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
     }));`,
-  );
-  const command = await providerPreflightCommand(
-    { command: process.execPath, args: [script] },
-    {
-      profile: "cloud.production",
-      profiles: {
-        "cloud.production": {
-          ...config,
-          model_providers: {
-            "synthetic.gateway": {
-              ...provider,
-              requires_openai_auth: true,
-              base_url: "https://provider.example.test/v1",
-              env_key: "SYNTHETIC_API_KEY",
-              auth: {
-                command: "synthetic-auth",
-                args: ["synthetic-command-secret"],
+    );
+    const command = await providerPreflightCommand(
+      { command: process.execPath, args: [script] },
+      settings,
+    );
+    const environment = { ...process.env, CODEX_HOME: home };
+    const result = await runCodexCommand(
+      command,
+      ["plugin", "marketplace", "list"],
+      environment,
+    );
+    expect(result.success).toBe(true);
+    const observed = JSON.parse(result.stdout);
+    expect(observed.home).toBe(home);
+    expect(observed.config).toBe(sharedConfig);
+    const overrides = observed.args.slice(0, -3);
+    const decoded: Record<string, unknown> = {};
+    for (let index = 0; index < overrides.length; index += 2) {
+      expect(overrides[index]).toBe("-c");
+      Object.assign(decoded, parse(overrides[index + 1]));
+    }
+    expect(decoded).toEqual({
+      ...(selection === undefined ? {} : { model_provider: selection }),
+      ...(metadata
+        ? {
+            model_providers: {
+              "synthetic.gateway": {
+                name: "Synthetic",
+                wire_api: "responses",
+                requires_openai_auth: true,
               },
             },
-          },
+          }
+        : {}),
+    });
+    expect(observed.args.slice(-3)).toEqual(["plugin", "marketplace", "list"]);
+    for (const marker of [
+      "synthetic-provider-secret",
+      "synthetic-command-secret",
+      "SYNTHETIC_API_KEY",
+      "provider.example.test",
+    ]) {
+      expect(JSON.stringify(observed.args)).not.toContain(marker);
+    }
+    const login = new CodexLoginHandle(
+      command,
+      ["login"],
+      environment,
+      () => {},
+    );
+    const completed = await login.wait();
+    expect(completed.success).toBe(true);
+    expect(JSON.parse(completed.stdout)).toEqual({
+      ...observed,
+      args: [...overrides, "login"],
+    });
+
+    const prefix = [
+      "-c",
+      "features.api_key_model_discovery=false",
+      "-c",
+      "features.plugins=false",
+    ];
+    const native = await providerPreflightCommand(
+      { ...resolveCodexCommand({}), args: prefix },
+      settings,
+    );
+    expect(native.args?.slice(0, prefix.length)).toEqual(prefix);
+    const { readDeepScanRuntimeConfig } = await import(
+      pathToFileURL(
+        join(
+          await bundledPluginRoot(),
+          "mcp",
+          "permission-profile-preflight.mjs",
+        ),
+      ).href
+    );
+    const read = () =>
+      readDeepScanRuntimeConfig({
+        codexPath: native.command,
+        commandArgs: native.args,
+        cwd: home,
+        configOverrides: [],
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          ...(process.env["SystemRoot"] === undefined
+            ? {}
+            : { SystemRoot: process.env["SystemRoot"] }),
+          ...(process.env["TMPDIR"] === undefined
+            ? {}
+            : { TMPDIR: process.env["TMPDIR"] }),
+          HOME: home,
+          CODEX_HOME: home,
         },
-      },
-    },
-  );
-  const environment = { ...process.env, CODEX_HOME: home };
-  const result = await runCodexCommand(
-    command,
-    ["plugin", "marketplace", "list"],
-    environment,
-  );
-  expect(result.success).toBe(true);
-  const observed = JSON.parse(result.stdout);
-  expect(observed.home).toBe(home);
-  expect(observed.config).toBe(sharedConfig);
-  expect(observed.args[0]).toBe("-c");
-  expect(parse(observed.args[1])).toEqual({
-    model_providers: {
-      "synthetic.gateway": {
-        name: "Synthetic",
-        wire_api: "responses",
-        requires_openai_auth: true,
-      },
-    },
-  });
-  expect(observed.args.slice(2)).toEqual(["plugin", "marketplace", "list"]);
-  const login = new CodexLoginHandle(command, ["login"], environment, () => {});
-  const completed = await login.wait();
-  expect(completed.success).toBe(true);
-  expect(JSON.parse(completed.stdout)).toEqual({
-    ...observed,
-    args: [...observed.args.slice(0, 2), "login"],
-  });
-});
+        signal: new AbortController().signal,
+        context: "helper",
+      });
+    if (selection === "") {
+      await expect(read()).rejects.toThrow("Model provider `` not found");
+    } else {
+      const effective = await read();
+      expect(effective.model_provider).toBe(selection ?? inherited);
+    }
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      sharedConfig,
+    );
+  },
+);
 
 test("private profiles retain providers for native required and inherited selection", async () => {
   const home = await temporaryDirectory();

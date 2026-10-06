@@ -33,21 +33,27 @@ export async function providerPreflightCommand(
   command: CodexCommand,
   config: JsonObject,
 ): Promise<CodexCommand> {
-  const providers = resolveCodexProfile(config)["model_providers"];
-  if (!isRecord(providers) || Object.keys(providers).length === 0)
-    return command;
-  const client = await nativeProfileClient();
-  const definitions = client.preflightProviderDefinitions(
-    providers,
-  ) as JsonObject;
-  if (Object.keys(definitions).length === 0) return command;
+  const resolved = resolveCodexProfile(config);
+  const overrides: string[] = [];
+  if (resolved["model_provider"] !== undefined)
+    overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
+  const providers = resolved["model_providers"];
+  if (isRecord(providers) && Object.keys(providers).length > 0) {
+    const client = await nativeProfileClient();
+    const definitions = client.preflightProviderDefinitions(
+      providers,
+    ) as JsonObject;
+    if (Object.keys(definitions).length > 0)
+      overrides.push(
+        ...modelProviderConfigOverride({ model_providers: definitions }),
+      );
+  }
+  if (overrides.length === 0) return command;
   return {
     ...command,
     args: [
       ...(command.args ?? []),
-      ...modelProviderConfigOverride({ model_providers: definitions }).flatMap(
-        (value) => ["-c", value],
-      ),
+      ...overrides.flatMap((value) => ["-c", value]),
     ],
   };
 }
