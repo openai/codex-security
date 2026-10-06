@@ -91,6 +91,7 @@ async function fixture(mode = "success") {
       process.exit(0);
     } else if (process.env.PROFILE_TEST_MODE === "wait") {
       setInterval(() => {}, 1000);
+      await new Promise(() => {});
     } else if (process.env.PROFILE_TEST_MODE.startsWith("fallback_")) {
       emit({ type: "item.completed", item: { type: "agent_message", id: "discarded-item", text: "discarded synthetic response" } });
       const message = "Configured value for \u0060permission_profile\u0060 is disallowed by requirements; falling back from \u0060synthetic_read_only\u0060 to required value \u0060:workspace\u0060.";
@@ -98,6 +99,7 @@ async function fixture(mode = "success") {
         ? { type: "item.completed", item: { type: "error", message } }
         : { type: "error", message });
       setInterval(() => {}, 1000);
+      await new Promise(() => {});
     } else {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
       emit({ type: "turn.completed", usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } });
