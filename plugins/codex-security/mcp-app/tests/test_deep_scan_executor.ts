@@ -1223,6 +1223,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(fixture.root, `instructions ${index}.md`);
           const verbosity = [undefined, "low", "medium", "high"][index];
+          const windowsSandbox =
+            index === 0
+              ? undefined
+              : index % 2 === 0
+                ? "unelevated"
+                : "elevated";
           const entryPath = `${configPath}.${index}`;
           const deepPath = `${entryPath}.deep`;
           const nativeProfile =
@@ -1283,6 +1289,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             serviceTier,
             instructionsFile,
             verbosity,
+            windowsSandbox,
             configuration: {
               ...parsedConfiguration,
               ...(index === 0
@@ -1322,6 +1329,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
+                        windows: { sandbox: entry.windowsSandbox },
                       },
               }),
             ),
@@ -1492,6 +1500,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
               model_verbosity: workerConfigurations[index].verbosity,
+              "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
             assert.equal(
               invocation.cacheDirectory,
@@ -1606,6 +1615,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
+              "windows.sandbox": selectedProvider.windowsSandbox,
             });
             assert.equal(
               preflight.cacheDirectory,
@@ -1673,7 +1683,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),

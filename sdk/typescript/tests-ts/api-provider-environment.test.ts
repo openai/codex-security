@@ -138,9 +138,11 @@ test("native plugin workers recover provider variables omitted from the MCP envi
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const scan = join(root, "scan");
+  const sourceHome = join(root, "source-home");
   const report = join(root, "environment.json");
   await mkdir(repository);
   await mkdir(scan, { mode: 0o700 });
+  await mkdir(sourceHome, { mode: 0o700 });
   const plugin = await createPluginProbe(root, report);
   const providerEnvironment = {
     SYNTHETIC_CUSTOM_API_KEY: " synthetic-custom-key ",
@@ -173,7 +175,9 @@ test("native plugin workers recover provider variables omitted from the MCP envi
     },
     {
       environment: {
+        CODEX_HOME: sourceHome,
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "synthetic-account-key",
         ...providerEnvironment,
         SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
       },

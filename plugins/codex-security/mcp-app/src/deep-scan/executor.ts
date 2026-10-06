@@ -600,6 +600,12 @@ async function workerRuntimeSettings(
       (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
     }
   }
+  const windows = isRecord(workerConfig) ? workerConfig.windows : undefined;
+  if (isRecord(windows) && typeof windows.sandbox === "string") {
+    (settings.configOverrides ??= []).push(
+      `windows.sandbox=${JSON.stringify(windows.sandbox)}`,
+    );
+  }
   if (typeof provider === "string") {
     (settings.configOverrides ??= []).push(
       `model_provider=${JSON.stringify(provider)}`,

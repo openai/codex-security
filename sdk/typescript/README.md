@@ -974,8 +974,12 @@ enabled = true
 max_concurrent_threads_per_session = 9
 
 [windows]
-sandbox = "unelevated"
+sandbox = "elevated"
 ```
+
+Windows uses Codex's elevated sandbox backend to enforce credential read
+denials. Explicit `windows.sandbox` settings remain unchanged; Codex reports
+policies unsupported by the selected backend.
 
 Use `--model MODEL` to choose a model and `--effort EFFORT`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,

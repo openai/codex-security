@@ -4,6 +4,7 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -135,7 +136,9 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
   const repository = join(root, "repository");
   const state = join(root, "state");
   const sharedHome = join(state, "codex-home");
+  const sourceHome = join(root, "source-home");
   await mkdir(repository);
+  await mkdir(sourceHome, { mode: 0o700 });
   await mkdir(sharedHome, { recursive: true, mode: 0o700 });
   // Initialize native state before the mocked primary scans start concurrently.
   await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
@@ -145,6 +148,8 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
   const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
   const clients: TestClient[] = [];
   const runs: Promise<unknown>[] = [];
+  const snapshots: string[] = [];
+  const filesystems: Array<Record<string, unknown>> = [];
   try {
     for (let index = 0; index < 2; index++) {
       const scan = join(root, `scan-${index}`);
@@ -185,7 +190,9 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
           },
           {
             environment: {
+              CODEX_HOME: sourceHome,
               CODEX_SECURITY_STATE_DIR: state,
+              OPENAI_API_KEY: "synthetic-account-key",
               OPENROUTER_API_KEY: "synthetic-sdk-account-key",
               ...providerEnvironment,
               SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
@@ -197,9 +204,29 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
               startThread: () => ({
                 id: null,
                 async runStreamed() {
+                  const environment = options.env!;
+                  snapshots[index] =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const permission = parseToml(
+                    options.configOverrides!.find((value) =>
+                      value.startsWith(
+                        "permissions.codex_security_scan.filesystem=",
+                      ),
+                    )!,
+                  )["permissions"] as Record<string, Record<string, unknown>>;
+                  filesystems[index] = permission["codex_security_scan"]![
+                    "filesystem"
+                  ] as Record<string, unknown>;
                   ready[index]!.resolve();
                   await ready[1]!.promise;
-                  const environment = options.env!;
+                  expect(snapshots[0]).not.toBe(snapshots[1]);
+                  for (const snapshot of snapshots) {
+                    expect(dirname(dirname(snapshot))).toBe(sharedHome);
+                    for (const filesystem of filesystems) {
+                      // The same denied home protects both concurrent snapshots.
+                      expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
+                    }
+                  }
                   const preflight = await readFile(
                     environment["CODEX_SECURITY_CONFIG_PATH"]!,
                     "utf8",
@@ -282,6 +309,10 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
     await Promise.allSettled(runs);
     await Promise.all(clients.map((client) => client.close()));
   }
+  for (const snapshot of snapshots) {
+    expect(existsSync(dirname(snapshot))).toBe(false);
+  }
+  expect(existsSync(sharedHome)).toBe(true);
 }, 30_000);
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {

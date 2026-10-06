@@ -47,6 +47,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
@@ -1697,7 +1698,11 @@ describe("CodexSecurity orchestration", () => {
     const scenarios: [JsonObject, string, string | undefined][] = [
       [{}, "none", undefined],
       [
-        { model_reasoning_summary: "auto", service_tier: "flex" },
+        {
+          model_reasoning_summary: "auto",
+          service_tier: "flex",
+          windows: { sandbox: "unelevated" },
+        },
         "auto",
         "flex",
       ],
@@ -1705,7 +1710,11 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           profiles: {
-            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+            cloud: {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+              windows: { sandbox: "elevated" },
+            },
           },
         },
         "concise",
@@ -1714,12 +1723,14 @@ describe("CodexSecurity orchestration", () => {
       [
         {
           profile: "cloud.production",
+          windows: { sandbox: "elevated" },
           profiles: {
             "cloud.production": {
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
               model_verbosity: "high",
+              windows: { sandbox: "unelevated" },
             },
           },
         },
@@ -1797,6 +1808,12 @@ describe("CodexSecurity orchestration", () => {
                   const workerConfig = parseToml(
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
+                  const windows = (resolveCodexProfile(overrides)["windows"] ??
+                    DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
+                  expect(workerConfig["windows"] as JsonObject).toEqual(
+                    windows,
+                  );
+                  expect(options.config?.["windows"]).toEqual(windows);
                   expect(workerConfig["model_verbosity"]).toBe(
                     resolveCodexProfile(overrides)["model_verbosity"],
                   );
@@ -3713,6 +3730,7 @@ describe("CodexSecurity orchestration", () => {
       let matched = false;
       let savedComparisonInput: string | undefined;
       const providerConfig = {
+        windows: { sandbox: "unelevated" },
         model_provider: "synthetic.provider",
         model_providers: {
           "synthetic.provider": {
@@ -6996,47 +7014,79 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await expect(client.close()).resolves.toBeUndefined();
   });
 
-  test("propagates bootstrap workspace cleanup failures from close", async () => {
+  test("attempts all runtime directory cleanup and preserves failures from close", async () => {
     if (
       runTestInSubprocess(
         import.meta.path,
-        "propagates bootstrap workspace cleanup failures from close",
+        "attempts all runtime directory cleanup and preserves failures from close",
       )
     ) {
       return;
     }
-    const { root, repository, codexHome } = await runtimeDirectories();
-    const bootstrapWorkspace = join(root, "bootstrap-workspace");
-    await mkdir(bootstrapWorkspace);
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "ambient-key",
+    for (const failures of [["deep"], ["bootstrap"], ["deep", "bootstrap"]]) {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const bootstrapWorkspace = join(root, "bootstrap-workspace");
+      const deepScanConfigDirectory = join(codexHome, "worker-config");
+      await mkdir(bootstrapWorkspace);
+      await mkdir(deepScanConfigDirectory, { recursive: true });
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            OPENAI_API_KEY: "ambient-key",
+          },
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            bootstrapWorkspace,
+            deepScanConfigDirectory,
+          })),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          createCodex: () => fail("scan reached"),
         },
-        prepareRuntime: runtimePreparer(codexHome, () => ({
+      );
+      await expect(client.run(repository)).rejects.toThrow("scan reached");
+      const originalRm = fsPromises.rm;
+      const deepFailure = new Error("synthetic raw worker cleanup failure");
+      const bootstrapFailure = new Error(
+        "synthetic raw bootstrap cleanup failure",
+      );
+      const attempted: string[] = [];
+      mockFs(() => ({
+        rm: async (...args: Parameters<typeof originalRm>) => {
+          const path = String(args[0]);
+          attempted.push(path);
+          if (path === deepScanConfigDirectory && failures.includes("deep"))
+            throw deepFailure;
+          if (path === bootstrapWorkspace && failures.includes("bootstrap"))
+            throw bootstrapFailure;
+          return await originalRm(...args);
+        },
+      }));
+      try {
+        const error = await client.close().catch((error: unknown) => error);
+        if (failures.length === 1) {
+          expect(error).toBe(
+            failures[0] === "deep" ? deepFailure : bootstrapFailure,
+          );
+        } else {
+          expect(error).toBeInstanceOf(AggregateError);
+          expect((error as AggregateError).errors).toEqual([
+            deepFailure,
+            bootstrapFailure,
+          ]);
+        }
+        expect(attempted).toEqual([
+          deepScanConfigDirectory,
           bootstrapWorkspace,
-        })),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        createCodex: () => fail("scan reached"),
-      },
-    );
-    await expect(client.run(repository)).rejects.toThrow("scan reached");
-    const originalRm = fsPromises.rm;
-    const failure = new Error("synthetic raw bootstrap cleanup failure");
-    mockFs(() => ({
-      rm: async (...args: Parameters<typeof originalRm>) => {
-        if (String(args[0]) === bootstrapWorkspace) throw failure;
-        return await originalRm(...args);
-      },
-    }));
-    try {
-      await expect(client.close()).rejects.toBe(failure);
-      expect(existsSync(codexHome)).toBe(true);
-    } finally {
-      restoreFs({ rm: originalRm });
+        ]);
+        expect(existsSync(bootstrapWorkspace)).toBe(
+          failures.includes("bootstrap"),
+        );
+        expect(existsSync(codexHome)).toBe(true);
+      } finally {
+        restoreFs({ rm: originalRm });
+      }
     }
   });
 

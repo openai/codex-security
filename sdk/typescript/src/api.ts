@@ -259,6 +259,7 @@ interface PreparedRuntime {
   codexHome: string;
   bootstrapWorkspace?: string;
   configPath?: string;
+  deepScanConfigDirectory?: string;
   deepScanConfigPath?: string;
   providerProfile?: ProviderProfile;
   plugin: PluginInstall;
@@ -2616,8 +2617,24 @@ export class CodexSecurity {
     const runtime = this.#runtime;
     this.#runtime = null;
     await runtime?.providerProfile?.cleanup();
-    if (runtime?.bootstrapWorkspace !== undefined) {
-      await cleanupSdkDirectory(runtime.bootstrapWorkspace);
+    const cleanupErrors: unknown[] = [];
+    for (const directory of [
+      runtime?.deepScanConfigDirectory,
+      runtime?.bootstrapWorkspace,
+    ]) {
+      if (directory === undefined) continue;
+      try {
+        await cleanupSdkDirectory(directory);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (cleanupErrors.length === 1) throw cleanupErrors[0];
+    if (cleanupErrors.length > 1) {
+      throw new AggregateError(
+        cleanupErrors,
+        "Codex Security runtime directories could not be cleaned up.",
+      );
     }
   }
 
@@ -2728,7 +2745,9 @@ export class CodexSecurity {
           ":root": "read",
           ":workspace_roots": "write",
           [runtimeHome]: { ".": "deny" },
-          [runtime.deepScanConfigPath]: { ".": "deny" },
+          ...(runtime.deepScanConfigDirectory === undefined
+            ? { [runtime.deepScanConfigPath]: { ".": "deny" } }
+            : {}),
         })}`,
         ...configOverrides,
       ];
@@ -3084,11 +3103,20 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
     };
-    runtime.deepScanConfigPath =
+    if (
       runtime.bootstrapWorkspace !== undefined &&
       (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
-        ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
-        : undefined;
+    ) {
+      runtime.deepScanConfigDirectory ??= await mkdtemp(
+        join(runtime.codexHome, "codex-security-worker-"),
+      );
+      runtime.deepScanConfigPath = join(
+        runtime.deepScanConfigDirectory,
+        "deep-scan-config.toml",
+      );
+    } else {
+      runtime.deepScanConfigPath = undefined;
+    }
   }
 
   async #validatePolicyInputs(
@@ -3515,6 +3543,7 @@ export class CodexSecurity {
       codexSecurityCredentialHome(processEnvironment),
     );
     let bootstrapWorkspace: string | undefined;
+    let deepScanConfigDirectory: string | undefined;
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
@@ -3555,11 +3584,15 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const deepScanConfigPath = (await pluginSupportsIsolatedDeepScanConfig(
-        plugin.pluginRoot,
-      ))
-        ? join(bootstrapWorkspace, "deep-scan-config.toml")
-        : undefined;
+      if (await pluginSupportsIsolatedDeepScanConfig(plugin.pluginRoot)) {
+        deepScanConfigDirectory = await mkdtemp(
+          join(codexHome, "codex-security-worker-"),
+        );
+      }
+      const deepScanConfigPath =
+        deepScanConfigDirectory === undefined
+          ? undefined
+          : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
         isExternalModelProvider(modelProvider) ||
@@ -3574,6 +3607,7 @@ export class CodexSecurity {
         codexHome,
         bootstrapWorkspace,
         configPath,
+        deepScanConfigDirectory,
         deepScanConfigPath,
         plugin,
         environment: {
@@ -3585,16 +3619,21 @@ export class CodexSecurity {
         credentialsAvailable,
       };
     } catch (error) {
-      if (bootstrapWorkspace !== undefined) {
+      const cleanupErrors: unknown[] = [];
+      for (const directory of [deepScanConfigDirectory, bootstrapWorkspace]) {
+        if (directory === undefined) continue;
         try {
-          await cleanupSdkDirectory(bootstrapWorkspace);
+          await cleanupSdkDirectory(directory);
         } catch (cleanupError) {
-          throw new AggregateError(
-            [error, cleanupError],
-            "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
-            { cause: error },
-          );
+          cleanupErrors.push(cleanupError);
         }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
+          { cause: error },
+        );
       }
       throw error;
     }
@@ -4922,7 +4961,7 @@ function selectedWorkerRuntimeConfig(
   }
   return {
     ...Object.fromEntries(
-      ["model_instructions_file", "model_verbosity"]
+      ["model_instructions_file", "model_verbosity", "windows"]
         .filter((key) => resolved[key] !== undefined)
         .map((key) => [key, resolved[key]!]),
     ),

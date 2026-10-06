@@ -68,9 +68,9 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
       max_concurrent_threads_per_session: 9,
     }),
   }),
-  // Named filesystem profiles need an active Windows sandbox backend.
+  // Credential read denials require the elevated Windows sandbox backend.
   windows: Object.freeze({
-    sandbox: "unelevated",
+    sandbox: "elevated",
   }),
 });
 
@@ -261,7 +261,10 @@ export async function mergedCodexConfig(
   return deepMerge(defaults, overrides);
 }
 
-function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
+/** @internal Preserve existing native Windows backend selections. */
+export function normalizeLegacyWindowsSandboxOverride(
+  overrides: JsonObject,
+): void {
   const features = overrides["features"];
   if (!isObject(features)) {
     return;
