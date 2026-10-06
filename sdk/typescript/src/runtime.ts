@@ -2447,13 +2447,6 @@ async function legacyPluginProjection(
   if (environment !== undefined && !Array.isArray(environment)) return;
   const directNode = isLegacyNodeMcpServer(server);
   if (
-    Array.isArray(environment) &&
-    environment.includes("CODEX_SECURITY_PLUGIN_ROOT") &&
-    !directNode
-  ) {
-    return;
-  }
-  if (
     !Array.isArray(environment) ||
     !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
   ) {

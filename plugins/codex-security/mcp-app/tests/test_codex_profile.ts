@@ -1,5 +1,3 @@
-import { syncBuiltinESMExports } from "node:module";
-import childProcess, { type SpawnOptions } from "node:child_process";
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
