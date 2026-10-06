@@ -16,9 +16,23 @@ launch_node() {
     shift
     # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
     exec 4<&0
+    wait_helper() {
+      if wait "$!" 2>&-; then exit 0; else exit $?; fi
+    }
+    forward_signal() {
+      if [ -n "${!:-}" ]; then
+        kill -s "$1" "$!" 2>&- || :
+        wait_helper
+      fi
+      exit "$2"
+    }
+    trap 'forward_signal HUP 129' HUP
+    trap 'forward_signal INT 130' INT
+    trap 'forward_signal TERM 143' TERM
     printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' |
-      "$node_command" "$server_path" --helper 3<&0 0<&4 4<&-
-    exit $?
+      "$node_command" "$server_path" --helper 3<&0 0<&4 4<&- &
+    exec 4<&-
+    wait_helper
   fi
   exec "$node_command" "$server_path" "$@"
 }
@@ -41,8 +55,8 @@ do
   fi
 done
 
-if command -v node >/dev/null 2>&1; then
-  launch_node node "$@"
+if node_path=$(command -v node); then
+  launch_node "$node_path" "$@"
 fi
 
 printf '%s\n' 'Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime.' >&2

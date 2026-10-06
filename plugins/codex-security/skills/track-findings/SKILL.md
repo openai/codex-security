@@ -77,11 +77,11 @@ For batches, show every item in execution order and obtain approval for that lis
 
 ## 5. Apply and verify
 
-After an approval pause or interruption, rerun source validation and recheck the active account and live destination identity, visibility, and required permissions. Stop if validation or required access fails; return to preview if the source, account, destination, or disclosure audience changed. Reuse source-link and field metadata unless a response or changed context calls them into question. Do not repeat full discovery before every item.
+After an approval pause or interruption, rerun source validation, reverify source links against the repository, revision, paths, and live visibility, and recheck the active account and live destination identity, visibility, and required permissions. Stop if validation or required access fails; return to preview if source verification or visibility, account, destination, or disclosure audience changed. Reuse field metadata unless a response or changed context calls it into question. Do not repeat full discovery before every item.
 
 Before creating, refresh duplicate results to catch an issue created while awaiting approval. Before updating after a pause, reread the fields being changed and return to preview if they differ from the reviewed values. Without an intervening pause, a successful create receipt can supply the values for an already approved follow-up edit. Preserve unowned fields and existing rich content.
 
-Process findings serially in the approved order. Use the exact approved payload and record each provider receipt outside the sealed bundle. Stop the batch on a failed or uncertain mutation or unresolved duplicate.
+Process findings serially in the approved order. Immediately before each create, update, or reuse, run the source validator with that exact finding id and stop if it fails. Use the exact approved payload and record each provider receipt outside the sealed bundle. Stop the batch on a failed or uncertain mutation or unresolved duplicate.
 
 A successful provider response establishes an accepted write. Read the returned object through the same transport when possible to check identity and changed fields, allowing provider formatting that preserves meaning and links. Report a failed follow-up read separately, retaining the returned identity. An unreadable issue does not authorize another create.
 
