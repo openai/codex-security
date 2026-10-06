@@ -646,9 +646,12 @@ describe("Codex configuration", () => {
               details,
             )) ||
           (process.platform === "win32" &&
-            details.includes(
+            (details.includes(
               "Restricted read-only access requires the elevated Windows sandbox backend",
-            ))
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,

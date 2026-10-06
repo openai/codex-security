@@ -17,7 +17,7 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
   readonly cwd: string;
-  /** Worker overrides; preflight checks permissions with native OpenAI account selection. */
+  /** Worker overrides, including the effective provider selection. */
   readonly configOverrides: readonly string[];
   /** Provider metadata needed for managed selection; credentials stay in private profiles. */
   readonly providerConfigOverrides?: readonly string[];
@@ -42,6 +42,45 @@ type PendingRequest = {
   readonly resolve: (message: JsonRecord) => void;
   readonly reject: (error: Error) => void;
 };
+
+type RuntimeConfigReadOptions = Pick<
+  DeepScanPermissionProfilePreflightOptions,
+  "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
+> & {
+  readonly commandArgs?: readonly string[];
+  readonly providerConfigOverrides?: readonly string[];
+};
+
+/** Read native effective settings, including managed provider requirements, without a turn. */
+export async function readDeepScanRuntimeConfig(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  const client = new AppServerPreflightClient(options);
+  try {
+    await client.initialize();
+    const response = await client.request("config/read", {
+      cwd: options.cwd,
+      includeLayers: false,
+    });
+    const config = record(response.config);
+    if (!config) throw malformedPreflightError(options.context);
+    return config;
+  } catch (error) {
+    await client.close();
+    const stderr = client.stderrText;
+    if (error instanceof Error && stderr)
+      Object.defineProperty(error, "message", {
+        value: error.message + "\n" + stderr,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
 
 /**
  * Verify the worker profile with the same executable, effective worker cwd,
@@ -104,7 +143,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
   } catch (error) {
     await client.close();
     const stderr = client.stderrText;
-    if (error instanceof Error && stderr) error.message += "\n" + stderr;
+    if (error instanceof Error && stderr)
+      Object.defineProperty(error, "message", {
+        value: error.message + "\n" + stderr,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
     throw error;
   } finally {
     await client.close();
@@ -123,27 +168,22 @@ class AppServerPreflightClient {
   private childClosed = false;
   private readonly removeAbortListener: () => void;
 
-  constructor(
-    private readonly options: DeepScanPermissionProfilePreflightOptions,
-  ) {
-    const args: string[] = [];
+  constructor(private readonly options: RuntimeConfigReadOptions) {
+    const args: string[] = [...(options.commandArgs ?? [])];
     for (const override of options.configOverrides) {
-      if (override.startsWith("model_provider=")) continue;
       args.push("--config", override);
     }
+    // App-server loads credential-free metadata; exec reads private provider profiles.
     for (const override of options.providerConfigOverrides ?? []) {
       args.push("--config", override);
     }
-    // App-server has no private profile-file option. Check permissions and
-    // native OpenAI account selection without putting provider credentials in argv.
-    // Managed provider requirements still take precedence over this selection.
-    args.push("--config", 'model_provider="openai"');
     args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,
       ...(options.env === undefined ? {} : { env: options.env }),
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     this.childClose = new Promise((resolve) => {
       this.child.once("close", () => {

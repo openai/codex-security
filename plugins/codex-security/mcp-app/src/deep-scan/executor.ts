@@ -18,6 +18,7 @@ import {
 } from "node:path";
 import {
   Codex,
+  type CodexOptions,
   type CyberAccessProgram,
   type ThreadEvent,
 } from "@openai/codex-sdk";
@@ -68,10 +69,7 @@ interface CodexSdkWorkerRuntimeSettings {
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
-  features?: {
-    api_key_cyber_access_programs?: boolean;
-    api_key_model_discovery?: boolean;
-  };
+  features?: NonNullable<CodexOptions["config"]>;
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
@@ -594,7 +592,11 @@ async function workerRuntimeSettings(
   const provider = isRecord(workerConfig)
     ? workerConfig.model_provider
     : undefined;
-  for (const key of ["model_instructions_file", "model_verbosity"]) {
+  for (const key of [
+    "model_instructions_file",
+    "model_verbosity",
+    "web_search",
+  ]) {
     const value = isRecord(workerConfig) ? workerConfig[key] : undefined;
     if (typeof value === "string") {
       (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
@@ -627,6 +629,12 @@ async function workerRuntimeSettings(
         (settings.features ??= {})[name] = value;
       }
     }
+  }
+  if (isRecord(workerConfig) && isRecord(workerConfig.features)) {
+    settings.features = {
+      ...settings.features,
+      ...(workerConfig.features as NonNullable<CodexOptions["config"]>),
+    };
   }
   return settings;
 }

@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -125,6 +126,7 @@ async function loadWorkerSettings(root: string) {
       configOverrides?: string[];
       nativeProfile?: string;
       environment?: Record<string, string>;
+      features?: JsonObject;
     }>;
   };
 
@@ -172,6 +174,12 @@ test.each(["root", "profile override", "profile only"] as const)(
             ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
             : {}),
         };
+        const webSearch = index === 0 ? "disabled" : "cached";
+        const featureOverrides = {
+          shell_tool: index === 1,
+          unified_exec: false,
+          view_image: index === 0,
+        };
         const providerEnvironment = {
           SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
@@ -183,6 +191,8 @@ test.each(["root", "profile override", "profile only"] as const)(
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
                 model_provider: "openrouter",
+                web_search: selection === "root" ? webSearch : "live",
+                features: selection === "root" ? featureOverrides : {},
                 ...(selection === "profile only"
                   ? {}
                   : {
@@ -207,6 +217,8 @@ test.each(["root", "profile override", "profile only"] as const)(
                       profile: "selected",
                       profiles: {
                         selected: {
+                          features: featureOverrides,
+                          web_search: webSearch,
                           model_provider: "openrouter",
                           model_providers: {
                             openrouter: provider,
@@ -273,7 +285,13 @@ test.each(["root", "profile override", "profile only"] as const)(
                     );
                     expect(workerSnapshot["worker_runtime"]).toMatchObject({
                       environment: providerEnvironment,
+                      features: featureOverrides,
+                      web_search: webSearch,
                     });
+                    expect(options.config!["web_search"]).toBe(webSearch);
+                    expect(options.config!["features"]).toMatchObject(
+                      featureOverrides,
+                    );
                     expect(
                       (workerSnapshot["worker_runtime"] as JsonObject)[
                         "environment"
@@ -292,6 +310,10 @@ test.each(["root", "profile override", "profile only"] as const)(
                     ).not.toContain("synthetic-key-");
                     const settings = await workerRuntimeSettings(environment);
                     expect(settings.environment).toEqual(providerEnvironment);
+                    expect(settings.features).toMatchObject(featureOverrides);
+                    expect(settings.configOverrides).toContain(
+                      `web_search=${JSON.stringify(webSearch)}`,
+                    );
                     const actual = await effectiveProvider(
                       environment,
                       repository,
@@ -515,11 +537,29 @@ test.each(legacyProviders)(
   },
 );
 
-test.each([
-  ["standard", "standard", {}],
-  ["deep", "deep", {}],
-  ["standard with explicit provider", "standard", legacyProviders[0]![1]],
-  ["deep with explicit OpenAI", "deep", { model_provider: "openai" }],
+const legacyScanCases: Array<
+  [
+    string,
+    "standard" | "deep",
+    JsonObject,
+    {
+      capability?: true | number;
+      inherited?: string;
+      managed?: string;
+      rejects?: boolean;
+      reads?: boolean;
+    },
+  ]
+> = [
+  ["standard", "standard", {}, {}],
+  ["deep", "deep", {}, {}],
+  ["standard with explicit provider", "standard", legacyProviders[0]![1], {}],
+  [
+    "deep with explicit OpenAI",
+    "deep",
+    { model_provider: "openai" },
+    { reads: true },
+  ],
   [
     "deep with profile-selected OpenAI",
     "deep",
@@ -527,10 +567,57 @@ test.each([
       profile: "selected",
       profiles: { selected: { model_provider: "openai" } },
     },
+    { reads: true },
   ],
-] as const)(
-  "keeps older custom plugins working for %s scans",
-  async (_scenario, mode, overrides) => {
+  [
+    "deep with a conflicting native provider",
+    "deep",
+    { model_provider: "openai" },
+    {
+      inherited: "synthetic.system",
+      reads: true,
+      rejects: true,
+    },
+  ],
+  [
+    "deep with the same managed provider",
+    "deep",
+    { model_provider: "openai" },
+    {
+      inherited: "synthetic.system",
+      managed: "synthetic.required",
+      reads: true,
+    },
+  ],
+  ...([true, 2, 3] as const).map(
+    (capability): (typeof legacyScanCases)[number] => [
+      `deep with selector snapshot ${capability}`,
+      "deep",
+      { model_provider: "openai" },
+      {
+        capability,
+        inherited: "synthetic.system",
+      },
+    ],
+  ),
+  [
+    "deep with a filtered profile and readable snapshot",
+    "deep",
+    {
+      profile: "selected.profile",
+      profiles: { "selected.profile": { model_provider: "openai" } },
+    },
+    {
+      capability: true,
+      inherited: "synthetic.system",
+      reads: true,
+      rejects: true,
+    },
+  ],
+];
+test.each(legacyScanCases)(
+  "checks effective worker compatibility for %s scans",
+  async (_scenario, mode, overrides, native) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -540,47 +627,130 @@ test.each([
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    delete manifest.codexSecurity;
+    if (native.capability === undefined) delete manifest.codexSecurity;
+    else manifest.codexSecurity = { workerProviderSnapshot: native.capability };
     await writeFile(manifestPath, JSON.stringify(manifest));
+    const callsPath = join(root, "config-reads.jsonl");
+    const fakeNative = join(root, "native-config.mjs");
+    await writeFile(
+      fakeNative,
+      `
+      import { appendFileSync, existsSync } from "node:fs";
+      import { join } from "node:path";
+      import { createInterface } from "node:readline";
+      const args = process.argv.slice(2);
+      const selected = args.some((arg) => arg === 'model_provider="openai"') ? "openai" : ${JSON.stringify(native.inherited ?? "openai")};
+      for await (const line of createInterface({ input: process.stdin })) {
+        const request = JSON.parse(line);
+        if (request.id === undefined) continue;
+        if (request.method === "config/read") appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
+          args, cwd: process.cwd(), params: request.params,
+          home: process.env.CODEX_HOME, key: process.env.CODEX_API_KEY,
+          openai: process.env.OPENAI_API_KEY,
+          lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
+        }) + "\\n");
+        console.log(JSON.stringify({ id: request.id, result: request.method === "config/read"
+          ? { config: { model_provider: ${JSON.stringify(native.managed)} ?? selected } } : {} }));
+      }
+    `,
+    );
+    const command = resolveCodexCommand({});
+    const commandArgs = ["-c", "features.api_key_model_discovery=false"];
+    const originalSpawn = childProcess.spawn;
+    const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+      ...input: Parameters<typeof originalSpawn>
+    ) => {
+      const [, args, options] = input;
+      return args?.includes("app-server")
+        ? originalSpawn(process.execPath, [fakeNative, ...args], options ?? {})
+        : originalSpawn(...input);
+    }) as typeof originalSpawn);
+    let launched = false;
     const client = new TestClient(
-      {
-        pluginPath: plugin,
-        codexOverrides: overrides,
-      },
+      { pluginPath: plugin, codexOverrides: overrides },
       {
         environment: {
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-openai-key",
           OPENROUTER_API_KEY: "synthetic-gateway-key",
         },
+        resolveCodexCommand: () => ({ ...command, args: commandArgs }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              const config = parseToml(
-                await readFile(
-                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-              );
-              expect(
-                resolveCodexProfile(config as JsonObject)["model_provider"],
-              ).toBe(resolveCodexProfile(overrides)["model_provider"]);
-              throw new Error("synthetic compatible scan started");
-            },
-          }),
-        }),
+        createCodex: (options) => {
+          launched = true;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                const config = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                );
+                expect(
+                  resolveCodexProfile(config as JsonObject)["model_provider"],
+                ).toBe(resolveCodexProfile(overrides)["model_provider"]);
+                if (native.capability === 2 || native.capability === 3) {
+                  const worker = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (worker["worker_runtime"] as JsonObject)["model_provider"],
+                  ).toBe("openai");
+                }
+                expect(
+                  existsSync(
+                    join(
+                      options.env!["CODEX_HOME"]!,
+                      ".codex-security-preflight",
+                      ".codex-security-scan.lock",
+                    ),
+                  ),
+                ).toBe(false);
+                throw new Error("synthetic compatible scan started");
+              },
+            }),
+          };
+        },
       },
     );
     try {
       await expect(client.run(repository, { mode })).rejects.toThrow(
-        "synthetic compatible scan started",
+        native.rejects
+          ? "Update the custom plugin or use the bundled plugin"
+          : "synthetic compatible scan started",
       );
+      expect(launched).toBe(!native.rejects);
+      const calls = existsSync(callsPath)
+        ? (await readFile(callsPath, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line))
+        : [];
+      expect(calls).toHaveLength(native.reads ? 2 : 0);
+      for (const call of calls) {
+        expect(call.cwd).toBe(scan);
+        expect(call.params).toEqual({ cwd: scan, includeLayers: false });
+        expect(call.home).toBe(join(root, "state", "codex-home"));
+        expect(call.key).toBe("synthetic-openai-key");
+        expect(call.openai).toBeUndefined();
+        expect(call.lockHeld).toBe(true);
+        expect(call.args.slice(0, commandArgs.length)).toEqual(commandArgs);
+        expect(JSON.stringify(call.args)).not.toContain("synthetic-openai-key");
+      }
+      if (native.reads) {
+        expect(calls[0].args).not.toContain('model_provider="openai"');
+        expect(calls[1].args).toContain('model_provider="openai"');
+      }
     } finally {
       await client.close();
+      spawnSpy.mockRestore();
     }
   },
 );

@@ -35,6 +35,7 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  legacyWorkerUsesScanProvider,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -1384,6 +1385,25 @@ export class CodexSecurity {
                 session.apiKey,
             }),
       };
+      if (
+        mode === "deep" &&
+        modelProvider === "openai" &&
+        !(await pluginForwardsWorkerProviderSelection(
+          runtime,
+          preflightConfig,
+        )) &&
+        !(await legacyWorkerUsesScanProvider(
+          this.#codexCommand(),
+          definedEnvironment(workerProviderEnvironment),
+          scanDir,
+          modelProvider,
+          signal,
+        ))
+      ) {
+        throw new CodexSecurityError(
+          "This custom plugin cannot forward the scan's selected provider to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
+        );
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -2296,6 +2316,9 @@ export class CodexSecurity {
           "all",
         );
         if (previousFindings !== undefined) {
+          const matchingRuntimeConfig = structuredClone(workerRuntimeConfig);
+          const matchingFeatures = matchingRuntimeConfig["features"];
+          if (isRecord(matchingFeatures)) delete matchingFeatures["plugins"];
           await matchCompletedScan({
             scanId,
             repository: repo,
@@ -2323,7 +2346,7 @@ export class CodexSecurity {
                 ...scanPreflightCodexConfig(
                   resolveCodexProfile(session.sessionConfig),
                 ),
-                ...workerRuntimeConfig,
+                ...matchingRuntimeConfig,
               },
             },
             model,
@@ -4934,6 +4957,32 @@ async function pluginSupportsWorkerProviderSnapshot(
   );
 }
 
+async function pluginForwardsWorkerProviderSelection(
+  runtime: PreparedRuntime,
+  preflightConfig: JsonObject,
+): Promise<boolean> {
+  const manifest: unknown = JSON.parse(
+    await readFile(
+      join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
+      "utf8",
+    ),
+  );
+  const capability =
+    isRecord(manifest) && isRecord(manifest["codexSecurity"])
+      ? manifest["codexSecurity"]["workerProviderSnapshot"]
+      : undefined;
+  if (capability === true) {
+    return (
+      runtime.configPath !== undefined &&
+      resolveCodexProfile(preflightConfig)["model_provider"] === "openai"
+    );
+  }
+  return (
+    runtime.deepScanConfigPath !== undefined &&
+    (capability === 2 || capability === 3 || capability === 4)
+  );
+}
+
 function selectedWorkerRuntimeConfig(
   config: JsonObject,
   selectedProvider: unknown,
@@ -4979,7 +5028,13 @@ function selectedWorkerRuntimeConfig(
   }
   return {
     ...Object.fromEntries(
-      ["model_instructions_file", "model_verbosity", "windows"]
+      [
+        "features",
+        "model_instructions_file",
+        "model_verbosity",
+        "web_search",
+        "windows",
+      ]
         .filter((key) => resolved[key] !== undefined)
         .map((key) => [key, resolved[key]!]),
     ),
@@ -4987,16 +5042,7 @@ function selectedWorkerRuntimeConfig(
     ...(Object.keys(providerEnvironment).length === 0
       ? {}
       : { environment: providerEnvironment }),
-    ...(isRecord(providers)
-      ? {
-          model_providers:
-            provider === undefined
-              ? providers
-              : Object.hasOwn(providers, provider)
-                ? { [provider]: providers[provider]! }
-                : {},
-        }
-      : {}),
+    ...(isRecord(providers) ? { model_providers: providers } : {}),
   };
 }
 
