@@ -915,7 +915,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         );
       }
 
-      const readRoot = async (pluginRoot: string) => {
+      const readRoot = async (pluginRoot?: string) => {
         const child = childProcess.spawn(
           executablePathForSpawn(command.command),
           ["app-server", "--stdio"],
@@ -961,13 +961,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       };
       // Warm native session storage independently of this concurrent root check.
       await readRoot(selected);
-      const servers = await Promise.all([readRoot(selected), readRoot(second)]);
-      for (const [index, pluginRoot] of [selected, second].entries()) {
+      const roots = [selected, second, undefined];
+      const servers = await Promise.all(roots.map(readRoot));
+      for (const [index, pluginRoot] of roots.entries()) {
         expect(servers[index].pluginId).toBe(
           "codex-security@codex-security-sdk",
         );
         expect(servers[index].tools.probe.description).toStartWith(
-          await realpath(pluginRoot),
+          await realpath(pluginRoot ?? installed.installedRoot),
         );
       }
     },

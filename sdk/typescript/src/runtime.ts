@@ -2384,13 +2384,20 @@ export async function createMarketplace(
       const file = join(pluginDestination, path);
       if (!(await lstat(file).catch(nullIfMissingFileError))?.isFile())
         continue;
+      const contents = await readFile(file, { signal });
+      if (path === "scripts/launch_codex_security_mcp") {
+        await writeFile(
+          join(dirname(file), LEGACY_MCP_UNIX_ORIGINAL),
+          contents,
+          {
+            mode: (await lstat(file)).mode,
+            signal,
+          },
+        );
+      }
       await writeFile(
         file,
-        projectLegacyPluginFile(
-          path,
-          await readFile(file, { signal }),
-          legacyMcp,
-        ),
+        projectLegacyPluginFile(path, contents, legacyMcp),
         { signal },
       );
     }
@@ -2469,6 +2476,8 @@ async function legacyPluginMcpConfiguration(
   return Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`);
 }
 
+const LEGACY_MCP_UNIX_ORIGINAL = "launch_codex_security_mcp_sdk_original";
+
 function projectLegacyPluginFile(
   path: string,
   contents: Buffer,
@@ -2477,7 +2486,12 @@ function projectLegacyPluginFile(
   if (path === ".mcp.json") return mcpConfiguration;
   if (path === "scripts/launch_codex_security_mcp") {
     return Buffer.from(
-      '#!/bin/sh\nexec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n',
+      "#!/bin/sh\n" +
+        'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+        '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+        "fi\n" +
+        'launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)\n' +
+        `exec "$launcher_dir/${LEGACY_MCP_UNIX_ORIGINAL}" "$@"\n`,
     );
   }
   if (path === "scripts/launch_codex_security_mcp.cmd") {
@@ -2775,6 +2789,17 @@ async function pluginContentsMatch(
       readFile(destination, { signal }),
     ]);
 
+    if (
+      projectedPath === "scripts/launch_codex_security_mcp" &&
+      !(await pluginContentsMatch(
+        source,
+        join(dirname(destination), LEGACY_MCP_UNIX_ORIGINAL),
+        signal,
+      ))
+    ) {
+      return false;
+    }
+
     return (
       projected
         ? projectLegacyPluginFile(
@@ -2791,11 +2816,15 @@ async function pluginContentsMatch(
   }
 
   const entries = await readdir(source);
+  const hasOriginalLauncher =
+    projection !== undefined &&
+    relative(projection.root, source) === "scripts" &&
+    entries.includes("launch_codex_security_mcp");
+  const destinationEntries = (await readdir(destination)).filter(
+    (entry) => !hasOriginalLauncher || entry !== LEGACY_MCP_UNIX_ORIGINAL,
+  );
 
-  if (
-    !allowExtraFiles &&
-    entries.length !== (await readdir(destination)).length
-  ) {
+  if (!allowExtraFiles && entries.length !== destinationEntries.length) {
     return false;
   }
 
