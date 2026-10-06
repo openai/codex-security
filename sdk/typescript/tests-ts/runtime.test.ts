@@ -1746,6 +1746,14 @@ describe("plugin runtime preparation", () => {
       const { home, staged, installed, record, calls, bootstrap } =
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
+      const manifest = join(
+        home,
+        "sdk-marketplace",
+        ".agents",
+        "plugins",
+        "marketplace.json",
+      );
+      const expectedManifest = await readFile(manifest, "utf8");
       switch (damage) {
         case "missing file":
           await rm(helper);
@@ -1779,6 +1787,7 @@ describe("plugin runtime preparation", () => {
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
       expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
       expect(existsSync(join(staged, "stale.py"))).toBe(false);
+      expect(await readFile(manifest, "utf8")).toBe(expectedManifest);
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
         installedPath: installed,
         version: "1.2.3",

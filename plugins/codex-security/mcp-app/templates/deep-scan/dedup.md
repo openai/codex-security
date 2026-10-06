@@ -22,6 +22,6 @@ For a valid merge, synthesize one stronger finding while preserving every materi
 
 Account for every input finding using the host-supplied `provenance.sourceFindingIds`. Copy the refs for retained findings; union them for a valid merge, preserving previous refs. Never invent, omit, or reuse a ref across independent output findings. The host retains original source payloads and rejects unaccounted input. Identity collisions do not establish that findings are duplicates.
 
-Preserve the threat-model context and scope as needed. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
+Preserve the threat-model context and scope as needed, omitting scope `includePaths` and `excludePaths`. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
 
 Call `record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? })` until it succeeds; correct a reported validation error and retry in the same conversation. After the first successful call, do not call it again. The host derives convergence and worker attribution from its existing state.

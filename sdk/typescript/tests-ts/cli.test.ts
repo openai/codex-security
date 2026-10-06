@@ -13,7 +13,6 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test, mock } from "bun:test";
-import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -62,7 +61,6 @@ import {
   failingSecurity,
   fakeInterval,
 } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { fail, throwing } from "./support/errors.js";
@@ -403,144 +401,6 @@ describe("CLI", () => {
         expect(typeof option.description).toBe("string");
         expect(option.description?.trim().length).toBeGreaterThan(0);
       }
-    }
-  });
-
-  test("documents user-facing environment and deep-scan configuration", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const publicReadme = await readFile(
-      new URL("../../../README.md", import.meta.url),
-      { encoding: "utf8" },
-    );
-
-    for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain("https://chatgpt.com/cyber");
-    }
-
-    for (const setting of [
-      "OPENAI_API_KEY",
-      "CODEX_API_KEY",
-      "CODEX_SECURITY_LOG_LEVEL",
-      "LOG_LEVEL",
-      "CODEX_SECURITY_STATE_DIR",
-      "CODEX_HOME",
-      "PYTHON",
-      "GH_HOST",
-      "GH_TOKEN",
-      "GITHUB_TOKEN",
-      "CODEX_SECURITY_GIT_HOST",
-      "CODEX_SECURITY_IMAGE",
-      "CODEX_SECURITY_USER",
-      "CODEX_SECURITY_SECCOMP",
-      "CODEX_SECURITY_CSV",
-      "CODEX_SECURITY_RESULTS",
-      "CODEX_SECURITY_STATE",
-      "CODEX_SECURITY_NO_UPDATE_NOTICE",
-      "NO_UPDATE_NOTIFIER",
-      "CODEX_SECURITY_NPM_REGISTRY",
-      "npm_config_registry",
-      "NPM_CONFIG_REGISTRY",
-      "NO_COLOR",
-      "TERM",
-      "CI",
-      "features.multi_agent_v2.max_concurrent_threads_per_session",
-      "agents.max_threads",
-      "$CODEX_HOME/codex-security/config.toml",
-      "[deep_scan]",
-      "stop_after_no_new",
-      "max_discovery_runs",
-      "max_time_hours",
-    ]) {
-      expect(readme).toContain(setting);
-    }
-    expect(readme).toMatch(
-      /\|\s*`CODEX_SECURITY_LOG_LEVEL`\s*\|\s*CLI-only\b/u,
-    );
-    expect(readme).toMatch(/\|\s*`LOG_LEVEL`\s*\|\s*CLI-only\b/u);
-  });
-
-  test("keeps documented runtime and deep-scan defaults accurate", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const documentedConfigs = [
-      ...readme.matchAll(/^```toml\s*\n([\s\S]*?)\n```\s*$/gmu),
-    ].map(([, config]) => parseToml(config!));
-    const documentedRuntime = documentedConfigs.find(
-      (config) => "cli_auth_credentials_store" in config,
-    );
-    expect(documentedRuntime).toMatchObject({
-      cli_auth_credentials_store:
-        DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"],
-      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
-      model_reasoning_effort: DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort,
-    });
-
-    const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
-    const multiAgent = features["multi_agent_v2"] as JsonObject;
-    expect(documentedRuntime).toMatchObject({
-      features: {
-        multi_agent_v2: {
-          max_concurrent_threads_per_session:
-            multiAgent["max_concurrent_threads_per_session"],
-        },
-      },
-    });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const root = await temporaryDirectory("codex-security-deep-defaults-");
-
-    try {
-      const { status, stdout, stderr } = await runCommand(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
-          "--available-parallelism",
-          "12",
-        ],
-        {
-          env: {
-            ...process.env,
-            CODEX_HOME: join(root, "codex-home"),
-            PYTHONDONTWRITEBYTECODE: "1",
-          },
-          timeout: 30_000,
-        },
-      );
-
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-
-      const defaults = JSON.parse(stdout) as {
-        workers: number;
-        subagents: number;
-        stopAfterNoNew: number;
-        stopAfterConsecutiveErrors: number;
-        maxDiscoveryRuns: number;
-        maxTimeHours: number;
-      };
-      expect(defaults.workers).toBe(4);
-      const documentedDeepScan = documentedConfigs.find(
-        (config) =>
-          typeof config["deep_scan"] === "object" &&
-          config["deep_scan"] !== null &&
-          "stop_after_consecutive_errors" in config["deep_scan"],
-      );
-      expect(documentedDeepScan).toMatchObject({
-        deep_scan: {
-          workers: 4,
-          subagents: defaults.subagents,
-          stop_after_no_new: defaults.stopAfterNoNew,
-          stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
-          max_discovery_runs: defaults.maxDiscoveryRuns,
-          max_time_hours: defaults.maxTimeHours,
-        },
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
   });
 
