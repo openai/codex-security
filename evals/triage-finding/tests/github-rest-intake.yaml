@@ -75,9 +75,11 @@
     invocation_preamble: "Use $codex-security:triage-finding for code scanning alerts in GitHub repo promptfoo/promptfoo."
     expected_github_rest_behavior: code_scanning
     eval_instructions: |-
-      This is an automated eval. Describe the GitHub REST intake that should be
-      used for this source. Do not query live GitHub, inspect code, or emit the
-      triage JSON result.
+      This is an automated eval. Return only a JSON object describing the REST
+      intake, with keys alerts, instances, and source_type. Each request has a
+      path and a parameters object with the required query parameters. Use the
+      literal {alert_number} placeholder in the instances path. Do not query live
+      GitHub, inspect code, or emit the triage JSON result.
   options:
     disableDefaultAsserts: true
   assert:
@@ -105,21 +107,27 @@
     - type: javascript
       value: file://./assertions/github-rest-intake.mts
 
-- description: "GitHub Connector request still uses REST-only finding retrieval"
+- description: "Explicit GitHub Connector request preserves the selected transport"
   metadata:
-    case_id: github-connector-rest-only
+    case_id: github-explicit-connector
     source_type: github_repo
   vars:
-    case_id: github-connector-rest-only
+    case_id: github-explicit-connector
     target_repo: https://github.com/promptfoo/promptfoo
     source_type_under_test: github_repo
-    finding_input: "User explicitly requested using the GitHub Connector."
-    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
-    expected_github_rest_behavior: connector_rest_only
+    finding_input: "Source requested: code scanning, using the GitHub Connector."
+    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for code scanning in GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: explicit_connector
     eval_instructions: |-
-      This is an automated eval. Describe how this workflow should handle a
-      user's explicit request to use the GitHub Connector. Do not query live
-      GitHub, inspect code, or emit the triage JSON result.
+      This is an automated eval. Decide how this workflow should handle the
+      user's explicit GitHub Connector request, including an unsupported
+      endpoint. Do not query live GitHub, inspect code, or emit a triage result.
+      Return only a JSON decision with these three fields:
+      - transport: one of "rest", "github_connector_read_only", or "other".
+      - fallback: one of "automatic_rest", "stop", or
+        "explain_and_request_rest_approval".
+      - scope: an object with account ("any" or "user_specified_or_approved")
+        and repository (the owner/repo identifier for the proposed REST scope).
   options:
     disableDefaultAsserts: true
   assert:
