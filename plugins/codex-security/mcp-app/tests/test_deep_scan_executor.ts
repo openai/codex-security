@@ -942,6 +942,25 @@ async function testSdkInvocationAndThreadCapture() {
 
 async function testOpenAiCredentialsReachWorker() {
   const noAccount = { account: null, requiresOpenaiAuth: true };
+  let virtualenv: string | undefined;
+  if (process.platform !== "win32") {
+    const root = await temporaryDirectories.create(
+      "codex-security-worker-python-",
+    );
+    virtualenv = path.join(root, "venv");
+    const created = spawnSync(
+      "python3",
+      ["-m", "venv", "--without-pip", virtualenv],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
+        },
+      },
+    );
+    assert.equal(created.status, 0, created.stderr);
+  }
   const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
   const nativeLauncher = path.join(
     path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
@@ -1000,11 +1019,33 @@ async function testOpenAiCredentialsReachWorker() {
       true,
       entry.accountResult ?? noAccount,
     );
+    const runtimeEnvironment = {
+      PATH: [
+        virtualenv === undefined
+          ? path.join(fixture.root, "runner-tools")
+          : path.join(virtualenv, "bin"),
+        path.dirname(process.execPath),
+      ].join(path.delimiter),
+      HOME: path.join(fixture.root, "home"),
+      PYTHON:
+        virtualenv === undefined
+          ? path.join(fixture.root, "tools", "python3")
+          : "python3",
+      PYTHONUTF8: "1",
+      LD_LIBRARY_PATH:
+        (process.env.LD_LIBRARY_PATH === undefined
+          ? ""
+          : process.env.LD_LIBRARY_PATH + path.delimiter) +
+        path.join(fixture.root, "libraries"),
+      CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
+      RUNNER_TRACKING_ID: "synthetic-worker-job",
+    };
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
+      ...Object.keys(runtimeEnvironment),
     ].map((name) => [name, process.env[name]] as const);
     const originalSpawn = childProcess.spawn;
     try {
@@ -1012,6 +1053,7 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
         await writeFile(
           path.join(fixture.root, "config.toml"),
@@ -1030,7 +1072,13 @@ env_key = "CODEX_API_KEY"
         );
       }
       let nativePreflight:
-        { codexHome: string | undefined; argv: readonly string[] } | undefined;
+        | {
+            codexHome: string | undefined;
+            argv: readonly string[];
+            runnerTrackingId: string | undefined;
+            libraryPath: string | undefined;
+          }
+        | undefined;
       childProcess.spawn = ((
         command: string,
         args: readonly string[],
@@ -1048,6 +1096,8 @@ env_key = "CODEX_API_KEY"
         ) {
           nativePreflight = {
             codexHome: options.env?.CODEX_HOME,
+            runnerTrackingId: options.env?.RUNNER_TRACKING_ID,
+            libraryPath: options.env?.LD_LIBRARY_PATH,
             argv: args,
           };
           return originalSpawn(command, [nativeLauncher, ...args], options);
@@ -1060,7 +1110,10 @@ env_key = "CODEX_API_KEY"
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
       const promptPath = path.join(fixture.root, "prompt.md");
-      await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
+      await writeFile(
+        promptPath,
+        `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
+      );
       const executor = new CodexSdkWorkerExecutor({
         parentSandbox: trustedParentSandbox,
       });
@@ -1080,7 +1133,26 @@ env_key = "CODEX_API_KEY"
               : nativePreflight!;
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.codexHome, fixture.root);
+          assert.equal(
+            preflight.runnerTrackingId,
+            runtimeEnvironment.RUNNER_TRACKING_ID,
+          );
+          assert.equal(
+            preflight.libraryPath,
+            runtimeEnvironment.LD_LIBRARY_PATH,
+          );
           assert.equal(invocation.codexHome, fixture.root);
+          assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
+          if (virtualenv !== undefined) {
+            assert.equal(invocation.pythonPrefix, virtualenv);
+            assert.equal(
+              invocation.pythonLibraryPath,
+              runtimeEnvironment.LD_LIBRARY_PATH,
+            );
+          }
+          for (const [name, value] of Object.entries(runtimeEnvironment)) {
+            assert.equal(process.env[name], value);
+          }
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -2610,12 +2682,13 @@ async function fakeCodexFixture(
     `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2658,7 +2731,11 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
+if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
+const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
