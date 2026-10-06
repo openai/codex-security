@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
-import { stringify } from "smol-toml";
+import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -206,10 +206,8 @@ function selectedScanProfile(
 }
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const resolved = deepMerge(
-    structuredClone(config),
-    selectedScanProfile(config) ?? {},
-  );
+  const normalized = parse(stringify(config)) as JsonObject;
+  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;

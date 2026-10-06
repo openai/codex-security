@@ -123,6 +123,7 @@ async function loadWorkerSettings(root: string) {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
       configOverrides?: string[];
       nativeProfile?: string;
+      environment?: Record<string, string>;
     }>;
   };
 
@@ -152,7 +153,11 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
         name: `Synthetic ${index}`,
         base_url: `https://provider-${index}.example.test/v1`,
         wire_api: "responses",
-        env_key: "OPENROUTER_API_KEY",
+        env_key: "SYNTHETIC_GATEWAY_KEY",
+        env_http_headers: {
+          "X-Synthetic": "SYNTHETIC_HEADER",
+          "X-Missing": "MISSING_HEADER",
+        },
         ...(index === 1
           ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
           : {}),
@@ -163,12 +168,18 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
             pluginPath: PLUGIN_ROOT,
             codexOverrides: {
               model_provider: "openrouter",
-              model_providers: { openrouter: provider },
+              model_providers: {
+                openrouter: provider,
+                unused: { name: "Unused", env_key: "UNUSED_KEY" },
+              },
             },
           },
           {
             environment: {
               CODEX_SECURITY_STATE_DIR: state,
+              SYNTHETIC_GATEWAY_KEY: `synthetic-key-${index}`,
+              SYNTHETIC_HEADER: `synthetic-header-${index}`,
+              UNUSED_KEY: "synthetic-unused",
               OPENROUTER_API_KEY:
                 index === 0 ? "synthetic-key-A" : "synthetic-key-B",
             },
@@ -187,7 +198,24 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                     "utf8",
                   );
                   expect(preflight).not.toContain("synthetic-key-");
-                  const settings = await workerRuntimeSettings(environment);
+                  const manifest = JSON.parse(
+                    await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+                  );
+                  const mcpEnvironment = Object.fromEntries(
+                    Object.entries(environment).filter(([name]) =>
+                      manifest.mcpServers["codex-security"].env_vars.includes(
+                        name,
+                      ),
+                    ),
+                  );
+                  expect(
+                    mcpEnvironment["SYNTHETIC_GATEWAY_KEY"],
+                  ).toBeUndefined();
+                  const settings = await workerRuntimeSettings(mcpEnvironment);
+                  expect(settings.environment).toEqual({
+                    SYNTHETIC_GATEWAY_KEY: `synthetic-key-${index}`,
+                    SYNTHETIC_HEADER: `synthetic-header-${index}`,
+                  });
                   const actual = await effectiveProvider(
                     environment,
                     repository,

@@ -1155,12 +1155,18 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "SYNTHETIC_HEADER",
+    "OPENROUTER_API_KEY",
+    "openrouter_api_key",
     "XDG_CACHE_HOME",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
+    delete process.env.openrouter_api_key;
+    process.env.OPENROUTER_API_KEY = "synthetic-ambient-key";
+    process.env.SYNTHETIC_HEADER = "synthetic-ambient-header";
     for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
@@ -1317,6 +1323,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         model_verbosity: entry.verbosity,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
+                        environment: {
+                          SYNTHETIC_GATEWAY_KEY: `synthetic-gateway-key-${workerConfigurations.indexOf(entry)}`,
+                          SYNTHETIC_HEADER: `synthetic-header-${workerConfigurations.indexOf(entry)}`,
+                          openrouter_api_key: `synthetic-selected-key-${workerConfigurations.indexOf(entry)}`,
+                        },
                       },
               }),
             ),
@@ -1377,7 +1388,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
       const providerKeys = settings.map((_, index) =>
-        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
+        index === 0 ? undefined : `synthetic-gateway-key-${index}`,
       );
       const executors = settings.map(
         (modelSettings, index) =>
@@ -1407,11 +1418,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
-              if (providerKeys[index] === undefined) {
-                delete process.env.SYNTHETIC_GATEWAY_KEY;
-              } else {
-                process.env.SYNTHETIC_GATEWAY_KEY = providerKeys[index];
-              }
+              // Native plugin transport omits custom provider variables.
+              delete process.env.SYNTHETIC_GATEWAY_KEY;
               return executor.run({
                 kind,
                 promptPath,
@@ -1485,11 +1493,39 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
-            assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
-              process.env.SYNTHETIC_GATEWAY_KEY,
-              providerKeys.at(-1),
+              workerLaunch.environment!.SYNTHETIC_HEADER,
+              index === 0
+                ? "synthetic-ambient-header"
+                : `synthetic-header-${index}`,
             );
+            assert.equal(
+              invocation.providerHeader,
+              index === 0
+                ? "synthetic-ambient-header"
+                : `synthetic-header-${index}`,
+            );
+            assert.equal(
+              invocation.lowercaseProviderKey,
+              index === 0
+                ? process.platform === "win32"
+                  ? "synthetic-ambient-key"
+                  : undefined
+                : `synthetic-selected-key-${index}`,
+            );
+            assert.deepEqual(
+              Object.keys(workerLaunch.environment!)
+                .filter((name) => name.toUpperCase() === "OPENROUTER_API_KEY")
+                .sort(),
+              index === 0 || process.platform !== "win32"
+                ? [
+                    "OPENROUTER_API_KEY",
+                    ...(index === 0 ? [] : ["openrouter_api_key"]),
+                  ]
+                : ["openrouter_api_key"],
+            );
+            assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+            assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
               service_tier: workerConfigurations[index].serviceTier,
@@ -2567,7 +2603,7 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER, lowercaseProviderKey: process.env.openrouter_api_key, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

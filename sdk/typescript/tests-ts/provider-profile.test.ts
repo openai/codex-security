@@ -137,7 +137,10 @@ test("native profile turns omit optional null fields and retain array errors", a
     {
       ...options,
       config: structuredCodexConfig({
-        service_tier: null,
+        model_provider: "synthetic.gateway",
+        service_tier: "fast",
+        profile: "review",
+        profiles: { review: { model_provider: null, service_tier: null } },
         features: { plugins: false, optional: null },
         nested: [{ enabled: true, optional: null }],
       }) as CodexOptions["config"],
@@ -154,6 +157,8 @@ test("native profile turns omit optional null fields and retain array errors", a
       arg === "--config" ? [args[index + 1]!] : [],
     );
     expect(parse(overrides.join("\n"))).toEqual({
+      model_provider: "synthetic.gateway",
+      service_tier: "fast",
       features: { plugins: false },
       nested: [{ enabled: true }],
     });
@@ -162,9 +167,7 @@ test("native profile turns omit optional null fields and retain array errors", a
   const invalid = await createProfileCodex(
     {
       ...options,
-      config: structuredCodexConfig({
-        invalid: [null],
-      }) as CodexOptions["config"],
+      config: { invalid: [null] } as unknown as CodexOptions["config"],
     },
     "synthetic-profile",
   );

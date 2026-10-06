@@ -4880,7 +4880,26 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
-  const providers = config["model_providers"];
+  const providers = resolved["model_providers"];
+  const definition =
+    isRecord(providers) && provider !== undefined
+      ? providers[provider]
+      : undefined;
+  const providerEnvironment: JsonObject = {};
+  if (isRecord(definition)) {
+    const headers = definition["env_http_headers"];
+    for (const name of [
+      definition["env_key"],
+      ...(isRecord(headers) ? Object.values(headers) : []),
+    ]) {
+      if (typeof name !== "string") continue;
+      const value =
+        process.platform === "win32"
+          ? environmentValue(environment, name)
+          : environment[name];
+      if (value !== undefined) providerEnvironment[name] = value;
+    }
+  }
   const instructionsFile = resolved["model_instructions_file"];
   if (typeof instructionsFile === "string") {
     resolved["model_instructions_file"] = resolve(
@@ -4895,6 +4914,9 @@ function selectedWorkerRuntimeConfig(
         .map((key) => [key, resolved[key]!]),
     ),
     ...(provider === undefined ? {} : { model_provider: provider }),
+    ...(Object.keys(providerEnvironment).length === 0
+      ? {}
+      : { environment: providerEnvironment }),
     ...(isRecord(providers)
       ? {
           model_providers:
