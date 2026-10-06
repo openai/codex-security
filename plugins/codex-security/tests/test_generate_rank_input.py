@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from source_cases import SOURCE_CASES
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PLUGIN_ROOT / "scripts" / "generate_rank_input.py"
@@ -271,94 +272,26 @@ def test_rank_input_bounds_large_text_reads(
     assert rows[0]["preview"] == "function visible()"
 
 
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_terraform(tmp_path: Path, mode: str) -> None:
-    repo = tmp_path / "repo"
-    infra = repo / "infra"
-    infra.mkdir(parents=True)
-    initialize_repo(repo)
-    source = infra / "main.tf"
-    source.write_text('variable "enabled" { default = false }\n', encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    changed = 'variable "enabled" { default = true }'
-    source.write_text(changed + "\n", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "infra"]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
-
-    run_cli(*arguments, "--out", str(output))
-
-    assert read_jsonl(output) == [
-        {"path": "infra/main.tf", "area": "infra" if mode == "repo" else "diff", "preview": changed}
-    ]
-
-
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_objective_c(tmp_path: Path, mode: str) -> None:
-    repo = tmp_path / "repo"
-    ios = repo / "ios"
-    ios.mkdir(parents=True)
-    initialize_repo(repo)
-    source = ios / "ViewController.m"
-    source.write_text('NSString *greeting = @"hello";\n', encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    changed = 'NSString *greeting = @"goodbye";'
-    source.write_text(changed + "\n", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "ios"]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
-
-    run_cli(*arguments, "--out", str(output))
-
-    assert read_jsonl(output) == [
-        {
-            "path": "ios/ViewController.m",
-            "area": "ios" if mode == "repo" else "diff",
-            "preview": changed,
-        }
-    ]
-
-
 @pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
-def test_rank_input_includes_cpp_headers(tmp_path: Path, mode: str) -> None:
+def test_rank_input_includes_source_cases(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
-    include = repo / "include"
-    include.mkdir(parents=True)
+    repo.mkdir()
     initialize_repo(repo)
-    names = ["base.h", "base.hpp", "lower.hh", "lower.hxx", "upper.HH", "upper.HXX"]
-    for name in names:
-        (include / name).write_text("inline int before() { return 1; }\n", encoding="utf-8")
+    for case in SOURCE_CASES:
+        source = repo / case.path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(case.before + "\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
     base = git(repo, "rev-parse", "HEAD")
-    for name in names:
-        (include / name).write_text("inline int after() { return 2; }\n", encoding="utf-8")
+    for case in SOURCE_CASES:
+        (repo / case.path).write_text(case.after + "\n", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
 
     if mode in {"revisions", "staged"}:
         git(repo, "add", ".")
     if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "include"]
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "."]
     else:
         diff_mode = "revisions" if mode == "revisions" else "local-patch"
         arguments = [
@@ -377,133 +310,13 @@ def test_rank_input_includes_cpp_headers(tmp_path: Path, mode: str) -> None:
 
     run_cli(*arguments, "--out", str(output))
 
-    rows = read_jsonl(output)
-    assert [row["path"] for row in rows] == [f"include/{name}" for name in sorted(names)]
-    for row in rows:
-        assert row["area"] == ("include" if mode == "repo" else "diff")
-        assert "function after" in row["preview"]
-        assert "before" not in row["preview"]
-
-
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
-    repo = tmp_path / "repo"
-    contracts = repo / "contracts"
-    contracts.mkdir(parents=True)
-    initialize_repo(repo)
-    source = contracts / "Vault.sol"
-    source.write_text("uint256 public limit = 1;\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    changed = "uint256 public limit = 2;"
-    source.write_text(changed + "\n", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
-
-    run_cli(*arguments, "--out", str(output))
-
     assert read_jsonl(output) == [
         {
-            "path": "contracts/Vault.sol",
-            "area": "contracts" if mode == "repo" else "diff",
-            "preview": changed,
+            "path": case.path,
+            "area": "." if mode == "repo" else "diff",
+            "preview": case.after if case.preview is None else case.preview,
         }
-    ]
-
-
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_vyper(tmp_path: Path, mode: str) -> None:
-    repo = tmp_path / "repo"
-    contracts = repo / "contracts"
-    contracts.mkdir(parents=True)
-    initialize_repo(repo)
-    source = contracts / "Vault.vy"
-    source.write_text("stored: public(uint256)\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    changed = "stored: public(uint256)\nowner: public(address)"
-    source.write_text(changed + "\n", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
-
-    run_cli(*arguments, "--out", str(output))
-
-    assert read_jsonl(output) == [
-        {
-            "path": "contracts/Vault.vy",
-            "area": "contracts" if mode == "repo" else "diff",
-            "preview": changed,
-        }
-    ]
-
-
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-@pytest.mark.parametrize(
-    ("filename", "content"),
-    [
-        (
-            "Counter.svelte",
-            '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>',
-        ),
-        ("profile.EJS", "<% const count = 0; %>\n<p><%= count %></p>"),
-        ("show.html.erb", "<% count = 0 %>\n<p><%= count %></p>"),
-        ("card.phtml", "<?php $count = 0; ?>\n<p><?= $count ?></p>"),
-    ],
-)
-def test_rank_input_includes_templates(
-    tmp_path: Path, mode: str, filename: str, content: str
-) -> None:
-    repo = tmp_path / "repo"
-    components = repo / "src"
-    components.mkdir(parents=True)
-    initialize_repo(repo)
-    source = components / filename
-    source.write_text(content + "\n", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    changed = content.replace("count = 0", "count = 1")
-    source.write_text(changed + "\n", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "src"]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
-
-    run_cli(*arguments, "--out", str(output))
-
-    assert read_jsonl(output) == [
-        {
-            "path": f"src/{filename}",
-            "area": "src" if mode == "repo" else "diff",
-            "preview": changed,
-        }
+        for case in sorted(SOURCE_CASES, key=lambda case: case.path)
     ]
 
 
