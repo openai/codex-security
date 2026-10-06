@@ -7,14 +7,15 @@ minimumReleaseAgeExclude:
 trustLockfile: true
 
 overrides:
-  "@huggingface/transformers@4.2.0>sharp": 0.35.4
   "@openai/codex": "$@openai/codex-sdk"
   "@openai/codex-sdk": "$@openai/codex-sdk"
-  "@openai/codex-security@0.1.27>fast-uri": 3.1.8
+  "@openai/codex-security@0.1.31>smol-toml": 1.9.0
   "@opencode-ai/sdk": "$@opencode-ai/sdk"
   "ibm-cloud-sdk-core@5.6.0>axios": 1.20.0
   "get-uri@8.0.1>basic-ftp": 6.2.1
-  "onnxruntime-node@1.24.3>adm-zip": 0.6.1
+  # The parser must share simple-git's pathspec object registry.
+  "simple-git@3.36.0>@simple-git/args-pathspec": 1.0.4
+  "simple-git@3.36.0>@simple-git/argv-parser": 2.0.1
   "socks@2.8.10>ip-address": 10.7.2
 
 allowBuilds:
