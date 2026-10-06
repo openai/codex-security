@@ -39,7 +39,7 @@ const napiLicense = new Set([
   "napi-build@2.5.0",
   "napi-derive@3.6.9",
   "napi-derive-backend@6.1.4",
-  "napi-sys@3.4.0",
+  "napi-sys@3.3.2",
 ]);
 const notices: string[] = [];
 for (const entry of packages) {
