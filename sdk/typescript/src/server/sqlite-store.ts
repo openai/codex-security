@@ -109,7 +109,12 @@ export class SqliteFindingsStore implements FindingsStore {
   }
 
   private async run(args: string[], input?: string) {
-    const options = await (this.options ??= this.resolveOptions());
+    const options = await (this.options ??= this.resolveOptions().catch(
+      (error: unknown) => {
+        this.options = undefined;
+        throw error;
+      },
+    ));
     return await runWorkbench(options, args, input);
   }
 
