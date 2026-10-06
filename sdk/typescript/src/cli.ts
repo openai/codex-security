@@ -2334,11 +2334,13 @@ export async function main(
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
-          const { recipe } = await dependencies.runWorkbench([
-            "get-scan-recipe",
-            "--scan-id",
-            scanId,
-          ]);
+          const { recipe, scanId: resolvedScanId } =
+            await dependencies.runWorkbench([
+              "get-scan-recipe",
+              "--scan-id",
+              scanId,
+            ]);
+          const parentScanId = resolvedScanId as string;
           if (
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
@@ -2370,7 +2372,7 @@ export async function main(
             const outcome = await runImport({
               sourcePath,
               format,
-              parentScanId: scanId,
+              parentScanId,
             });
             exitCode = outcome.exitCode;
             if (outcome.error !== undefined) {
@@ -2384,7 +2386,7 @@ export async function main(
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
-            scanId,
+            parentScanId,
             {
               scanPromptFile:
                 options.scanPromptFile === undefined

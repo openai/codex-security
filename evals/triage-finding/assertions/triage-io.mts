@@ -111,6 +111,11 @@ export default (output: unknown, context: AssertionContext) => {
         `${label}: actionable or unresolved finding must use a positive integer rank`,
       );
     } else {
+      if (rankQueue !== finding.verdict) {
+        failures.push(
+          `${label}: rank_queue must match verdict ${finding.verdict}, got ${rankQueue}`,
+        );
+      }
       const ranks = ranksByQueue.get(rankQueue) || [];
       ranks.push({ label, rank: rank! });
       ranksByQueue.set(rankQueue, ranks);
