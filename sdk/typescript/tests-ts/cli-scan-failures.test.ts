@@ -166,7 +166,7 @@ for (const formatArgs of [
       );
 
       test.each(commands)(
-        "keeps credential masking for %s failures",
+        "preserves diagnostic text for %s failures",
         async (_name, command) => {
           const stdout = capture();
           const stderr = capture();
