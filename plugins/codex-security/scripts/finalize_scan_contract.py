@@ -706,7 +706,7 @@ def _read_scan_local_json_with_metadata(
             raw = handle.read()
             metadata = os.fstat(handle.fileno())
         try:
-            payload = _loads_json(raw.decode("utf-8"))
+            payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ContractError(f"{context}: invalid JSON: {exc}") from exc
         if not isinstance(payload, dict):
@@ -887,7 +887,7 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 def _validate_remote(remote: str, context: str) -> None:
     parsed = urlsplit(remote)
-    if not parsed.scheme or not parsed.netloc:
+    if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ContractError(
