@@ -4700,6 +4700,9 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
+  if (safeString(config["openai_base_url"])) {
+    result["openai_base_url"] = config["openai_base_url"];
+  }
   // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
   for (const key of ["model_reasoning_summary", "service_tier"]) {

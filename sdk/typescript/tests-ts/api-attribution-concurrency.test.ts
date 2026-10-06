@@ -41,6 +41,7 @@ describe("delegated scan attribution", () => {
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {
           const program = surface === "cli" ? programs[0] : programs[1];
+          const endpoint = `https://${surface}.example.test/v1`;
           const features = selectProgram
             ? {
                 api_key_cyber_access_programs: surface === "cli",
@@ -64,7 +65,10 @@ describe("delegated scan attribution", () => {
           return new InternalSecurity(
             {
               pluginPath: PLUGIN_ROOT,
-              ...(surface === "sdk" ? { codexOverrides: { features } } : {}),
+              codexOverrides: {
+                openai_base_url: endpoint,
+                ...(surface === "sdk" ? { features } : {}),
+              },
             },
             {
               environment: {
@@ -136,6 +140,7 @@ describe("delegated scan attribution", () => {
                       expect(options.apiKey).toBe(`synthetic-${surface}-key`);
                       expect(turnOptions?.cyberAccessProgram).toBe(program);
                       expect(options.config).toMatchObject({
+                        openai_base_url: endpoint,
                         features,
                         responses_api_metadata: {
                           codex_security_surface: surface,
@@ -148,7 +153,10 @@ describe("delegated scan attribution", () => {
                       configPaths.add(configPath!);
                       const initialConfig = await readFile(configPath!, "utf8");
                       const runtimeConfig = parseToml(initialConfig);
-                      expect(runtimeConfig).toMatchObject({ features });
+                      expect(runtimeConfig).toMatchObject({
+                        openai_base_url: endpoint,
+                        features,
+                      });
                       if (program === undefined) {
                         expect(runtimeConfig).not.toHaveProperty(
                           "codex_security",
@@ -174,6 +182,9 @@ describe("delegated scan attribution", () => {
                         "responses_api_metadata",
                       );
                       expect(sharedConfig).not.toHaveProperty("codex_security");
+                      expect(sharedConfig).not.toHaveProperty(
+                        "openai_base_url",
+                      );
                       expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
                         "api_key_cyber_access_programs",
                       );

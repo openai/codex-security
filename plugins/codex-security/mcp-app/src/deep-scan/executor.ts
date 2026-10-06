@@ -52,6 +52,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  openAiBaseUrl?: string;
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
@@ -118,6 +119,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
+          ...(runtimeSettings.openAiBaseUrl === undefined
+            ? {}
+            : { openai_base_url: runtimeSettings.openAiBaseUrl }),
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
@@ -495,6 +499,9 @@ async function workerRuntimeSettings(
       ? profile.service_tier
       : config.service_tier;
   const settings: CodexSdkWorkerRuntimeSettings = {
+    ...(typeof config.openai_base_url === "string"
+      ? { openAiBaseUrl: config.openai_base_url }
+      : {}),
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
     ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };

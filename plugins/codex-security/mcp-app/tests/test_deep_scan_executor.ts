@@ -90,6 +90,7 @@ try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
+  await testWorkerEndpointPropagation();
   await testWorkerCyberAccessSettings();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
@@ -1370,6 +1371,150 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
           }
           await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
+  }
+}
+
+async function testWorkerEndpointPropagation() {
+  const saved = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+  ].map((name) => [name, process.env[name]] as const);
+  const originalSpawn = childProcess.spawn;
+  try {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_API_KEY;
+    const fixture = await fakeCodexFixture(
+      deniedWorkerPermissionProfile,
+      true,
+      { account: null, requiresOpenaiAuth: false },
+    );
+    const codexHome = path.join(fixture.root, "endpoint scan home");
+    const promptPath = path.join(fixture.root, "endpoint prompt.md");
+    const configPaths = ["first", "second", "unset"].map((name) =>
+      path.join(fixture.root, `${name} scan config.toml`),
+    );
+    const endpoints = [
+      "https://first.example.test/v1",
+      "https://second.example.test/v1",
+      undefined,
+    ];
+    await mkdir(codexHome);
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      `openai_base_url = "https://ambient.example.test/v1"\nmodel = "fixture-model"\n`,
+    );
+    await writeFile(configPaths[0]!, `openai_base_url = "${endpoints[0]}"\n`);
+    await writeFile(configPaths[1]!, `openai_base_url = "${endpoints[1]}"\n`);
+    await writeFile(configPaths[2]!, 'model_reasoning_summary = "none"\n');
+    await writeFile(promptPath, "synthetic endpoint routing fixture");
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = codexHome;
+
+    const launches: {
+      args: readonly string[];
+      markerPath: string;
+    }[] = [];
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) => {
+      const markerPath = path.join(
+        fixture.root,
+        `endpoint-invocation-${launches.length}.json`,
+      );
+      const environment = {
+        ...options!.env,
+        FAKE_CODEX_MARKER: markerPath,
+        FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+      };
+      launches.push({ args, markerPath });
+      return originalSpawn(
+        command,
+        command === process.execPath ||
+          command === path.toNamespacedPath(process.execPath)
+          ? [fixture.executablePath, ...args]
+          : args,
+        { ...options, env: environment },
+      );
+    }) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+
+    const executors = endpoints.map(
+      (_, index) =>
+        new CodexSdkWorkerExecutor({
+          model: `fixture-scan-${index}`,
+          parentSandbox: trustedParentSandboxWithDenials,
+          artifactContext: {
+            pluginRoot: fixture.root,
+            repoRoot: fixture.root,
+            scanId: `fixture-scan-${index}`,
+          },
+        }),
+    );
+    const workingDirectory = fixture.root;
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+        launches.length = 0;
+        await Promise.all(
+          executors.map((executor, index) => {
+            // Resumes run after the ambient config path has moved to another scan.
+            const configIndex =
+              resumeThreadId === undefined
+                ? index
+                : (index + 1) % configPaths.length;
+            process.env.CODEX_SECURITY_CONFIG_PATH = configPaths[configIndex]!;
+            return executor.run({
+              kind,
+              promptPath,
+              workingDirectory,
+              subagents: 0,
+              resumeThreadId,
+              artifactContext: {
+                root: fixture.root,
+                layout: kind === "dedup" ? "reducer" : "worker",
+                ...(kind === "dedup"
+                  ? {
+                      deepReducer: {
+                        scanRoot: fixture.root,
+                        claimedWorkers: [],
+                      },
+                    }
+                  : {}),
+              },
+              signal: new AbortController().signal,
+            });
+          }),
+        );
+        const workerLaunches = launches.filter(
+          ({ args }) => args[0] === "exec",
+        );
+        assert.equal(workerLaunches.length, executors.length);
+        for (const [index, endpoint] of endpoints.entries()) {
+          const launch = workerLaunches.find(
+            ({ args }) =>
+              args[args.indexOf("--model") + 1] === `fixture-scan-${index}`,
+          );
+          assert.ok(launch, `missing worker launch for fixture-scan-${index}`);
+          const invocation = await readJson(launch.markerPath);
+          assertConfigOverrides(invocation.argv, {
+            openai_base_url: endpoint,
+          });
+          assert.equal(invocation.codexHome, await realpath(codexHome));
+          assert.equal(
+            invocation.argv.includes("resume"),
+            resumeThreadId !== undefined,
+          );
         }
       }
     }
