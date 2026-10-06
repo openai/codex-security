@@ -5379,6 +5379,53 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("rejects custom Deep Scan plugins without worker-root forwarding before model work", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const legacyPlugin = join(root, "legacy-plugin");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(join(ambientHome, "auth.json"), "{}\n");
+    await cp(PLUGIN_ROOT, legacyPlugin, { recursive: true });
+    const manifestPath = join(legacyPlugin, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      codexSecurity?: unknown;
+    };
+    delete manifest.codexSecurity;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const createCodex = mock(throwing("Codex should not start"));
+    const client = new TestClient(
+      { pluginPath: legacyPlugin },
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex,
+      },
+    );
+
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "This custom plugin cannot forward the accessible plugin root and per-scan settings to Deep Scan workers",
+      );
+      expect(createCodex).not.toHaveBeenCalled();
+      expect(
+        existsSync(join(credentialHome, ".codex-security-scan.lock")),
+      ).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("keeps legacy custom-plugin Deep Scan settings under the credential lock", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

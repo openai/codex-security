@@ -2875,15 +2875,15 @@ export class CodexSecurity {
       const providers = effectiveConfig["model_providers"];
       if (
         deepScan &&
-        (typeof modelProvider === "string" ||
-          (isRecord(providers) && Object.keys(providers).length > 0)) &&
-        (runtime.deepScanConfigPath === undefined ||
-          !(await pluginSupportsWorkerProviderSnapshot(
-            runtime.plugin.pluginRoot,
-          )))
+        (!(await pluginSupportsWorkerProviderSnapshot(
+          runtime.plugin.pluginRoot,
+        )) ||
+          (runtime.deepScanConfigPath === undefined &&
+            (typeof modelProvider === "string" ||
+              (isRecord(providers) && Object.keys(providers).length > 0))))
       ) {
         throw new CodexSecurityError(
-          "This custom plugin cannot forward per-scan provider settings to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
+          "This custom plugin cannot forward the accessible plugin root and per-scan settings to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
         );
       }
       if (runtime.configPath !== undefined) {
