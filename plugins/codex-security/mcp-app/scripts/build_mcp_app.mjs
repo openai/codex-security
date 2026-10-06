@@ -126,6 +126,12 @@ export async function buildMcpApp({ output, native = "universal" }) {
 }
 
 function isMain() {
+  if (
+    process.execArgv.some((argument) =>
+      /^(?:--(?:eval|print)(?:=|$)|-[ep]$)/u.test(argument),
+    )
+  )
+    return false;
   try {
     return (
       process.argv[1] !== undefined &&

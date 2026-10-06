@@ -137,7 +137,13 @@ test.each([
       );
     else expect(result.stderr).toContain("SCRIPT_MAIN_REACHED");
   }
-  for (const argument of [[], ["unrelated argument"]]) {
+  for (const argument of [
+    [],
+    ["unrelated argument"],
+    ...(native || script.endsWith("build_mcp_app.mjs")
+      ? [[direct], [linked]]
+      : []),
+  ]) {
     const result = await runCommand(
       "node",
       [
