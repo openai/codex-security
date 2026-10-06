@@ -568,7 +568,7 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("projects only the unchanged external payload from the source checkout", async () => {
+  test("projects the external payload with its session launcher", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
     await mkdir(workspace);
@@ -623,10 +623,19 @@ describe("plugin runtime preparation", () => {
           readFile(sourcePath),
           readFile(projectedPath),
         ]);
-        expect({
-          path,
-          unchanged: projectedContents.equals(sourceContents),
-        }).toEqual({ path, unchanged: true });
+        if (path === ".mcp.json") {
+          const configuration = JSON.parse(sourceContents.toString("utf8"));
+          configuration.mcpServers["codex-security"].command =
+            "./scripts/launch_codex_security_mcp_sdk";
+          expect(JSON.parse(projectedContents.toString("utf8"))).toEqual(
+            configuration,
+          );
+        } else {
+          expect({
+            path,
+            unchanged: projectedContents.equals(sourceContents),
+          }).toEqual({ path, unchanged: true });
+        }
       }),
     );
     await expect(stat(join(projected, ".internal"))).rejects.toThrow();
@@ -816,7 +825,9 @@ describe("plugin runtime preparation", () => {
 
   test.each([
     "shell",
+    "shell with root",
     "node",
+    "node with root",
     "direct node",
     "direct node with root",
     "direct node with flags",
@@ -833,7 +844,7 @@ describe("plugin runtime preparation", () => {
       await mkdir(join(selected, "mcp"));
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
       const directNode = interpreter.startsWith("direct node");
-      const declaredRoot = interpreter === "direct node with root";
+      const declaredRoot = interpreter.endsWith("with root");
       const nodeOptions =
         interpreter === "direct node with flags"
           ? ["--enable-source-maps"]
@@ -906,7 +917,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 ${directNode ? "}" : ""}
 `;
       await writeFile(join(selected, "mcp", "server.mjs"), serverProgram);
-      if (interpreter === "node") {
+      if (interpreter.startsWith("node")) {
         await writeFile(
           join(selected, "scripts", "launch_codex_security_mcp"),
           `#!/usr/bin/env node\n${serverProgram}`,
@@ -925,6 +936,31 @@ ${directNode ? "}" : ""}
         ),
       );
       await cp(selected, second, { recursive: true });
+      if (declaredRoot) {
+        // Replace same-version installed code before either client starts MCP.
+        for (const path of [
+          "mcp/server.mjs",
+          ...(interpreter.startsWith("node")
+            ? ["scripts/launch_codex_security_mcp"]
+            : []),
+        ]) {
+          const file = join(second, path);
+          await writeFile(
+            file,
+            (await readFile(file, "utf8")).replace(
+              'version: "1"',
+              'version: "2"',
+            ),
+          );
+        }
+      }
+      const installedOriginals = new Map(
+        await Promise.all(
+          [...originals.keys()].map(
+            async (path) => [path, await readFile(join(second, path))] as const,
+          ),
+        ),
+      );
       const environment = {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
@@ -967,7 +1003,7 @@ ${directNode ? "}" : ""}
           directNode ? path.startsWith("scripts/") : path.startsWith("mcp/")
         ) {
           expect(await readFile(join(installed.installedRoot, path))).toEqual(
-            contents,
+            installedOriginals.get(path)!,
           );
         }
       }
@@ -1024,9 +1060,11 @@ ${directNode ? "}" : ""}
       const assertServer = async (
         server: Awaited<ReturnType<typeof readRoot>>,
         pluginRoot: string,
+        version: string,
       ) => {
         expect(structuredClone(server)).toMatchObject({
           pluginId: "codex-security@codex-security-sdk",
+          serverInfo: { name: "synthetic-legacy", version },
           tools: { probe: { description: expect.any(String) } },
         });
         expect(server.tools.probe.description).toStartWith(
@@ -1049,13 +1087,25 @@ ${directNode ? "}" : ""}
         }
       };
       for (const [index, pluginRoot] of [selected, second].entries()) {
-        await assertServer(servers[index], pluginRoot);
+        await assertServer(
+          servers[index],
+          pluginRoot,
+          index === 1 && declaredRoot ? "2" : "1",
+        );
       }
-      await assertServer(await readRoot(), installed.installedRoot);
+      await assertServer(
+        await readRoot(),
+        installed.installedRoot,
+        declaredRoot ? "2" : "1",
+      );
       await rm(selected, { recursive: true });
       await rm(second, { recursive: true });
-      await assertServer(await readRoot(), installed.installedRoot);
-      for (const [path, contents] of originals) {
+      await assertServer(
+        await readRoot(),
+        installed.installedRoot,
+        declaredRoot ? "2" : "1",
+      );
+      for (const [path, contents] of installedOriginals) {
         expect(await readFile(join(installed.installedRoot, path))).toEqual(
           contents,
         );
@@ -2509,7 +2559,7 @@ ${directNode ? "}" : ""}
       };
       const server = configuration.mcpServers["codex-security"];
 
-      expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+      expect(server?.command).toBe("./scripts/launch_codex_security_mcp_sdk");
       expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
       expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
       expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
