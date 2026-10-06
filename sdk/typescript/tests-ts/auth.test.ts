@@ -170,6 +170,24 @@ describe("Codex authentication process boundary", () => {
     },
   );
 
+  test("ignores external plaintext HTTP authentication URLs", async () => {
+    const root = await temporaryDirectory("codex-security-auth-http-");
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      `process.stderr.write(${JSON.stringify("Open http://auth.example.test/device\nUser code: ABCD-EFGH\n")}, () => process.exit(0));\n`,
+    );
+    const handle = new CodexLoginHandle(
+      nodeCommand(),
+      [script],
+      process.env,
+      () => {},
+    );
+
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(handle.verificationUrl).toBeNull();
+    expect(handle.userCode).toBe("ABCD-EFGH");
+  });
   test("retains large interactive output and login instructions", async () => {
     const root = await temporaryDirectory("codex-security-auth-output-");
     const script = join(root, "login.mjs");
