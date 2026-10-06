@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,16 +16,13 @@ const files = execFileSync("git", ["ls-files", "-z", "--", "*.md"], {
   );
 
 if (files.length > 0) {
-  const result = spawnSync(
+  process.chdir(root);
+  process.argv = [
     process.execPath,
-    [
-      fileURLToPath(import.meta.resolve("prettier/bin/prettier.cjs")),
-      "--check",
-      "--",
-      ...files,
-    ],
-    { cwd: root, stdio: "inherit" },
-  );
-  if (result.error) throw result.error;
-  process.exitCode = result.status ?? 1;
+    fileURLToPath(import.meta.resolve("prettier/bin/prettier.cjs")),
+    "--check",
+    "--",
+    ...files,
+  ];
+  await import("prettier/bin/prettier.cjs");
 }

@@ -32,6 +32,13 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
     await writeFile(join(root, ".gitignore"), "node_modules/\n");
     await writeFile(join(root, "README.md"), "# Readme\n");
     await writeFile(join(root, "--plugin=fixture.md"), "# Markdown fixture\n");
+    // The combined paths exceed the Windows process command-line limit.
+    for (let index = 0; index < 400; index++) {
+      await writeFile(
+        join(root, `guide-${index}-${"x".repeat(80)}.md`),
+        "# Guide\n",
+      );
+    }
     await writeFile(guide, invalid);
     await writeFile(join(root, "deleted.md"), invalid);
     if (process.platform !== "win32")
