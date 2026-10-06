@@ -1,0 +1,33 @@
+{
+  "name": "codex-security-action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Codex Security in GitHub Actions with explicit scope, budgets, and scan health reporting",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:cli": "node --import tsx scripts/cli-integration.ts",
+    "build": "node scripts/build.mjs",
+    "check-dist": "node scripts/build.mjs --check",
+    "check-metadata": "node --import tsx scripts/check-metadata.ts",
+    "docs": "node scripts/generate-input-docs.mjs",
+    "check-docs": "node scripts/generate-input-docs.mjs --check",
+    "validate": "npm run typecheck && npm test && npm run check-metadata && npm run check-docs && npm run check-dist"
+  },
+  "dependencies": {
+    "@actions/artifact": "6.2.1",
+    "@actions/core": "3.0.1",
+    "@actions/io": "3.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "yaml": "2.8.3"
+  }
+}
