@@ -334,10 +334,12 @@ npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --outpu
 ```
 
 The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci), or start from the
-[GitHub Actions](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
-and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/examples/azure-pipelines/README.md)
-examples.
+[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
+request scans in GitHub Actions, use the
+[GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
+Separate examples cover
+[GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
+and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/examples/azure-pipelines/README.md).
 
 ### Classify finding severity
 

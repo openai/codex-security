@@ -1130,8 +1130,9 @@ codex-security scan . --diff origin/main \
 | `130` / `143` | Interrupt / termination.                                              |
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
-`--json`. See the
-[GitHub Actions examples](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md).
+`--json`. For GitHub Actions setup, see the
+[Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
+or the [Bedrock workflow](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md).
 
 ### Local pre-commit checks
 

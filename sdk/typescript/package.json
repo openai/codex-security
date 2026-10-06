@@ -108,6 +108,7 @@
     "fast-check": "4.10.2",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
+    "katex": "0.18.9",
     "minimatch": "10.2.6",
     "postcss": "8.5.28",
     "prettier": "3.9.9",
