@@ -6,6 +6,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -132,7 +133,7 @@ async function discover(
       continue;
     const path = join(directory, entry.name);
     if (entry.name.toLowerCase() === ".git") {
-      const marker = await lstat(join(directory, ".git"), {
+      const marker = await stat(join(directory, ".git"), {
         bigint: true,
       }).catch(nullIfMissingFile);
       if (marker !== null) {

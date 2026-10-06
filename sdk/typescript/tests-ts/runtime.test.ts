@@ -814,7 +814,13 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
-  test.each(["shell", "node", "direct node", "direct node with root"])(
+  test.each([
+    "shell",
+    "node",
+    "direct node",
+    "direct node with root",
+    "direct node with flags",
+  ])(
     "keeps legacy %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
@@ -828,6 +834,10 @@ describe("plugin runtime preparation", () => {
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
       const directNode = interpreter.startsWith("direct node");
       const declaredRoot = interpreter === "direct node with root";
+      const nodeOptions =
+        interpreter === "direct node with flags"
+          ? ["--enable-source-maps"]
+          : [];
       const nodeCommand = declaredRoot
         ? (
             await promisify(execFile)("node", ["-p", "process.execPath"], {
@@ -845,7 +855,7 @@ describe("plugin runtime preparation", () => {
               ? nodeCommand
               : "./scripts/launch_codex_security_mcp",
             args: directNode
-              ? ["./mcp/server.mjs", ...argumentsAfterEntry]
+              ? [...nodeOptions, "./mcp/server.mjs", ...argumentsAfterEntry]
               : argumentsAfterEntry,
             cwd: ".",
             env_vars: [
@@ -883,7 +893,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-legacy", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: pluginRoot + "\\n" + JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), entry: process.argv[1] }), inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: pluginRoot + "\\n" + JSON.stringify({ args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] }), inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1017,6 +1027,7 @@ ${directNode ? "}" : ""}
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(await realpath(installed.installedRoot));
         if (directNode) {
+          expect(details.execArgv).toEqual(nodeOptions);
           expect(details.entry).toBe(
             join(await realpath(pluginRoot), "mcp", "server.mjs"),
           );

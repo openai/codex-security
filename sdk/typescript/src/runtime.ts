@@ -2477,7 +2477,7 @@ function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
     typeof command === "string" &&
     ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
     Array.isArray(server["args"]) &&
-    server["args"][0] === "./mcp/server.mjs"
+    server["args"].includes("./mcp/server.mjs")
   );
 }
 

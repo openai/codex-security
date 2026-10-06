@@ -104,9 +104,14 @@ describe("scan knowledge bases", () => {
     },
   );
 
-  test.each([".git", ".GIT"])(
-    "directory knowledge bases handle %s metadata while direct files remain explicit",
-    async (metadataName) => {
+  test.each([
+    [".git", "directory"],
+    [".GIT", "directory"],
+    [".GIT", "directory link"],
+  ] as const)(
+    "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
+    async (metadataName, metadataKind) => {
+      const linked = metadataKind === "directory link";
       const root = await temporaryDirectory();
       await mkdir(join(root, metadataName));
       const metadata = join(root, metadataName, "config");
@@ -123,15 +128,26 @@ describe("scan knowledge bases", () => {
         () => false,
       );
       if (metadataName !== ".git" && !aliasesGit) {
-        await mkdir(join(root, ".git"));
-        await writeFile(join(root, ".git", "config"), "Separate Git metadata.");
+        if (linked) {
+          await symlink(
+            join(root, metadataName),
+            join(root, ".git"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        } else {
+          await mkdir(join(root, ".git"));
+          await writeFile(
+            join(root, ".git", "config"),
+            "Separate Git metadata.",
+          );
+        }
       }
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
       expect((await extractedDocuments(directory.path)).sort()).toEqual(
         [
           "Documented application behavior.",
-          ...(process.platform !== "win32" && !aliasesGit
+          ...(process.platform !== "win32" && !aliasesGit && !linked
             ? [await readFile(metadata, "utf8")]
             : []),
         ].sort(),
@@ -159,12 +175,12 @@ describe("scan knowledge bases", () => {
         join(root, "guide.md"),
         "Documented application behavior.",
       );
-      const originalLstat = filesystem.lstat;
-      const aliasSpy = spyOn(filesystem, "lstat").mockImplementation(
-        async (...args) =>
-          Reflect.apply(originalLstat, filesystem, [
-            args[0] === join(root, ".git") ? preservedGit : args[0],
-            ...args.slice(1),
+      const originalStat = filesystem.stat;
+      const aliasSpy = spyOn(filesystem, "stat").mockImplementation(
+        async (path, options?) =>
+          Reflect.apply(originalStat, filesystem, [
+            path === join(root, ".git") ? preservedGit : path,
+            options,
           ]),
       );
       try {
