@@ -19,7 +19,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
@@ -93,6 +93,7 @@ try {
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
+  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -109,7 +110,6 @@ try {
     await testOwnedArtifactToolFailureDiagnosticIsSanitized();
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
-    await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
     await testAbortPropagation();
     await testUnstructuredConfigurationFailureRemainsRetryable();
     await testUnstructuredThreadStartFailureRemainsRetryable();
@@ -942,7 +942,42 @@ async function testSdkInvocationAndThreadCapture() {
 
 async function testOpenAiCredentialsReachWorker() {
   const noAccount = { account: null, requiresOpenaiAuth: true };
-  const cases = [
+  let virtualenv: string | undefined;
+  if (process.platform !== "win32") {
+    const root = await temporaryDirectories.create(
+      "codex-security-worker-python-",
+    );
+    virtualenv = path.join(root, "venv");
+    const created = spawnSync(
+      "python3",
+      ["-m", "venv", "--without-pip", virtualenv],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
+        },
+      },
+    );
+    assert.equal(created.status, 0, created.stderr);
+  }
+  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+  const nativeLauncher = path.join(
+    path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
+    "bin",
+    "codex.js",
+  );
+  const cases: {
+    openai?: string;
+    codex?: string;
+    expected?: string;
+    accountResult?: {
+      account: { type: string } | null;
+      requiresOpenaiAuth: boolean;
+    };
+    nativeProvider?: string;
+    configuration?: string;
+  }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
     {
       openai: "synthetic-openai-key",
@@ -973,6 +1008,15 @@ async function testOpenAiCredentialsReachWorker() {
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
+    {
+      openai: "synthetic-openai-key",
+      nativeProvider: "synthetic.gateway",
+    },
+    {
+      openai: "synthetic-openai-key",
+      nativeProvider: "openai",
+      expected: "synthetic-openai-key",
+    },
     {},
     { openai: " " },
   ];
@@ -982,12 +1026,34 @@ async function testOpenAiCredentialsReachWorker() {
       true,
       entry.accountResult ?? noAccount,
     );
+    const runtimeEnvironment = {
+      PATH: [
+        virtualenv === undefined
+          ? path.join(fixture.root, "runner-tools")
+          : path.join(virtualenv, "bin"),
+        path.dirname(process.execPath),
+      ].join(path.delimiter),
+      HOME: path.join(fixture.root, "home"),
+      PYTHON:
+        virtualenv === undefined
+          ? path.join(fixture.root, "tools", "python3")
+          : "python3",
+      PYTHONUTF8: "1",
+      LD_LIBRARY_PATH:
+        (process.env.LD_LIBRARY_PATH === undefined
+          ? ""
+          : process.env.LD_LIBRARY_PATH + path.delimiter) +
+        path.join(fixture.root, "libraries"),
+      CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
+      RUNNER_TRACKING_ID: "synthetic-worker-job",
+    };
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
       "CODEX_SECURITY_CONFIG_PATH",
+      ...Object.keys(runtimeEnvironment),
     ].map((name) => [name, process.env[name]] as const);
     const originalSpawn = childProcess.spawn;
     try {
@@ -998,22 +1064,67 @@ async function testOpenAiCredentialsReachWorker() {
       const configPath = path.join(fixture.root, "scan-settings.toml");
       await writeFile(configPath, entry.configuration ?? "");
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      Object.assign(process.env, runtimeEnvironment);
+      if (entry.nativeProvider !== undefined) {
+        await writeFile(
+          path.join(fixture.root, "config.toml"),
+          `model_provider = ${JSON.stringify(entry.nativeProvider)}
+cli_auth_credentials_store = "file"
+[features]
+plugins = false
+api_key_model_discovery = false
+[model_providers."synthetic.gateway"]
+name = "Synthetic gateway"
+wire_api = "responses"
+base_url = "https://provider.example.test/v1"
+requires_openai_auth = false
+env_key = "CODEX_API_KEY"
+`,
+        );
+      }
+      let nativePreflight:
+        | {
+            codexHome: string | undefined;
+            argv: readonly string[];
+            runnerTrackingId: string | undefined;
+            libraryPath: string | undefined;
+          }
+        | undefined;
       childProcess.spawn = ((
         command: string,
         args: readonly string[],
         options: SpawnOptions,
-      ) =>
-        originalSpawn(
-          command,
+      ) => {
+        const nodeExecutable =
           command === process.execPath ||
-            command === path.toNamespacedPath(process.execPath)
-            ? [fixture.executablePath, ...args]
-            : args,
+          command === path.toNamespacedPath(process.execPath);
+        // Keep real account/config selection, while the existing fake exec
+        // observes credentials without starting a model turn.
+        if (
+          nodeExecutable &&
+          entry.nativeProvider !== undefined &&
+          args.includes("app-server")
+        ) {
+          nativePreflight = {
+            codexHome: options.env?.CODEX_HOME,
+            runnerTrackingId: options.env?.RUNNER_TRACKING_ID,
+            libraryPath: options.env?.LD_LIBRARY_PATH,
+            argv: args,
+          };
+          return originalSpawn(command, [nativeLauncher, ...args], options);
+        }
+        return originalSpawn(
+          command,
+          nodeExecutable ? [fixture.executablePath, ...args] : args,
           options,
-        )) as typeof childProcess.spawn;
+        );
+      }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
       const promptPath = path.join(fixture.root, "prompt.md");
-      await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
+      await writeFile(
+        promptPath,
+        `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
+      );
       const executor = new CodexSdkWorkerExecutor({
         parentSandbox: trustedParentSandbox,
       });
@@ -1027,10 +1138,32 @@ async function testOpenAiCredentialsReachWorker() {
             resumeThreadId,
             signal: new AbortController().signal,
           });
-          const preflight = await readJson(fixture.preflightMarkerPath);
+          const preflight =
+            entry.nativeProvider === undefined
+              ? await readJson(fixture.preflightMarkerPath)
+              : nativePreflight!;
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.codexHome, fixture.root);
+          assert.equal(
+            preflight.runnerTrackingId,
+            runtimeEnvironment.RUNNER_TRACKING_ID,
+          );
+          assert.equal(
+            preflight.libraryPath,
+            runtimeEnvironment.LD_LIBRARY_PATH,
+          );
           assert.equal(invocation.codexHome, fixture.root);
+          assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
+          if (virtualenv !== undefined) {
+            assert.equal(invocation.pythonPrefix, virtualenv);
+            assert.equal(
+              invocation.pythonLibraryPath,
+              runtimeEnvironment.LD_LIBRARY_PATH,
+            );
+          }
+          for (const [name, value] of Object.entries(runtimeEnvironment)) {
+            assert.equal(process.env[name], value);
+          }
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -1043,6 +1176,10 @@ async function testOpenAiCredentialsReachWorker() {
           assert.equal(process.env.OPENAI_API_KEY, entry.openai);
           assert.equal(
             invocation.argv.some((arg: string) => arg.includes("synthetic-")),
+            false,
+          );
+          assert.equal(
+            preflight.argv.some((arg: string) => arg.includes("synthetic-")),
             false,
           );
         }
@@ -1239,6 +1376,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               : index % 2 === 0
                 ? "unelevated"
                 : "elevated";
+          const webSearch =
+            index === 0 ? undefined : ["disabled", "cached", "live"][index % 3];
+          const features =
+            index === 0
+              ? undefined
+              : {
+                  shell_tool: index % 2 === 0,
+                  unified_exec: false,
+                  view_image: index % 2 !== 0,
+                  multi_agent_v2: {
+                    enabled: true,
+                    max_concurrent_threads_per_session: index + 2,
+                  },
+                  enable_fanout: true,
+                };
           const entryPath = `${configPath}.${index}`;
           const deepPath = `${entryPath}.deep`;
           const nativeProfile =
@@ -1304,6 +1456,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             instructionsFile,
             verbosity,
             windowsSandbox,
+            webSearch,
+            features,
             configuration: {
               ...parsedConfiguration,
               ...(index === 0
@@ -1340,10 +1494,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     : {
                         model_instructions_file: entry.instructionsFile,
                         model_verbosity: entry.verbosity,
+                        web_search: entry.webSearch,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
+                        features: entry.features,
                       },
               }),
             ),
@@ -1514,6 +1670,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
               model_verbosity: workerConfigurations[index].verbosity,
+              web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
             assert.equal(
@@ -1603,6 +1760,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.deepConfigPath,
               workerConfigurations[index].deepPath,
             );
+            const workerFeatures = parseToml(
+              invocation.argv
+                .filter((arg: string) => /^features[.=]/.test(arg))
+                .join("\n"),
+            ).features;
+            assert.deepEqual(JSON.parse(JSON.stringify(workerFeatures)), {
+              ...workerConfigurations[index].features,
+              multi_agent_v2: {
+                enabled: false,
+                max_concurrent_threads_per_session: 1,
+              },
+              enable_fanout: false,
+            });
             assertReadOnlyWorkerPolicy(invocation.argv);
             assertWorkerSubagentPolicy(invocation.argv, 0);
           }
@@ -1629,6 +1799,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
+              web_search: selectedProvider.webSearch,
               "windows.sandbox": selectedProvider.windowsSandbox,
             });
             assert.equal(
@@ -1638,7 +1809,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 `cache-${workerConfigurations.indexOf(selectedProvider)} `,
               ),
             );
-            assert.ok(preflight.argv.includes('model_provider="openai"'));
+            assert.deepEqual(
+              preflight.argv.filter((arg: string) =>
+                arg.startsWith("model_provider="),
+              ),
+              selectedProvider.provider === undefined
+                ? []
+                : [
+                    `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+                  ],
+            );
             const providerOverrides = preflight.argv.filter((arg: string) =>
               arg.startsWith("model_providers="),
             );
@@ -1697,7 +1877,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),
@@ -2250,9 +2430,61 @@ async function testAbortPropagation() {
 }
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
+  await completedWorkerSettlesWithoutWaitingForProcessExit();
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumed of [false, true]) {
+      await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
+    }
+  }
+}
+
+async function completedWorkerSettlesWithoutWaitingForProcessExit(
+  kind?: DeepScanWorkerKind,
+  resumed = false,
+) {
   const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const saved = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ].map((name) => [name, process.env[name]] as const);
+  process.env.CODEX_CLI_PATH = process.execPath;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) =>
+    originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.win32.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      options,
+    )) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  if (kind !== undefined) {
+    const home = path.join(fixture.root, "private profile home");
+    await mkdir(home);
+    const configPath = path.join(fixture.root, "preflight.toml");
+    const workerConfigPath = path.join(home, "deep-scan-config.toml");
+    await writeFile(configPath, "");
+    await writeFile(
+      workerConfigPath,
+      '[worker_runtime]\nnative_profile = "completion_fixture"\n',
+    );
+    await writeFile(
+      path.join(home, "completion_fixture.config.toml"),
+      'model_provider = "openai"\n',
+    );
+    Object.assign(process.env, {
+      CODEX_HOME: home,
+      CODEX_SECURITY_CONFIG_PATH: configPath,
+      CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfigPath,
+    });
+  }
   const controller = new AbortController();
   const unexpectedErrors: unknown[] = [];
   const captureUnexpectedError = (error: NodeJS.ErrnoException) =>
@@ -2266,15 +2498,24 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
-    await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
+    await writeFile(
+      promptPath,
+      kind === undefined
+        ? "COMPLETE_THEN_HANG\n"
+        : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
+    );
     execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
     }).run({
-      kind: "discovery",
+      kind: kind ?? "discovery",
       promptPath,
       workingDirectory,
       subagents: 0,
       signal: controller.signal,
+      ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
+      onThreadStarted: async () => {
+        childPid = (await readJson(fixture.markerPath)).pid;
+      },
     });
 
     const result = await Promise.race([
@@ -2289,25 +2530,34 @@ async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
       }),
     ]);
     clearTimeout(timeout);
-    assert.equal(result.threadId, "fixture-thread-id");
-    childPid = (await readJson(fixture.markerPath)).pid;
+    assert.equal(
+      result.threadId,
+      resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+    );
+    const invocation = await readJson(fixture.markerPath);
+    assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
+    assert.equal(invocation.argv.includes("resume"), resumed);
 
     controller.abort("coordinator immediately canceled its remaining workers");
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.deepEqual(unexpectedErrors, []);
-    assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+    if (kind === undefined) {
+      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+    }
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");
-    await execution?.catch(() => {});
     if (childPid) {
       try {
         process.kill(childPid, "SIGKILL");
       } catch {}
     }
+    await execution?.catch(() => {});
     process.removeListener("uncaughtException", captureUnexpectedError);
-    restoreEnv("CODEX_CLI_PATH", previousPath);
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
 
@@ -2551,12 +2801,13 @@ async function fakeCodexFixture(
     `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2599,8 +2850,12 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
-if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
+if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
+const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
 if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {

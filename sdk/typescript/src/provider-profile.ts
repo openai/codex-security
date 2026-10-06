@@ -33,21 +33,27 @@ export async function providerPreflightCommand(
   command: CodexCommand,
   config: JsonObject,
 ): Promise<CodexCommand> {
-  const providers = resolveCodexProfile(config)["model_providers"];
-  if (!isRecord(providers) || Object.keys(providers).length === 0)
-    return command;
-  const client = await nativeProfileClient();
-  const definitions = client.preflightProviderDefinitions(
-    providers,
-  ) as JsonObject;
-  if (Object.keys(definitions).length === 0) return command;
+  const resolved = resolveCodexProfile(config);
+  const overrides: string[] = [];
+  const providers = resolved["model_providers"];
+  if (isRecord(providers) && Object.keys(providers).length > 0) {
+    const client = await nativeProfileClient();
+    const definitions = client.preflightProviderDefinitions(
+      providers,
+    ) as JsonObject;
+    if (Object.keys(definitions).length > 0)
+      overrides.push(
+        ...modelProviderConfigOverride({ model_providers: definitions }),
+      );
+  }
+  if (resolved["model_provider"] !== undefined)
+    overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
+  if (overrides.length === 0) return command;
   return {
     ...command,
     args: [
       ...(command.args ?? []),
-      ...modelProviderConfigOverride({ model_providers: definitions }).flatMap(
-        (value) => ["-c", value],
-      ),
+      ...overrides.flatMap((value) => ["-c", value]),
     ],
   };
 }
@@ -103,15 +109,7 @@ export async function preflightReadOnlyProfileCodex(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<{ permissionProfileId: string; configOverrides: string[] }> {
-  const preflight = await import(
-    pathToFileURL(
-      join(
-        await bundledPluginRoot(),
-        "mcp",
-        "permission-profile-preflight.mjs",
-      ),
-    ).href
-  );
+  const preflight = await nativePermissionPreflight();
   const permissionProfileId =
     preflight.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID as string;
   const configOverrides = [
@@ -130,18 +128,7 @@ export async function preflightReadOnlyProfileCodex(
     options.env === undefined
       ? undefined
       : bundledCodexSdkEnvironment(command, options.env);
-  // App-server treats concurrent cold-home SQLite initialization as fatal.
-  // Keep the lock in a private child so a readable native home stays readable.
-  const lockDirectory = join(
-    configuredCodexHome(env ?? process.env),
-    ".codex-security-preflight",
-  );
-  await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
-  const release = await acquireCodexSecurityCredentialHomeLock(
-    lockDirectory,
-    signal,
-  );
-  try {
+  await withCodexPreflightLock(env, signal, async () => {
     await preflight.preflightDeepScanWorkerPermissionProfile({
       codexPath: executablePathForSpawn(command),
       cwd,
@@ -166,10 +153,77 @@ export async function preflightReadOnlyProfileCodex(
       signal: signal ?? new AbortController().signal,
       context: "helper",
     });
+  });
+  return { permissionProfileId, configOverrides };
+}
+
+/** Older workers must inherit the same effective provider as the parent scan. */
+export async function legacyWorkerUsesScanProvider(
+  command: CodexCommand,
+  environment: Record<string, string>,
+  cwd: string,
+  modelProvider: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const preflight = await nativePermissionPreflight();
+  const env = bundledCodexSdkEnvironment(command.command, environment);
+  return await withCodexPreflightLock(env, signal, async () => {
+    const options = {
+      codexPath: executablePathForSpawn(command.command),
+      commandArgs: command.args,
+      cwd,
+      env,
+      signal: signal ?? new AbortController().signal,
+      context: "helper",
+    };
+    const worker = await preflight.readDeepScanRuntimeConfig({
+      ...options,
+      configOverrides: [],
+    });
+    const parent = await preflight.readDeepScanRuntimeConfig({
+      ...options,
+      configOverrides: [`model_provider=${JSON.stringify(modelProvider)}`],
+    });
+    return (
+      (worker.model_provider ?? "openai") ===
+      (parent.model_provider ?? "openai")
+    );
+  });
+}
+
+async function withCodexPreflightLock<T>(
+  env: Record<string, string> | undefined,
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  // App-server treats concurrent cold-home SQLite initialization as fatal.
+  // Keep the lock in a private child so a readable native home stays readable.
+  const lockDirectory = join(
+    configuredCodexHome(env ?? process.env),
+    ".codex-security-preflight",
+  );
+  await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    lockDirectory,
+    signal,
+  );
+  try {
+    return await operation();
   } finally {
     await release();
   }
-  return { permissionProfileId, configOverrides };
+}
+
+async function nativePermissionPreflight() {
+  return await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
 }
 
 async function nativeProfileClient() {

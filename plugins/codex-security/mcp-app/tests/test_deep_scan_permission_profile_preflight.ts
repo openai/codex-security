@@ -33,6 +33,7 @@ const {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: profileId,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
+  readDeepScanRuntimeConfig,
 } = await importSource(
   path.join(
     import.meta.dirname,
@@ -129,9 +130,9 @@ async function testAllowedProfileAndRawArgv() {
         "--config",
         rawOverrides[1],
         "--config",
-        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        'model_provider="synthetic.gateway"',
         "--config",
-        'model_provider="openai"',
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
         "app-server",
         "--stdio",
       ]);
@@ -701,29 +702,61 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  await withFakeCodex(
-    {
-      hangAt: "config/read",
-    },
-    async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-      const controller = new AbortController();
-      const running = preflightDeepScanWorkerPermissionProfile({
-        codexPath,
-        cwd,
-        configOverrides: rawOverrides,
-        expectedProfile,
-        signal: controller.signal,
-      });
-      await waitForFile(readyPath);
-      controller.abort(new DOMException("fixture aborted", "AbortError"));
-      await assert.rejects(
-        running,
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "AbortError",
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
+  for (const run of [
+    preflightDeepScanWorkerPermissionProfile,
+    readDeepScanRuntimeConfig,
+  ]) {
+    for (const stderr of ["", "synthetic native abort diagnostic\n"]) {
+      for (const reason of [
+        undefined,
+        new DOMException("fixture aborted", "AbortError"),
+        Object.assign(
+          new Error("fixture caller error", { cause: { fixture: true } }),
+          { code: "SYNTHETIC_CANCELED" },
+        ),
+      ]) {
+        await withFakeCodex(
+          { hangAt: "config/read", stderr },
+          async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+            const controller = new AbortController();
+            const running = run({
+              codexPath,
+              cwd,
+              configOverrides: rawOverrides,
+              expectedProfile,
+              signal: controller.signal,
+            });
+            if (stderr) {
+              await new Promise<void>((resolve) => {
+                children[0].stderr!.once("data", () => resolve());
+              });
+            }
+            await waitForFile(readyPath);
+            controller.abort(reason);
+            const aborted = controller.signal.reason;
+            const expected = {
+              message: aborted.message + (stderr ? "\n" + stderr : ""),
+              name: aborted.name,
+              code: aborted.code,
+              cause: aborted.cause,
+            };
+            await assert.rejects(running, (error: Error) => {
+              assert.equal(error, aborted);
+              assert.equal(error.name, expected.name);
+              assert.equal(error.message, expected.message);
+              assert.equal(
+                (error as NodeJS.ErrnoException).code,
+                expected.code,
+              );
+              assert.equal(error.cause, expected.cause);
+              return true;
+            });
+            await assertPreflightStopped(children, terminatedPath);
+          },
+        );
+      }
+    }
+  }
 }
 
 async function assertPreflightStopped(

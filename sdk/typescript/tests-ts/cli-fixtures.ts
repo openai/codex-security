@@ -112,6 +112,7 @@ export const savedRecipe = (
   config: JsonObject = {},
   target: JsonObject = { kind: "repository", paths: [] },
 ) => ({
+  scanId: "scan-original",
   recipe: {
     repository: "/original/repository",
     target,

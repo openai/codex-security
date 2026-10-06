@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
@@ -344,9 +346,35 @@ test("native profile failures preserve upstream diagnostics and remove schema fi
   }
 });
 
+function captureChildClose() {
+  let closed: Promise<void> | undefined;
+  const originalSpawn = childProcess.spawn;
+  const spawnSpy = mock.method(
+    childProcess,
+    "spawn",
+    (command: string, args: readonly string[], options: SpawnOptions) => {
+      const child = originalSpawn(command, args, options);
+      closed = new Promise((resolve) => child.once("close", () => resolve()));
+      return child;
+    },
+  );
+  syncBuiltinESMExports();
+  return {
+    wait: () => {
+      assert.ok(closed);
+      return closed;
+    },
+    restore: () => {
+      spawnSpy.mock.restore();
+      syncBuiltinESMExports();
+    },
+  };
+}
+
 test("native profile abort and abandoned streams close the actual child", async () => {
   for (const abort of [true, false]) {
     const f = await fixture("wait");
+    const childClose = captureChildClose();
     try {
       const controller = new AbortController();
       const thread = createCodexProfileClient(f.options).startThread();
@@ -361,8 +389,10 @@ test("native profile abort and abandoned streams close the actual child", async 
       } else {
         await events.return(undefined);
       }
+      await childClose.wait();
       assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
     } finally {
+      childClose.restore();
       await f.cleanup();
     }
   }
@@ -371,6 +401,7 @@ test("native profile abort and abandoned streams close the actual child", async 
 test("a late native permission fallback discards the turn and closes the actual child", async () => {
   for (const mode of ["fallback_item", "fallback_event"]) {
     const f = await fixture(mode);
+    const childClose = captureChildClose();
     try {
       const thread = createCodexProfileClient({
         ...f.options,
@@ -381,9 +412,11 @@ test("a late native permission fallback discards the turn and closes the actual 
         /results were discarded[\s\S]*falling back from `synthetic_read_only` to required value `:workspace`\./,
       );
       const record = await f.record();
+      await childClose.wait();
       assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
       await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
     } finally {
+      childClose.restore();
       await f.cleanup();
     }
   }

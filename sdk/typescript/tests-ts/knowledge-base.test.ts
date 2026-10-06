@@ -104,15 +104,55 @@ describe("scan knowledge bases", () => {
     },
   );
 
-  test.each([".git", ".GIT"])(
-    "directory knowledge bases handle %s metadata while direct files remain explicit",
-    async (metadataName) => {
+  test.each([
+    [".git", "directory"],
+    [".GIT", "directory"],
+    [".GIT", "directory link"],
+    [".GIT", "Git file"],
+  ] as const)(
+    "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
+    async (metadataName, metadataKind) => {
+      const linked = metadataKind === "directory link";
+      const gitFile = metadataKind === "Git file";
       const root = await temporaryDirectory();
-      await mkdir(join(root, metadataName));
+      if (gitFile) {
+        const template = await temporaryDirectory();
+        const initialized = spawnSync(
+          "git",
+          [
+            "init",
+            "--quiet",
+            `--template=${template}`,
+            "--initial-branch=synthetic",
+            root,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(initialized.status, initialized.stderr).toBe(0);
+        await filesystem.rename(join(root, ".git"), join(root, ".GIT"));
+        const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+          () => true,
+          () => false,
+        );
+        // Case-insensitive filesystems cannot represent this separate Git file.
+        if (!aliasesGit) await writeFile(join(root, ".git"), "gitdir: .GIT\n");
+        const recognized = spawnSync(
+          "git",
+          ["-C", root, "rev-parse", "--absolute-git-dir"],
+          { encoding: "utf8" },
+        );
+        expect(recognized.status, recognized.stderr).toBe(0);
+        expect(await filesystem.realpath(recognized.stdout.trim())).toBe(
+          await filesystem.realpath(join(root, ".GIT")),
+        );
+      } else {
+        await mkdir(join(root, metadataName));
+      }
       const metadata = join(root, metadataName, "config");
       await writeFile(
         metadata,
-        "[http]\nextraheader = synthetic-authorization\n",
+        (gitFile ? await readFile(metadata, "utf8") : "") +
+          "[http]\nextraheader = synthetic-authorization\n",
       );
       await writeFile(
         join(root, "guide.md"),
@@ -123,15 +163,26 @@ describe("scan knowledge bases", () => {
         () => false,
       );
       if (metadataName !== ".git" && !aliasesGit) {
-        await mkdir(join(root, ".git"));
-        await writeFile(join(root, ".git", "config"), "Separate Git metadata.");
+        if (linked) {
+          await symlink(
+            join(root, metadataName),
+            join(root, ".git"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        } else {
+          await mkdir(join(root, ".git"));
+          await writeFile(
+            join(root, ".git", "config"),
+            "Separate Git metadata.",
+          );
+        }
       }
       const directory = await prepareKnowledgeBase([root]);
       temporaryDirectories.track(directory.path);
       expect((await extractedDocuments(directory.path)).sort()).toEqual(
         [
           "Documented application behavior.",
-          ...(process.platform !== "win32" && !aliasesGit
+          ...(process.platform !== "win32" && !aliasesGit && !linked
             ? [await readFile(metadata, "utf8")]
             : []),
         ].sort(),
@@ -159,12 +210,12 @@ describe("scan knowledge bases", () => {
         join(root, "guide.md"),
         "Documented application behavior.",
       );
-      const originalLstat = filesystem.lstat;
-      const aliasSpy = spyOn(filesystem, "lstat").mockImplementation(
-        async (...args) =>
-          Reflect.apply(originalLstat, filesystem, [
-            args[0] === join(root, ".git") ? preservedGit : args[0],
-            ...args.slice(1),
+      const originalStat = filesystem.stat;
+      const aliasSpy = spyOn(filesystem, "stat").mockImplementation(
+        async (path, options?) =>
+          Reflect.apply(originalStat, filesystem, [
+            path === join(root, ".git") ? preservedGit : path,
+            options,
           ]),
       );
       try {
