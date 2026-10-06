@@ -121,9 +121,62 @@ function readScope(
   root: string,
   allowMissing: boolean,
 ): Set<string> {
-  const lines = decodeUtf8(readFile(path)).split(/\r?\n/u);
+  const contents = decodeUtf8(readFile(path));
+  const lines = contents.split("\n");
+  const listedRows = new Set(lines);
+  const isScopeFile = (value: string): boolean => {
+    try {
+      relativeFile(value, root);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const carriageRows = new Map<string, [boolean, boolean]>();
+  if (!windows) {
+    for (const line of lines) {
+      if (line.endsWith("\r") && line !== "\r") {
+        carriageRows.set(line, [
+          isScopeFile(line),
+          isScopeFile(line.slice(0, -1)),
+        ]);
+      }
+    }
+  }
+  const crlfEvidence =
+    lines.includes("\r") ||
+    [...carriageRows.values()].some(
+      ([literal, stripped]) => stripped && !literal,
+    );
+  const literalEvidence = [...carriageRows.values()].some(
+    ([literal, stripped]) => literal && !stripped,
+  );
   const scope = new Set<string>();
-  for (const [index, line] of lines.entries()) {
+  for (const [index, row] of lines.entries()) {
+    let line = row;
+    if (windows || line === "\r") {
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+    } else if (line.endsWith("\r")) {
+      const [literal, stripped] = carriageRows.get(line)!;
+      const trimmed = line.slice(0, -1);
+      if (stripped && !literal) {
+        line = trimmed;
+      } else if (stripped && literal) {
+        const finalLiteral =
+          index === lines.length - 1 && !contents.endsWith("\n");
+        if (!finalLiteral && !listedRows.has(trimmed)) {
+          if (crlfEvidence && !literalEvidence) {
+            line = trimmed;
+          } else if (!literalEvidence || crlfEvidence) {
+            throw new Error(
+              `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+            );
+          }
+        }
+      } else if (!literal && crlfEvidence) {
+        line = trimmed;
+      }
+    }
     if (line === "") continue;
     try {
       scope.add(relativeFile(line, root)[0]);
