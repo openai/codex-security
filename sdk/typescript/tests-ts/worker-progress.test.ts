@@ -132,6 +132,36 @@ describe("worker progress events", () => {
     });
   });
 
+  test("ignores failed or inconsistent preflight command executions", () => {
+    const output = JSON.stringify({
+      profile: "security_scan",
+      status: "ready",
+      results: [
+        { capability: "delegated_workers", status: "pass" },
+        { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
+      ],
+    });
+
+    for (const [status, exitCode] of [
+      ["failed", 2],
+      ["completed", 2],
+      ["failed", 0],
+    ] as const) {
+      expect(
+        workerStatusFromEvent({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command:
+              "python3 /plugin/scripts/config_preflight.py --profile security_scan",
+            aggregated_output: output,
+            status,
+            exit_code: exitCode,
+          },
+        }),
+      ).toBeNull();
+    }
+  });
   test("keeps unavailable and unknown delegation distinct from capacity", () => {
     for (const [status, delegation] of [
       ["fail", "unavailable"],

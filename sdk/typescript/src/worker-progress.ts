@@ -121,7 +121,9 @@ function preflightStatus(
   if (
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
-    typeof item["aggregated_output"] !== "string"
+    typeof item["aggregated_output"] !== "string" ||
+    item["status"] !== "completed" ||
+    item["exit_code"] !== 0
   ) {
     return null;
   }
