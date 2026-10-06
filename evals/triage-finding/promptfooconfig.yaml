@@ -45,6 +45,7 @@ defaultTest:
 
 tests:
   - file://./tests/input-types.yaml
+  - file://./tests/security-policy.yaml
   - file://./tests/invocation-behavior.yaml
   - file://./tests/ticket-intake.yaml
   - file://./tests/github-rest-intake.yaml

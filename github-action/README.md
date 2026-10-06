@@ -20,7 +20,7 @@ name: Codex Security repository
 on:
   workflow_dispatch:
   schedule:
-    - cron: '23 7 * * 1' # Mondays at 07:23 UTC
+    - cron: "23 7 * * 1" # Mondays at 07:23 UTC
 
 permissions:
   contents: read
@@ -123,7 +123,7 @@ For a Deep scan of a repository or selected paths, add these inputs to the scan 
 ```yaml
 with:
   mode: deep
-  max-time-hours: '2'
+  max-time-hours: "2"
 ```
 
 Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
@@ -249,55 +249,59 @@ audits the Action and CLI dependency locks. The `@openai/codex-security` depende
 pin and regenerate `runtime/package-lock.json`, rebuild the bundles, and run
 validation. Verify report compatibility when adopting a new release.
 
+<!-- prettier-ignore-start -->
+
 <!-- action-reference:start -->
 
 ## Inputs
 
 Inputs are strings. Quote booleans and use newline-separated literal paths for lists.
 
-| Input | Default | Meaning |
-| --- | --- | --- |
-| `repository` | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout. |
-| `scope` | `repository` | repository or diff. Select diff for PR changes only; repository scans the full checkout. |
-| `paths` | Unset | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion. |
-| `diff-base` | Unset | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff. |
-| `mode` | `standard` | standard or deep. Deep supports repository scans, including selected paths; not diff scans. |
-| `model` | `gpt-5.6-sol` | Model with access through your API key. Cost limits require CLI pricing support for the model. |
-| `effort` | `xhigh` | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support). |
-| `max-cost` | Unset | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit. |
-| `max-time-hours` | Unset | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate. |
-| `fail-on-severity` | `none` | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail. |
-| `verbose` | `true` | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only. |
-| `dry-run` | `false` | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job. |
-| `summary` | `true` | Write a human-readable job summary. |
-| `annotations` | `true` | Emit up to 50 source finding annotations; complete findings remain in reports. |
-| `upload-artifacts` | `false` | Upload an allowlist of validated reports. Reports may contain source and vulnerability details. |
-| `artifact-name` | `codex-security` | Report artifact name; choose distinct names for matrix jobs and multiple invocations. |
-| `retention-days` | `7` | Artifact retention, 1–90 days (subject to repository limits). |
+| Input              | Default                   | Meaning                                                                                                                                  |
+| ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `repository`       | `${{ github.workspace }}` | Checkout root. Use paths to select folders within the checkout.                                                                          |
+| `scope`            | `repository`              | repository or diff. Select diff for PR changes only; repository scans the full checkout.                                                 |
+| `paths`            | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                            |
+| `diff-base`        | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                              |
+| `mode`             | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                              |
+| `model`            | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                           |
+| `effort`           | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                  |
+| `max-cost`         | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                       |
+| `max-time-hours`   | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.              |
+| `fail-on-severity` | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail. |
+| `verbose`          | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                           |
+| `dry-run`          | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job. |
+| `summary`          | `true`                    | Write a human-readable job summary.                                                                                                      |
+| `annotations`      | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                           |
+| `upload-artifacts` | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                          |
+| `artifact-name`    | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                    |
+| `retention-days`   | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                            |
 
 ## Outputs
 
 All outputs are strings. An empty cost or count means unavailable, not zero.
 
-| Output | Meaning |
-| --- | --- |
-| `sarif-path` | Absolute validated SARIF file path, or empty when unavailable or withheld. |
-| `json-path` | Absolute canonical findings JSON path, or empty when unavailable or withheld. |
-| `coverage-path` | Absolute coverage JSON path, or empty when unavailable or withheld. |
-| `results-directory` | Runner-local reports directory; do not upload it recursively. |
-| `scan-status` | completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run. |
-| `skip-reason` | empty-diff or dry-run when no scan ran; otherwise empty. |
-| `policy-status` | passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured. |
-| `report-status` | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed. |
-| `exit-code` | CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step. |
-| `scanned-sha` | Verified checkout commit SHA. |
-| `analysis-ref` | GitHub ref matching the scanned revision. |
-| `sarif-upload-ready` | true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure. |
-| `critical-count` | Available critical findings, or empty before results are available. |
-| `high-count` | Available high findings, or empty before results are available. |
-| `medium-count` | Available medium findings, or empty before results are available. |
-| `low-count` | Available low findings, or empty before results are available. |
-| `informational-count` | Available informational findings, or empty before results are available. |
-| `estimated-cost` | Estimated USD cost reported by the CLI. Empty means unavailable, not zero. |
+| Output                | Meaning                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                                                         |
+| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                                                      |
+| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                                                |
+| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                                                      |
+| `scan-status`         | completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run. |
+| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                                                           |
+| `policy-status`       | passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.                                                |
+| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.                               |
+| `exit-code`           | CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.                                            |
+| `scanned-sha`         | Verified checkout commit SHA.                                                                                                                                      |
+| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                                                          |
+| `sarif-upload-ready`  | true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.                                       |
+| `critical-count`      | Available critical findings, or empty before results are available.                                                                                                |
+| `high-count`          | Available high findings, or empty before results are available.                                                                                                    |
+| `medium-count`        | Available medium findings, or empty before results are available.                                                                                                  |
+| `low-count`           | Available low findings, or empty before results are available.                                                                                                     |
+| `informational-count` | Available informational findings, or empty before results are available.                                                                                           |
+| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                                                         |
 
 <!-- action-reference:end -->
+
+<!-- prettier-ignore-end -->
