@@ -29,6 +29,11 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -71,6 +76,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -198,8 +208,13 @@ for code scanning availability and permissions.
 
 The Action installs a pinned CLI release from npm using a committed dependency
 lock. It runs on Linux x64 with Node 24 and Python 3.11 or later; the Ubuntu 24.04
-runner supplies these prerequisites. npm and Python are found on the runner's
-`PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
+runner supplies Node and Python. The setup step above installs Bubblewrap and
+loads Ubuntu's `bwrap-userns-restrict` AppArmor profile. This profile lets
+Bubblewrap create the sandbox's user namespace and denies capabilities to its
+child processes. It is loaded into the running kernel for the job's runner.
+Codex uses the system Bubblewrap from `PATH`.
+
+npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
 The runner's process tracking marker is retained by the scan coordinator and Deep Scan workers.
 Authentication uses `OPENAI_API_KEY`.
@@ -215,6 +230,11 @@ report paths empty; it does not recover unvalidated partial files from disk.
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
   for PRs, and `persist-credentials: false`.
 - **Authentication errors:** check the repository secret and model access.
+- **Sandbox startup errors:** on Ubuntu 24.04, include the sandbox setup step
+  shown above. Installing Bubblewrap alone does not load the AppArmor profile.
+  A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
+  the sandbox could not configure its network namespace. Check that the profile
+  loaded successfully before running the Action.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Incomplete scans:** inspect the warning and coverage report before adjusting
