@@ -5,7 +5,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -4055,7 +4054,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable across reduced CI", () => {
+  test("keeps required contexts stable for every change", () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -4091,7 +4090,6 @@ describe("GitHub release workflow safeguards", () => {
       )?.if,
     ).toContain("github.event.changes.base == null");
 
-    const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
     for (const job of [
       "static-checks",
       "package",
@@ -4103,26 +4101,8 @@ describe("GitHub release workflow safeguards", () => {
       "windows-test",
       "windows-verify",
     ]) {
-      expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
+      expect(workflow.jobs[job]?.if).toBeUndefined();
     }
-    expect(workflow.jobs["markdown-checks"]).toBeUndefined();
-    const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
-    expect(
-      validationSteps.find(
-        ({ name }) => name === "Check plugin source compatibility",
-      )?.if,
-    ).toBe("steps.scope.outputs.ci-mode == 'markdown'");
-    const markdownCommand =
-      validationSteps.find(({ name }) => name === "Check Markdown formatting")
-        ?.run ?? "";
-    expect(markdownCommand).toContain(
-      "git diff --no-renames --name-only -z HEAD^1 HEAD",
-    );
-    expect(markdownCommand).toContain("! -L");
-    expect(markdownCommand).toContain(
-      "pnpm --dir sdk/typescript exec prettier --check",
-    );
-    expect(markdownCommand).not.toContain("--ignore-path");
     const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
@@ -4132,13 +4112,10 @@ describe("GitHub release workflow safeguards", () => {
           name ===
           `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
       );
-    for (const [ciMode, validation, upstream, gateFailure] of [
-      ["full", "success", "success", false],
-      ["full", "success", "skipped", true],
-      ["markdown", "success", "skipped", false],
-      ["markdown", "failure", "skipped", true],
-      ["skip", "success", "skipped", true],
-      ["unknown", "success", "skipped", true],
+    for (const [validation, upstream, gateFailure] of [
+      ["success", "success", false],
+      ["success", "skipped", true],
+      ["failure", "skipped", true],
     ] as const) {
       const values = {
         "needs.static-checks.result": upstream,
@@ -4148,7 +4125,6 @@ describe("GitHub release workflow safeguards", () => {
         "needs.compatibility.result": upstream,
         "needs.mcp.result": upstream,
         "needs.test.result": upstream,
-        "needs.validate-title.outputs.ci-mode": ciMode,
         "needs.validate-title.result": validation,
         "needs.windows-test.result": upstream,
         "needs.windows-verify.result": upstream,
@@ -4156,7 +4132,7 @@ describe("GitHub release workflow safeguards", () => {
       for (const job of ["required-test", "windows"]) {
         expect(
           evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
-          `${job}: ${ciMode}/${validation}/${upstream}`,
+          `${job}: ${validation}/${upstream}`,
         ).toBe(gateFailure);
       }
     }
@@ -4184,7 +4160,6 @@ describe("GitHub release workflow safeguards", () => {
           expect(
             evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
               "needs.validate-title.result": "success",
-              "needs.validate-title.outputs.ci-mode": "full",
               ...Object.fromEntries(
                 dependencies.map((job) => [
                   `needs.${job}.result`,
@@ -4229,213 +4204,6 @@ describe("GitHub release workflow safeguards", () => {
       fullNames.filter((name) => requiredContexts.has(name)).sort(),
     ).toEqual([...requiredContexts].sort());
   });
-
-  test.each([
-    [
-      "Markdown-only PR",
-      "pull_request",
-      false,
-      ["README.md", "docs/guide.md"],
-      "markdown",
-      true,
-    ],
-    [
-      "generated-plugin Markdown-only PR",
-      "pull_request",
-      false,
-      ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
-      "full",
-      true,
-    ],
-    [
-      "authored-plugin skill Markdown-only PR",
-      "pull_request",
-      false,
-      ["plugins/codex-security/skills/example/SKILL.md"],
-      "full",
-      true,
-    ],
-    [
-      "authored-plugin reference Markdown-only PR",
-      "pull_request",
-      false,
-      ["plugins/codex-security/skills/example/references/contract.md"],
-      "full",
-      true,
-    ],
-    ["base retarget", "pull_request", true, ["README.md"], "full", false],
-    [
-      "mixed PR",
-      "pull_request",
-      false,
-      ["README.md", "src/index.ts"],
-      "full",
-      false,
-    ],
-    [
-      "source-to-Markdown rename",
-      "pull_request",
-      false,
-      ["src/index.ts", "docs/index.md"],
-      "full",
-      false,
-    ],
-    ["empty merge diff", "pull_request", false, [], "full", false],
-    ["push", "push", false, ["README.md"], "full", false],
-  ] as const)(
-    "selects CI and formatting checks for %s",
-    (_name, eventName, baseChanged, changedPaths, ciMode, checkMarkdown) => {
-      const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
-      const output = join(workspace, "output");
-      const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
-      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
-        jobs: Record<string, { steps: Array<{ name?: string; if?: string }> }>;
-      };
-      const validationSteps = workflow.jobs["validate-title"]!.steps;
-      const gitMock = `git() {
-      [[ "$*" == "diff --no-renames --name-only -z HEAD^1 HEAD" ]] || return 64
-      while IFS= read -r path; do
-        [[ -z "$path" ]] || printf '%s\\0' "$path"
-      done <<< "$MOCK_CHANGED_FILES"
-    }`;
-      try {
-        const result = spawnSync(bash, ["-c", `${gitMock}\n${script}`], {
-          env: {
-            ...process.env,
-            BASE_CHANGED: String(baseChanged),
-            EVENT_NAME: eventName,
-            GITHUB_OUTPUT: output,
-            MOCK_CHANGED_FILES: changedPaths.join("\n"),
-          },
-        });
-        expect(result.status).toBe(0);
-        const outputs: Record<string, string> = Object.fromEntries(
-          readFileSync(output, "utf8")
-            .trim()
-            .split("\n")
-            .map((line) => line.split("=")),
-        );
-        expect(outputs["ci-mode"]).toBe(ciMode);
-        const values = Object.fromEntries(
-          Object.entries(outputs).map(([key, value]) => [
-            `steps.scope.outputs.${key}`,
-            value,
-          ]),
-        );
-        for (const stepName of [
-          "Set up TypeScript tools",
-          "Install dependencies",
-          "Check Markdown formatting",
-        ]) {
-          const condition =
-            validationSteps.find(({ name }) => name === stepName)?.if ?? "";
-          expect(evaluateWorkflowCondition(condition, values), stepName).toBe(
-            checkMarkdown,
-          );
-        }
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "rejects oversized plugin Markdown in reduced CI",
-    async () => {
-      const workspace = mkdtempSync(
-        join(tmpdir(), "release-ci-plugin-source-"),
-      );
-      const pluginRoot = join(workspace, "plugins", "codex-security");
-      mkdirSync(pluginRoot, { recursive: true });
-      writeFileSync(join(pluginRoot, "README.md"), "x".repeat(150_001));
-      spawnSync("git", ["init", "--quiet", workspace]);
-      spawnSync("git", [
-        "-C",
-        workspace,
-        "add",
-        "--",
-        "plugins/codex-security/README.md",
-      ]);
-      try {
-        const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-        const build = await runCommand(
-          "node",
-          [
-            join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
-            "--project",
-            join(packageRoot, "tsconfig.ci.json"),
-            "--outDir",
-            workspace,
-          ],
-          { timeout: 30_000 },
-        );
-        expect(build.status, build.stdout + build.stderr).toBe(0);
-        const result = spawnSync(
-          bash,
-          [
-            "-c",
-            workflowStepShell(
-              nodeCiWorkflow,
-              "Check plugin source compatibility",
-            ),
-          ],
-          { cwd: workspace, encoding: "utf8" },
-        );
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain(
-          "README.md: file is 150001 bytes; maximum is 150000 bytes",
-        );
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "formats every changed regular non-symlink Markdown file",
-    () => {
-      const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
-      const argsFile = join(workspace, "prettier-args");
-      const guide = join(workspace, "docs", "guide with spaces.md");
-      const readme = join(workspace, "README.md");
-      mkdirSync(join(workspace, "docs"));
-      writeFileSync(guide, "# Guide\n");
-      writeFileSync(readme, "# Readme\n");
-      symlinkSync(readme, join(workspace, "docs", "link.md"));
-      const mocks = `git() {
-      printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
-    }
-    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
-      try {
-        const result = spawnSync(
-          bash,
-          [
-            "-c",
-            `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
-          ],
-          {
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: workspace,
-              MOCK_PNPM_ARGS: argsFile,
-            },
-          },
-        );
-        expect(result.status).toBe(0);
-        expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
-          "--dir",
-          "sdk/typescript",
-          "exec",
-          "prettier",
-          "--check",
-          readme,
-          guide,
-        ]);
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
 
   test("documents a canonical historical-summary prefix block", () => {
     const start = "<!-- codex-security-release-summary:start -->";

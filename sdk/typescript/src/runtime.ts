@@ -75,6 +75,22 @@ const execFile = promisify(execFileCallback);
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
+const MARKETPLACE_MANIFEST = `${JSON.stringify(
+  {
+    name: MARKETPLACE_NAME,
+    interface: { displayName: "Codex Security SDK" },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+        category: "Security",
+      },
+    ],
+  },
+  null,
+  2,
+)}\n`;
 
 const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
@@ -2353,19 +2369,15 @@ export async function createMarketplace(
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
+  await writeMarketplaceManifest(marketplace, signal);
+  return marketplace;
+}
+
+async function writeMarketplaceManifest(
+  marketplace: string,
+  signal?: AbortSignal,
+): Promise<void> {
   throwIfSignalAborted(signal);
-  const manifest = {
-    name: MARKETPLACE_NAME,
-    interface: { displayName: "Codex Security SDK" },
-    plugins: [
-      {
-        name: PLUGIN_NAME,
-        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Security",
-      },
-    ],
-  };
   const manifestPath = join(
     marketplace,
     ".agents",
@@ -2373,14 +2385,26 @@ export async function createMarketplace(
     "marketplace.json",
   );
   await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-    signal,
-  });
-  throwIfSignalAborted(signal);
-  return marketplace;
+  const temporary = `${manifestPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, MARKETPLACE_MANIFEST, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal,
+    });
+    throwIfSignalAborted(signal);
+    try {
+      await rename(temporary, manifestPath);
+    } catch (error) {
+      // Concurrent replacement can fail on Windows after another repair wins.
+      const published = await readFile(manifestPath, "utf8").catch(() => null);
+      if (published !== MARKETPLACE_MANIFEST) throw error;
+    }
+    throwIfSignalAborted(signal);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export function resolveCodexCommand(
@@ -2488,6 +2512,13 @@ export async function bootstrapPlugin(
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);
+  } else if (
+    (await readFile(
+      join(marketplace, ".agents", "plugins", "marketplace.json"),
+      "utf8",
+    ).catch(nullIfMissingFileError)) !== MARKETPLACE_MANIFEST
+  ) {
+    await writeMarketplaceManifest(marketplace, options.signal);
   }
 
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
