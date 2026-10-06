@@ -18,10 +18,25 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile", "null optional args", "null optional cwd"])(
+  test.each([
+    "direct",
+    "profile",
+    "profile-providers",
+    "profile-providers-ambient",
+    "profile-inherited-cwd",
+    "profile-overridden-cwd",
+    "profile-strict",
+    "null optional args",
+    "null optional cwd",
+  ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
-      const profile = selection === "profile";
+      const profile =
+        selection === "profile" || selection.startsWith("profile-");
+      const profileProviders = profile && selection !== "profile";
+      const inheritedCwd = selection === "profile-inherited-cwd";
+      const overriddenCwd = selection === "profile-overridden-cwd";
+      const strict = selection === "profile-strict";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -43,7 +58,30 @@ describe("CodexSecurity orchestration", () => {
             ? { cwd: null }
             : {}),
       };
+      const definition = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      const rootDefinition = {
+        ...definition,
+        auth: {
+          ...auth,
+          ...(inheritedCwd || overriddenCwd ? { cwd: "root-helpers" } : {}),
+        },
+      };
+      const selectedDefinition =
+        inheritedCwd || overriddenCwd
+          ? {
+              auth: {
+                command: "./selected-auth",
+                ...(overriddenCwd ? { cwd: "selected-helpers" } : {}),
+              },
+            }
+          : definition;
       const overrides = {
+        ...(strict ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
@@ -51,25 +89,23 @@ describe("CodexSecurity orchestration", () => {
                 review: {
                   model_provider: "synthetic.provider",
                   service_tier: "fast",
+                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(profileProviders
+                    ? {
+                        model_providers: {
+                          "synthetic.provider": selectedDefinition,
+                        },
+                      }
+                    : {}),
                 },
               },
             }
           : { model_provider: "synthetic.provider" }),
-        model_providers: {
-          "synthetic.provider": {
-            name: "Synthetic",
-            base_url: "https://provider.example/v1",
-            wire_api: "responses",
-            auth,
-          },
-        },
+        ...(!profileProviders || inheritedCwd || overriddenCwd
+          ? { model_providers: { "synthetic.provider": rootDefinition } }
+          : {}),
       };
-      const expectedAuth = {
-        command: auth.command,
-        refresh_interval_ms: auth.refresh_interval_ms,
-        ...(auth.args === null ? {} : { args: auth.args }),
-        cwd: profile ? join(home, "helpers") : home,
-      };
+      const originalOverrides = structuredClone(overrides);
       let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
@@ -77,7 +113,8 @@ describe("CodexSecurity orchestration", () => {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
             CODEX_SECURITY_STATE_DIR: state,
-            ...(profile
+            ...(selection === "profile" ||
+            selection === "profile-providers-ambient"
               ? {
                   OPENAI_API_KEY: "synthetic-ambient-key",
                   CODEX_API_KEY: "synthetic-other-key",
@@ -144,8 +181,25 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
-          ...overrides.model_providers["synthetic.provider"],
-          auth: expectedAuth,
+          ...definition,
+          auth: {
+            command: auth.command,
+            refresh_interval_ms: auth.refresh_interval_ms,
+            ...(auth.args === null ? {} : { args: auth.args }),
+            ...(inheritedCwd || overriddenCwd
+              ? { command: "./selected-auth" }
+              : {}),
+            cwd: !profile
+              ? home
+              : join(
+                  home,
+                  inheritedCwd
+                    ? "root-helpers"
+                    : overriddenCwd
+                      ? "selected-helpers"
+                      : "helpers",
+                ),
+          },
         };
         expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
           "model_providers",
@@ -167,6 +221,8 @@ describe("CodexSecurity orchestration", () => {
             "synthetic.provider",
           );
           expect(captured?.config?.["service_tier"]).toBe("fast");
+          if (strict)
+            expect(captured?.config?.["approval_policy"]).toBe("never");
         } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
@@ -176,6 +232,7 @@ describe("CodexSecurity orchestration", () => {
           expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
+        expect(overrides).toEqual(originalOverrides);
       } finally {
         await client.close();
       }
