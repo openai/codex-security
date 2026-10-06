@@ -5876,7 +5876,11 @@ export async function main(
       return 2;
     }
   }
-  if (frameworkOutput.length === 0 && streamedLogs === undefined)
+  if (
+    frameworkOutput.length === 0 &&
+    streamedLogs === undefined &&
+    renderedScanFailure === undefined
+  )
     return exitCode;
   try {
     // Incur can add a stale-skills CTA after the logs handler returns.

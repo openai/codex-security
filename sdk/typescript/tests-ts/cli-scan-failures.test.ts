@@ -342,6 +342,8 @@ test.each(commands.slice(1))(
         for (const filter of [
           ["--filter-output", "manifest,findings"],
           ["--filter-output=manifest,findings"],
+          ["--filter-output", "findings"],
+          ["--filter-output=manifest"],
         ]) {
           const stdout = capture();
           const stderr = capture();
