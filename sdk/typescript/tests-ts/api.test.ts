@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
@@ -3703,6 +3704,7 @@ describe("CodexSecurity orchestration", () => {
       "dismissed",
       undefined,
     ],
+    ["managed provider selection retains matching", "managed", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
@@ -3730,7 +3732,14 @@ describe("CodexSecurity orchestration", () => {
       let observedSingleTurn: boolean | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
+      const managedProvider = {
+        name: "Synthetic managed provider",
+        wire_api: "responses",
+        requires_openai_auth: false,
+        http_headers: { "X-Synthetic-Key": "synthetic-managed-secret" },
+      };
       const providerConfig = {
+        features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
         model_provider: "synthetic.provider",
         model_providers: {
@@ -3743,8 +3752,80 @@ describe("CodexSecurity orchestration", () => {
             },
             auth: { command: "synthetic-auth" },
           },
+          ...(failure === "managed"
+            ? { "synthetic.managed": managedProvider }
+            : {}),
         },
       };
+      const executable = join(codexHome, "synthetic-native.mjs");
+      const startupCallsPath = join(codexHome, "matching-calls.jsonl");
+      let spawnSpy: ReturnType<typeof spyOn> | undefined;
+      if (failure === "managed") {
+        await writeFile(
+          executable,
+          `import { appendFileSync, readFileSync } from "node:fs";
+          import { join } from "node:path";
+          import { createInterface } from "node:readline";
+          import { parse } from ${JSON.stringify(pathToFileURL(Bun.resolveSync("smol-toml", import.meta.dir)).href)};
+          const args = process.argv.slice(2);
+          const config = {};
+          for (let index = 0; index < args.length; index++) {
+            if (args[index] === "-c" || args[index] === "--config")
+              Object.assign(config, parse(args[++index]));
+          }
+          const kind = args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec";
+          const call = { kind, args };
+          if (kind !== "exec") {
+            call.metadata = config.model_providers;
+            appendFileSync(${JSON.stringify(startupCallsPath)}, JSON.stringify(call) + "\\n");
+            if (!config.model_providers?.["synthetic.managed"]) {
+              console.error(${JSON.stringify("Model provider `synthetic.managed` not found")});
+              process.exit(1);
+            }
+          } else {
+            const name = args[args.indexOf("--profile") + 1];
+            const profile = parse(readFileSync(join(process.env.CODEX_HOME, name + ".config.toml"), "utf8"));
+            call.providers = Object.keys(profile.model_providers);
+            call.privateSecretLoaded = profile.model_providers["synthetic.managed"].http_headers["X-Synthetic-Key"] === "synthetic-managed-secret";
+            call.permissions = config.permissions[config.default_permissions];
+            appendFileSync(${JSON.stringify(startupCallsPath)}, JSON.stringify(call) + "\\n");
+          }
+          if (kind === "mcp") { console.log("[]"); process.exit(0); }
+          if (kind === "exec") {
+            console.log(JSON.stringify({ type: "thread.started", thread_id: "matching-thread" }));
+            console.log(JSON.stringify({ type: "turn.started" }));
+            console.log(JSON.stringify({ type: "item.completed", item: { id: "matching-result", type: "agent_message", text: ${JSON.stringify(JSON.stringify({ matches: [{ beforeOccurrenceIds: [previous.occurrenceId], afterOccurrenceIds: [current.occurrenceId], confidence: "high", reason: "Same synthetic root cause." }], uncertain: [] }))} } }));
+            console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+            process.exit(0);
+          }
+          const lines = createInterface({ input: process.stdin });
+          for await (const line of lines) {
+            const request = JSON.parse(line);
+            if (request.id === undefined) continue;
+            const result = request.method === "config/read"
+              ? { config: { ...config, model_provider: "synthetic.managed" } }
+              : request.method === "permissionProfile/list"
+                ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null }
+                : {};
+            console.log(JSON.stringify({ id: request.id, result }));
+          }`,
+        );
+        const originalSpawn = childProcess.spawn;
+        spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+          ...input: Parameters<typeof originalSpawn>
+        ) => {
+          const [command, args, options] = input;
+          return (command === process.execPath ||
+            command === runtime.executablePathForSpawn(process.execPath)) &&
+            args?.some((arg) => ["mcp", "app-server", "exec"].includes(arg))
+            ? originalSpawn(
+                process.execPath,
+                [executable, ...args],
+                options ?? {},
+              )
+            : originalSpawn(...input);
+        }) as typeof originalSpawn);
+      }
       const client = new TestClient(
         {
           codexOverrides: {
@@ -3758,6 +3839,7 @@ describe("CodexSecurity orchestration", () => {
                     "cloud.production": {
                       model: "gpt-5.6-sol",
                       model_reasoning_effort: "medium",
+                      features: { shell_tool: true, view_image: true },
                     },
                   },
                 }
@@ -3769,6 +3851,15 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
+              ...(failure === "managed"
+                ? {
+                    PATH: process.env["PATH"] ?? "",
+                    ...(process.env["SystemRoot"] === undefined
+                      ? {}
+                      : { SystemRoot: process.env["SystemRoot"] }),
+                    CODEX_CLI_PATH: process.execPath,
+                  }
+                : {}),
             },
           })),
           runWorkbench: async (
@@ -3797,7 +3888,7 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed") {
+              if (failure === "dismissed" || failure === "managed") {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -3821,9 +3912,16 @@ describe("CodexSecurity orchestration", () => {
           },
           async matchFindings(input, options, runtimeOptions) {
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
-            expect(options?.config?.codexOverrides).toMatchObject(
-              providerConfig,
-            );
+            if (failure !== "managed")
+              expect(options?.config?.codexOverrides).toMatchObject({
+                ...providerConfig,
+                features: {
+                  ...providerConfig.features,
+                  ...(failure === "budget-context"
+                    ? { shell_tool: true, view_image: true }
+                    : {}),
+                },
+              });
             expect(
               options?.config?.codexOverrides?.["environment"],
             ).toBeUndefined();
@@ -3833,6 +3931,12 @@ describe("CodexSecurity orchestration", () => {
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
+            if (failure === "managed")
+              return await matchScanFindingsInternal(
+                input,
+                options,
+                runtimeOptions,
+              );
             if (failure === "budget-context") {
               return await matchScanFindingsInternal(
                 input,
@@ -3870,66 +3974,135 @@ describe("CodexSecurity orchestration", () => {
                 runtimeOptions,
               );
             }
-            return {
-              matches: [
-                {
-                  beforeOccurrenceIds: [previous.occurrenceId],
-                  afterOccurrenceIds: [current.occurrenceId],
-                  confidence: "high",
-                  reason: "Same dismissed root cause.",
+            return await matchScanFindingsInternal(
+              input,
+              {
+                ...options,
+                codex: {
+                  startThread(threadOptions) {
+                    expect(threadOptions).toMatchObject({
+                      sandboxMode: "read-only",
+                      approvalPolicy: "never",
+                      networkAccessEnabled: false,
+                    });
+                    return {
+                      async run() {
+                        matchingTurns += 1;
+                        return {
+                          finalResponse: JSON.stringify({
+                            matches: [
+                              {
+                                beforeOccurrenceIds: [previous.occurrenceId],
+                                afterOccurrenceIds: [current.occurrenceId],
+                                confidence: "high",
+                                reason: "Same dismissed root cause.",
+                              },
+                            ],
+                            uncertain: [],
+                          }),
+                        };
+                      },
+                    };
+                  },
                 },
-              ],
-              uncertain: [],
-            };
+              },
+              runtimeOptions,
+            );
           },
           createCodex: completedCodex(root),
         },
       );
 
-      const result = await client.run(repository, {
-        ...(limited ? { maxCostUsd: 1 } : {}),
-        cyberAccessProgram: "daybreak_blue",
-        onWarning: (message) => warnings.push(message),
-      });
-      expect(result.threadId).toBe("thread-1");
-      expect(
-        result.repositoryFindings?.map(({ findingId }) => findingId),
-      ).toEqual(
-        failure === "budget"
-          ? ["another-open-finding"]
-          : failure === "dismissed"
-            ? []
-            : undefined,
-      );
-      expect(warnings).toEqual(
-        warning === undefined ? [] : [expect.stringContaining(warning)],
-      );
-      expect(modelCalled).toBe(failure !== "index");
-      expect(observedSingleTurn).toBe(
-        failure === "index" ? undefined : limited,
-      );
-      if (failure === "budget-context") {
-        expect(matchingTurns).toBe(1);
-        expect(matched).toBe(false);
-      }
-      expect(commands.some(([command]) => command === "complete-scan")).toBe(
-        true,
-      );
-      expect(
-        commands.some(([command]) => command === "list-global-findings"),
-      ).toBe(true);
-      if (failure === "dismissed") {
-        expect(JSON.parse(savedComparisonInput!)).toMatchObject({
-          matches: [
-            {
-              beforeOccurrenceIds: [previous.occurrenceId],
-              afterOccurrenceIds: [current.occurrenceId],
-            },
-          ],
-          uncertain: [],
+      try {
+        const result = await client.run(repository, {
+          ...(limited ? { maxCostUsd: 1 } : {}),
+          cyberAccessProgram: "daybreak_blue",
+          onWarning: (message) => warnings.push(message),
         });
+        expect(result.threadId).toBe("thread-1");
+        expect(warnings).toEqual(
+          warning === undefined ? [] : [expect.stringContaining(warning)],
+        );
+        expect(
+          result.repositoryFindings?.map(({ findingId }) => findingId),
+        ).toEqual(
+          failure === "budget"
+            ? ["another-open-finding"]
+            : failure === "dismissed" || failure === "managed"
+              ? []
+              : undefined,
+        );
+        expect(modelCalled).toBe(failure !== "index");
+        expect(observedSingleTurn).toBe(
+          failure === "index" ? undefined : limited,
+        );
+        expect(matchingTurns).toBe(
+          failure === "index" || failure === "matcher" || failure === "managed"
+            ? 0
+            : 1,
+        );
+        if (failure === "budget-context") {
+          expect(matched).toBe(false);
+        }
+        expect(commands.some(([command]) => command === "complete-scan")).toBe(
+          true,
+        );
+        expect(
+          commands.some(([command]) => command === "list-global-findings"),
+        ).toBe(true);
+        if (failure === "dismissed" || failure === "managed") {
+          expect(JSON.parse(savedComparisonInput!)).toMatchObject({
+            matches: [
+              {
+                beforeOccurrenceIds: [previous.occurrenceId],
+                afterOccurrenceIds: [current.occurrenceId],
+              },
+            ],
+            uncertain: [],
+          });
+        }
+        if (failure === "managed") {
+          const calls = (await readFile(startupCallsPath, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(calls.map(({ kind }) => kind)).toEqual([
+            "mcp",
+            "preflight",
+            "exec",
+          ]);
+          const metadata = {
+            "synthetic.provider": {
+              name: "Synthetic provider",
+              wire_api: "responses",
+            },
+            "synthetic.managed": {
+              name: "Synthetic managed provider",
+              wire_api: "responses",
+              requires_openai_auth: false,
+            },
+          };
+          expect(calls[0].metadata).toEqual(metadata);
+          expect(calls[1].metadata).toEqual(metadata);
+          expect(calls[2]).toMatchObject({
+            providers: ["synthetic.provider", "synthetic.managed"],
+            privateSecretLoaded: true,
+            permissions: {
+              filesystem: { [codexHome]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          });
+          expect(JSON.stringify(calls.map(({ args }) => args))).not.toContain(
+            "synthetic-managed-secret",
+          );
+          expect(JSON.stringify(calls.map(({ args }) => args))).not.toContain(
+            "provider.example.test",
+          );
+        }
+      } finally {
+        await client.close();
+        spawnSpy?.mockRestore();
       }
-      await client.close();
     },
   );
 

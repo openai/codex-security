@@ -2316,6 +2316,9 @@ export class CodexSecurity {
           "all",
         );
         if (previousFindings !== undefined) {
+          const matchingRuntimeConfig = structuredClone(workerRuntimeConfig);
+          const matchingFeatures = matchingRuntimeConfig["features"];
+          if (isRecord(matchingFeatures)) delete matchingFeatures["plugins"];
           await matchCompletedScan({
             scanId,
             repository: repo,
@@ -2343,7 +2346,7 @@ export class CodexSecurity {
                 ...scanPreflightCodexConfig(
                   resolveCodexProfile(session.sessionConfig),
                 ),
-                ...workerRuntimeConfig,
+                ...matchingRuntimeConfig,
               },
             },
             model,
@@ -5033,16 +5036,7 @@ function selectedWorkerRuntimeConfig(
     ...(Object.keys(providerEnvironment).length === 0
       ? {}
       : { environment: providerEnvironment }),
-    ...(isRecord(providers)
-      ? {
-          model_providers:
-            provider === undefined
-              ? providers
-              : Object.hasOwn(providers, provider)
-                ? { [provider]: providers[provider]! }
-                : {},
-        }
-      : {}),
+    ...(isRecord(providers) ? { model_providers: providers } : {}),
   };
 }
 
