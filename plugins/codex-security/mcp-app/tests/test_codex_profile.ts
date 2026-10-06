@@ -102,7 +102,10 @@ async function fixture(mode = "success") {
       await new Promise(() => {});
     } else {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
-      emit({ type: "turn.completed", usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } });
+      const completion = { type: "turn.completed" };
+      if (process.env.PROFILE_TEST_MODE === "null_usage") completion.usage = null;
+      else if (process.env.PROFILE_TEST_MODE !== "missing_usage") completion.usage = { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) };
+      emit(completion);
       process.exit(0);
     }
   `,
@@ -269,6 +272,56 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
     await f.cleanup();
   }
 });
+
+for (const mode of ["null_usage", "missing_usage"]) {
+  for (const resumed of [false, true]) {
+    for (const streamed of [false, true]) {
+      test(`native profile ${resumed ? "resumed" : "fresh"} ${streamed ? "streamed" : "collected"} turns preserve ${mode}`, async () => {
+        const f = await fixture(mode);
+        try {
+          const client = createCodexProfileClient(f.options);
+          const thread = resumed
+            ? client.resumeThread("existing-fixture")
+            : client.startThread();
+          const turnOptions = { outputSchema: { type: "object" } };
+          if (streamed) {
+            const { events } = await thread.runStreamed(
+              "synthetic prompt",
+              turnOptions,
+            );
+            const received = [];
+            for await (const event of events) received.push(event);
+            assert.equal(received.length, 3);
+            assert.deepEqual(received.at(-1), {
+              type: "turn.completed",
+              ...(mode === "null_usage" ? { usage: null } : {}),
+            });
+          } else {
+            const result = await thread.run("synthetic prompt", turnOptions);
+            assert.equal(
+              result.finalResponse,
+              "synthetic token=fixture-secret",
+            );
+            assert.equal(result.items.length, 1);
+            assert.equal(
+              result.usage,
+              mode === "null_usage" ? null : undefined,
+            );
+          }
+          assert.equal(
+            thread.id,
+            resumed ? "existing-fixture" : "fixture-thread",
+          );
+          const record = await f.record();
+          assert.equal(record.args.includes("resume"), resumed);
+          await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
+        } finally {
+          await f.cleanup();
+        }
+      });
+    }
+  }
+}
 
 test("native profile failures preserve upstream diagnostics and remove schema files", async () => {
   for (const mode of ["error", "malformed", "turn_failed"]) {
