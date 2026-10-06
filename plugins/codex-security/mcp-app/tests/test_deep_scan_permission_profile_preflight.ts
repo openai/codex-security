@@ -923,6 +923,7 @@ writeFileSync(scenario.envPath, JSON.stringify({
 if (scenario.stderr) process.stderr.write(scenario.stderr);
 if (scenario.inheritStdio) {
   const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+    detached: true,
     stdio: ["ignore", "inherit", "inherit"],
   });
   writeFileSync(scenario.descendantPidPath, String(descendant.pid));
