@@ -349,6 +349,34 @@ def test_completion_counts_only_scan_owned_parent_and_descendants(
     assert json.loads(stored[0]) == {"usage": expected}
 
 
+@pytest.mark.parametrize("measurement", ["unknown", "malformed", "missing"])
+def test_completion_distinguishes_unknown_usage_from_invalid_measurements(
+    tmp_path: Path, measurement: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    payload: dict[str, Any] = {"type": "token_count"}
+    if measurement == "unknown":
+        payload["info"] = None
+        payload["rate_limits"] = {"primary": {"used_percent": 5}}
+    elif measurement == "malformed":
+        payload["info"] = {"total_token_usage": {"input_tokens": "invalid"}}
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _token_event(counted, 10, 2),
+            _event(counted, "event_msg", payload),
+            _token_event(counted, 20, 4),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["totalTokens"] == 24
+    assert usage["coverage"] == ("complete" if measurement == "unknown" else "partial")
+    assert ("token_record_invalid" in usage.get("warnings", [])) is (measurement != "unknown")
+
+
 @pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
 def test_scan_usage_helper_preserves_cached_token_totals(
     cache_write_field: str,

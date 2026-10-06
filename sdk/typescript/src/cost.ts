@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -38,6 +39,7 @@ interface SessionReasoning {
 }
 
 interface SessionUsage {
+  tracked: boolean;
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
@@ -51,7 +53,7 @@ interface SessionUsage {
   usage: ScanTokenUsage | null;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
-  progress: ScanProgress[];
+  progress?: ScanProgress[];
   filesCompleted: number;
   filesTotal: number | null;
   prose: Set<string>;
@@ -85,6 +87,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 
 function createSessionUsage(): SessionUsage {
   return {
+    tracked: false,
     offset: 0,
     pendingLine: [],
     pendingLineBytes: 0,
@@ -98,7 +101,6 @@ function createSessionUsage(): SessionUsage {
     usage: null,
     calls: new Map(),
     activities: [],
-    progress: [],
     filesCompleted: 0,
     filesTotal: null,
     prose: new Set(),
@@ -202,7 +204,6 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
     )) {
@@ -211,11 +212,10 @@ export class ScanCostTracker {
         session = createSessionUsage();
         this.#sessions.set(path, session);
       }
-      try {
-        await readSessionUsage(path, session, this.#options.repository);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+      if (session.threadId === null) {
+        // Index ownership before reading a transcript. Unrelated sessions need
+        // only their metadata, including parents discovered by a later poll.
+        await readSessionUsage(path, session, undefined, true);
       }
     }
 
@@ -259,30 +259,34 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
-
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
       let session = tracked;
-      if (
-        this.#options.onSessionEvent !== undefined &&
-        session.events === undefined
-      ) {
-        // Replay only newly associated sessions, including their early events.
-        session = createSessionUsage();
-        session.events = [];
-        await readSessionUsage(path, session, this.#options.repository);
-        this.#sessions.set(path, session);
-      }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
         worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
         this.#workers.set(threadId, worker);
       }
+      if (!session.tracked) {
+        // Replay newly associated sessions from the start for every observer,
+        // not just raw session events. Their early usage and activity matter.
+        session = createSessionUsage();
+        session.tracked = true;
+        if (this.#options.onSessionEvent !== undefined) session.events = [];
+        if (worker !== undefined && this.#options.onProgress !== undefined) {
+          session.progress = [];
+        }
+      }
+      await readSessionUsage(
+        path,
+        session,
+        worker !== undefined && this.#options.onActivity !== undefined
+          ? this.#options.repository
+          : undefined,
+      );
+      this.#sessions.set(path, session);
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({
           threadId,
@@ -331,7 +335,7 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    for (const progress of session.progress.splice(0)) {
+    for (const progress of session.progress?.splice(0) ?? []) {
       const expectedFilesTotal = this.#expectedFilesTotal;
       if (
         (expectedFilesTotal !== undefined &&
@@ -405,6 +409,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -427,13 +432,19 @@ async function readSessionUsage(
       if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        readSessionChunk(
+          buffer.subarray(0, bytesRead),
+          session,
+          repository,
+          metadataOnly,
+        );
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
         session.pendingLineBytes = 0;
         throw error;
       }
+      if (metadataOnly && session.threadId !== null) return;
     }
   } finally {
     await file.close();
@@ -444,6 +455,7 @@ function readSessionChunk(
   contents: Buffer,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): void {
   let lineStart = 0;
   while (lineStart < contents.length) {
@@ -461,17 +473,24 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
+      readSessionEvent(
+        fragment.toString("utf8"),
+        session,
+        repository,
+        metadataOnly,
+      );
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
         repository,
+        metadataOnly,
       );
       session.pendingLine = [];
       session.pendingLineBytes = 0;
     }
+    if (metadataOnly && session.threadId !== null) return;
     lineStart = newline + 1;
   }
 }
@@ -480,6 +499,7 @@ function readSessionEvent(
   line: string,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): void {
   if (line.length === 0) return;
   let event: unknown;
@@ -507,6 +527,7 @@ function readSessionEvent(
     session.events?.push(event);
     return;
   }
+  if (metadataOnly) return;
   if (session.replaying) {
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
@@ -532,7 +553,7 @@ function readSessionEvent(
   }
   session.events?.push(event);
   if (event["type"] === "response_item") {
-    session.progress.push(...sessionProgressUpdates(payload));
+    session.progress?.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -553,10 +574,7 @@ function readSessionEvent(
           },
           repository,
         );
-        if (
-          activity === null ||
-          session.prose.has(`${activity.kind}:${activity.description}`)
-        ) {
+        if (activity === null || session.prose.has(proseKey(activity))) {
           continue;
         }
         session.reasoning = {
@@ -591,12 +609,12 @@ function readSessionEvent(
       session.reasoning = null;
       if (
         activity.kind === "message" &&
-        session.prose.has(`${activity.kind}:${activity.description}`)
+        session.prose.has(proseKey(activity))
       ) {
         return;
       }
       if (activity.kind === "message") {
-        session.prose.add(`${activity.kind}:${activity.description}`);
+        session.prose.add(proseKey(activity));
       }
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
@@ -632,7 +650,9 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
+      session.progress?.push(
+        ...scanProgressUpdatesFromText(payload["message"]),
+      );
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -641,11 +661,8 @@ function readSessionEvent(
     }
     session.reasoning = null;
     const activity = scanActivityFromSessionEvent(event, repository);
-    if (
-      activity !== null &&
-      !session.prose.has(`${activity.kind}:${activity.description}`)
-    ) {
-      session.prose.add(`${activity.kind}:${activity.description}`);
+    if (activity !== null && !session.prose.has(proseKey(activity))) {
+      session.prose.add(proseKey(activity));
       session.activities.push(activity);
     }
     return;
@@ -742,8 +759,19 @@ function recordReasoningActivity(
     return;
   }
   reasoning.activity = activity;
-  session.prose.add(`${activity.kind}:${activity.description}`);
+  session.prose.add(proseKey(activity));
   session.activities.push(activity);
+}
+
+function proseKey(activity: ScanActivity): string {
+  // Deduplication needs an identity, not a retained copy of every transcript
+  // message and every expanding reasoning prefix.
+  // Hash UTF-16 code units to keep distinct lone surrogates distinct too.
+  return createHash("sha256")
+    .update(activity.kind)
+    .update(":")
+    .update(activity.description, "utf16le")
+    .digest("hex");
 }
 
 function sessionProgressUpdates(
