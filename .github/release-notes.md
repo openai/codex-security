@@ -1,129 +1,88 @@
 <!-- release-version: 0.2.0 -->
 
 <!-- release-section: highlights:start -->
+
 ## Highlights
 
-- restore omitted target and scope metadata ([#1083](https://github.com/openai/codex-security/pull/1083))
-- prevent scans from failing before custom validation ([#1085](https://github.com/openai/codex-security/pull/1085))
-- include C++ headers in scan inventories ([#1079](https://github.com/openai/codex-security/pull/1079))
-- skip already tagged unchanged versions ([#1091](https://github.com/openai/codex-security/pull/1091))
-- upgrade Codex CLI and SDK to 0.159.0 ([#1088](https://github.com/openai/codex-security/pull/1088))
-- upgrade OpenCode SDK to 1.18.32 ([#1090](https://github.com/openai/codex-security/pull/1090))
-- fall back on Python AST recursion errors ([#1094](https://github.com/openai/codex-security/pull/1094))
-- probe the Codex sandbox before starting a billed scan ([#1084](https://github.com/openai/codex-security/pull/1084))
-- preserve source excerpt line numbering ([#1098](https://github.com/openai/codex-security/pull/1098))
-- bump Codex CLI and SDK to 0.159.2 ([#1100](https://github.com/openai/codex-security/pull/1100))
-- update Linear SDK, smol-toml, and Prettier ([#1101](https://github.com/openai/codex-security/pull/1101))
-- exclude nested Git metadata from scan inventories ([#1099](https://github.com/openai/codex-security/pull/1099))
-- bump fast-uri from 3.1.7 to 3.1.8 in /sdk/typescript ([#1106](https://github.com/openai/codex-security/pull/1106))
-- bump fast-uri from 3.1.7 to 3.1.8 in /plugins/codex-security/mcp-app ([#1109](https://github.com/openai/codex-security/pull/1109))
-- bump brace-expansion from 5.0.9 to 5.0.12 in /sdk/typescript ([#1107](https://github.com/openai/codex-security/pull/1107))
-- bump ip-address from 10.7.0 to 10.7.2 in /plugins/codex-security/mcp-app ([#1108](https://github.com/openai/codex-security/pull/1108))
-- reuse unchanged plugins across concurrent scans ([#1082](https://github.com/openai/codex-security/pull/1082))
-- deduplicate tracked ignored files in scoped inventories ([#1077](https://github.com/openai/codex-security/pull/1077))
-- bump Codex SDK and CLI to 0.159.3 ([#1170](https://github.com/openai/codex-security/pull/1170))
-- bump MCP SDK to 1.30.1 in MCP app and evals ([#1171](https://github.com/openai/codex-security/pull/1171))
-- support custom inference providers in patch commands ([#1131](https://github.com/openai/codex-security/pull/1131))
-- allow opting out of log redaction ([#1176](https://github.com/openai/codex-security/pull/1176))
-- organize and clarify command help ([#1142](https://github.com/openai/codex-security/pull/1142))
-- reuse native builds across package and container checks ([#1130](https://github.com/openai/codex-security/pull/1130))
-- smoke test published npm installs across supported platforms ([#1129](https://github.com/openai/codex-security/pull/1129))
-- require workflow checks and production dependency audits ([#1128](https://github.com/openai/codex-security/pull/1128))
-- attribute records reviews to participating observations ([#1145](https://github.com/openai/codex-security/pull/1145))
-- restore GPT-5.6 Sol as the default model ([#1181](https://github.com/openai/codex-security/pull/1181))
-- share model options across commands ([#1143](https://github.com/openai/codex-security/pull/1143))
-- add Invoice Desk fixture and OpenAI PR scans ([#1144](https://github.com/openai/codex-security/pull/1144))
-- prohibit reintroducing CLI secret and log redaction ([#1178](https://github.com/openai/codex-security/pull/1178))
-- preserve diagnostic text without secret redaction ([#1179](https://github.com/openai/codex-security/pull/1179))
-- scope sample behavior concurrency to each revision ([#1182](https://github.com/openai/codex-security/pull/1182))
-- update Codex for per-turn Cyber selection ([#1184](https://github.com/openai/codex-security/pull/1184))
-- add wide Windows candidate file operations ([#836](https://github.com/openai/codex-security/pull/836))
-- port candidate normalization to TypeScript ([#837](https://github.com/openai/codex-security/pull/837))
-- improve authentication and Blue/Red support ([#1188](https://github.com/openai/codex-security/pull/1188))
-- bump @linear/sdk from 95.2.0 to 96.0.0 in /sdk/typescript ([#1191](https://github.com/openai/codex-security/pull/1191))
-- bump ruff from 0.16.8 to 0.16.9 in /plugins/codex-security ([#1189](https://github.com/openai/codex-security/pull/1189))
-- bump the codex group across 3 directories with 2 updates ([#1195](https://github.com/openai/codex-security/pull/1195))
-- remove unused OS primitives and proofs ([#1192](https://github.com/openai/codex-security/pull/1192))
-- remove unused scan machinery and share fixtures ([#1193](https://github.com/openai/codex-security/pull/1193))
-- consolidate helpers and adjacent tooling ([#1194](https://github.com/openai/codex-security/pull/1194))
-- support per-scan Cyber access programs ([#1185](https://github.com/openai/codex-security/pull/1185))
-- preserve custom provider authentication in skill commands ([#1187](https://github.com/openai/codex-security/pull/1187))
-- restore completed artifacts after follow-up cancellation ([#1057](https://github.com/openai/codex-security/pull/1057))
-- detect credentials exposed in source ([#1134](https://github.com/openai/codex-security/pull/1134))
-- close saved review tasks and simplify recovery ([#1036](https://github.com/openai/codex-security/pull/1036))
-- bump @types/node to 26.6.3 ([#1199](https://github.com/openai/codex-security/pull/1199))
-- bump Codex CLI and SDK to 0.162.0-alpha.9 ([#1198](https://github.com/openai/codex-security/pull/1198))
-- include server-rendered templates in scan inventories ([#1197](https://github.com/openai/codex-security/pull/1197))
-- save models with results and support offline export ([#1133](https://github.com/openai/codex-security/pull/1133))
-- share triage assertion output parsing ([#1201](https://github.com/openai/codex-security/pull/1201))
-- simplify contradiction grouping state ([#1202](https://github.com/openai/codex-security/pull/1202))
-- share repository Git adapters ([#1203](https://github.com/openai/codex-security/pull/1203))
-- consolidate build and tool setup ([#1204](https://github.com/openai/codex-security/pull/1204))
-- simplify workbench owner calls ([#1205](https://github.com/openai/codex-security/pull/1205))
-- simplify artifact storage boundaries ([#1206](https://github.com/openai/codex-security/pull/1206))
-- reuse runtime and authentication setup ([#1207](https://github.com/openai/codex-security/pull/1207))
-- share finalizer fixtures and migration moves ([#1216](https://github.com/openai/codex-security/pull/1216))
-- reuse Markdown tool setup ([#1215](https://github.com/openai/codex-security/pull/1215))
-- simplify command setup and fixtures ([#1208](https://github.com/openai/codex-security/pull/1208))
-- simplify persisted finding workflows ([#1210](https://github.com/openai/codex-security/pull/1210))
-- simplify publication preparation ([#1211](https://github.com/openai/codex-security/pull/1211))
-- simplify Deep Scan coordinator ownership ([#1213](https://github.com/openai/codex-security/pull/1213))
-- simplify Deep Scan worker launch ([#1212](https://github.com/openai/codex-security/pull/1212))
-- support long inventory output filenames ([#1214](https://github.com/openai/codex-security/pull/1214))
-- share progress and event parsing ([#1209](https://github.com/openai/codex-security/pull/1209))
-- simplify artifact projections ([#1227](https://github.com/openai/codex-security/pull/1227))
-- simplify workbench persistence ([#1226](https://github.com/openai/codex-security/pull/1226))
-- reuse parsed artifact tool inputs ([#1224](https://github.com/openai/codex-security/pull/1224))
-- reuse parsing and Git helpers ([#1222](https://github.com/openai/codex-security/pull/1222))
-- bump the codex group across 3 directories with 2 updates ([#1220](https://github.com/openai/codex-security/pull/1220))
-- reuse migration repair declarations ([#1225](https://github.com/openai/codex-security/pull/1225))
-- share provenance verification plumbing ([#1233](https://github.com/openai/codex-security/pull/1233))
-- consolidate internal runtime helpers ([#1230](https://github.com/openai/codex-security/pull/1230))
-- share container Compose smoke checks ([#1231](https://github.com/openai/codex-security/pull/1231))
-- cancel failed embedding response bodies ([#1232](https://github.com/openai/codex-security/pull/1232))
-- recognize PHP heredoc terminators inside expressions ([#1236](https://github.com/openai/codex-security/pull/1236))
-- preserve Go declarations after raw strings ending in backslashes ([#1235](https://github.com/openai/codex-security/pull/1235))
-- migrate tests to TypeScript and simplify tooling ([#1219](https://github.com/openai/codex-security/pull/1219))
-- update Codex CLI and SDK to 0.162.0-alpha.14 ([#1242](https://github.com/openai/codex-security/pull/1242))
-- preserve declarations around C++ raw strings ([#1279](https://github.com/openai/codex-security/pull/1279))
-- bump eval OpenCode SDK to 1.18.33 ([#1243](https://github.com/openai/codex-security/pull/1243))
-- preserve split UTF-8 diagnostics ([#1249](https://github.com/openai/codex-security/pull/1249))
-- simplify fixtures and eval tooling ([#1292](https://github.com/openai/codex-security/pull/1292))
-- preserve saved results with non-UTF-8 artifact names ([#1289](https://github.com/openai/codex-security/pull/1289))
-- preserve scan service tier for inline patches ([#1274](https://github.com/openai/codex-security/pull/1274))
-- document SSH login fallback ([#1294](https://github.com/openai/codex-security/pull/1294))
-- cover container and native dependencies ([#1246](https://github.com/openai/codex-security/pull/1246))
-- exclude Git metadata from document discovery ([#1273](https://github.com/openai/codex-security/pull/1273))
-- verify calibration checkout roots before hydration ([#1250](https://github.com/openai/codex-security/pull/1250))
-- require JSON content types for mutations ([#1277](https://github.com/openai/codex-security/pull/1277))
-- preserve legacy document filename spelling ([#1283](https://github.com/openai/codex-security/pull/1283))
-- send the app-server initialized notification ([#1282](https://github.com/openai/codex-security/pull/1282))
-- require owned temporary artifact storage ([#1278](https://github.com/openai/codex-security/pull/1278))
-- parse existing option values consistently ([#1248](https://github.com/openai/codex-security/pull/1248))
-- load helpers with Python safe path ([#1240](https://github.com/openai/codex-security/pull/1240))
-- describe automatic sample PR scans ([#1183](https://github.com/openai/codex-security/pull/1183))
-- preserve finding occurrences and literal apostrophes ([#1247](https://github.com/openai/codex-security/pull/1247))
-- wait for npm registry visibility ([#1239](https://github.com/openai/codex-security/pull/1239))
-- resolve parents of new artifact storage roots ([#1241](https://github.com/openai/codex-security/pull/1241))
-- run entrypoints through symlinked paths ([#1256](https://github.com/openai/codex-security/pull/1256))
-- inherit Deep Scan worker service tiers ([#1238](https://github.com/openai/codex-security/pull/1238))
-- update Codex CLI and SDK to 0.162.0-alpha.15 ([#1303](https://github.com/openai/codex-security/pull/1303))
-- upgrade native napi build and derive dependencies ([#1302](https://github.com/openai/codex-security/pull/1302))
-- bump node from 22-bookworm-slim to 26-bookworm-slim ([#1300](https://github.com/openai/codex-security/pull/1300))
-- update GitHub CLI and Docker-in-Docker features ([#1299](https://github.com/openai/codex-security/pull/1299))
-- bump @linear/sdk from 96.0.0 to 97.0.0 in /sdk/typescript ([#1305](https://github.com/openai/codex-security/pull/1305))
-- keep scan readers available during registration ([#1272](https://github.com/openai/codex-security/pull/1272))
-- update MCP SDK to 1.31.0 for plugin and evals ([#1304](https://github.com/openai/codex-security/pull/1304))
-- pass reasoning effort through to Codex ([#1237](https://github.com/openai/codex-security/pull/1237))
-- include Vyper sources in scan inventories ([#1306](https://github.com/openai/codex-security/pull/1306))
-- refresh eval and MCP dependency resolutions ([#1313](https://github.com/openai/codex-security/pull/1313))
-- pin Codex Security smoke test API endpoint ([#1293](https://github.com/openai/codex-security/pull/1293))
+- **Save and export threat models.** Standard, Deep, Diff, and policy workflows
+  retain threat models with their results. Export a saved model without another
+  model call using `codex-security export --artifact threat-model`, select a run
+  with `--scan`, or use the SDK's `exportArtifact` helper. Retained content remains
+  exportable if its Markdown document could not be written.
+  ([#1133](https://github.com/openai/codex-security/pull/1133))
+- **Detect credentials exposed in source.** Scans now explicitly assess
+  credentials embedded in source, including unused code and tests, and distinguish
+  supported exposures from placeholders and public material. This assessment runs
+  offline and does not use discovered credentials or contact their services.
+  ([#1134](https://github.com/openai/codex-security/pull/1134))
+- **Use consistent model controls across workflows.** Choose `--model` and
+  `--effort` for patching, validation, fix verification, and saved-scan matching and
+  comparison. Reasoning-effort values pass through to Codex instead of being
+  restricted to a fixed wrapper list. Deep Scan workers and inline patches retain
+  the scan's configured service tier.
+  ([#1143](https://github.com/openai/codex-security/pull/1143),
+  [#1237](https://github.com/openai/codex-security/pull/1237),
+  [#1238](https://github.com/openai/codex-security/pull/1238),
+  [#1274](https://github.com/openai/codex-security/pull/1274))
+- **Improve provider and authentication support.** Standalone patch, validation,
+  and fix-verification commands honor custom provider configuration and
+  authentication. Native Amazon Bedrock scans provide more relevant authentication
+  diagnostics and Blue/Red cost estimates. Eligible OpenAI API-key scans can select
+  a Cyber access program per scan, including resumed Deep Scan workers.
+  ([#1131](https://github.com/openai/codex-security/pull/1131),
+  [#1187](https://github.com/openai/codex-security/pull/1187),
+  [#1188](https://github.com/openai/codex-security/pull/1188),
+  [#1185](https://github.com/openai/codex-security/pull/1185))
+- **Cover more source files accurately.** Scan inventories and ranking include
+  previously omitted C++ headers, EJS/ERB/PHTML templates, and Vyper sources.
+  Source previews also handle C++ raw strings, Go raw strings, and PHP heredocs
+  more accurately.
+  ([#1079](https://github.com/openai/codex-security/pull/1079),
+  [#1197](https://github.com/openai/codex-security/pull/1197),
+  [#1306](https://github.com/openai/codex-security/pull/1306),
+  [#1279](https://github.com/openai/codex-security/pull/1279),
+  [#1235](https://github.com/openai/codex-security/pull/1235),
+  [#1236](https://github.com/openai/codex-security/pull/1236))
+- **Make scan startup and saved results more reliable.** Unix sandbox readiness
+  is checked before billed inference starts, and concurrent scans reuse unchanged
+  plugin installations. Completed artifacts survive follow-up cancellation, scan
+  history remains readable during registration, and CSV round trips preserve
+  distinct finding occurrences and literal leading apostrophes.
+  ([#1084](https://github.com/openai/codex-security/pull/1084),
+  [#1082](https://github.com/openai/codex-security/pull/1082),
+  [#1057](https://github.com/openai/codex-security/pull/1057),
+  [#1272](https://github.com/openai/codex-security/pull/1272),
+  [#1247](https://github.com/openai/codex-security/pull/1247))
+
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
+
 ## Upgrade notes
 
-Review migration steps for these breaking changes:
+- **Threat-model consumers:** `SecurityPolicyDraft.threatModelPath` is now
+  `string | null`; check it before opening the document. Policy generation writes
+  `threatmodel.md` instead of `THREAT_MODEL.md`, so prefer the returned path over a
+  hard-coded filename. Readers of saved model data must handle Markdown content
+  (`format: "markdown"`, `content`) as well as legacy structured models.
+  Historical structured models remain readable and exportable; no saved-data
+  migration is required.
+  ([#1133](https://github.com/openai/codex-security/pull/1133))
+- **Findings service clients:** send `Content-Type: application/json` to
+  `POST /v1/bulk/findings` and `POST /v1/dedupe-groups`. Missing or other media types
+  now return HTTP 400 `invalid_request`; JSON with a charset parameter is accepted.
+  ([#1277](https://github.com/openai/codex-security/pull/1277))
+- **Diagnostic output:** the wrapper now preserves original diagnostic text,
+  including credential-shaped values, in CLI output and saved failure,
+  publication, and patch-risk summaries. Review logs and artifacts for sensitive
+  information before sharing them.
+  ([#1179](https://github.com/openai/codex-security/pull/1179))
+- **Effort schemas:** reasoning effort is a nonempty string rather than a closed
+  enum. Supported values still depend on Codex and the chosen model/provider.
+  ([#1237](https://github.com/openai/codex-security/pull/1237))
+- **Older CSV exports:** new exports preserve leading apostrophes, but ambiguous
+  prefixes in older CSV files cannot be reconstructed. Use JSON export when those
+  original values are needed.
+  ([#1247](https://github.com/openai/codex-security/pull/1247))
 
-- save models with results and support offline export ([#1133](https://github.com/openai/codex-security/pull/1133))
 <!-- release-section: upgrades:end -->
