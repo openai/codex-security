@@ -28,11 +28,21 @@ try {
     fs.readFileSync(path.join(runtime, skill), "utf8"),
     fs.readFileSync(path.join(sourceRoot, skill), "utf8"),
   );
-  assert.ok(
-    fs.existsSync(
-      path.join(runtime, "evals/triage-finding/fixtures/repo/src/server.js"),
-    ),
-  );
+  const policyTarget = fs
+    .readFileSync(path.join(evalRoot, "tests/security-policy.yaml"), "utf8")
+    .match(/^\s+target_repo: (.+)$/m)?.[1];
+  assert.ok(policyTarget);
+  for (const relativePath of [
+    "evals/triage-finding/fixtures/repo/src/server.js",
+    path.join(policyTarget, "SECURITY.md"),
+    path.join(policyTarget, "service/SECURITY.md"),
+    path.join(policyTarget, "launch-service.js"),
+  ]) {
+    assert.equal(
+      fs.readFileSync(path.join(runtime, relativePath), "utf8"),
+      fs.readFileSync(path.join(sourceRoot, relativePath), "utf8"),
+    );
+  }
   for (const entry of fs.readdirSync(runtime, {
     recursive: true,
     encoding: "utf8",

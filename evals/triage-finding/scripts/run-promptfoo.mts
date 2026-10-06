@@ -84,8 +84,8 @@ export function stageSkillRuntime() {
     }
   }
   copyDirectory(
-    path.join(EVAL_ROOT, "fixtures", "repo"),
-    path.join(runtimeRoot, "evals", "triage-finding", "fixtures", "repo"),
+    path.join(EVAL_ROOT, "fixtures"),
+    path.join(runtimeRoot, "evals", "triage-finding", "fixtures"),
   );
   const stagedScripts = path.join(stagedPluginRoot, "scripts");
   fs.mkdirSync(stagedScripts, { recursive: true });
