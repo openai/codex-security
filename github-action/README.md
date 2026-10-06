@@ -20,7 +20,7 @@ name: Codex Security repository
 on:
   workflow_dispatch:
   schedule:
-    - cron: '23 7 * * 1' # Mondays at 07:23 UTC
+    - cron: "23 7 * * 1" # Mondays at 07:23 UTC
 
 permissions:
   contents: read
@@ -123,7 +123,7 @@ For a Deep scan of a repository or selected paths, add these inputs to the scan 
 ```yaml
 with:
   mode: deep
-  max-time-hours: '2'
+  max-time-hours: "2"
 ```
 
 Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
@@ -249,6 +249,8 @@ audits the Action and CLI dependency locks. The `@openai/codex-security` depende
 pin and regenerate `runtime/package-lock.json`, rebuild the bundles, and run
 validation. Verify report compatibility when adopting a new release.
 
+<!-- prettier-ignore-start -->
+
 <!-- action-reference:start -->
 
 ## Inputs
@@ -301,3 +303,5 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | `estimated-cost` | Estimated USD cost reported by the CLI. Empty means unavailable, not zero. |
 
 <!-- action-reference:end -->
+
+<!-- prettier-ignore-end -->
