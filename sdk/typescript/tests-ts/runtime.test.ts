@@ -964,7 +964,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       await readRoot(selected);
       const servers = await Promise.all([readRoot(selected), readRoot(second)]);
       for (const [index, pluginRoot] of [selected, second].entries()) {
-        expect(servers[index]).toMatchObject({
+        expect(structuredClone(servers[index])).toMatchObject({
           pluginId: "codex-security@codex-security-sdk",
           tools: { probe: { description: expect.any(String) } },
         });
