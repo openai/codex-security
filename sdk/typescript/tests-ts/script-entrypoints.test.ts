@@ -89,6 +89,7 @@ test.each([
   "app.mjs",
 ])("runs %s through symlinks and stays inert when imported", async (script) => {
   const native = script === "plugins/codex-security/native/check.mjs";
+  const pluginScript = native || script.endsWith("build_mcp_app.mjs");
   const direct =
     script === "app.mjs" || native
       ? join(compiled, script)
@@ -120,6 +121,12 @@ test.each([
     [direct],
     [linked],
     ["--preserve-symlinks-main", linked],
+    ...(pluginScript
+      ? [
+          ["-predictable", direct],
+          ["-expose-gc", direct],
+        ]
+      : []),
   ]) {
     const result = await runCommand(
       "node",
@@ -140,9 +147,7 @@ test.each([
   for (const argument of [
     [],
     ["unrelated argument"],
-    ...(native || script.endsWith("build_mcp_app.mjs")
-      ? [[direct], [linked]]
-      : []),
+    ...(pluginScript ? [[direct], [linked]] : []),
   ]) {
     const result = await runCommand(
       "node",
@@ -158,5 +163,27 @@ test.each([
     );
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout + result.stderr).toBe("");
+  }
+  if (pluginScript) {
+    const expression = `void import(${JSON.stringify(pathToFileURL(linked).href)})`;
+    for (const [command, mode, stdout] of [
+      ["node", ["-pe", expression], "undefined\n"],
+      [process.execPath, [`-e${expression}`], ""],
+      [process.execPath, [`-p${expression}`], "undefined\n"],
+    ] as const) {
+      const result = await runCommand(
+        command,
+        [
+          "--import",
+          command === "node" ? pathToFileURL(preload).href : preload,
+          ...mode,
+          direct,
+        ],
+        { env: environment, timeout: 30_000 },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(stdout);
+      expect(result.stderr).toBe("");
+    }
   }
 });
