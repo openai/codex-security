@@ -196,7 +196,6 @@ explicitly select the built-in OpenAI provider without custom provider definitio
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
 
-
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
 for supported overrides and defaults.
