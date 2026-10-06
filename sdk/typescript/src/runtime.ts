@@ -2404,7 +2404,13 @@ async function writeMarketplaceManifest(
       signal,
     });
     throwIfSignalAborted(signal);
-    await rename(temporary, manifestPath);
+    try {
+      await rename(temporary, manifestPath);
+    } catch (error) {
+      // Concurrent replacement can fail on Windows after another repair wins.
+      const published = await readFile(manifestPath, "utf8").catch(() => null);
+      if (published !== MARKETPLACE_MANIFEST) throw error;
+    }
     throwIfSignalAborted(signal);
   } finally {
     await rm(temporary, { force: true });
