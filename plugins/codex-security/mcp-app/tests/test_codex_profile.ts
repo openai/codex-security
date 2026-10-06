@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import childProcess, { type SpawnOptions } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
@@ -100,7 +102,7 @@ async function fixture(mode = "success") {
       await new Promise(() => setInterval(() => {}, 1000));
     } else {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
-      emit({ type: "turn.completed", usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } });
+      emit({ type: "turn.completed", ...(process.env.PROFILE_TEST_MODE === "missing_usage" ? {} : { usage: process.env.PROFILE_TEST_MODE === "null_usage" ? null : { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } }) });
       process.exit(0);
     }
   `,
@@ -278,6 +280,55 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       delete process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK;
     else process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK = previousEnvironment;
     await f.cleanup();
+  }
+});
+
+test("native profile children hide Windows console windows", async () => {
+  const f = await fixture();
+  const originalSpawn = childProcess.spawn;
+  let launched = false;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[],
+    options: SpawnOptions,
+  ) => {
+    launched = true;
+    assert.equal(options?.windowsHide, true);
+    return originalSpawn(command, args, options);
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  try {
+    await createCodexProfileClient(f.options)
+      .startThread()
+      .run("synthetic prompt");
+    assert.equal(launched, true);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    await f.cleanup();
+  }
+});
+
+test("native profile completions retain unavailable optional usage", async () => {
+  for (const mode of ["null_usage", "missing_usage"]) {
+    const f = await fixture(mode);
+    try {
+      const thread = createCodexProfileClient(f.options).startThread();
+      const { events } = await thread.runStreamed("synthetic prompt");
+      const received = [];
+      for await (const event of events) received.push(event);
+      assert.deepEqual(
+        received.at(-1),
+        mode === "null_usage"
+          ? { type: "turn.completed", usage: null }
+          : { type: "turn.completed" },
+      );
+      const result = await thread.run("resumed synthetic prompt");
+      assert.equal(result.finalResponse, "synthetic token=fixture-secret");
+      assert.equal(result.usage, mode === "null_usage" ? null : undefined);
+    } finally {
+      await f.cleanup();
+    }
   }
 });
 

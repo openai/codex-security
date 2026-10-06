@@ -2880,7 +2880,7 @@ export class CodexSecurity {
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      const providers = effectiveConfig["model_providers"];
+      const providers = resolveCodexProfile(effectiveConfig)["model_providers"];
       if (
         deepScan &&
         (!(await pluginSupportsWorkerProviderSnapshot(

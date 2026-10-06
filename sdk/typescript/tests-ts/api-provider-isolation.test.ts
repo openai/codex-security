@@ -130,9 +130,13 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test.each([false, true])(
-  "concurrent provider snapshots preserve selected profile credentials: %s",
-  async (selectedProfile) => {
+test.each([
+  ["root", false, true],
+  ["profile override", true, true],
+  ["profile only", true, false],
+] as const)(
+  "concurrent provider snapshots preserve %s credentials",
+  async (_scenario, selectedProfile, rootDefinitions) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const state = join(root, "state");
@@ -172,9 +176,16 @@ test.each([false, true])(
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
                 model_provider: "openrouter",
-                model_providers: {
-                  openrouter: { ...provider, env_key: "OPENROUTER_API_KEY" },
-                },
+                ...(rootDefinitions
+                  ? {
+                      model_providers: {
+                        openrouter: {
+                          ...provider,
+                          env_key: "OPENROUTER_API_KEY",
+                        },
+                      },
+                    }
+                  : {}),
                 ...(selectedProfile
                   ? {
                       profile: "selected",
