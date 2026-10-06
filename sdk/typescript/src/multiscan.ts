@@ -971,7 +971,15 @@ async function ensureManifest(
     if (Object.keys(boundDigests).length > 0)
       manifest.knowledgeBaseDigests = boundDigests;
     const bound = `${JSON.stringify(manifest, null, 2)}\n`;
-    if (bound !== existing) await writeFile(path, bound);
+    if (bound !== existing) {
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, bound, { flag: "wx", mode: 0o600 });
+        await rename(temporary, path);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    }
   }
 }
 

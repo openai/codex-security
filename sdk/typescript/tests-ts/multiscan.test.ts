@@ -2193,6 +2193,89 @@ describe("multiscan", () => {
     });
   });
 
+  test.each(["partial write", "rename"])(
+    "preserves the campaign manifest after a knowledge repair %s failure",
+    async (failure) => {
+      const testName = `preserves the campaign manifest after a knowledge repair ${failure} failure`;
+      if (runTestInSubprocess(import.meta.path, testName)) return;
+      const paths = await fixture();
+      const source = await repository(paths.root, "manifest-repair");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,mode\nfailed,${source.path},${source.revision},deep\ngood,${source.path},${source.revision},standard\n`,
+      );
+      const document = join(paths.root, "missing.md");
+      const scans: string[] = [];
+      const configured = options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          scans.push(scan.mode!);
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxAttempts: 1,
+          scanOptionsByMode: { deep: { knowledgeBasePaths: [document] } },
+        },
+      );
+      const initial = await runMultiscan(configured);
+      expect(initial).toMatchObject({ completed: 1, failed: 1 });
+      const manifestPath = join(paths.output, "manifest.json");
+      const originalManifest = await readFile(manifestPath, "utf8");
+      const originalReceipts = await readFile(initial.resultsPath, "utf8");
+      await writeFile(document, "Repaired context.");
+      const originalWrite = filesystem.writeFile;
+      const originalRename = filesystem.rename;
+      const write = spyOn(filesystem, "writeFile").mockImplementation(
+        async (file, data, opts) => {
+          if (
+            failure === "partial write" &&
+            ((String(file) === manifestPath &&
+              (typeof opts !== "object" || opts?.flag !== "wx")) ||
+              String(file).startsWith(`${manifestPath}.`))
+          ) {
+            await originalWrite(file, "{", opts);
+            throw Object.assign(new Error("Synthetic manifest I/O failure"), {
+              code: "EIO",
+            });
+          }
+          return originalWrite(file, data, opts);
+        },
+      );
+      const move = spyOn(filesystem, "rename").mockImplementation(
+        async (from, to) => {
+          if (failure === "rename" && String(to) === manifestPath)
+            throw Object.assign(new Error("Synthetic manifest I/O failure"), {
+              code: "EIO",
+            });
+          return originalRename(from, to);
+        },
+      );
+      try {
+        await expect(runMultiscan(configured)).rejects.toThrow(
+          "Synthetic manifest I/O failure",
+        );
+      } finally {
+        write.mockRestore();
+        move.mockRestore();
+      }
+      expect(await readFile(manifestPath, "utf8")).toBe(originalManifest);
+      expect(await readFile(initial.resultsPath, "utf8")).toBe(
+        originalReceipts,
+      );
+      expect(scans).toEqual(["standard"]);
+      expect(await readdir(paths.output)).not.toContainEqual(
+        expect.stringMatching(/^manifest\.json\..*\.tmp$/),
+      );
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toEqual(["standard", "deep"]);
+      expect(await runMultiscan(configured)).toMatchObject({ skipped: 2 });
+    },
+  );
+
   test("rejects legacy campaigns when unrecorded inputs are omitted", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "legacy-inputs");
