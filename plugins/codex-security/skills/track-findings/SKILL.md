@@ -29,7 +29,7 @@ Choose findings and a practical batch size from the user's requested scope. GitH
 
 Honor the user's current choice, then current repository or organization policy. Ask when routing remains ambiguous. Keep one destination for the selected findings; tracking in another provider requires a separate reviewed run. Preserve a policy requiring private reporting or an advisory.
 
-- Linear: resolve the team and optional project ids. Sensitive findings default to a private team. If visibility is broader or unknown, explain the exposure and get confirmation before sharing details.
+- Linear: resolve the team and optional project ids and verify live visibility when available. Sensitive findings default to a private team. If visibility is broader or unknown, explain the exposure and get confirmation before sharing details.
 - Jira: resolve the Atlassian identity, site, `cloudId`, project, and issue type through the Jira reference. Confirm the project audience with the user; create permission does not establish who can read an issue.
 - GitHub issues: resolve the exact repository from the user's choice or the sealed target and verify it live. Accept HTTPS or SSH remotes that resolve unambiguously to that repository. Sensitive findings default to a private repository. Internal or public visibility requires a warning and explicit confirmation.
 - GitHub advisories: use the verified public canonical non-fork source repository for a sealed `git_revision`, with the access required by the advisory reference. Do not use an external tracker or fall back to an issue.
@@ -77,7 +77,7 @@ For batches, show every item in execution order and obtain approval for that lis
 
 ## 5. Apply and verify
 
-After an approval pause or interruption, rerun source validation and recheck the active account. Stop if validation fails; return to preview if the source or account changed. Reuse destination, source-link, and field metadata unless a response or changed context calls them into question. Do not repeat full discovery before every item.
+After an approval pause or interruption, rerun source validation and recheck the active account and live destination identity, visibility, and required permissions. Stop if validation or required access fails; return to preview if the source, account, destination, or disclosure audience changed. Reuse source-link and field metadata unless a response or changed context calls them into question. Do not repeat full discovery before every item.
 
 Before creating, refresh duplicate results to catch an issue created while awaiting approval. Before updating after a pause, reread the fields being changed and return to preview if they differ from the reviewed values. Without an intervening pause, a successful create receipt can supply the values for an already approved follow-up edit. Preserve unowned fields and existing rich content.
 
