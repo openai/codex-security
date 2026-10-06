@@ -2458,7 +2458,7 @@ async function legacyPluginProjection(
   const files: LegacyPluginProjection["files"] = new Map();
   if (directNode) {
     const args = [...(server["args"] as string[])];
-    args[args.indexOf("./mcp/server.mjs")] =
+    args[args.findIndex(isLegacyNodeMcpEntry)] =
       "./mcp/codex_security_sdk_bridge.mjs";
     server["args"] = args;
     files.set("mcp/codex_security_sdk_bridge.mjs", {
@@ -2504,13 +2504,17 @@ async function legacyPluginProjection(
   return { root, files };
 }
 
+function isLegacyNodeMcpEntry(argument: unknown): boolean {
+  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
+}
+
 function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
   const command = server["command"];
   return (
     typeof command === "string" &&
     ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
     Array.isArray(server["args"]) &&
-    server["args"].includes("./mcp/server.mjs")
+    server["args"].some(isLegacyNodeMcpEntry)
   );
 }
 

@@ -831,6 +831,7 @@ describe("plugin runtime preparation", () => {
     "direct node",
     "direct node with root",
     "direct node with flags",
+    "direct node unprefixed",
   ])(
     "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
@@ -858,10 +859,14 @@ describe("plugin runtime preparation", () => {
         : process.platform === "win32"
           ? "node.exe"
           : "node";
+      const nodeEntry =
+        interpreter === "direct node unprefixed"
+          ? "mcp/server.mjs"
+          : "./mcp/server.mjs";
       const argumentsAfterEntry = [
         "--stdio",
         "synthetic ! % & argument",
-        "./mcp/server.mjs",
+        nodeEntry,
       ];
       const mcp = {
         mcpServers: {
@@ -870,7 +875,7 @@ describe("plugin runtime preparation", () => {
               ? nodeCommand
               : "./scripts/launch_codex_security_mcp",
             args: directNode
-              ? [...nodeOptions, "./mcp/server.mjs", ...argumentsAfterEntry]
+              ? [...nodeOptions, nodeEntry, ...argumentsAfterEntry]
               : argumentsAfterEntry,
             cwd: ".",
             env_vars: [
