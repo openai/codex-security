@@ -92,6 +92,54 @@ def test_git_output_decodes_repository_paths_as_utf8(
     assert Path(output) == target
 
 
+@pytest.mark.parametrize("suffix", ["", " ", "\t", "\r", "\n"])
+def test_git_worktree_preserves_path_whitespace(tmp_path: Path, suffix: str) -> None:
+    if os.name == "nt" and suffix:
+        pytest.skip("Windows does not support these trailing path characters")
+    target = tmp_path / f"target{suffix}"
+    revision = initialize_git_repository(target)
+    nested = target / "src"
+    nested.mkdir()
+
+    assert WORKBENCH_TARGET["git_worktree_context"](target) == (target.resolve(), ".")
+    assert WORKBENCH_TARGET["git_worktree_context"](nested) == (target.resolve(), "src")
+    metadata = WORKBENCH_TARGET["git_target_metadata"](target)
+    assert metadata["reviewChangesSupported"] is True
+    assert metadata["revision"] == revision
+    assert metadata["branch"] == "main"
+
+    original_digest = worktree_content_digest(target)
+    (target / "README.md").write_text("changed after commit\n")
+    assert worktree_content_digest(target) != original_digest
+
+
+@pytest.mark.parametrize(
+    ("platform", "stdout", "expected"),
+    [
+        ("linux", b"/repo\r\n", "/repo\r"),
+        ("linux", b"/repo\n\n", "/repo\n"),
+        ("win32", b"C:/repo\r\n", "C:/repo"),
+        ("win32", b"C:/repo\n", "C:/repo"),
+    ],
+)
+def test_git_output_removes_only_the_record_terminator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    stdout: bytes,
+    expected: str,
+) -> None:
+    git_output = WORKBENCH_TARGET["git_output"]
+    monkeypatch.setitem(git_output.__globals__, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setitem(
+        git_output.__globals__,
+        "git_command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=stdout),
+    )
+
+    assert git_output(tmp_path, "rev-parse", "--show-toplevel") == expected
+
+
 def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)

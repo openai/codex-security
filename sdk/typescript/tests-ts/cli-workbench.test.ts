@@ -1277,6 +1277,7 @@ describe("CLI workbench", () => {
             args[0] === "list-scans"
               ? { scans: [{ scanId: "latest-scan" }] }
               : {
+                  scanId: "latest-scan",
                   recipe: {
                     repository: "/current/repository",
                     target: { kind: "repository", paths: [] },
@@ -1288,6 +1289,25 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(parentScanId).toBe("latest-scan");
+  });
+
+  test("reruns a scan prefix with its resolved parent UUID", async () => {
+    const scanId = "12345678-1234-4234-8234-123456789abc";
+    const prefix = scanId.slice(0, 8);
+    const onTurn = mock<(repository: string, options: ScanOptions) => void>();
+    const onWorkbench = mock((args: readonly string[]): JsonObject => {
+      expect(args).toEqual(["get-scan-recipe", "--scan-id", prefix]);
+      return { ...savedRecipe(), scanId };
+    });
+
+    expect(
+      await runCapturedCli(
+        main,
+        ["scans", "rerun", prefix],
+        dependencies({ onWorkbench, onTurn }),
+      ),
+    ).toBe(0);
+    expect(onTurn.mock.lastCall?.[1]?.parentScanId).toBe(scanId);
   });
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
@@ -1309,6 +1329,7 @@ describe("CLI workbench", () => {
           onConfig,
           onTurn,
           onWorkbench: () => ({
+            scanId: "scan-original",
             recipe: {
               repository: "/original/repository",
               target: { kind: "paths", paths: ["src", "packages/core"] },
