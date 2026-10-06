@@ -35,6 +35,7 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  legacyWorkerUsesScanProvider,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -1384,6 +1385,25 @@ export class CodexSecurity {
                 session.apiKey,
             }),
       };
+      if (
+        mode === "deep" &&
+        modelProvider === "openai" &&
+        !(await pluginForwardsWorkerProviderSelection(
+          runtime,
+          preflightConfig,
+        )) &&
+        !(await legacyWorkerUsesScanProvider(
+          this.#codexCommand(),
+          definedEnvironment(workerProviderEnvironment),
+          scanDir,
+          modelProvider,
+          signal,
+        ))
+      ) {
+        throw new CodexSecurityError(
+          "This custom plugin cannot forward the scan's selected provider to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
+        );
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -4931,6 +4951,32 @@ async function pluginSupportsWorkerProviderSnapshot(
     isRecord(manifest) &&
     isRecord(manifest["codexSecurity"]) &&
     manifest["codexSecurity"]["workerProviderSnapshot"] === 4
+  );
+}
+
+async function pluginForwardsWorkerProviderSelection(
+  runtime: PreparedRuntime,
+  preflightConfig: JsonObject,
+): Promise<boolean> {
+  const manifest: unknown = JSON.parse(
+    await readFile(
+      join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
+      "utf8",
+    ),
+  );
+  const capability =
+    isRecord(manifest) && isRecord(manifest["codexSecurity"])
+      ? manifest["codexSecurity"]["workerProviderSnapshot"]
+      : undefined;
+  if (capability === true) {
+    return (
+      runtime.configPath !== undefined &&
+      resolveCodexProfile(preflightConfig)["model_provider"] === "openai"
+    );
+  }
+  return (
+    runtime.deepScanConfigPath !== undefined &&
+    (capability === 2 || capability === 3 || capability === 4)
   );
 }
 

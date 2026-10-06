@@ -43,6 +43,39 @@ type PendingRequest = {
   readonly reject: (error: Error) => void;
 };
 
+type RuntimeConfigReadOptions = Pick<
+  DeepScanPermissionProfilePreflightOptions,
+  "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
+> & {
+  readonly commandArgs?: readonly string[];
+  readonly providerConfigOverrides?: readonly string[];
+};
+
+/** Read native effective settings, including managed provider requirements, without a turn. */
+export async function readDeepScanRuntimeConfig(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  const client = new AppServerPreflightClient(options);
+  try {
+    await client.initialize();
+    const response = await client.request("config/read", {
+      cwd: options.cwd,
+      includeLayers: false,
+    });
+    const config = record(response.config);
+    if (!config) throw malformedPreflightError(options.context);
+    return config;
+  } catch (error) {
+    await client.close();
+    const stderr = client.stderrText;
+    if (error instanceof Error && stderr) error.message += "\n" + stderr;
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
 /**
  * Verify the worker profile with the same executable, effective worker cwd,
  * Codex home, and permission overrides that the real worker will use. App-server must
@@ -123,10 +156,8 @@ class AppServerPreflightClient {
   private childClosed = false;
   private readonly removeAbortListener: () => void;
 
-  constructor(
-    private readonly options: DeepScanPermissionProfilePreflightOptions,
-  ) {
-    const args: string[] = [];
+  constructor(private readonly options: RuntimeConfigReadOptions) {
+    const args: string[] = [...(options.commandArgs ?? [])];
     for (const override of options.configOverrides) {
       args.push("--config", override);
     }
@@ -140,6 +171,7 @@ class AppServerPreflightClient {
       cwd: options.cwd,
       ...(options.env === undefined ? {} : { env: options.env }),
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     this.childClose = new Promise((resolve) => {
       this.child.once("close", () => {

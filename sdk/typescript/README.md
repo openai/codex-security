@@ -192,7 +192,10 @@ require a plugin that supports per-scan worker provider snapshots. Older custom 
 fail before starting model work with an upgrade message; update the plugin or
 omit `pluginPath` to use the bundled version. Older custom plugins remain usable
 for standard scans and Deep Scans that inherit native provider configuration or
-explicitly select the built-in OpenAI provider without custom provider definitions.
+explicitly select the built-in OpenAI provider without custom provider definitions
+when their workers forward that selection or native configuration selects the
+same effective provider for both the parent and workers. Otherwise, the scan
+stops before model work with the plugin upgrade message.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
 
