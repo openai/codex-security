@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 let temporaryRoot: string | undefined;
 afterEach(async () => {
@@ -22,9 +22,7 @@ describe("runtime directories and plugin Python boundary", () => {
   )(
     "prepares managed credential homes under constrained PowerShell",
     async () => {
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-policy-")),
-      );
+      const root = await temporaryDirectory("codex-security-policy-", true);
       temporaryRoot = root;
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
@@ -80,10 +78,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: constrainedEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(mode.error).toBeUndefined();
         expect(mode.status).toBe(0);
         expect(mode.stdout.trim()).toBe("ConstrainedLanguage");
 
@@ -99,10 +98,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: constrainedEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(oldImplementation.error).toBeUndefined();
         expect(oldImplementation.status).not.toBe(0);
 
         const trustedPowerShellEnvironment = {
@@ -130,10 +130,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: trustedPowerShellEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(guest.error).toBeUndefined();
         expect(guest.status).toBe(0);
         expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
         const home = join(root, "state", "codex-home");

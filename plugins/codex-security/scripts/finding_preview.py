@@ -6,6 +6,8 @@ import argparse
 import json
 import re
 import sys
+from bisect import bisect_right
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -145,9 +147,9 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
         prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
 
-    evidence_key, evidence = merged_code_evidence(value)
+    evidence_key, evidence = merged_bounded_code_evidence(value)
     if evidence_key is not None:
-        prepared[evidence_key] = bounded_code_evidence(evidence)
+        prepared[evidence_key] = evidence
 
     for key in (
         "confidence",
@@ -208,8 +210,9 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     }
     projected_core = {}
     for selected_guidance in (complete_guidance, minimum_guidance):
+        # Keep raw guidance inline to preserve its JSON-encoding recursion boundary.
         reserved = (
-            len(json.dumps(selected_guidance, separators=(",", ":")).encode("utf-8")) - 1
+            len(json.dumps(selected_guidance, separators=(",", ":"))) - 1
             if selected_guidance
             else 0
         )
@@ -247,53 +250,34 @@ def bounded_finding_section(
     for key in (*priority_keys, *value):
         if key in value and key not in ordered:
             ordered[key] = value[key]
-    evidence_key, evidence = merged_code_evidence(ordered)
+    evidence_key, evidence = merged_bounded_code_evidence(ordered)
     if evidence_key is not None:
-        ordered[evidence_key] = bounded_code_evidence(evidence)
+        ordered[evidence_key] = evidence
         ordered.pop("code_evidence" if evidence_key == "codeEvidence" else "codeEvidence", None)
     return bounded_json_value(ordered, [maximum_bytes])
 
 
-def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
+def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
     evidence_keys = [key for key in ("codeEvidence", "code_evidence") if key in value]
     if not evidence_keys:
         return None, None
     catalogs = [value[key] for key in evidence_keys if isinstance(value[key], list)]
-    if catalogs:
-        merged = []
-        seen_ids: set[str] = set()
-        for catalog in catalogs:
-            for item in catalog:
-                if not _is_valid_code_evidence(item):
-                    continue
-                evidence_id = item["id"]
-                if evidence_id in seen_ids:
-                    continue
-                seen_ids.add(evidence_id)
-                merged.append(item)
-        return evidence_keys[0], merged
-    return evidence_keys[0], value[evidence_keys[0]]
-
-
-def _is_valid_code_evidence(item: Any) -> bool:
-    return (
-        isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and bool(item["id"].strip())
-        and isinstance(item.get("code"), str)
-        and bool(item["code"].strip())
-    )
-
-
-def bounded_code_evidence(value: Any) -> Any:
-    if not isinstance(value, list):
-        return value
-    bounded = []
-    for item in value:
-        if not _is_valid_code_evidence(item):
+    if not catalogs:
+        return evidence_keys[0], value[evidence_keys[0]]
+    bounded = {}
+    for item in chain.from_iterable(catalogs):
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and bool(item["id"].strip())
+            and isinstance(item.get("code"), str)
+            and bool(item["code"].strip())
+        ):
+            continue
+        if item["id"] in bounded:
             continue
         if len(bounded) >= FINDING_CODE_EVIDENCE_LIMIT:
-            break
+            return evidence_keys[0], list(bounded.values())
         evidence = dict(item)
         for field in ("explanation", "label", "language", "path"):
             if field in evidence and not isinstance(evidence[field], str):
@@ -316,14 +300,17 @@ def bounded_code_evidence(value: Any) -> Any:
             and (not isinstance(end_line, int) or isinstance(end_line, bool) or end_line < 1)
         ):
             evidence.pop("endLine")
-        code = evidence.get("code")
-        if isinstance(code, str):
-            evidence["code"] = bounded_json_text(
-                code,
-                FINDING_CODE_EVIDENCE_SNIPPET_BYTES,
-            )[0]
-        bounded.append(evidence)
-    return bounded
+        evidence["code"] = bounded_json_text(
+            evidence["code"],
+            FINDING_CODE_EVIDENCE_SNIPPET_BYTES,
+        )[0]
+        bounded[item["id"]] = evidence
+    return evidence_keys[0], list(bounded.values())
+
+
+def json_size(value: Any) -> int:
+    # ASCII output gives byte length; strings can use the cached default encoder.
+    return len(json.dumps(value, separators=None if isinstance(value, str) else (",", ":")))
 
 
 def bounded_json_value(
@@ -343,7 +330,7 @@ def bounded_json_value(
         consume_json_budget(budget, size)
         return bounded
     if value is None or isinstance(value, (bool, int, float)):
-        consume_json_budget(budget, len(json.dumps(value, separators=(",", ":")).encode("utf-8")))
+        consume_json_budget(budget, json_size(value))
         return value
     if isinstance(value, list):
         if not consume_json_budget(budget, 2):
@@ -360,7 +347,7 @@ def bounded_json_value(
                 depth=depth + 1,
                 max_depth=max_depth,
             )
-            size = len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
+            size = json_size(bounded_item)
             if separator + size > remaining or (
                 isinstance(item, str) and item and bounded_item == ""
             ):
@@ -398,19 +385,9 @@ def bounded_json_value(
                     and isinstance(controls[0], str)
                     and controls[0]
                 ):
-                    minimum_tests = len(
-                        json.dumps([item[0][0]], separators=(",", ":")).encode("utf-8")
-                    )
+                    minimum_tests = json_size([item[0][0]])
                     for control in (controls[0], controls[0][0]):
-                        reserved = (
-                            len(
-                                json.dumps(
-                                    {"preventiveControls": [control]},
-                                    separators=(",", ":"),
-                                ).encode("utf-8")
-                            )
-                            - 1
-                        )
+                        reserved = json_size({"preventiveControls": [control]}) - 1
                         if budget[0] >= minimum_tests + reserved:
                             item_budget = [budget[0] - reserved]
                             break
@@ -420,12 +397,7 @@ def bounded_json_value(
                 depth=depth + 1,
                 max_depth=max_depth,
             )
-            size = (
-                separator
-                + key_size
-                + 1
-                + len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
-            )
+            size = separator + key_size + 1 + json_size(bounded_item)
             if size > remaining or (isinstance(item, str) and item and bounded_item == ""):
                 budget[0] = remaining
                 break
@@ -445,21 +417,9 @@ def consume_json_budget(budget: list[int], size: int) -> bool:
 
 
 def bounded_json_text(value: str, maximum_bytes: int) -> tuple[str, int]:
-    low = 0
-    high = len(value)
-    selected = ""
-    selected_size = 2
-    while low <= high:
-        midpoint = (low + high) // 2
-        candidate = value[:midpoint]
-        size = len(json.dumps(candidate, separators=(",", ":")).encode("utf-8"))
-        if size <= maximum_bytes:
-            selected = candidate
-            selected_size = size
-            low = midpoint + 1
-        else:
-            high = midpoint - 1
-    return selected, selected_size
+    length = bisect_right(range(len(value) + 1), maximum_bytes, key=lambda n: json_size(value[:n]))
+    selected = value[: max(0, length - 1)]
+    return selected, json_size(selected)
 
 
 if __name__ == "__main__":

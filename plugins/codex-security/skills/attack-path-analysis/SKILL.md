@@ -5,6 +5,8 @@ description: Use when Codex is already in the attack-path-analysis phase of a se
 
 # Security Attack Path Analysis
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 ## Objective
 
 Turn validated or still-plausible findings into explicit attacker stories, structured attack-path analysis facts, severity calibration, and a final reportability decision grounded in the threat model.

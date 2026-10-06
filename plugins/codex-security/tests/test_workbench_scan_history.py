@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -11,29 +10,20 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from test_workbench_db import HEAD_CHANGED_WARNING, create_saved_workspace
+import pytest
+from test_workbench_db import HEAD_CHANGED_WARNING
+from test_workbench_deep_scan import begin_target_scan
+from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    run_workbench,
     stable_target_id,
     write_completed_contract,
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
-
-
-def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        check=check,
-        capture_output=True,
-        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
-        text=True,
-    )
-    if not check:
-        return {"returncode": completed.returncode, "stderr": completed.stderr}
-    return json.loads(completed.stdout)
 
 
 def compare_scan_pair(
@@ -281,6 +271,9 @@ def test_cli_scan_persists_its_continuation_thread(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
+    initial = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert initial["threadIds"] == []
+    assert initial["executionThreadIds"] == []
 
     result = run_workbench(
         state_dir,
@@ -294,6 +287,104 @@ def test_cli_scan_persists_its_continuation_thread(tmp_path: Path) -> None:
     assert result == {"scanId": scan["scanId"], "threadId": "thread-1"}
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])
     assert detail["scan"]["continuationThreadId"] == "thread-1"
+    assert detail["scan"]["threadIds"] == ["thread-1"]
+    assert detail["scan"]["executionThreadIds"] == ["thread-1"]
+
+
+def test_get_scan_keeps_desktop_standard_owners_out_of_execution_roots(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    for start_scan in (start_prompt_only_scan, start_headless_standard_scan):
+        repository = tmp_path / start_scan.__name__
+        repository.mkdir()
+        started = start_scan(
+            state_dir, repository, tmp_path / "results", thread_id="desktop-owner"
+        )["scan"]
+        detail = run_workbench(state_dir, "get-scan", "--scan-id", started["scanId"])["scan"]
+        assert detail["threadIds"] == ["desktop-owner"]
+        assert detail["executionThreadIds"] == []
+        if start_scan is start_headless_standard_scan:
+            assert detail["continuationThreadId"] == "desktop-owner"
+
+
+def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_path: Path) -> None:
+    state_dir, codex_home = tmp_path / "state", tmp_path / "codex-home"
+    repository, other_repository = tmp_path / "repository", tmp_path / "other-repository"
+    repository.mkdir()
+    other_repository.mkdir()
+    scan = begin_target_scan(
+        state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
+    )["deepScan"]
+    other = begin_target_scan(
+        state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
+    )["deepScan"]
+    workers = [
+        (scan["scanId"], "setup", "succeeded", "setup-worker"),
+        (scan["scanId"], "discovery", "failed", "failed-worker"),
+        (scan["scanId"], "discovery", "canceled", "canceled-worker"),
+        (scan["scanId"], "dedup", "running", "dedup-worker"),
+        (scan["scanId"], "discovery", "running", "shared-worker"),
+        (scan["scanId"], "discovery", "succeeded", "shared-worker"),
+        (scan["scanId"], "discovery", "running", "desktop-workspace"),
+        (scan["scanId"], "discovery", "queued", None),
+        (other["scanId"], "discovery", "failed", "other-worker"),
+    ]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE workspaces SET thread_id = 'desktop-workspace' "
+            "WHERE id = (SELECT workspace_id FROM scans WHERE id = ?)",
+            (scan["scanId"],),
+        )
+        connection.executemany(
+            """
+            INSERT INTO deep_scan_workers (
+                id, scan_id, kind, status, sdk_thread_id, prompt_path, artifact_dir,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(uuid.uuid4()),
+                    scan_id,
+                    kind,
+                    status,
+                    thread_id,
+                    str(tmp_path / "prompt.md"),
+                    str(tmp_path / "artifacts"),
+                    scan["createdAt"],
+                    scan["createdAt"],
+                )
+                for scan_id, kind, status, thread_id in workers
+            ],
+        )
+
+    detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert detail["continuationThreadId"] is None
+    assert detail["threadIds"] == [
+        "desktop-owner",
+        "desktop-workspace",
+        "canceled-worker",
+        "dedup-worker",
+        "failed-worker",
+        "setup-worker",
+        "shared-worker",
+    ]
+    assert detail["executionThreadIds"] == [
+        "canceled-worker",
+        "dedup-worker",
+        "desktop-workspace",
+        "failed-worker",
+        "setup-worker",
+        "shared-worker",
+    ]
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET continuation_thread_id = 'desktop-headless' WHERE id = ?",
+            (scan["scanId"],),
+        )
+    continued = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert continued["threadIds"] == ["desktop-headless", *detail["threadIds"]]
+    assert continued["executionThreadIds"] == detail["executionThreadIds"]
 
 
 def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) -> None:
@@ -339,7 +430,8 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
     assert history["scans"][0]["warnings"] == completed["scan"]["warnings"]
 
 
-def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path) -> None:
+@pytest.mark.parametrize("context_reporting", ["bounded", "unknown_upper", "legacy"])
+def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path, context_reporting: str) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -349,8 +441,29 @@ def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path) -> None:
         "cachedInputTokens": 200,
         "cacheWriteInputTokens": 0,
         "outputTokens": 30,
-        "estimatedUsd": 0.00625,
+        "estimatedUsd": 0.00488,
+        "cacheWriteInputTokensReported": False,
+        "pricing": {
+            "source": "https://developers.openai.com/api/docs/pricing",
+            "asOf": "2026-09-09" if context_reporting == "legacy" else "2026-09-14",
+            "serviceTier": "standard",
+            "context": "short",
+            "usdPerMillionTokens": {"input": 4, "cacheRead": 0.4, "cacheWrite": 5, "output": 20},
+        },
     }
+    if context_reporting != "legacy":
+        cost["estimatedUsdRange"] = {
+            "min": 0.00488,
+            "max": 0.01156 if context_reporting == "bounded" else None,
+            "context": "unknown",
+        }
+    if context_reporting == "bounded":
+        cost["pricing"]["longContextUsdPerMillionTokens"] = {
+            "input": 8,
+            "cacheRead": 0.8,
+            "cacheWrite": 10,
+            "output": 30,
+        }
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, cost=cost)
 
     listed = run_workbench(state_dir, "list-scans", "--repository", str(repository))
@@ -717,6 +830,18 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     assert "Run 'codex-security scans match BEFORE AFTER' first" in rejected["stderr"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
+        known_since = connection.execute("SELECT MIN(started_at) FROM scans").fetchone()[0]
+
+    before_finding, after_finding = (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in (before, after)
+    )
+    assert before_finding["findingId"] == after_finding["findingId"]
+    for finding, other in ((before_finding, after_finding), (after_finding, before_finding)):
+        assert [match["occurrenceId"] for match in finding["matches"]] == [other["occurrenceId"]]
+        assert finding["knownSince"] == known_since
+        assert finding["knownScanIds"] == [before["scanId"], after["scanId"]]
 
     save_scan_matches(state_dir, before, after)
     with sqlite3.connect(database) as connection:
@@ -734,7 +859,8 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     )
 
     compared = compare_scan_pair(state_dir, before, after, "--require-matches")
-    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 1
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 0
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM scan_comparisons").fetchall() == comparisons
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
@@ -1021,13 +1147,15 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
     repository.mkdir()
     root = tmp_path / "results"
     before = create_cli_scan(state_dir, root, repository)
-    after = create_cli_scan(state_dir, root, repository)
+    after = create_cli_scan(
+        state_dir, root, repository, identity_anchor="independent-archive-entry-write"
+    )
     inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
         "matchingInputs"
     ]
     previous = inputs["before"][0]
     current = inputs["after"][0]
-    assert previous["findingId"] == current["findingId"]
+    assert previous["findingId"] != current["findingId"]
 
     compared = save_scan_matches(
         state_dir,

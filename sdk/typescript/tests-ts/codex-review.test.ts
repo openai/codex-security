@@ -1,18 +1,84 @@
+import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve, win32 } from "node:path";
+import { join, relative, resolve, win32 } from "node:path";
+import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import { checkpointWorkbench } from "./support/workbench-fakes.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
+import { isReviewRefusal } from "../src/deduplication/refusal.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
+
+const failureReasons: Record<string, string> = {
+  "policy-turn-code": "Request blocked.",
+  "policy-request-code": "Request blocked.",
+  "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-request": "Request rejected: cyber_policy.",
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-reported-error":
+    "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
+  "text-only": "Codex did not submit a validated review",
+  "failed-turn": "Rate limit exceeded",
+  "server-error": "Provider temporarily unavailable",
+  "connection-error": "Provider stream disconnected",
+  "unauthorized-turn": "Authentication required",
+  "bad-request-turn": "Invalid model configuration",
+  "unknown-turn": "Unknown model failure",
+  "request-error": "Authentication required",
+  "credential-error": "Authentication failed: Bearer synthetic-review-key",
+  "invalid-json": "Codex returned malformed JSON",
+  "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-verdict":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-text":
+    "Required review check could not be completed: Required source revision could not be read.",
+  "invalid-review-error":
+    "Required review check could not be completed: Required source revision could not be read.",
+  exit: "Codex exited before completing the review",
+};
+const retriedFailures = new Set([
+  "text-only",
+  "failed-turn",
+  "server-error",
+  "connection-error",
+  "invalid-json",
+  "invalid-submission",
+  "exit",
+]);
+const recoveredScenarios: Record<string, string> = {
+  "recover-rate-limit": "failed-turn",
+  "recover-server-error": "server-error",
+  "recover-connection-error": "connection-error",
+  "recover-process-exit": "exit",
+  "recover-invalid-json": "invalid-json",
+  "recover-invalid-submission": "invalid-submission",
+  "recover-no-submission": "text-only",
+};
+const modelFailures = new Set([
+  "policy-turn-code",
+  "policy-turn",
+  "failed-turn",
+  "server-error",
+  "connection-error",
+  "unauthorized-turn",
+  "bad-request-turn",
+  "unknown-turn",
+]);
 
 const transportCases: {
   scenario: string;
@@ -20,10 +86,31 @@ const transportCases: {
   environmentNames?: readonly [string, string, string];
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
+  commandAuth?: "direct" | "ambient";
 }[] = [
-  ...["correction", "text-only", "failed-turn", "exit", "cancel"].map(
-    (scenario) => ({ scenario }),
-  ),
+  {
+    scenario: "correction",
+    name: "command auth without an API key",
+    commandAuth: "direct",
+  },
+  {
+    scenario: "correction",
+    name: "command auth with ambient API key and relative home",
+    commandAuth: "ambient",
+  },
+  { scenario: "retry-correction" },
+  { scenario: "text-only-correction" },
+  { scenario: "cancel-continuation" },
+  { scenario: "accepted-no-replay" },
+  ...[
+    "correction",
+    "incomplete-content",
+    "optional-lookup-failure",
+    ...Object.keys(recoveredScenarios),
+    ...Object.keys(failureReasons),
+    "cancel-backoff",
+    "cancel",
+  ].map((scenario) => ({ scenario })),
   {
     scenario: "correction",
     name: "lowercase Windows environment",
@@ -57,21 +144,47 @@ for (const {
   environmentNames = ["CODEX_HOME", "OPENAI_API_KEY", "GH_CONFIG_DIR"],
   extraEnvironment,
   windowsOnly = false,
+  commandAuth,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
-    const checkout = await mkdtemp(join(tmpdir(), "codex-review-source-"));
+    const checkout = await temporaryDirectory("codex-review-source-", true);
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
+    let starts = 0;
     let directory: string | undefined;
     let args: readonly string[] = [];
+    const delays: number[] = [];
+    const recovery = recoveredScenarios[scenario];
+    const sessions = retriedFailures.has(scenario) ? 3 : recovery ? 2 : 1;
     const controller = new AbortController();
     try {
-      const configuration =
-        '[mcp_servers.synthetic]\ncommand = "synthetic-unused-command"\n';
+      const auth = {
+        command: "./synthetic-auth",
+        args: ["token"],
+        refresh_interval_ms: 1234,
+        ...(commandAuth === "ambient" ? { cwd: modelHome } : {}),
+      };
+      const configuration = stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(commandAuth
+          ? {
+              model_provider: "synthetic.provider",
+              model_providers: {
+                "synthetic.provider": {
+                  name: "Synthetic",
+                  wire_api: "responses",
+                  base_url: "https://provider.example/v1",
+                  auth,
+                },
+              },
+            }
+          : {}),
+      });
       await writeFile(join(modelHome, "config.toml"), configuration);
+      await mkdir(join(modelHome, "state", "codex-home"), { recursive: true });
       const [homeName, keyName, ghName] = environmentNames;
       const runner = new CodexReviewRunner(
         {
@@ -79,12 +192,19 @@ for (const {
           SystemRoot: process.env["SystemRoot"],
           TEMP: process.env["TEMP"],
           TMP: process.env["TMP"],
-          [homeName]: modelHome,
-          [keyName]: "synthetic-review-key",
+          [homeName]:
+            commandAuth === "ambient"
+              ? relative(process.cwd(), modelHome)
+              : modelHome,
+          ...(commandAuth === "direct"
+            ? {}
+            : { [keyName]: "synthetic-review-key" }),
+          CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
           [ghName]: ghConfig,
           ...extraEnvironment,
         },
         (command, commandArgs, options) => {
+          starts++;
           const selected = resolveCodexCommand({}).command;
           expect(command).toBe(
             process.platform === "win32"
@@ -93,23 +213,82 @@ for (const {
           );
           args = commandArgs;
           directory = options.env!["CODEX_SQLITE_HOME"];
-          expect(options.cwd).toBe(checkout);
+          expect(options.cwd).toBe(directory);
+          expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
-            [fixture, scenario, transcript],
+            [
+              fixture,
+              recovery
+                ? starts === 1
+                  ? recovery
+                  : "accepted-no-replay"
+                : scenario === "cancel-backoff"
+                  ? "exit"
+                  : scenario,
+              transcript,
+              checkout,
+            ],
             options,
           );
           if (scenario === "cancel")
             child.once("spawn", () =>
               controller.abort("synthetic cancellation"),
             );
+          if (scenario === "cancel-continuation")
+            child.stderr.once("data", () =>
+              controller.abort("synthetic cancellation"),
+            );
           return child;
         },
         controller.signal,
         checkout,
+        {
+          random: () => 0,
+          wait: async (delay, signal) => {
+            delays.push(delay);
+            if (scenario === "cancel-backoff") {
+              controller.abort("synthetic cancellation");
+              await waitForRetry(delay, signal);
+            }
+          },
+        },
       );
-      let validations = 0;
-      const result = runner.run({
+      const validate = mock((value: unknown) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("decision" in value) ||
+          value.decision !==
+            (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
+        )
+          throw new Error("Invalid decision");
+        return { decision: value.decision };
+      });
+      const checkpoints = checkpointWorkbench("blocked-review", {
+        repository: checkout,
+      });
+      const reportsBlocker =
+        scenario.startsWith("required-source-error") ||
+        scenario === "policy-reported-error" ||
+        scenario === "invalid-review-error";
+      const refused =
+        scenario.startsWith("policy-") || scenario === "refusal-text";
+      const reviewRunner =
+        reportsBlocker || refused
+          ? new CheckpointedReviewRunner(
+              new FindingWorkflow(
+                "blocked-review",
+                process.env,
+                checkpoints.run,
+              ),
+              runner,
+              checkpoints.source,
+              { allRepositories: true },
+            )
+          : runner;
+      const result = reviewRunner.run({
+        stage: "pair-review",
         model: "gpt-5.6-sol",
         effort: "ultra",
         prompt: "Review the supplied synthetic reports.",
@@ -119,31 +298,129 @@ for (const {
           required: ["decision"],
           additionalProperties: false,
         },
-        validate(value: unknown) {
-          validations++;
-          if (
-            typeof value !== "object" ||
-            value === null ||
-            !("decision" in value) ||
-            value.decision !== "SAME"
-          )
-            throw new Error("Invalid decision");
-          return { decision: value.decision };
-        },
+        validate,
       });
-      if (scenario === "correction") {
+      if (
+        recovery ||
+        [
+          "correction",
+          "retry-correction",
+          "text-only-correction",
+          "accepted-no-replay",
+        ].includes(scenario)
+      ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(2);
-      } else if (scenario === "cancel") {
+        expect(validate).toHaveBeenCalledTimes(
+          recovery
+            ? recovery === "invalid-submission"
+              ? 3
+              : modelFailures.has(recovery)
+                ? 2
+                : 1
+            : ["text-only-correction", "accepted-no-replay"].includes(scenario)
+              ? 1
+              : 2,
+        );
+      } else if (
+        ["incomplete-content", "optional-lookup-failure"].includes(scenario)
+      ) {
+        expect(await result).toEqual({
+          decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
+        });
+        expect(validate).toHaveBeenCalledTimes(1);
+      } else if (
+        ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
+      ) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
-        await expect(result).rejects.toMatchObject({
-          message:
-            "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
+        const failure = await result.catch((error: unknown) => error);
+        expect(failure).toMatchObject({
+          name: "DeduplicationReviewError",
+          message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
-        expect(validations).toBe(scenario === "failed-turn" ? 1 : 0);
+        const reviewFailure = failure as Error & {
+          cause?: unknown;
+          metadata: {
+            stage: string;
+            model: string;
+            category: string;
+            attempts: number;
+            reason: string;
+          };
+        };
+        expect(reviewFailure.cause).toBeUndefined();
+        expect(reviewFailure.metadata).toEqual({
+          stage: "pair-review",
+          model: "gpt-5.6-sol",
+          category: refused
+            ? "refusal"
+            : scenario === "invalid-submission"
+              ? "validation"
+              : scenario === "text-only"
+                ? "no-submission"
+                : modelFailures.has(scenario) || reportsBlocker
+                  ? "model"
+                  : "transport",
+          attempts:
+            ([
+              "invalid-submission",
+              "text-only",
+              "required-source-error-after-text",
+            ].includes(scenario)
+              ? 2
+              : 1) * sessions,
+          reason: refused
+            ? "The model refused the deduplication review."
+            : scenario === "invalid-submission"
+              ? "The submitted review failed semantic validation."
+              : scenario === "text-only"
+                ? "Codex did not submit a validated review."
+                : modelFailures.has(scenario)
+                  ? "Codex review turn failed."
+                  : reportsBlocker
+                    ? "A required review check could not be completed."
+                    : ["request-error", "credential-error"].includes(scenario)
+                      ? "Codex rejected the review request."
+                      : "Codex review transport failed.",
+        });
+        const supportBundle = JSON.stringify(reviewFailure.metadata);
+        expect(supportBundle).not.toContain("synthetic-review-key");
+        expect(supportBundle).not.toContain(checkout);
+        expect(supportBundle).not.toContain("review-thread");
+        expect(validate).toHaveBeenCalledTimes(
+          scenario === "invalid-submission"
+            ? 2 * sessions
+            : modelFailures.has(scenario) ||
+                scenario === "required-source-error-after-verdict"
+              ? sessions
+              : 0,
+        );
+        if (reportsBlocker || refused)
+          expect(checkpoints.saved).toHaveLength(0);
       }
-      expect(args).toContain('cli_auth_credentials_store="ephemeral"');
+      expect(starts).toBe(sessions);
+      expect(delays).toEqual(
+        scenario === "cancel-backoff"
+          ? [1000]
+          : sessions === 3
+            ? [1000, 2000]
+            : sessions === 2
+              ? [1000]
+              : [],
+      );
+      if (commandAuth) {
+        expect(args).not.toContain('cli_auth_credentials_store="ephemeral"');
+        const providers = parse(
+          args.find((value) => value.startsWith("model_providers="))!,
+        );
+        expect(providers).toMatchObject({
+          model_providers: {
+            "synthetic.provider": { auth: { ...auth, cwd: modelHome } },
+          },
+        });
+      } else {
+        expect(args).toContain('cli_auth_credentials_store="ephemeral"');
+      }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
@@ -155,19 +432,48 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const loginRequest = (await readFile(transcript, "utf8"))
-          .trim()
-          .split("\n")
-          .map(
-            (line) =>
-              JSON.parse(line) as {
-                method?: string;
-                params?: { apiKey?: string };
-              },
-          )
-          .find((message) => message.method === "account/login/start");
-        expect(loginRequest?.params?.apiKey).toBe("synthetic-review-key");
+        const messages = parseJsonLines<{
+          method?: string;
+          params?: { apiKey?: string };
+        }>(await readFile(transcript, "utf8"));
+        const loginRequest = messages.find(
+          (message) => message.method === "account/login/start",
+        );
+        expect(
+          messages.filter((message) => message.method === "thread/start"),
+        ).toHaveLength(sessions);
+        expect(
+          messages.filter((message) => message.method === "turn/start"),
+        ).toHaveLength(
+          recovery
+            ? ["invalid-submission", "text-only"].includes(recovery)
+              ? 3
+              : 2
+            : ([
+                "invalid-submission",
+                "text-only",
+                "retry-correction",
+                "text-only-correction",
+                "cancel-continuation",
+                "required-source-error-after-text",
+              ].includes(scenario)
+                ? 2
+                : [
+                      "request-error",
+                      "credential-error",
+                      "policy-request",
+                      "policy-request-code",
+                    ].includes(scenario)
+                  ? 0
+                  : 1) * sessions,
+        );
+        expect(loginRequest?.params?.apiKey).toBe(
+          commandAuth ? undefined : "synthetic-review-key",
+        );
       }
+      expect(await readFile(join(modelHome, "config.toml"), "utf8")).toBe(
+        configuration,
+      );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
       expect(existsSync(directory!)).toBe(false);
@@ -179,6 +485,37 @@ for (const {
     }
   });
 }
+
+test.each([
+  "cyber_policy",
+  "Request blocked by a safety policy violation.",
+  "Request flagged for potentially high-risk cyber activity.",
+  "I cannot help with this request.",
+  "I’m sorry, but I can’t assist with your request.",
+  "I can't help analyze or merge these vulnerability reports.",
+  "I'm unable to assist with this comparison.",
+])("recognizes explicit review refusals: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(true);
+});
+
+test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+  "recognizes structured policy refusal codes independently of message wording: %s",
+  (code) => {
+    expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
+  },
+);
+
+test.each([
+  "Rate limit exceeded",
+  "Authentication required",
+  "Required source revision could not be read.",
+  "I cannot complete the review because the source is unavailable.",
+  "Connection refused",
+  "Here is the review JSON.",
+])("does not turn other failures into refused reviews: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(false);
+});
 
 test("empty credential paths use default directories without denying cwd", async () => {
   if (
@@ -220,6 +557,7 @@ test("empty credential paths use default directories without denying cwd", async
       );
       await expect(
         runner.run({
+          stage: "pair-review",
           model: "gpt-5.6-sol",
           effort: "ultra",
           prompt: "Review the supplied synthetic reports.",
@@ -265,4 +603,48 @@ test("environment lookups preserve platform case rules and exact-key precedence"
   expect(environmentEntry({ ...aliases, CODEX_HOME: "" }, "CODEX_HOME")).toBe(
     "",
   );
+});
+
+test("retry backoff grows exponentially with jitter and preserves cancellation", async () => {
+  expect(retryDelay(1, () => 0.25)).toBe(1250);
+  expect(retryDelay(2, () => 0.75)).toBe(3500);
+  const controller = new AbortController();
+  const waiting = waitForRetry(60_000, controller.signal);
+  controller.abort("synthetic backoff cancellation");
+  await expect(waiting).rejects.toBe("synthetic backoff cancellation");
+});
+
+test("a missing Codex executable is not retried", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codex-review-missing-command-"));
+  let starts = 0;
+  const delays = mock(async (_delay: number) => {});
+  try {
+    await writeFile(join(root, "config.toml"), "");
+    const runner = new CodexReviewRunner(
+      { CODEX_HOME: root, OPENAI_API_KEY: "synthetic-review-key" },
+      (_command, args, options) => {
+        starts++;
+        return spawn(join(root, "missing-executable"), args, options);
+      },
+      undefined,
+      root,
+      {
+        wait: delays,
+      },
+    );
+    await expect(
+      runner.run({
+        stage: "pair-review",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        prompt: "Review synthetic reports",
+        schema: {},
+        validate: (value) => value,
+      }),
+    ).rejects.toThrow("ENOENT");
+    expect(starts).toBe(1);
+    expect(delays).not.toHaveBeenCalled();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

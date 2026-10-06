@@ -1,6 +1,7 @@
+import { rejecting } from "./support/errors.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import type { Finding, FindingsDocument } from "../src/models.js";
@@ -88,12 +89,17 @@ test("chunks long findings losslessly and pools vectors by token count", async (
   expect(Math.hypot(...result.vector)).toBeCloseTo(1, 10);
 });
 
-test("splits bulk requests at the provider token budget", async () => {
+test("splits bulk requests at the provider token budget and renews credentials per batch", async () => {
   const finding: Finding = { ...example, summary: " evidence".repeat(8000) };
   const requests: number[][][] = [];
+  let credentials = 0;
   const embedder = new OpenAiFindingEmbedder(
-    "synthetic-key",
+    async () => `synthetic-key-${++credentials}`,
     async (_url, init) => {
+      expect(credentials).toBe(requests.length + 1);
+      expect(init.headers).toMatchObject({
+        Authorization: `Bearer synthetic-key-${credentials}`,
+      });
       const input: number[][] = JSON.parse(String(init.body)).input;
       requests.push(input);
       expect(
@@ -110,33 +116,84 @@ test("splits bulk requests at the provider token budget", async () => {
     Array.from({ length: 40 }, () => finding),
   );
   expect(requests).toHaveLength(2);
+  expect(credentials).toBe(2);
   expect(result).toHaveLength(40);
   expect(result.every((embedding) => embedding.vector[0] === 1)).toBe(true);
 });
 
+test("does not resolve credentials for empty input or reuse a key after renewal fails", async () => {
+  for (const failure of ["throw", "empty"]) {
+    let credentials = 0;
+    const observeRequests = mock(async () => {
+      return Response.json({
+        model: EMBEDDING_MODEL,
+        data: [{ index: 0, embedding: vector() }],
+      });
+    });
+    const embedder = new OpenAiFindingEmbedder(() => {
+      if (++credentials === 1) return "synthetic-key";
+      if (failure === "throw") throw new Error("synthetic-private-token");
+      return "";
+    }, observeRequests);
+    expect(await embedder.embed([])).toEqual([]);
+    expect(credentials).toBe(0);
+    await embedder.embed([example]);
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Could not reach the embedding provider.",
+    });
+    expect(credentials).toBe(2);
+    expect(observeRequests).toHaveBeenCalledTimes(1);
+  }
+});
+
 test("does not call the provider for empty input or missing credentials", async () => {
-  let calls = 0;
-  const embedder = new OpenAiFindingEmbedder(undefined, async () => {
-    calls++;
-    throw new Error("Must not call");
-  });
+  const observeCalls = mock(rejecting("Must not call"));
+  const embedder = new OpenAiFindingEmbedder(undefined, observeCalls);
   expect(await embedder.embed([])).toEqual([]);
   await expect(embedder.embed([example])).rejects.toMatchObject({
     code: "embedding_unavailable",
   });
-  expect(calls).toBe(0);
+  expect(observeCalls).toHaveBeenCalledTimes(0);
 });
 
-test("reports provider failures without echoing response bodies or credentials", async () => {
-  const embedder = new OpenAiFindingEmbedder(
-    "synthetic-key",
-    async () => new Response("synthetic private body", { status: 429 }),
-  );
-  await expect(embedder.embed([example])).rejects.toMatchObject({
-    code: "embedding_failed",
-    message: "Embedding provider returned HTTP 429.",
-  });
-});
+test.each(["synthetic private body", null])(
+  "preserves the HTTP error with response body %p",
+  async (body) => {
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () => new Response(body, { status: 429 }),
+    );
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Embedding provider returned HTTP 429.",
+    });
+  },
+);
+
+test.each(["complete", "reject", "pending"])(
+  "cancels a rejected embedding response without replacing its HTTP error (%s)",
+  async (cleanup) => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      cancel() {
+        cancelled = true;
+        if (cleanup === "reject")
+          return Promise.reject(new Error("cleanup failed"));
+        if (cleanup === "pending") return new Promise<void>(() => {});
+      },
+    });
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () => new Response(body, { status: 503 }),
+    );
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+      message: "Embedding provider returned HTTP 503.",
+    });
+    expect(cancelled).toBe(true);
+  },
+);
 
 test("rejects malformed vectors instead of misaligning stored findings", async () => {
   for (const data of [

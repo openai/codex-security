@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
 
           release_note_label() {
-            local type="$1" breaking_marker="$2"
+            local type="$1" breaking_marker="$2" scope="$3"
             if [[ "$breaking_marker" == "!" ]]; then
               printf '%s\n' breaking-change
               return 0
@@ -50,6 +50,11 @@ jobs:
                 ;;
               release | test)
                 printf '%s\n' skip-release-notes
+                ;;
+              chore)
+                if [[ "$scope" == "(release)" ]]; then
+                  printf '%s\n' skip-release-notes
+                fi
                 ;;
               *)
                 return 0
@@ -78,8 +83,9 @@ jobs:
             exit 1
           fi
           type="${BASH_REMATCH[1]}"
+          scope="${BASH_REMATCH[2]:-}"
           breaking_marker="${BASH_REMATCH[3]:-}"
-          label="$(release_note_label "$type" "$breaking_marker")"
+          label="$(release_note_label "$type" "$breaking_marker" "$scope")"
           current_labels="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
               --jq '.[].name'

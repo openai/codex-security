@@ -5,6 +5,8 @@ description: "Assess an immutable patch artifact's program impact, regression ri
 
 # Assess Patch Risk
 
+Before choosing paths or saving retained output, read `../../references/artifact-storage.md` and follow its storage policy.
+
 Explain what can change if the patch merges and whether the available evidence supports merging it. Keep these concepts separate:
 
 - **impact if wrong**: the consequence and blast radius of a regression;

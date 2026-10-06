@@ -7,6 +7,7 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -15,9 +16,10 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 try:
@@ -39,6 +41,7 @@ import workbench_remediation as remediation
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+import workbench_severity as severity
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -58,6 +61,7 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
+from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -92,12 +96,14 @@ from workbench_findings import (
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
-    compact_timestamp,
     insert_running_scan,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+)
+from workbench_scan_start import (
+    compact_timestamp as compact_timestamp,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -113,13 +119,14 @@ from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
+    diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_bytes,
     git_command,
     git_output,
     git_revision,
-    git_submodule_paths,
+    git_submodule_entries,
     git_target_metadata,
     git_worktree_context,
     remediation_checkout_snapshot,
@@ -136,6 +143,7 @@ from workbench_validation import (
     optional_text,
     parse_scan_cost,
     path_within_scope,
+    reject_non_finite_json,
     require_close_note,
     require_occurrence,
     require_uuid,
@@ -146,7 +154,6 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -159,14 +166,6 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
     )
 
 
-def state_dir() -> Path:
-    state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
-    if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
-
-
 def database_path() -> Path:
     return state_dir() / "workbench.sqlite3"
 
@@ -174,7 +173,7 @@ def database_path() -> Path:
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
     lock_dir = state_dir() / "completion-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
     descriptor = os.open(
         lock_path,
@@ -235,16 +234,17 @@ def release_completion_file_lock(descriptor: int) -> None:
     windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
 
 
-def connect() -> sqlite3.Connection:
+def connect(*, deferred: bool = False) -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    create_private_directory(path.parent)
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         connection = sqlite3.connect(path, timeout=5)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
-            apply_migrations(connection)
+            # Keep writer admission retries; readers only wait when a repair needs to write.
+            apply_migrations(connection, immediate=not deferred or attempt > 0)
             connection.execute("PRAGMA journal_mode = WAL")
             path.chmod(0o600)
             return connection
@@ -256,8 +256,10 @@ def connect() -> sqlite3.Connection:
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
 
 
-def apply_migrations(connection: sqlite3.Connection) -> None:
-    apply_schema_migrations(connection, MIGRATIONS, now, backfill_security_targets)
+def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False) -> None:
+    apply_schema_migrations(
+        connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
+    )
 
 
 def require_target(value: str) -> Path:
@@ -400,18 +402,6 @@ def inspect_setup_values(
     }
 
 
-def inspect_setup(args: argparse.Namespace) -> dict[str, Any]:
-    return inspect_setup_values(
-        args.target_path,
-        args.scope,
-        args.mode,
-        args.diff_target_kind,
-        args.diff_base_revision,
-        args.diff_head_revision,
-        args.diff_content_digest,
-    )
-
-
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
@@ -501,7 +491,9 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
+def workbench_completion_binding(
+    scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
+) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_manifest = read_json_object(
@@ -517,8 +509,8 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
-            target["snapshotDigest"] = scan["diff_content_digest"]
+        if snapshot_digest := diff_snapshot_digest(scan, manifest):
+            target["snapshotDigest"] = snapshot_digest
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
@@ -530,7 +522,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
-    return {
+    binding: dict[str, Any] = {
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
@@ -540,6 +532,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    return scan_history.preserve_sealed_completion(binding, manifest)
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -803,7 +796,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
-    root = Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
+    root = resolve_scan_root(scan_root)
     target_root = (root / safe_segment(target.name)).resolve()
     if target_root == target or target in target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
@@ -857,7 +850,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             metadata=target_metadata,
         )
         target_root = scan_target_root(args.scan_root, target)
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
@@ -918,18 +911,6 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             connection.rollback()
         raise
     return workspace_state(connection, workspace["id"])
-
-
-def start_prompt_only_scan(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return _start_prompt_driven_scan(connection, args, headless_standard=False)
-
-
-def start_headless_standard_scan(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return _start_prompt_driven_scan(connection, args, headless_standard=True)
 
 
 def _start_prompt_driven_scan(
@@ -1025,7 +1006,7 @@ def _start_prompt_driven_scan(
                 **scan_context(connection, existing["id"]),
                 "startDisposition": "joined",
             }
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
@@ -1118,7 +1099,7 @@ def pin_legacy_manifest_digest(
     connection: sqlite3.Connection, scan_id: str, manifest_digest: str
 ) -> None:
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = require_scan(connection, scan_id)
         current = scan["seal_manifest_digest"]
         if current is not None and current != manifest_digest:
@@ -1128,10 +1109,6 @@ def pin_legacy_manifest_digest(
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def complete_scan(
@@ -1446,22 +1423,9 @@ def complete_scan_locked(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
-        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        require_recorded_manifest_digest(scan, scan_dir)
-        verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
-        try:
-            manifest, _, _ = finalize_scan(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-            )
-        except ContractError as exc:
-            raise SystemExit(str(exc)) from exc
-        verify_manifest_binding(scan, manifest)
-        manifest_digest = published_manifest_digest(scan_dir, manifest)
-        pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
-        if cost_json is not None and scan["recipe_json"] is not None:
-            scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
-        return scan_context(connection, scan["id"])
+        return saved_results.refresh_completed_scan(
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+        )
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
     handoff.require_current_continuation(
@@ -1482,17 +1446,10 @@ def complete_scan_locked(
     add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
-    completion_binding = workbench_completion_binding(scan, completion_timestamp)
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    current_manifest = None
     if current_manifest_path is not None:
         current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
@@ -1501,8 +1458,8 @@ def complete_scan_locked(
             or current_manifest["scan"].get("artifacts") is not None
         )
     )
+    completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
-        draft_artifacts: dict[str, Path] = {}
         missing_drafts = []
         for file_name in (
             ARTIFACTS["manifest"],
@@ -1514,50 +1471,69 @@ def complete_scan_locked(
             except FileNotFoundError:
                 missing_drafts.append(file_name)
                 continue
-            draft_path = artifact_path(scan_dir, file_name, required=True)
-            if draft_path is not None:
-                draft_artifacts[file_name] = draft_path
+            artifact_path(scan_dir, file_name, required=True)
         if missing_drafts:
             raise SystemExit(
                 "Scan agent did not create required draft artifacts: "
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
                 "commands and write to the scan directory before retrying."
             )
-        manifest = read_json_object(draft_artifacts[ARTIFACTS["manifest"]])
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-            completion_binding["startedAt"] = manifest_scan.get("startedAt")
-            completion_binding["completedAt"] = manifest_scan.get("completedAt")
+    merge_parent_draft = (
+        scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
+    )
     wrote = False
     try:
-        prepared = _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=expected_coverage_mode(scan),
-            completion_binding=completion_binding,
-            completion_warnings=warnings,
-            draft_documents=saved_results.merge_saved_results(
-                scan_dir,
-                scan["id"],
-                completion_binding,
-                connection.execute(
-                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                    (scan["id"],),
-                ).fetchall(),
-                warnings,
-                stopped=False,
-                reason="",
+        with (
+            saved_results.preserve_parent_head_on_error(scan_dir)
+            if merge_parent_draft
+            else nullcontext()
+        ):
+            draft_documents = (
+                saved_results.merge_saved_results(
+                    scan_dir,
+                    scan["id"],
+                    completion_binding,
+                    connection.execute(
+                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                        (scan["id"],),
+                    ).fetchall(),
+                    warnings,
+                    stopped=False,
+                    reason="",
+                )
+                if merge_parent_draft
+                else None
             )
-            if current_manifest_path is not None and not already_sealed
-            else None,
-        )
+            completion_manifest = draft_documents[0] if draft_documents else current_manifest
+            if (
+                completion_manifest is not None
+                and isinstance(completion_manifest.get("scan"), dict)
+                and completion_manifest["scan"].get("complete") is False
+            ):
+                raise RecoverableContractError(
+                    "The latest saved scan draft is incomplete; continue the scan before completing it."
+                )
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=expected_coverage_mode(scan),
+                completion_binding=completion_binding,
+                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                draft_documents=draft_documents,
+            )
         add_warning()
         wrote = True
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(
+            prepared, projection_warnings=warnings
+        )
     except ContractError as exc:
-        if wrote or (scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)):
+        if wrote or (
+            scan["mode"] == "deep"
+            and not already_sealed
+            and not isinstance(exc, RecoverableContractError)
+        ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
-            fail_scan_locked(connection, args)
+            saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
         raise SystemExit(str(exc)) from exc
     artifacts = {
         kind: artifact_path(scan_dir, filename, required=True)
@@ -1566,17 +1542,13 @@ def complete_scan_locked(
     manifest_digest = published_manifest_digest(scan_dir, manifest)
     if prepare_only:
         connection.execute("BEGIN IMMEDIATE")
-        try:
+        with connection:
             updated = connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
                 (json.dumps(warnings), scan["id"]),
             )
             if updated.rowcount != 1:
                 raise SystemExit("Only a running scan can be prepared for completion.")
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
         return context
@@ -1709,7 +1681,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     workspace_id = str(uuid.uuid4())
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
         target_id = ensure_security_target(connection, str(repository))
         if parent_scan_id is not None:
@@ -1764,10 +1736,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         )
         if workflow_id is not None:
             register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     scan = require_scan(connection, scan_id)
     return {
         "contract": scan_contract(scan),
@@ -1789,9 +1757,32 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 
+def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    limit = args.max_cost_usd
+    if not math.isfinite(limit) or limit <= 0:
+        raise SystemExit("The scan cost limit must be a positive finite USD amount.")
+    with scan_completion_lock(scan_id), connection:
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI scan can increase its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        previous = recipe.get("maxCostUsd")
+        if (
+            not isinstance(previous, (int, float))
+            or isinstance(previous, bool)
+            or limit <= previous
+        ):
+            raise SystemExit("The new cost limit must exceed the current limit.")
+        recipe["maxCostUsd"] = limit
+        connection.execute(
+            "UPDATE scans SET recipe_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(recipe, allow_nan=False), now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "maxCostUsd": limit}
+
+
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
-        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -1840,20 +1831,6 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     return recipe
 
 
-def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    scan = require_scan(connection, args.scan_id)
-    if scan["recipe_json"] is None:
-        raise SystemExit("This scan does not have a saved launch recipe.")
-    return {
-        "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
-        "scanId": scan["id"],
-    }
-
-
-_WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
-
-
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
@@ -1868,26 +1845,8 @@ def recover_scan_results(
     return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
-def preserve_scan_results(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def write_scan_draft(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def fail_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.fail_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def cancel_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
 
 
 def cancel_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1909,7 +1868,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     note = optional_text(args.note, maximum=2400)
     require_close_note(close_reason, note)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         if args.status == "closed":
@@ -1981,10 +1940,6 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
             """,
             (occurrence["id"], args.status, close_reason, note, timestamp),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2308,7 +2263,7 @@ def set_finding_remediation(
     action_token = require_uuid(args.action_token, "action-token")
     summary = optional_text(args.summary, maximum=2400)
     verification_summary = optional_text(args.verification_summary, maximum=2400)
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2423,18 +2378,7 @@ def set_finding_remediation(
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
-
-
-_WORKBENCH_PUBLICATION_CONTEXT: publication.WorkbenchPublicationContext
-
-
-def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
-    return publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
 
 
 def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -2461,7 +2405,7 @@ def require_reviewed_patch_applied(
         git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
-        excluded += git_submodule_paths(target)
+        excluded += tuple(path for path, _ in git_submodule_entries(target))
     with tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary:
         reviewed_patch = Path(temporary) / "reviewed.patch"
         digest = hashlib.sha256()
@@ -2477,7 +2421,7 @@ def require_reviewed_patch_applied(
             checkout = checkout_root
             copy_directory_excluding(target, checkout, excluded)
         else:
-            checkout = copy_git_worktree_files(target, checkout_root, excluded)
+            copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2722,9 +2666,13 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
+    relations = scan_history.finding_relations(connection, scan["id"], (row["id"] for row in rows))
     return {
         "findingsPage": {
-            "findings": [finding_result(connection, scan, row) for row in rows],
+            "findings": [
+                finding_result(connection, scan, row, related=relations.get(row["id"], []))
+                for row in rows
+            ],
             "limit": limit,
             "nextOffset": next_offset if next_offset < total else None,
             "offset": args.offset,
@@ -2759,6 +2707,9 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
+    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
+    if path := model_fields.get("threatModelPath"):
+        artifacts["threatModel"] = path
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
@@ -2817,14 +2768,23 @@ def scan_result(
             "maximum": independent_reviews["maximum"],
             "consolidating": independent_reviews["consolidating"],
         }
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in occurrence_rows)
+    )
     return {
         "artifacts": artifacts,
+        **model_fields,
         "canceledAt": scan["canceled_at"],
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
-        "findings": [finding_result(connection, scan, row) for row in occurrence_rows],
+        "findings": [
+            finding_result(connection, scan, row, related=relations.get(row["id"], []))
+            for row in occurrence_rows
+        ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
         "severityCounts": severity_counts,
@@ -2905,14 +2865,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     except (ContractError, OSError, SystemExit, ValueError):
         return
 
-    findings = findings_document.get("findings")
-    if not isinstance(findings, list):
-        return
-    by_occurrence = {
-        finding.get("occurrenceId"): finding
-        for finding in findings
-        if isinstance(finding, dict) and isinstance(finding.get("occurrenceId"), str)
-    }
+    by_occurrence = {finding["occurrenceId"]: finding for finding in findings_document["findings"]}
     updates = []
     for row in legacy_rows:
         finding = by_occurrence.get(row["id"])
@@ -2928,8 +2881,16 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     if not updates:
         return
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    # Reads normally avoid writer admission, but legacy details still need a write.
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                raise
+            time.sleep(0.05 * (2**attempt))
+    with connection:
         current = require_scan(connection, scan["id"])
         recorded_digest = current["seal_manifest_digest"]
         if recorded_digest is not None and recorded_digest != manifest_digest:
@@ -2947,26 +2908,18 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
     if not isinstance(finding, dict):
         return False
-    severity = finding.get("severity")
-    confidence = finding.get("confidence")
     return (
         finding.get("findingId") == row["finding_id"]
         and finding.get("title") == row["title"]
         and finding.get("summary") == row["summary"]
         and finding.get("remediation") == row["remediation"]
-        and isinstance(severity, dict)
-        and severity.get("level") == row["severity"]
-        and isinstance(confidence, dict)
-        and confidence.get("level") == row["confidence"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
     )
 
 
@@ -2974,6 +2927,8 @@ def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
+    *,
+    related: list[dict[str, Any]],
 ) -> dict[str, Any]:
     details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
     confidence = details.get("confidence")
@@ -3038,7 +2993,8 @@ def finding_result(
         result["matches"] = matches
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
-    result.pop("artifactPaths", None)
+    if related:
+        result["related"] = related
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
@@ -3070,13 +3026,10 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
     except OSError:
         return artifacts
 
-    directories_seen = 0
-    for current_directory, directory_names, file_names in os.walk(
-        poc_root, topdown=True, followlinks=False
+    for directories_seen, (current_directory, directory_names, file_names) in enumerate(
+        os.walk(poc_root, topdown=True, followlinks=False), start=1
     ):
-        directories_seen += 1
         if directories_seen > FINDING_ARTIFACT_DIRECTORIES_LIMIT:
-            directory_names[:] = []
             break
         current_path = Path(current_directory)
         directory_names[:] = [
@@ -3097,15 +3050,15 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
 
 
 def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
-    if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
-        return False
     try:
+        if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
+            return False
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
             relative_path,
             f"finding artifact {relative_path}",
         )
-    except (ContractError, OSError):
+    except (ContractError, OSError, UnicodeEncodeError):
         return False
     try:
         return stat.S_ISREG(os.fstat(descriptor).st_mode)
@@ -3333,52 +3286,10 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r} is not supported")
+_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals())
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
-    ARTIFACTS=ARTIFACTS,
-    artifact_path=artifact_path,
-    available_artifact_path=available_artifact_path,
-    database_path=database_path,
-    expected_coverage_mode=expected_coverage_mode,
-    now=now,
-    pin_legacy_manifest_digest=pin_legacy_manifest_digest,
-    published_manifest_digest=published_manifest_digest,
-    read_json_object=read_json_object,
-    require_canonical_scan_directory=require_canonical_scan_directory,
-    require_recorded_manifest_digest=require_recorded_manifest_digest,
-    require_scan=require_scan,
-    scan_result=scan_result,
-    verify_manifest_binding=verify_manifest_binding,
-    workspace_state=workspace_state,
-)
-
-
-_WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
-    ARTIFACTS=ARTIFACTS,
-    artifact_path=artifact_path,
-    deep_scan=deep_scan,
-    expected_coverage_mode=expected_coverage_mode,
-    handoff=handoff,
-    index_findings=index_findings,
-    now=now,
-    optional_text=optional_text,
-    parse_scan_cost=parse_scan_cost,
-    published_manifest_digest=published_manifest_digest,
-    read_json_object=read_json_object,
-    require_canonical_scan_directory=require_canonical_scan_directory,
-    require_recorded_manifest_digest=require_recorded_manifest_digest,
-    require_scan=require_scan,
-    require_uuid=require_uuid,
-    require_workspace=require_workspace,
-    scan_completion_lock=scan_completion_lock,
-    scan_context=scan_context,
-    verify_manifest_binding=verify_manifest_binding,
-    workbench_completion_binding=workbench_completion_binding,
-    workspace_state=workspace_state,
-)
+_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
 def main() -> None:
@@ -3386,36 +3297,44 @@ def main() -> None:
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
     deep_scan.configure(
-        deep_scan.DeepScanDependencies(
-            now=now,
-            state_dir=state_dir,
-            require_scan=require_scan,
-            require_workspace=require_workspace,
-            require_target=require_target,
-            require_remediation_target=require_remediation_target,
-            require_scannable_target=require_scannable_target,
-            require_scope=require_scope,
-            ensure_security_target=ensure_security_target,
-            require_canonical_scan_directory=require_canonical_scan_directory,
-            safe_segment=safe_segment,
-            compact_timestamp=compact_timestamp,
-            scan_completion_lock=scan_completion_lock,
+        SimpleNamespace(
+            **globals(),
             preserve_stopped_results=preserve_stopped_results_after_transition,
         )
     )
+    if args.command == "resolve-scan-root":
+        print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
+        return
     if args.command == "inspect-target":
         result = inspect_target(args.target_path)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-setup":
-        result = inspect_setup(args)
+        result = inspect_setup_values(
+            args.target_path,
+            args.scope,
+            args.mode,
+            args.diff_target_kind,
+            args.diff_base_revision,
+            args.diff_head_revision,
+            args.diff_content_digest,
+        )
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if args.command in {"save-artifact", "read-artifact"}:
+        print(json.dumps(saved_results.read_or_save_artifact(args)))
+        return
+    if args.command == "read-severity-classification":
+        result = severity.read_classification(database_path(), args.scan_id)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-linear-publication":
-        result = inspect_linear_publication(args)
+        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    with closing(connect()) as connection:
+    with closing(
+        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+    ) as connection:
         remediation.require_available(connection, args, require_scan)
         if args.command == "create-workspace":
             result = create_workspace(connection, args)
@@ -3430,9 +3349,9 @@ def main() -> None:
         elif args.command == "start-scan":
             result = start_scan(connection, args)
         elif args.command == "start-prompt-only-scan":
-            result = start_prompt_only_scan(connection, args)
+            result = _start_prompt_driven_scan(connection, args, headless_standard=False)
         elif args.command == "start-headless-standard-scan":
-            result = start_headless_standard_scan(connection, args)
+            result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "begin-deep-scan":
             result = deep_scan.begin_deep_scan(connection, args)
         elif args.command == "get-deep-scan":
@@ -3468,8 +3387,28 @@ def main() -> None:
             result = register_cli_scan(connection, args)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
+        elif args.command == "set-scan-cost-limit":
+            result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
-            result = get_scan_recipe(connection, args)
+            result = scan_history.scan_recipe(require_scan(connection, args.scan_id))
+        elif args.command == "get-cli-scan-resume":
+            scan = require_scan(connection, args.scan_id)
+            try:
+                result = scan_history.cli_scan_resume(
+                    connection,
+                    scan,
+                    require_workspace(connection, scan["workspace_id"]),
+                    parse_scan_recipe=parse_scan_recipe,
+                    scan_contract=scan_contract,
+                    require_scan_directory=require_canonical_scan_directory,
+                    artifact_path=artifact_path,
+                    read_json_object=read_json_object,
+                    workbench_completion_binding=workbench_completion_binding,
+                )
+            except SystemExit as exc:
+                if not args.allow_unavailable:
+                    raise
+                result = {"unavailable": str(exc)}
         elif args.command == "compare-scans":
             result = scan_history.compare_scans(
                 connection,
@@ -3505,15 +3444,17 @@ def main() -> None:
         elif args.command == "complete-budget-exhausted-scan":
             result = complete_budget_exhausted_scan(connection, args)
         elif args.command == "cancel-scan":
-            result = cancel_scan(connection, args)
+            result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "fail-scan":
             result = fail_scan(connection, args)
         elif args.command == "preserve-scan-results":
-            result = preserve_scan_results(connection, args)
+            result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "recover-scan-results":
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
-            result = write_scan_draft(connection, args)
+            result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
+        elif args.command == "save-scan-artifact":
+            result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
             result = handoff.mark_handoff_delivered(
                 connection,
@@ -3579,6 +3520,8 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "severity-classification":
+            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
         elif args.command == "dashboard":

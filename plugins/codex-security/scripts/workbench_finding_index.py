@@ -52,15 +52,10 @@ def index_findings(
     document: dict[str, Any],
     timestamp: str,
 ) -> None:
-    findings = document.get("findings")
-    if not isinstance(findings, list):
-        raise SystemExit("findings.json must contain a findings array.")
     repository_id = connection.execute(
         "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()["target_id"]
-    for finding in findings:
-        if not isinstance(finding, dict):
-            raise SystemExit("findings.json entries must be objects.")
+    for finding in document["findings"]:
         severity = finding["severity"]
         confidence = finding["confidence"]
         upsert_finding(connection, finding, timestamp, repository_id)

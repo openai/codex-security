@@ -1,43 +1,31 @@
-<!-- release-version: 0.1.24 -->
+<!-- release-version: 0.1.32 -->
 
+<!-- release-section: highlights:start -->
 ## Highlights
 
-- Start the preview findings service directly with
-  `codex-security serve [--port PORT]`, without Docker or an internal package
-  path. The command reuses the existing service, state, and shutdown behavior;
-  `--port` overrides `PORT`, and port `0` selects a free port. See
-  [running without Docker](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#running-without-docker).
-- Observe durable Deep Scan progress from the SDK with the optional
-  `onDeepProgress({ completed, active, maximum })` callback. Updates report
-  changed completed and active independent-review counts without blocking the
-  scan. See
-  [SDK scan options](https://github.com/openai/codex-security/blob/npm-v0.1.24/sdk/typescript/README.md#sdk-configuration-and-scan-options).
-- Make stopped-result handling explicit and stable. Read, list, and export
-  operations no longer publish late retained results as a side effect; the app
-  reports when recovery is needed and can recover validated results on request.
-  See
-  [stopped result recovery](https://github.com/openai/codex-security/blob/npm-v0.1.24/plugins/codex-security/references/scan-contract.md#stopped-result-recovery).
-- Include changed PowerShell `.ps1` files in diff-scan inventories and remove a
-  conflicting reporting rule so valid internal attack paths remain eligible for
-  review. Nested Deep Scan workers now also receive an explicitly configured
-  OpenAI provider credential through the plugin's existing environment boundary.
-- Improve Windows reliability by preserving case-insensitive `CODEX_HOME`
-  entries and repository paths from ordinary PowerShell activity, and by
-  retrying credential snapshots when a descendant file disappears during ACL
-  inspection. Existing path-safety and permission failures remain fatal.
+- return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
+- keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
+- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
+- bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
+- bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
+- patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
+- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
+- include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
+- propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
+- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
+- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
+- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
+- calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
+- preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
+- create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
+- require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
+- bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
+- bump the codex group across 3 directories with 2 updates ([#1076](https://github.com/openai/codex-security/pull/1076))
+- default CLI and SDK to GPT-6 Sol xhigh ([#1078](https://github.com/openai/codex-security/pull/1078))
+<!-- release-section: highlights:end -->
 
+<!-- release-section: upgrades:start -->
 ## Upgrade notes
 
-- The findings API and dashboard still have no built-in authentication.
-  `codex-security serve` binds to loopback by default; keep it local or place it
-  behind an authenticated TLS proxy before sharing access. Python is still
-  required, and nonempty imports still require an embeddings API credential.
-- Stopped-scan recovery is now explicit. App clients should check
-  `resultsRecoveryNeeded` and request recovery when they want validated late
-  results republished. Canceled scans remain immutable and cannot use this
-  recovery path.
-- `onDeepProgress.maximum` is the configured independent-review cap, not a
-  percentage denominator. The SDK polls the durable projection only when the
-  callback is supplied.
-
-The categorized list below contains the individual changes.
+Review compatibility and document any required migration steps before releasing.
+<!-- release-section: upgrades:end -->
