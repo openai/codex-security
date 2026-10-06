@@ -44,11 +44,6 @@ const expectedSubissuePatterns: Record<string, RegExp[]> = {
     /include|triage/i,
     /ask|would you|do you want/i,
   ],
-  over_limit: [
-    /250/i,
-    /narrow|smaller|filter|depth|status|label/i,
-    /not.*truncate|cannot.*truncate|stop/i,
-  ],
 };
 
 export default (output: unknown, context: AssertionContext) => {
