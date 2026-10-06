@@ -16,7 +16,7 @@ launch_node() {
     shift
     # Preserve POSIX argv and HOME bytes without temporary files or consuming stdin.
     helper_stdin=-
-    if (exec 4<&0) 2>/dev/null; then
+    if (exec 4<&0) 2>&-; then
       exec 4<&0
       helper_stdin=4
     fi
