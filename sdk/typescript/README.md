@@ -296,7 +296,6 @@ credentials. Deep scans additionally expose durable independent-review counts
 through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
 configured cap, not a percentage denominator. `ScanOptions` lists all callbacks.
 
-
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
 allowance. Use `cost.estimatedUsdRange` for reporting. `maxCostUsd` uses the
 short-context estimate; in-flight requests can exceed it. Post-scan prompts run
