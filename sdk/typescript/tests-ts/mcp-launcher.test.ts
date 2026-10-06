@@ -13,20 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-
-async function removeTemporaryDirectory(path: string): Promise<void> {
-  // Bun 1.3.14 ignores fs.rm's retry options.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await rm(path, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
-        throw error;
-      await Bun.sleep(100 * (attempt + 1));
-    }
-  }
-}
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",

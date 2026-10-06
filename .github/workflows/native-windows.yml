@@ -37,6 +37,9 @@ jobs:
         with:
           architecture: ${{ matrix.arch }}
           compile: true
+      - name: Install helper dependencies
+        working-directory: .
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Rust
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
       - name: Check Rust source
