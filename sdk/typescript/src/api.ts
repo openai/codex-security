@@ -4901,7 +4901,7 @@ async function pluginSupportsWorkerProviderSnapshot(
   return (
     isRecord(manifest) &&
     isRecord(manifest["codexSecurity"]) &&
-    manifest["codexSecurity"]["workerProviderSnapshot"] === 3
+    manifest["codexSecurity"]["workerProviderSnapshot"] === 4
   );
 }
 

@@ -110,10 +110,7 @@ export function scanModel(config: Readonly<JsonObject>): unknown {
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
-  return selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model_provider")
-    ? selectedProfile["model_provider"]
-    : config["model_provider"];
+  return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */

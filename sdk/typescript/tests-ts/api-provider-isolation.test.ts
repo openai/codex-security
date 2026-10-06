@@ -132,9 +132,15 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test.each(["custom", "openrouter", "fireworks", "codex-api-key"])(
-  "concurrent %s provider snapshots do not inherit another scan's credentials",
-  async (providerKind) => {
+test.each([
+  ["custom", "direct"],
+  ["custom", "null profile"],
+  ["openrouter", "direct"],
+  ["fireworks", "direct"],
+  ["codex-api-key", "direct"],
+] as const)(
+  "concurrent %s provider snapshots (%s) do not inherit another scan's credentials",
+  async (providerKind, selection) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const state = join(root, "state");
@@ -208,6 +214,12 @@ test.each(["custom", "openrouter", "fireworks", "codex-api-key"])(
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                ...(selection === "null profile"
+                  ? {
+                      profile: "review",
+                      profiles: { review: { model_provider: null } },
+                    }
+                  : {}),
                 model_provider: providerId,
                 model_providers: {
                   [providerId]: provider,
@@ -459,9 +471,16 @@ const legacyProviders: Array<[string, JsonObject]> = [
     },
   ],
 ];
-test.each(legacyProviders)(
-  "checks older custom worker compatibility before launching %s",
-  async (_name, overrides) => {
+test.each(
+  legacyProviders.flatMap(([name, overrides]) =>
+    [true, 3].map(
+      (capability) =>
+        [name, String(capability), capability, overrides] as const,
+    ),
+  ),
+)(
+  "checks older custom worker compatibility before launching %s (capability %s)",
+  async (_name, _capabilityLabel, capability, overrides) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -471,7 +490,7 @@ test.each(legacyProviders)(
     await cp(PLUGIN_ROOT, plugin, { recursive: true });
     const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.codexSecurity = { workerProviderSnapshot: true };
+    manifest.codexSecurity = { workerProviderSnapshot: capability };
     await writeFile(manifestPath, JSON.stringify(manifest));
     let launched = false;
     const client = new TestClient(
