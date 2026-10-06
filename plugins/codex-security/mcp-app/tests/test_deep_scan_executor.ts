@@ -1403,7 +1403,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 workerConfigurations[index].path;
               process.env.XDG_CACHE_HOME = path.join(
                 fixture.root,
-                `cache-${index}`,
+                `cache-${index} `,
               );
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
@@ -1499,7 +1499,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               invocation.cacheDirectory,
-              path.join(fixture.root, `cache-${index}`),
+              path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>
@@ -1605,7 +1605,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.cacheDirectory,
               path.join(
                 fixture.root,
-                `cache-${workerConfigurations.indexOf(selectedProvider)}`,
+                `cache-${workerConfigurations.indexOf(selectedProvider)} `,
               ),
             );
             assert.ok(preflight.argv.includes('model_provider="openai"'));

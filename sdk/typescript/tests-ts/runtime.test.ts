@@ -6218,20 +6218,22 @@ describe("runtime directories and plugin Python boundary", () => {
         managedRuntimeRoots: [managedRoot],
       }),
     ).toBe(managed);
-    const cacheDirectory = join(root, "custom-cache");
-    const cachedPython = join(
-      cacheDirectory,
-      "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
-    );
-    await mkdir(dirname(cachedPython), { recursive: true });
-    await copyFile(managed, cachedPython);
-    await chmod(cachedPython, 0o700);
-    expect(
-      await resolvePluginPython({
-        environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-        homeDirectory: join(root, "unused-home"),
-      }),
-    ).toBe(cachedPython);
+    for (const name of ["custom-cache", "custom-cache "]) {
+      const cacheDirectory = join(root, name);
+      const cachedPython = join(
+        cacheDirectory,
+        "codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+      );
+      await mkdir(dirname(cachedPython), { recursive: true });
+      await copyFile(managed, cachedPython);
+      await chmod(cachedPython, 0o700);
+      expect(
+        await resolvePluginPython({
+          environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
+          homeDirectory: join(root, "unused-home"),
+        }),
+      ).toBe(cachedPython);
+    }
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,

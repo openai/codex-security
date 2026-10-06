@@ -2737,7 +2737,8 @@ export async function resolvePluginPython(
 
   const home = options.homeDirectory ?? homedir();
   const cacheDirectory =
-    environmentValue(environment, "XDG_CACHE_HOME") || join(home, ".cache");
+    environmentValue(environment, "XDG_CACHE_HOME", true) ||
+    join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
     join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
   ];
