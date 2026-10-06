@@ -839,15 +839,20 @@ export class ScanDashboard {
 
   #costLines(): string[] {
     if (!this.#showCost) return [];
+    if (
+      this.#cost === null &&
+      this.#options.maxCostUsd === undefined &&
+      estimateScanCost(this.#options.model?.model, {
+        input_tokens: 0,
+        output_tokens: 0,
+      }) === null
+    ) {
+      return [];
+    }
     const cost =
       this.#cost === null
         ? this.#options.maxCostUsd === undefined
-          ? estimateScanCost(this.#options.model?.model, {
-              input_tokens: 0,
-              output_tokens: 0,
-            }) === null
-            ? "unavailable (model pricing missing)"
-            : "waiting for usage"
+          ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
     return wrapActivity("  COST     ", cost, this.#width());

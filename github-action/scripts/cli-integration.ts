@@ -19,6 +19,7 @@ try {
   const home = join(root, 'home');
   await mkdir(repository);
   await mkdir(home);
+  await mkdir(join(home, '.codex'), {mode:0o700});
   // Pass runner tool lookup/loader settings and isolated homes, without credentials or user configuration.
   const env = { PATH: process.env.PATH, LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH, HOME: home, CI: 'true', NO_COLOR: '1',
     CODEX_HOME: join(home, '.codex'), CODEX_SECURITY_STATE_DIR: join(root, 'state'),
@@ -155,9 +156,11 @@ try {
   await checkPython(venvPython, root, venvEnv);
   const selected = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
     import { execFileSync } from 'node:child_process';
-    const { resolvePluginPython } = await import(process.argv[1]);
+    const { resolvePluginPython, resolveCodexCommand, probeCodexSandbox } = await import(process.argv[1]);
+    const codex = resolveCodexCommand(process.env);
+    await probeCodexSandbox(codex, process.env);
     const python = await resolvePluginPython({environment:process.env, protectedRoot:process.cwd()});
-    console.log(JSON.stringify({python,
+    console.log(JSON.stringify({python, codex:codex.command,
       ...JSON.parse(execFileSync(python, ['-I', '-c', 'import json,os,sys; print(json.dumps(dict(prefix=sys.prefix,loader=os.environ.get("LD_LIBRARY_PATH"))))'],
         {encoding:'utf8', env:{...process.env, LD_LIBRARY_PATH:undefined}})),
       tracking:process.env.RUNNER_TRACKING_ID}));
@@ -166,6 +169,36 @@ try {
   assert.equal(selected.prefix, venv);
   assert.equal(selected.loader, libraryPath);
   assert.equal(selected.tracking, 'synthetic-cli-job');
+
+  // Exercise filesystem enforcement with the scan and network-disabled Deep
+  // worker profiles, using the same pinned Codex and child PATH as the Action.
+  const sandboxWorkspace = join(root, 'sandbox-workspace');
+  const outsideFile = join(root, 'outside-sandbox-workspace.txt');
+  const workspaceFile = join(sandboxWorkspace, 'result.txt');
+  await mkdir(sandboxWorkspace);
+  await writeFile(outsideFile, 'unchanged');
+  for (const [mode, profile] of [
+    ['scan', '{filesystem={":root"="read",":workspace_roots"="write"}}'],
+    ['worker', '{extends=":read-only",filesystem={":root"="read"},network={enabled=false}}'],
+  ] as const) {
+    const proof = JSON.parse(execFileSync(selected.codex, [
+      'sandbox', '-c', `permissions.integration=${profile}`, '-P', 'integration', '-C', sandboxWorkspace,
+      '--', 'node', '--input-type=module', '-e', `
+        import assert from 'node:assert/strict';
+        import { readFileSync, writeFileSync } from 'node:fs';
+        const [source, outside, workspace, mode] = process.argv.slice(1);
+        assert.equal(readFileSync(source, 'utf8'), 'export const example = 1;\\n');
+        const denied = error => ['EACCES', 'EPERM', 'EROFS'].includes(error.code);
+        assert.throws(() => writeFileSync(outside, 'changed'), denied);
+        if (mode === 'scan') writeFileSync(workspace, 'scan output');
+        else assert.throws(() => writeFileSync(workspace, 'worker output'), denied);
+        writeFileSync(1, JSON.stringify({mode, tracking:process.env.RUNNER_TRACKING_ID}));
+      `, join(repository, 'example.ts'), outsideFile, workspaceFile, mode,
+    ], {cwd:sandboxWorkspace, env:venvEnv, encoding:'utf8', timeout:30_000}));
+    assert.deepEqual(proof, {mode, tracking:'synthetic-cli-job'});
+    assert.equal(await readFile(outsideFile, 'utf8'), 'unchanged');
+    assert.equal(await readFile(workspaceFile, 'utf8'), 'scan output');
+  }
   // The actual pinned helper must still work when an MCP-style child drops the loader variable.
   const strippedEnv = {...venvEnv, LD_LIBRARY_PATH:undefined};
   const loaderSourceInput = join(root, 'loader-source.jsonl');
@@ -187,7 +220,7 @@ try {
   assert.equal(result.policyStatus, 'not-evaluated');
   assert.equal(result.sarifUploadReady, false);
   assert.ok(result.errors.some(error => error.includes(cliError.message)));
-  console.log(`Pinned CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, MCP runner tracking, and failures passed without model calls.`);
+  console.log(`Pinned CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness and filesystem enforcement, MCP runner tracking, and failures passed without model calls.`);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
