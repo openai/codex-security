@@ -888,6 +888,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       const environment = {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
+        PATHEXT: process.env["PATHEXT"],
         CODEX_MCP_NODE_PATH: process.execPath,
       };
       const command = resolveCodexCommand({});
@@ -963,9 +964,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       await readRoot(selected);
       const servers = await Promise.all([readRoot(selected), readRoot(second)]);
       for (const [index, pluginRoot] of [selected, second].entries()) {
-        expect(servers[index].pluginId).toBe(
-          "codex-security@codex-security-sdk",
-        );
+        expect(servers[index]).toMatchObject({
+          pluginId: "codex-security@codex-security-sdk",
+          tools: { probe: { description: expect.any(String) } },
+        });
         expect(servers[index].tools.probe.description).toStartWith(
           await realpath(pluginRoot),
         );
