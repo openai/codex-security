@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
+import { gitMarkerRoot } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -24,11 +25,13 @@ const DOCUMENT_EXTENSIONS = new Set([
 export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
+  protectedRoots: string[];
   cleanup(): Promise<void>;
 }
 
 export interface KnowledgeBaseSnapshot {
   readonly sources: readonly string[];
+  readonly protectedRoots?: readonly string[];
   readonly documents: Readonly<Record<string, string>>;
 }
 
@@ -100,7 +103,16 @@ export async function readKnowledgeBaseSnapshot(
     extracted[filename] = text;
     index++;
   }
-  return { sources: [...sources], documents: extracted };
+  return {
+    sources: [...sources],
+    protectedRoots: await Promise.all(
+      [...sources].map(
+        async (source) =>
+          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+      ),
+    ),
+    documents: extracted,
+  };
 }
 
 export async function prepareKnowledgeBase(
@@ -112,6 +124,15 @@ export async function prepareKnowledgeBase(
     "documents" in input
       ? input
       : await readKnowledgeBaseSnapshot(input, signal);
+  const protectedRoots =
+    snapshot.protectedRoots === undefined
+      ? await Promise.all(
+          snapshot.sources.map(
+            async (source) =>
+              (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+          ),
+        )
+      : [...snapshot.protectedRoots];
   const path = await mkdtemp(
     join(directory ?? tmpdir(), "codex-security-knowledge-"),
   );
@@ -131,6 +152,7 @@ export async function prepareKnowledgeBase(
   return {
     path,
     sources: [...snapshot.sources],
+    protectedRoots,
     cleanup: () => rm(path, { recursive: true, force: true }),
   };
 }
@@ -156,8 +178,8 @@ async function discover(
   signal?.throwIfAborted();
   for (const entry of entries) {
     signal?.throwIfAborted();
+    if (entry.name.toLowerCase() === ".git") continue;
     const path = join(directory, entry.name);
-    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);

@@ -8,6 +8,7 @@ import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
 import { codexSecurityCredentialHome } from "../src/runtime.js";
 import { VERSION, BUNDLED_PLUGIN_VERSION } from "../src/version.js";
+import { throwing } from "./support/errors.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/feedback.mjs", import.meta.url),
@@ -270,9 +271,7 @@ test("respects disabled feedback without starting Codex", async () => {
     "[feedback]\nenabled = false\n",
   );
   await expect(
-    sendFeedback(context.options, () => {
-      throw new Error("Must not start Codex");
-    }),
+    sendFeedback(context.options, throwing("Must not start Codex")),
   ).rejects.toThrow("disabled by configuration");
 });
 

@@ -6,6 +6,7 @@ import type {
   FindingsDocument,
   ScanManifest,
   SeverityLevel,
+  ThreatModel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
 import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
@@ -42,6 +43,7 @@ export interface ScanResultOptions {
   threadId: string;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
+  threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
 }
 
@@ -54,6 +56,7 @@ export class ScanResult {
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
+  public readonly threatModelPath: string | null;
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
 
   public constructor(options: ScanResultOptions) {
@@ -64,6 +67,7 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
+    this.threatModelPath = options.threatModelPath ?? null;
     this.cost = estimateScanCost(
       options.turnResult.model,
       options.turnResult.usage,
@@ -86,6 +90,10 @@ export class ScanResult {
         this.sarifPath = null;
       }
     }
+  }
+
+  public get threatModel(): ThreatModel | null {
+    return this.manifest.scan.threatModel ?? null;
   }
 
   public get reportPath(): string {
@@ -128,6 +136,8 @@ export class ScanResult {
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,
+      threatModel: this.threatModel,
+      threatModelPath: this.threatModelPath,
       artifactsDir: this.artifactsDir,
       sarifPath: this.sarifPath,
       cost: this.cost,

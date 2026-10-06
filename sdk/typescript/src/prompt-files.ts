@@ -1,16 +1,9 @@
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { CodexSecurityError } from "./errors.js";
 import { expandHome } from "./runtime.js";
+import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
 
 type ResolvedScanPrompts = Pick<
@@ -113,8 +106,4 @@ export async function readRegularInputFile(
   } finally {
     await file.close();
   }
-}
-
-export function isOutsidePath(path: string): boolean {
-  return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
 }

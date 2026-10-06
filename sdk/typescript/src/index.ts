@@ -1,3 +1,8 @@
+export { exportArtifact } from "./artifact-export.js";
+export type {
+  ExportArtifactOptions,
+  ArtifactExportResult,
+} from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
@@ -93,6 +98,7 @@ export {
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  SandboxUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -136,6 +142,7 @@ export type {
 } from "./deduplication/records.js";
 export type {
   DeduplicationReviewRequest,
+  DeduplicationReviewAttribution,
   DeduplicationReviewRunner,
 } from "./deduplication/review.js";
 export {

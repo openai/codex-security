@@ -1,24 +1,9 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
-from pathlib import Path
-from types import ModuleType
 
 import pytest
-
-PLUGIN_DIR = Path(__file__).resolve().parent.parent
-
-
-def load_script(name: str) -> ModuleType:
-    path = PLUGIN_DIR / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
+from workbench_test_support import load_script
 
 PROJECTION = load_script("report_projection")
 
@@ -32,7 +17,7 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
                 "excludePaths": [],
                 "summary": "## Injected scope\n- nested item",
             },
-            "threatModel": {"summary": "# Injected threat heading\nThreat details"},
+            "threatModel": {"summary": "# Queue boundaries\n\nThreat details"},
         }
     }
     findings = {
@@ -62,14 +47,15 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     return manifest, findings, coverage
 
 
-def test_projection_normalizes_multiline_and_block_structural_text() -> None:
+def test_projection_normalizes_structured_fields() -> None:
     markdown = PROJECTION.build_report_markdown(*canonical_documents())
 
     assert "\n## Injected" not in markdown
     assert "\n# Injected" not in markdown
     assert "\n```" not in markdown
     assert "Text: ## Injected scope - nested item" in markdown
-    assert "Text: # Injected threat heading Threat details" in markdown
+    assert "Text: # Queue boundaries Threat details" in markdown
+    assert "\n# Queue boundaries" not in markdown
     assert "Text: \\`\\`\\` code fence \\`\\`\\`" in markdown
     assert "Parser \\| boundary ## Injected finding heading" in markdown
     assert "Text: ## Injected remediation - unsafe instruction" in markdown

@@ -1,13 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
-import type { ScanResults } from "../types.js";
-
-type JsonObject = Record<string, unknown>;
+import type { JsonObject } from "../types.js";
 
 export interface HandoffWorkspaceState extends JsonObject {
   id: string;
-  results?: ScanResults & JsonObject;
+  results?: JsonObject;
   setup: {
     submitted: boolean;
   };

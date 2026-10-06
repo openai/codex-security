@@ -1,42 +1,26 @@
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
-  realpath,
-  rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-knowledge-test-");
 const testPosix = process.platform === "win32" ? test.skip : test;
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-knowledge-test-")),
-  );
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 async function extractedDocuments(path: string): Promise<string[]> {
   return await Promise.all(
@@ -86,11 +70,14 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
+    await mkdir(join(root, ".GiT"));
+    await writeFile(join(root, ".GiT", "config"), "Repository metadata.");
+    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
     const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
 
     expect(knowledgeBase.sources).toEqual([scope, root]);
     expect((await readdir(knowledgeBase.path)).sort()).toEqual([
@@ -128,7 +115,7 @@ describe("scan knowledge bases", () => {
 
     for (const paths of [[source], [root], [root, source]]) {
       const knowledgeBase = await prepareKnowledgeBase(paths);
-      temporaryDirectories.push(knowledgeBase.path);
+      temporaryDirectories.track(knowledgeBase.path);
       expect(await extractedDocuments(knowledgeBase.path)).toEqual([text]);
       expect(knowledgeBase.sources).toEqual(paths);
     }
@@ -158,7 +145,7 @@ describe("scan knowledge bases", () => {
     contents.push("Review application boundaries.");
 
     const knowledgeBase = await prepareKnowledgeBase(paths);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
 
     expect(knowledgeBase.sources).toEqual(paths);
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
@@ -195,7 +182,7 @@ describe("scan knowledge bases", () => {
     try {
       const prepared = prepareKnowledgeBase([root], controller.signal).then(
         (knowledgeBase) => {
-          temporaryDirectories.push(knowledgeBase.path);
+          temporaryDirectories.track(knowledgeBase.path);
           return knowledgeBase;
         },
       );
@@ -223,7 +210,7 @@ describe("scan knowledge bases", () => {
     let knowledgeBase;
     try {
       knowledgeBase = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(knowledgeBase.path);
+      temporaryDirectories.track(knowledgeBase.path);
     } finally {
       listingSpy.mockRestore();
     }
@@ -276,15 +263,15 @@ describe("scan knowledge bases", () => {
     process.env["USERPROFILE"] = home;
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
-      temporaryDirectories.push(expanded.path);
+      temporaryDirectories.track(expanded.path);
       expect(expanded.sources).toEqual([documents]);
 
       const bare = await prepareKnowledgeBase(["~"]);
-      temporaryDirectories.push(bare.path);
+      temporaryDirectories.track(bare.path);
       expect(bare.sources).toEqual([home]);
 
       const absolute = await prepareKnowledgeBase([documents]);
-      temporaryDirectories.push(absolute.path);
+      temporaryDirectories.track(absolute.path);
       expect(absolute.sources).toEqual([documents]);
 
       expect(expandHome("~other/docs")).toBe("~other/docs");
@@ -305,7 +292,7 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, "threat-model.docx"), docx("SSRF &amp; IDOR"));
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Payment service boundary");
@@ -324,7 +311,7 @@ describe("scan knowledge bases", () => {
     await writeFile(source, "Updated scope");
     await writeFile(join(root, "priorities.txt"), "New attack priorities");
     const second = await prepareKnowledgeBase(first.sources);
-    temporaryDirectories.push(second.path);
+    temporaryDirectories.track(second.path);
     const documents = await extractedDocuments(second.path);
 
     expect(documents.sort()).toEqual([
@@ -386,7 +373,7 @@ describe("scan knowledge bases", () => {
     await symlink(source, linked);
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
+    temporaryDirectories.track(knowledgeBase.path);
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "External APIs",
     ]);
