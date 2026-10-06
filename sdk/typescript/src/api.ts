@@ -2777,7 +2777,7 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = await this.#dependencies.createCodex({
+    const codexOptions = {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
@@ -2798,8 +2798,17 @@ export class CodexSecurity {
           codex_security_surface: this.#surface,
         },
       },
-    });
-    return { codex, environment };
+    };
+    const codex = await this.#dependencies.createCodex(codexOptions);
+    return {
+      codex,
+      environment: {
+        ...codexOptions.env,
+        ...(codexOptions.apiKey === undefined
+          ? {}
+          : { CODEX_API_KEY: codexOptions.apiKey }),
+      },
+    };
   }
 
   async #prepareSession(

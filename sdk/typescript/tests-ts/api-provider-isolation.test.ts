@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
+import { Codex } from "@openai/codex-sdk";
+import { createProfileCodex } from "../src/provider-profile.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
@@ -130,7 +132,7 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test.each(["custom", "openrouter", "fireworks"])(
+test.each(["custom", "openrouter", "fireworks", "codex-api-key"])(
   "concurrent %s provider snapshots do not inherit another scan's credentials",
   async (providerKind) => {
     const root = await temporaryDirectory();
@@ -143,6 +145,20 @@ test.each(["custom", "openrouter", "fireworks"])(
     await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
 
     const workerRuntimeSettings = await loadWorkerSettings(root);
+    const childScript = join(root, "provider-child.mjs");
+    await writeFile(
+      childScript,
+      `
+      for await (const chunk of process.stdin) {}
+      console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", id: "answer", text: JSON.stringify({
+        key: process.env.CODEX_API_KEY ?? null,
+        removedHeader: process.env.OPENAI_API_KEY ?? null,
+      }) } }));
+      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+      process.exit(0);
+    `,
+    );
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -155,15 +171,21 @@ test.each(["custom", "openrouter", "fireworks"])(
         const scan = join(root, `scan-${index}`);
         await mkdir(scan, { mode: 0o700 });
         const providerId =
-          providerKind === "fireworks" ? "fireworks" : "openrouter";
+          providerKind === "fireworks"
+            ? "fireworks"
+            : providerKind === "codex-api-key"
+              ? "synthetic.gateway"
+              : "openrouter";
         const envKey =
-          providerKind === "custom"
-            ? "SYNTHETIC_GATEWAY_KEY"
-            : providerKind === "openrouter"
-              ? process.platform === "win32"
-                ? "openrouter_api_key"
-                : "OPENROUTER_API_KEY"
-              : "FIREWORKS_API_KEY";
+          providerKind === "codex-api-key"
+            ? "CODEX_API_KEY"
+            : providerKind === "custom"
+              ? "SYNTHETIC_GATEWAY_KEY"
+              : providerKind === "openrouter"
+                ? process.platform === "win32"
+                  ? "openrouter_api_key"
+                  : "OPENROUTER_API_KEY"
+                : "FIREWORKS_API_KEY";
         const header = index === 0 ? " synthetic-header-0 " : " ";
         const provider = {
           name: `Synthetic ${index}`,
@@ -173,6 +195,9 @@ test.each(["custom", "openrouter", "fireworks"])(
           env_http_headers: {
             "X-Synthetic": "SYNTHETIC_HEADER",
             "X-Missing": "MISSING_HEADER",
+            ...(providerKind === "codex-api-key"
+              ? { "X-Removed": "OPENAI_API_KEY" }
+              : {}),
           },
           ...(index === 1
             ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
@@ -200,6 +225,12 @@ test.each(["custom", "openrouter", "fireworks"])(
                   : {}),
                 FIREWORKS_API_KEY: ` synthetic-key-${index}\n`,
                 UNUSED_KEY: "synthetic-unused",
+                ...(providerKind === "codex-api-key"
+                  ? {
+                      OPENAI_API_KEY: ` synthetic-key-${index}\n`,
+                      CODEX_API_KEY: `synthetic-other-key-${index}`,
+                    }
+                  : {}),
                 OPENROUTER_API_KEY: ` synthetic-key-${index}\n`,
               },
               resolvePluginPython: async () => "/managed/python",
@@ -232,6 +263,43 @@ test.each(["custom", "openrouter", "fireworks"])(
                     ).toBeUndefined();
                     const settings =
                       await workerRuntimeSettings(mcpEnvironment);
+                    if (providerKind === "codex-api-key") {
+                      const nativeOptions = {
+                        ...options,
+                        codexPathOverride: Bun.which("node")!,
+                        env: {
+                          ...environment,
+                          NODE_OPTIONS: `--import=${pathToFileURL(childScript).href}`,
+                        },
+                      };
+                      for (const native of [
+                        new Codex(nativeOptions),
+                        await createProfileCodex(
+                          nativeOptions,
+                          options.nativeProfile!,
+                        ),
+                      ]) {
+                        for (const resumed of [false, true]) {
+                          const thread = resumed
+                            ? native.resumeThread("synthetic-thread")
+                            : native.startThread();
+                          const result = await thread.run(
+                            "Synthetic credential capture",
+                          );
+                          const child = JSON.parse(result.finalResponse);
+                          expect(child).toEqual({
+                            key: `synthetic-key-${index}`,
+                            removedHeader: null,
+                          });
+                          expect(settings.environment?.[envKey]).toBe(
+                            child.key,
+                          );
+                          expect(
+                            settings.environment?.["OPENAI_API_KEY"],
+                          ).toBeUndefined();
+                        }
+                      }
+                    }
                     expect(settings.environment).toEqual({
                       [envKey]: `synthetic-key-${index}`,
                       SYNTHETIC_HEADER: header,
@@ -246,13 +314,14 @@ test.each(["custom", "openrouter", "fireworks"])(
                     expect(actual.http_headers ?? {}).toEqual(
                       provider.http_headers ?? {},
                     );
-                    expect(
-                      environment[
-                        providerId === "fireworks"
-                          ? "FIREWORKS_API_KEY"
-                          : "OPENROUTER_API_KEY"
-                      ],
-                    ).toBe(`synthetic-key-${index}`);
+                    if (providerKind !== "codex-api-key")
+                      expect(
+                        environment[
+                          providerId === "fireworks"
+                            ? "FIREWORKS_API_KEY"
+                            : "OPENROUTER_API_KEY"
+                        ],
+                      ).toBe(`synthetic-key-${index}`);
                     const saved = await readFile(
                       join(sharedHome, "config.toml"),
                       "utf8",
