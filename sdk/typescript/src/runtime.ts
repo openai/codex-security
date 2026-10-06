@@ -38,6 +38,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2372,6 +2373,30 @@ export async function createMarketplace(
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
+  const legacyMcp = await legacyPluginMcpConfiguration(
+    pluginDestination,
+    signal,
+  );
+  if (legacyMcp !== undefined) {
+    for (const path of [
+      ".mcp.json",
+      "scripts/launch_codex_security_mcp",
+      "scripts/launch_codex_security_mcp.cmd",
+    ]) {
+      const file = join(pluginDestination, path);
+      if (!(await lstat(file).catch(nullIfMissingFileError))?.isFile())
+        continue;
+      await writeFile(
+        file,
+        projectLegacyPluginFile(
+          path,
+          await readFile(file, { signal }),
+          legacyMcp,
+        ),
+        { signal },
+      );
+    }
+  }
   throwIfSignalAborted(signal);
   const manifestPath = join(
     marketplace,
@@ -2388,6 +2413,67 @@ export async function createMarketplace(
   });
   throwIfSignalAborted(signal);
   return marketplace;
+}
+
+async function legacyPluginMcpConfiguration(
+  root: string,
+  signal?: AbortSignal,
+): Promise<Buffer | undefined> {
+  const path = join(root, ".mcp.json");
+  // Keep the source link checks ahead of any configuration read.
+  if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
+  const configuration: unknown = JSON.parse(
+    await readFile(path, { encoding: "utf8", signal }),
+  );
+  const servers = isRecord(configuration)
+    ? configuration["mcpServers"]
+    : undefined;
+  const server = isRecord(servers) ? servers[PLUGIN_NAME] : undefined;
+  if (
+    !isRecord(server) ||
+    (server["command"] !== "./scripts/launch_codex_security_mcp" &&
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
+  ) {
+    return;
+  }
+  const environment = server["env_vars"];
+  if (environment !== undefined && !Array.isArray(environment)) return;
+  if (
+    Array.isArray(environment) &&
+    environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+  ) {
+    return;
+  }
+  server["env_vars"] = [
+    ...(Array.isArray(environment) ? environment : []),
+    "CODEX_SECURITY_PLUGIN_ROOT",
+  ];
+  return Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`);
+}
+
+function projectLegacyPluginFile(
+  path: string,
+  contents: Buffer,
+  mcpConfiguration: Buffer,
+): Buffer {
+  if (path === ".mcp.json") return mcpConfiguration;
+  if (path === "scripts/launch_codex_security_mcp") {
+    return Buffer.from(
+      '#!/bin/sh\nexec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n',
+    );
+  }
+  if (path === "scripts/launch_codex_security_mcp.cmd") {
+    return Buffer.concat([
+      Buffer.from(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+          "exit /b\r\n:codex_security_sdk_original\r\n",
+      ),
+      contents,
+    ]);
+  }
+  return contents;
 }
 
 export function resolveCodexCommand(
@@ -2463,6 +2549,9 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
+  const legacyMcp = await legacyPluginMcpConfiguration(root, options.signal);
+  const projection =
+    legacyMcp === undefined ? undefined : { root, mcpConfiguration: legacyMcp };
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2492,7 +2581,13 @@ export async function bootstrapPlugin(
       join(marketplace, ".agents", "plugins", "marketplace.json"),
       "utf8",
     ).catch(nullIfMissingFileError)) === SDK_MARKETPLACE_MANIFEST &&
-    (await pluginContentsMatch(root, stagedRoot, options.signal));
+    (await pluginContentsMatch(
+      root,
+      stagedRoot,
+      options.signal,
+      false,
+      projection,
+    ));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -2558,6 +2653,7 @@ export async function bootstrapPlugin(
       previous["installedPath"],
       options.signal,
       true,
+      projection,
     ))
   ) {
     return {
@@ -2621,6 +2717,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
+  projection?: { root: string; mcpConfiguration: Buffer },
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -2637,8 +2734,16 @@ async function pluginContentsMatch(
   if (destinationMetadata === null) return false;
 
   if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
+    const projectedPath =
+      projection === undefined
+        ? undefined
+        : relative(projection.root, source).split(sep).join("/");
+    const projected =
+      projectedPath === ".mcp.json" ||
+      projectedPath === "scripts/launch_codex_security_mcp" ||
+      projectedPath === "scripts/launch_codex_security_mcp.cmd";
     if (
-      sourceMetadata.size !== destinationMetadata.size ||
+      (!projected && sourceMetadata.size !== destinationMetadata.size) ||
       (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
     ) {
       return false;
@@ -2649,7 +2754,15 @@ async function pluginContentsMatch(
       readFile(destination, { signal }),
     ]);
 
-    return sourceBytes.equals(destinationBytes);
+    return (
+      projected
+        ? projectLegacyPluginFile(
+            projectedPath!,
+            sourceBytes,
+            projection!.mcpConfiguration,
+          )
+        : sourceBytes
+    ).equals(destinationBytes);
   }
 
   if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
@@ -2672,6 +2785,7 @@ async function pluginContentsMatch(
         join(destination, entry),
         signal,
         allowExtraFiles,
+        projection,
       ))
     ) {
       return false;

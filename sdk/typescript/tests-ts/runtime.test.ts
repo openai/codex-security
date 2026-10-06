@@ -2,7 +2,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -36,6 +36,7 @@ import {
   win32,
 } from "node:path";
 import { PassThrough } from "node:stream";
+import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -814,6 +815,165 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test.each(["shell", "node"])(
+    "keeps legacy %s MCP roots isolated outside the credential home",
+    async (interpreter) => {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const second = join(root, "second plugin");
+      const home = join(root, "home");
+      const work = join(root, "work");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(work);
+      await mkdir(join(selected, "mcp"));
+      await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
+      const mcp = {
+        mcpServers: {
+          "codex-security": {
+            command: "./scripts/launch_codex_security_mcp",
+            args: ["--stdio"],
+            cwd: ".",
+            env_vars: ["CODEX_HOME", "CODEX_MCP_NODE_PATH"],
+            startup_timeout_sec: 20,
+          },
+        },
+      };
+      await writeFile(join(selected, ".mcp.json"), JSON.stringify(mcp));
+      for (const launcher of [
+        "launch_codex_security_mcp",
+        "launch_codex_security_mcp.cmd",
+      ]) {
+        await copyFile(
+          join(PLUGIN_ROOT, "scripts", launcher),
+          join(selected, "scripts", launcher),
+        );
+      }
+      await chmod(
+        join(selected, "scripts", "launch_codex_security_mcp"),
+        0o755,
+      );
+      const serverProgram = `
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  const result = request.method === "initialize"
+    ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-legacy", version: "1" } }
+    : request.method === "tools/list"
+      ? { tools: [{ name: "probe", description: pluginRoot, inputSchema: { type: "object", properties: {} } }] }
+      : request.method === "resources/list" ? { resources: [] }
+      : request.method === "resources/templates/list" ? { resourceTemplates: [] }
+      : {};
+  console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+}
+`;
+      await writeFile(join(selected, "mcp", "server.mjs"), serverProgram);
+      if (interpreter === "node") {
+        await writeFile(
+          join(selected, "scripts", "launch_codex_security_mcp"),
+          `#!/usr/bin/env node\n${serverProgram}`,
+        );
+      }
+      const originals = new Map(
+        await Promise.all(
+          ["launch_codex_security_mcp", "launch_codex_security_mcp.cmd"].map(
+            async (name) =>
+              [name, await readFile(join(selected, "scripts", name))] as const,
+          ),
+        ),
+      );
+      await cp(selected, second, { recursive: true });
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_MCP_NODE_PATH: process.execPath,
+      };
+      const command = resolveCodexCommand({});
+      const installed = await bootstrapPlugin(home, selected, {
+        codexCommand: command,
+        environment,
+      });
+      expect(
+        (
+          await bootstrapPlugin(home, second, {
+            codexCommand: command,
+            environment,
+          })
+        ).installedRoot,
+      ).toBe(installed.installedRoot);
+      expect(
+        JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
+      ).toEqual(mcp);
+      for (const launcher of [
+        "launch_codex_security_mcp",
+        "launch_codex_security_mcp.cmd",
+      ]) {
+        expect(await readFile(join(selected, "scripts", launcher))).toEqual(
+          originals.get(launcher)!,
+        );
+      }
+
+      const readRoot = async (pluginRoot: string) => {
+        const child = childProcess.spawn(
+          executablePathForSpawn(command.command),
+          ["app-server", "--stdio"],
+          {
+            cwd: work,
+            env: {
+              ...environment,
+              CODEX_HOME: home,
+              CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+            },
+            windowsHide: true,
+          },
+        );
+        const closed = once(child, "close");
+        const lines = createInterface({ input: child.stdout });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        const send = (id: number, method: string, params: unknown) =>
+          child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+        try {
+          send(1, "initialize", {
+            clientInfo: { name: "synthetic_legacy_root", version: "1" },
+            capabilities: { experimentalApi: true },
+          });
+          for await (const line of lines) {
+            const response = JSON.parse(line);
+            if (response.error) throw new Error(JSON.stringify(response.error));
+            if (response.id === 1) {
+              child.stdin.write(
+                JSON.stringify({ method: "initialized", params: {} }) + "\n",
+              );
+              send(2, "mcpServerStatus/list", { detail: "full" });
+            }
+            if (response.id === 2) return response.result.data[0];
+          }
+          throw new Error(`Native MCP status did not finish: ${stderr}`);
+        } finally {
+          lines.close();
+          child.stdin.end();
+          child.kill();
+          await closed;
+        }
+      };
+      // Warm native session storage independently of this concurrent root check.
+      await readRoot(selected);
+      const servers = await Promise.all([readRoot(selected), readRoot(second)]);
+      for (const [index, pluginRoot] of [selected, second].entries()) {
+        expect(servers[index].pluginId).toBe(
+          "codex-security@codex-security-sdk",
+        );
+        expect(servers[index].tools.probe.description).toStartWith(
+          await realpath(pluginRoot),
+        );
+      }
+    },
+  );
+
   test("copies configured plugins with more than 4,096 entries", async () => {
     const root = await temporaryDirectory();
     const source = await plugin(root);
@@ -1542,7 +1702,7 @@ describe("plugin runtime preparation", () => {
   });
 
   describe("installed plugin reuse", () => {
-    async function fixture() {
+    async function fixture(legacy = false) {
       const root = await temporaryDirectory();
       const selected = await plugin(root);
       const home = join(root, "home");
@@ -1552,9 +1712,33 @@ describe("plugin runtime preparation", () => {
       const record = join(marketplace, "installed-plugin.json");
       const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
       const calls: string[][] = [];
+      if (legacy) {
+        await writeFile(
+          join(selected, ".mcp.json"),
+          JSON.stringify({
+            mcpServers: {
+              "codex-security": {
+                command: "./scripts/launch_codex_security_mcp",
+                args: ["--stdio", "synthetic argument"],
+                cwd: ".",
+                env_vars: ["CODEX_HOME"],
+              },
+            },
+          }),
+        );
+        for (const launcher of [
+          "launch_codex_security_mcp",
+          "launch_codex_security_mcp.cmd",
+        ]) {
+          await copyFile(
+            join(PLUGIN_ROOT, "scripts", launcher),
+            join(selected, "scripts", launcher),
+          );
+        }
+      }
       await mkdir(home);
-      const bootstrap = () =>
-        bootstrapPlugin(home, selected, {
+      const bootstrap = (pluginRoot = selected) =>
+        bootstrapPlugin(home, pluginRoot, {
           codexCommand: { command: "/codex" },
           runCodex: async (_command, args) => {
             calls.push([...args]);
@@ -1577,6 +1761,61 @@ describe("plugin runtime preparation", () => {
       await bootstrap();
       return { selected, home, staged, installed, record, calls, bootstrap };
     }
+
+    test("reuses root-independent legacy launchers and refreshes source changes", async () => {
+      const { selected, staged, installed, calls, bootstrap } =
+        await fixture(true);
+      const second = join(dirname(selected), "second plugin");
+      await cp(selected, second, { recursive: true });
+      expect((await bootstrap(second)).installedRoot).toBe(installed);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
+      const mcp = JSON.parse(await readFile(join(staged, ".mcp.json"), "utf8"));
+      expect(mcp.mcpServers["codex-security"]).toEqual({
+        command: "./scripts/launch_codex_security_mcp",
+        args: ["--stdio", "synthetic argument"],
+        cwd: ".",
+        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+      });
+      expect(
+        (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
+          .mode & 0o111,
+      ).toBe(
+        (await stat(join(selected, "scripts", "launch_codex_security_mcp")))
+          .mode & 0o111,
+      );
+      const script = join(selected, "scripts", "launch_codex_security_mcp.cmd");
+      await writeFile(
+        script,
+        Buffer.concat([
+          await readFile(script),
+          Buffer.from("\r\nrem synthetic changed source\r\n"),
+        ]),
+      );
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(
+        await readFile(
+          join(installed, "scripts", "launch_codex_security_mcp.cmd"),
+          "utf8",
+        ),
+      ).toEndWith("\r\nrem synthetic changed source\r\n");
+      const sourceMcp = JSON.parse(
+        await readFile(join(selected, ".mcp.json"), "utf8"),
+      );
+      sourceMcp.mcpServers["codex-security"].cwd = dirname(selected);
+      sourceMcp.mcpServers["codex-security"].args.push(
+        "literal ! % & diagnostic",
+      );
+      await writeFile(join(selected, ".mcp.json"), JSON.stringify(sourceMcp));
+      await bootstrap();
+      const changed = JSON.parse(
+        await readFile(join(installed, ".mcp.json"), "utf8"),
+      );
+      expect(changed.mcpServers["codex-security"].cwd).toBe(dirname(selected));
+      expect(changed.mcpServers["codex-security"].args).toEqual(
+        sourceMcp.mcpServers["codex-security"].args,
+      );
+    });
 
     test("preserves generated installed files during reuse", async () => {
       const { installed, calls, bootstrap } = await fixture();

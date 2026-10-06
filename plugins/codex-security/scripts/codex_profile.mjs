@@ -127,7 +127,7 @@ class ProfileThread {
           );
         }
         if (event.type === "thread.started") this.id = event.thread_id;
-        if (event.type === "turn.completed")
+        if (event.type === "turn.completed" && event.usage != null)
           event.usage.cache_write_input_tokens ??= 0;
         yield event;
       }
@@ -201,7 +201,11 @@ async function* execute(options, args, input, signal) {
   const env = { ...(options.env ?? process.env) };
   env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ||= "codex_sdk_ts";
   if (options.apiKey) env.CODEX_API_KEY = options.apiKey;
-  const child = spawn(options.codexPathOverride, args, { env, signal });
+  const child = spawn(options.codexPathOverride, args, {
+    env,
+    signal,
+    windowsHide: true,
+  });
   let processError;
   let inputError;
   child.on("error", (error) => {

@@ -166,11 +166,12 @@ Constructor options:
 | `pythonPath`     | Python interpreter; overrides `PYTHON`.                                 |
 | `codexOverrides` | Supported settings to deep-merge into the isolated Codex configuration. |
 
-Deep Scans with explicit provider selection or provider definitions require a
-plugin that supports per-scan worker provider snapshots. Older custom plugins
+Deep Scans with non-default provider selection or custom provider definitions
+require a plugin that supports per-scan worker provider snapshots. Older custom plugins
 fail before starting model work with an upgrade message; update the plugin or
 omit `pluginPath` to use the bundled version. Older custom plugins remain usable
-for standard scans and Deep Scans that inherit native provider configuration.
+for standard scans and Deep Scans that inherit native provider configuration or
+explicitly select the built-in OpenAI provider without custom provider definitions.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
 
@@ -974,8 +975,12 @@ enabled = true
 max_concurrent_threads_per_session = 9
 
 [windows]
-sandbox = "unelevated"
+sandbox = "elevated"
 ```
+
+Windows uses Codex's elevated sandbox backend to enforce credential read
+denials. Explicit `windows.sandbox` settings remain unchanged; Codex reports
+policies unsupported by the selected backend.
 
 Use `--model MODEL` to choose a model and `--effort EFFORT`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,

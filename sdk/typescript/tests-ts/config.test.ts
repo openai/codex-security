@@ -396,7 +396,7 @@ describe("Codex configuration", () => {
     });
 
     expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       profiles: {
         elevated: {
           features: { elevated_windows_sandbox: true },
@@ -471,7 +471,7 @@ describe("Codex configuration", () => {
     const merged = await mergedCodexConfig({});
 
     expect(scanRuntimeCodexConfig(merged)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
@@ -719,7 +719,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -806,7 +806,7 @@ describe("Codex configuration", () => {
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });

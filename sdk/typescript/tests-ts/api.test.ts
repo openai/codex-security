@@ -47,6 +47,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
@@ -89,6 +90,7 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
@@ -1697,7 +1699,11 @@ describe("CodexSecurity orchestration", () => {
     const scenarios: [JsonObject, string, string | undefined][] = [
       [{}, "none", undefined],
       [
-        { model_reasoning_summary: "auto", service_tier: "flex" },
+        {
+          model_reasoning_summary: "auto",
+          service_tier: "flex",
+          windows: { sandbox: "unelevated" },
+        },
         "auto",
         "flex",
       ],
@@ -1705,7 +1711,11 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           profiles: {
-            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+            cloud: {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+              windows: { sandbox: "elevated" },
+            },
           },
         },
         "concise",
@@ -1714,12 +1724,14 @@ describe("CodexSecurity orchestration", () => {
       [
         {
           profile: "cloud.production",
+          windows: { sandbox: "elevated" },
           profiles: {
             "cloud.production": {
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
               model_verbosity: "high",
+              windows: { sandbox: "unelevated" },
             },
           },
         },
@@ -1797,6 +1809,12 @@ describe("CodexSecurity orchestration", () => {
                   const workerConfig = parseToml(
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
+                  const windows = (resolveCodexProfile(overrides)["windows"] ??
+                    DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
+                  expect(workerConfig["windows"] as JsonObject).toEqual(
+                    windows,
+                  );
+                  expect(options.config?.["windows"]).toEqual(windows);
                   expect(workerConfig["model_verbosity"]).toBe(
                     resolveCodexProfile(overrides)["model_verbosity"],
                   );
@@ -3713,14 +3731,17 @@ describe("CodexSecurity orchestration", () => {
       let matched = false;
       let savedComparisonInput: string | undefined;
       const providerConfig = {
+        windows: { sandbox: "unelevated" },
         model_provider: "synthetic.provider",
         model_providers: {
           "synthetic.provider": {
             name: "Synthetic provider",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
+            env_http_headers: {
+              "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+            },
             auth: { command: "synthetic-auth" },
-            env_http_headers: { "X-Synthetic": "SYNTHETIC_COMPARISON_HEADER" },
           },
         },
       };
@@ -3747,7 +3768,7 @@ describe("CodexSecurity orchestration", () => {
           ...scanRuntimeDependencies(codexHome, scanDir),
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
-              SYNTHETIC_COMPARISON_HEADER: "synthetic-comparison-header",
+              SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
             },
           })),
           runWorkbench: async (
@@ -3803,15 +3824,12 @@ describe("CodexSecurity orchestration", () => {
             expect(options?.config?.codexOverrides).toMatchObject(
               providerConfig,
             );
-            expect(options?.environment?.["SYNTHETIC_COMPARISON_HEADER"]).toBe(
+            expect(
+              options?.config?.codexOverrides?.["environment"],
+            ).toBeUndefined();
+            expect(options?.environment?.["SYNTHETIC_MATCH_HEADER"]).toBe(
               "synthetic-comparison-header",
             );
-            expect(options?.config?.codexOverrides).not.toHaveProperty(
-              "environment",
-            );
-            expect(
-              JSON.stringify(options?.config?.codexOverrides),
-            ).not.toContain("synthetic-comparison-header");
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -6997,47 +7015,156 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await expect(client.close()).resolves.toBeUndefined();
   });
 
-  test("propagates bootstrap workspace cleanup failures from close", async () => {
+  test("retains provider profiles for close when replacement cleanup fails", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const prepared = preparedRuntime(codexHome);
+    const createCodex = mock(throwing("synthetic scan reached"));
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "synthetic-provider",
+          model_providers: {
+            "synthetic-provider": {
+              name: "Synthetic provider",
+              base_url: "https://provider.example.test/v1",
+              wire_api: "responses",
+              requires_openai_auth: false,
+              http_headers: {
+                "X-Synthetic-Token": "synthetic-private-value",
+              },
+            },
+          },
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => prepared,
+        createCodex,
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { mode: "standard" }),
+      ).rejects.toThrow("synthetic scan reached");
+      const previous = prepared.providerProfile!;
+      const cleanup = previous.cleanup;
+      const failure = new Error("synthetic raw profile cleanup failure");
+      let cleanups = 0;
+      previous.cleanup = async () => {
+        if (++cleanups === 1) throw failure;
+        await cleanup();
+      };
+      await expect(client.run(repository, { mode: "standard" })).rejects.toBe(
+        failure,
+      );
+      expect(createCodex).toHaveBeenCalledTimes(1);
+      const profiles = (await readdir(codexHome)).filter((name) =>
+        name.endsWith(".config.toml"),
+      );
+      await client.close();
+      expect(existsSync(previous.path)).toBe(false);
+      expect(cleanups).toBe(2);
+      expect(profiles).toEqual([`${previous.name}.config.toml`]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("attempts all runtime cleanup and preserves failures from close", async () => {
     if (
       runTestInSubprocess(
         import.meta.path,
-        "propagates bootstrap workspace cleanup failures from close",
+        "attempts all runtime cleanup and preserves failures from close",
       )
     ) {
       return;
     }
-    const { root, repository, codexHome } = await runtimeDirectories();
-    const bootstrapWorkspace = join(root, "bootstrap-workspace");
-    await mkdir(bootstrapWorkspace);
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "ambient-key",
+    for (const failures of [
+      ["profile"],
+      ["deep"],
+      ["bootstrap"],
+      ["deep", "bootstrap"],
+      ["profile", "deep", "bootstrap"],
+    ]) {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const bootstrapWorkspace = join(root, "bootstrap-workspace");
+      const deepScanConfigDirectory = join(codexHome, "worker-config");
+      await mkdir(bootstrapWorkspace);
+      await mkdir(deepScanConfigDirectory, { recursive: true });
+      const prepared = {
+        ...preparedRuntime(codexHome),
+        bootstrapWorkspace,
+        deepScanConfigDirectory,
+      };
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            OPENAI_API_KEY: "ambient-key",
+          },
+          prepareRuntime: async () => prepared,
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          createCodex: () => fail("scan reached"),
         },
-        prepareRuntime: runtimePreparer(codexHome, () => ({
+      );
+      await expect(client.run(repository)).rejects.toThrow("scan reached");
+      const profile = await createProviderProfile(codexHome, {
+        model_providers: {
+          "synthetic-provider": {
+            name: "Synthetic provider",
+            http_headers: { "X-Synthetic-Token": "synthetic-private-value" },
+          },
+        },
+      });
+      prepared.providerProfile = profile;
+      const originalRm = fsPromises.rm;
+      const cleanupFailures: Record<string, Error> = {
+        profile: new Error("synthetic raw profile cleanup failure"),
+        deep: new Error("synthetic raw worker cleanup failure"),
+        bootstrap: new Error("synthetic raw bootstrap cleanup failure"),
+      };
+      const attempted: string[] = [];
+      mockFs(() => ({
+        rm: async (...args: Parameters<typeof originalRm>) => {
+          const path = String(args[0]);
+          attempted.push(path);
+          if (path === profile.path && failures.includes("profile"))
+            throw cleanupFailures["profile"];
+          if (path === deepScanConfigDirectory && failures.includes("deep"))
+            throw cleanupFailures["deep"];
+          if (path === bootstrapWorkspace && failures.includes("bootstrap"))
+            throw cleanupFailures["bootstrap"];
+          return await originalRm(...args);
+        },
+      }));
+      try {
+        const error = await client.close().catch((error: unknown) => error);
+        if (failures.length === 1) {
+          expect(error).toBe(cleanupFailures[failures[0]!]);
+        } else {
+          expect(error).toBeInstanceOf(AggregateError);
+          expect((error as AggregateError).errors).toEqual(
+            failures.map((name) => cleanupFailures[name]),
+          );
+        }
+        expect(attempted).toEqual([
+          profile.path,
+          deepScanConfigDirectory,
           bootstrapWorkspace,
-        })),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        createCodex: () => fail("scan reached"),
-      },
-    );
-    await expect(client.run(repository)).rejects.toThrow("scan reached");
-    const originalRm = fsPromises.rm;
-    const failure = new Error("synthetic raw bootstrap cleanup failure");
-    mockFs(() => ({
-      rm: async (...args: Parameters<typeof originalRm>) => {
-        if (String(args[0]) === bootstrapWorkspace) throw failure;
-        return await originalRm(...args);
-      },
-    }));
-    try {
-      await expect(client.close()).rejects.toBe(failure);
-      expect(existsSync(codexHome)).toBe(true);
-    } finally {
-      restoreFs({ rm: originalRm });
+        ]);
+        expect(existsSync(profile.path)).toBe(failures.includes("profile"));
+        expect(existsSync(deepScanConfigDirectory)).toBe(
+          failures.includes("deep"),
+        );
+        expect(existsSync(bootstrapWorkspace)).toBe(
+          failures.includes("bootstrap"),
+        );
+        expect(existsSync(codexHome)).toBe(true);
+      } finally {
+        restoreFs({ rm: originalRm });
+      }
     }
   });
 

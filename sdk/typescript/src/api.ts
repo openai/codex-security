@@ -259,6 +259,7 @@ interface PreparedRuntime {
   codexHome: string;
   bootstrapWorkspace?: string;
   configPath?: string;
+  deepScanConfigDirectory?: string;
   deepScanConfigPath?: string;
   providerProfile?: ProviderProfile;
   plugin: PluginInstall;
@@ -1368,12 +1369,46 @@ export class CodexSecurity {
       );
       checkOpen();
 
-      const workerRuntimeConfig = selectedWorkerRuntimeConfig(
-        effectiveConfig,
-        modelProvider,
-        scanDir,
-        runtime.environment,
-      );
+      const workerProviderEnvironment = {
+        ...withoutOpenAiApiKeys(
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+          ),
+        ),
+        ...(session.apiKey === null
+          ? {}
+          : {
+              [session.externalProvider?.env_key ?? "CODEX_API_KEY"]:
+                session.apiKey,
+            }),
+      };
+      const { environment: workerEnvironment, ...workerRuntimeConfig } =
+        selectedWorkerRuntimeConfig(
+          effectiveConfig,
+          modelProvider,
+          scanDir,
+          workerProviderEnvironment,
+        );
+      const workerSnapshot: JsonObject = {
+        ...workerRuntimeConfig,
+        ...(workerEnvironment === undefined
+          ? {}
+          : { environment: workerEnvironment }),
+      };
+      delete workerSnapshot["model_providers"];
+      if (runtime.providerProfile !== undefined) {
+        workerSnapshot["native_profile"] = runtime.providerProfile.name;
+      }
+      if (deepScanConfiguration !== undefined) {
+        await writeDeepScanConfig(
+          runtime.deepScanConfigPath ??
+            join(runtimeHome, "codex-security", "config.toml"),
+          deepScanConfiguration,
+          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
+        );
+      }
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -1402,7 +1437,7 @@ export class CodexSecurity {
             );
       if (discoveryPrompt !== undefined)
         session.sessionConfig = await customValidationConfig(
-          session.sessionConfig,
+          resolveCodexProfile(session.sessionConfig),
           runtime.plugin.installedRoot,
         );
       const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
@@ -1908,44 +1943,6 @@ export class CodexSecurity {
         options.auth,
         git,
       );
-      if (deepScanConfiguration !== undefined) {
-        const workerSnapshot = { ...workerRuntimeConfig };
-        const providers = workerSnapshot["model_providers"];
-        const definition =
-          isRecord(providers) && typeof modelProvider === "string"
-            ? providers[modelProvider]
-            : undefined;
-        const providerEnvironment: JsonObject = {};
-        if (isRecord(definition)) {
-          const headers = definition["env_http_headers"];
-          for (const name of [
-            definition["env_key"],
-            ...(isRecord(headers) ? Object.values(headers) : []),
-          ]) {
-            if (typeof name !== "string") continue;
-            const key =
-              process.platform === "win32"
-                ? Object.keys(environment)
-                    .sort()
-                    .find((key) => key.toUpperCase() === name.toUpperCase())
-                : name;
-            const value = key === undefined ? undefined : environment[key];
-            if (value !== undefined) providerEnvironment[name] = value;
-          }
-        }
-        if (Object.keys(providerEnvironment).length > 0)
-          workerSnapshot["environment"] = providerEnvironment;
-        delete workerSnapshot["model_providers"];
-        if (runtime.providerProfile !== undefined)
-          workerSnapshot["native_profile"] = runtime.providerProfile.name;
-        await writeDeepScanConfig(
-          runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml"),
-          deepScanConfiguration,
-          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
-        );
-        checkOpen();
-      }
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
@@ -2634,9 +2631,29 @@ export class CodexSecurity {
     );
     const runtime = this.#runtime;
     this.#runtime = null;
-    await runtime?.providerProfile?.cleanup();
-    if (runtime?.bootstrapWorkspace !== undefined) {
-      await cleanupSdkDirectory(runtime.bootstrapWorkspace);
+    const cleanupErrors: unknown[] = [];
+    try {
+      await runtime?.providerProfile?.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    for (const directory of [
+      runtime?.deepScanConfigDirectory,
+      runtime?.bootstrapWorkspace,
+    ]) {
+      if (directory === undefined) continue;
+      try {
+        await cleanupSdkDirectory(directory);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (cleanupErrors.length === 1) throw cleanupErrors[0];
+    if (cleanupErrors.length > 1) {
+      throw new AggregateError(
+        cleanupErrors,
+        "Codex Security runtime directories could not be cleaned up.",
+      );
     }
   }
 
@@ -2747,7 +2764,9 @@ export class CodexSecurity {
           ":root": "read",
           ":workspace_roots": "write",
           [runtimeHome]: { ".": "deny" },
-          [runtime.deepScanConfigPath]: { ".": "deny" },
+          ...(runtime.deepScanConfigDirectory === undefined
+            ? { [runtime.deepScanConfigPath]: { ".": "deny" } }
+            : {}),
         })}`,
         ...configOverrides,
       ];
@@ -2777,7 +2796,7 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codexOptions = {
+    const codex = await this.#dependencies.createCodex({
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
@@ -2798,17 +2817,8 @@ export class CodexSecurity {
           codex_security_surface: this.#surface,
         },
       },
-    };
-    const codex = await this.#dependencies.createCodex(codexOptions);
-    return {
-      codex,
-      environment: {
-        ...codexOptions.env,
-        ...(codexOptions.apiKey === undefined
-          ? {}
-          : { CODEX_API_KEY: codexOptions.apiKey }),
-      },
-    };
+    });
+    return { codex, environment };
   }
 
   async #prepareSession(
@@ -2906,10 +2916,10 @@ export class CodexSecurity {
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      const providers = effectiveConfig["model_providers"];
+      const providers = resolveCodexProfile(effectiveConfig)["model_providers"];
       if (
         deepScan &&
-        (typeof modelProvider === "string" ||
+        ((typeof modelProvider === "string" && modelProvider !== "openai") ||
           (isRecord(providers) && Object.keys(providers).length > 0)) &&
         (runtime.deepScanConfigPath === undefined ||
           !(await pluginSupportsWorkerProviderSnapshot(
@@ -2935,12 +2945,11 @@ export class CodexSecurity {
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       if (isRecord(providers) && Object.keys(providers).length > 0) {
-        const previousProfile = runtime.providerProfile;
+        await runtime.providerProfile?.cleanup();
         runtime.providerProfile = await createProviderProfile(
           runtimeHome,
           effectiveConfig,
         );
-        await previousProfile?.cleanup();
       } else {
         await runtime.providerProfile?.cleanup();
         delete runtime.providerProfile;
@@ -3112,11 +3121,20 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
     };
-    runtime.deepScanConfigPath =
+    if (
       runtime.bootstrapWorkspace !== undefined &&
       (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
-        ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
-        : undefined;
+    ) {
+      runtime.deepScanConfigDirectory ??= await mkdtemp(
+        join(runtime.codexHome, "codex-security-worker-"),
+      );
+      runtime.deepScanConfigPath = join(
+        runtime.deepScanConfigDirectory,
+        "deep-scan-config.toml",
+      );
+    } else {
+      runtime.deepScanConfigPath = undefined;
+    }
   }
 
   async #validatePolicyInputs(
@@ -3543,6 +3561,7 @@ export class CodexSecurity {
       codexSecurityCredentialHome(processEnvironment),
     );
     let bootstrapWorkspace: string | undefined;
+    let deepScanConfigDirectory: string | undefined;
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
@@ -3583,11 +3602,15 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const deepScanConfigPath = (await pluginSupportsIsolatedDeepScanConfig(
-        plugin.pluginRoot,
-      ))
-        ? join(bootstrapWorkspace, "deep-scan-config.toml")
-        : undefined;
+      if (await pluginSupportsIsolatedDeepScanConfig(plugin.pluginRoot)) {
+        deepScanConfigDirectory = await mkdtemp(
+          join(codexHome, "codex-security-worker-"),
+        );
+      }
+      const deepScanConfigPath =
+        deepScanConfigDirectory === undefined
+          ? undefined
+          : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
         isExternalModelProvider(modelProvider) ||
@@ -3602,6 +3625,7 @@ export class CodexSecurity {
         codexHome,
         bootstrapWorkspace,
         configPath,
+        deepScanConfigDirectory,
         deepScanConfigPath,
         plugin,
         environment: {
@@ -3613,16 +3637,21 @@ export class CodexSecurity {
         credentialsAvailable,
       };
     } catch (error) {
-      if (bootstrapWorkspace !== undefined) {
+      const cleanupErrors: unknown[] = [];
+      for (const directory of [deepScanConfigDirectory, bootstrapWorkspace]) {
+        if (directory === undefined) continue;
         try {
-          await cleanupSdkDirectory(bootstrapWorkspace);
+          await cleanupSdkDirectory(directory);
         } catch (cleanupError) {
-          throw new AggregateError(
-            [error, cleanupError],
-            "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
-            { cause: error },
-          );
+          cleanupErrors.push(cleanupError);
         }
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupErrors],
+          "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
+          { cause: error },
+        );
       }
       throw error;
     }
@@ -4915,6 +4944,32 @@ function selectedWorkerRuntimeConfig(
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   const providers = resolved["model_providers"];
+  const providerEnvironmentNames = isRecord(providers)
+    ? Object.values(providers)
+        .flatMap((providerConfig) =>
+          isRecord(providerConfig)
+            ? [
+                providerConfig["env_key"],
+                ...(isRecord(providerConfig["env_http_headers"])
+                  ? Object.values(providerConfig["env_http_headers"])
+                  : []),
+              ]
+            : [],
+        )
+        .filter((name): name is string => typeof name === "string")
+    : [];
+  const providerEnvironment = Object.fromEntries(
+    providerEnvironmentNames.flatMap((name) => {
+      const key =
+        process.platform === "win32"
+          ? Object.keys(environment)
+              .sort()
+              .find((key) => key.toUpperCase() === name.toUpperCase())
+          : name;
+      const value = key === undefined ? undefined : environment[key];
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
   const instructionsFile = resolved["model_instructions_file"];
   if (typeof instructionsFile === "string") {
     resolved["model_instructions_file"] = resolve(
@@ -4924,11 +4979,14 @@ function selectedWorkerRuntimeConfig(
   }
   return {
     ...Object.fromEntries(
-      ["model_instructions_file", "model_verbosity"]
+      ["model_instructions_file", "model_verbosity", "windows"]
         .filter((key) => resolved[key] !== undefined)
         .map((key) => [key, resolved[key]!]),
     ),
     ...(provider === undefined ? {} : { model_provider: provider }),
+    ...(Object.keys(providerEnvironment).length === 0
+      ? {}
+      : { environment: providerEnvironment }),
     ...(isRecord(providers)
       ? {
           model_providers:

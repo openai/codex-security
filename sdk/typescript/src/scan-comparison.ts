@@ -24,6 +24,7 @@ import {
   deepMerge,
   hasCommandAuth,
   mergedCodexConfig,
+  normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCyberAccessConfig,
@@ -171,7 +172,7 @@ interface CompletedScanMatchingOptions extends Pick<
   "config" | "environment" | "model" | "signal"
 > {
   /** @internal Private native profile owned by the calling scan. */
-  nativeProfile?: { name: string; path: string };
+  nativeProfile?: ReadOnlyCodexOptions["nativeProfile"];
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
   scanId: string;
@@ -544,17 +545,27 @@ async function startReadOnlyCodexThread(
   const reasoningEffort =
     options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
   const source = options.environment ?? process.env;
+  const homeConfig =
+    options.codex === undefined
+      ? await readCodexHomeConfig(source, options.signal)
+      : {};
+  const homeExecutionConfig = resolveCodexProfile(homeConfig);
+  normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
   const providerConfig =
     options.codex === undefined
       ? resolveCommandAuthConfig(
-          deepMerge(
-            await readCodexHomeConfig(source, options.signal),
-            // Native file layers omit null object fields before inheritance.
-            parse(stringify(config ?? {})) as JsonObject,
-          ),
+          deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
           configuredCodexHome(source),
         )
       : {};
+  const suppliedConfig = resolveCodexProfile(
+    options.config?.codexOverrides ?? {},
+  );
+  normalizeLegacyWindowsSandboxOverride(suppliedConfig);
+  const windows =
+    suppliedConfig["windows"] === undefined
+      ? (homeExecutionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"])
+      : resolveCodexProfile(config ?? {})["windows"];
   const commandAuth = hasCommandAuth(providerConfig);
   if (
     commandAuth &&
@@ -611,6 +622,7 @@ async function startReadOnlyCodexThread(
       undefined,
     config: {
       ...sdkConfig,
+      windows,
       mcp_servers: await disabledMcpServers(
         await providerPreflightCommand(command!, providerSettings),
         config,
@@ -658,12 +670,6 @@ async function startReadOnlyCodexThread(
     let requestedPermissionProfile: string | undefined;
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
-      codexOptions.config = {
-        ...codexOptions.config,
-        windows:
-          resolveCodexProfile(providerConfig)["windows"] ??
-          DEFAULT_CODEX_CONFIG["windows"],
-      } as NonNullable<CodexOptions["config"]>;
       const permissions = await preflightReadOnlyProfileCodex(
         codexOptions,
         {
