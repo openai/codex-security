@@ -5,12 +5,53 @@ export function outputText(output: unknown) {
 }
 
 export function hasTriageJson(text: string) {
-  return (
-    /```(?:json)?\s*[\s\S]*?```/i.test(text) ||
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i.test(text) ||
-    /["']findings["']\s*:/i.test(text) ||
-    /["']verdict["']\s*:/i.test(text)
-  );
+  for (const [, key, literal] of text.matchAll(
+    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?<=[{,])\s*(?:schema_version|verdict))\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:triage-finding\/v0|confirmed|needs_review|not_actionable)(?=\s*[,}]))/g,
+  )) {
+    try {
+      const name = /^["']/.test(key)
+        ? JSON.parse(key.replace(/^'|'$/g, '"'))
+        : key.trim();
+      const value = /^["']/.test(literal)
+        ? JSON.parse(literal.replace(/^'|'$/g, '"'))
+        : literal;
+      if (name === "schema_version" && value === "triage-finding/v0")
+        return true;
+      if (
+        name === "verdict" &&
+        ["confirmed", "needs_review", "not_actionable"].includes(value)
+      )
+        return true;
+    } catch {
+      // Ignore quoted prose that is not a JSON field.
+    }
+  }
+  let depth = 0;
+  let start = 0;
+  for (const match of text.matchAll(
+    /"(?:\\.|[^"\\])*"|(?<!\w)'(?:\\.|[^'\\])*'|[{}]/g,
+  )) {
+    if (match[0] === "{") {
+      if (depth++ === 0) start = match.index;
+    } else if (match[0] === "}" && depth > 0 && --depth === 0) {
+      try {
+        const result = JSON.parse(text.slice(start, match.index + 1));
+        if (
+          !("schema_version" in result) &&
+          Array.isArray(result.findings) &&
+          (result.findings.length === 0 ||
+            result.findings.some(
+              (finding: { message?: unknown } | null) =>
+                typeof finding?.message !== "string",
+            ))
+        )
+          return true;
+      } catch {
+        // Keep prose and incomplete JSON out of the findings-envelope check.
+      }
+    }
+  }
+  return false;
 }
 
 export function parseExpected(

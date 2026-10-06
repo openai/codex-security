@@ -58,6 +58,7 @@ await copyFile(
 // Preserve the licenses of packages whose code or design tokens ship in the browser bundle.
 const packages = new Set([
   "node_modules/@openai/apps-sdk-ui",
+  "node_modules/katex",
   "node_modules/tailwindcss",
 ]);
 for (const output of Object.values(built.metafile.outputs)) {
