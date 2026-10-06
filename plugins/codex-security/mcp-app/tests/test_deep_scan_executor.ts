@@ -1277,6 +1277,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_CLI_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
@@ -1410,6 +1411,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   auth: {
                     type: "command",
                     command: "synthetic-auth",
+                    cwd: path.join(codexHome, `helpers ${index}`),
                     args: [String(index)],
                     env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                   },
@@ -1508,6 +1510,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      process.env.CODEX_SECURITY_PLUGIN_ROOT = path.join(
+        fixture.root,
+        "ambient-plugin",
+      );
       const launches: {
         command?: string;
         args: readonly string[];
@@ -1550,7 +1556,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ...modelSettings,
             parentSandbox: workerConfigurations[index].parentSandbox,
             artifactContext: {
-              pluginRoot: fixture.root,
+              pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
@@ -1621,6 +1627,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
               await realpath(codexHome),
+            );
+            assert.equal(
+              workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
+              path.join(fixture.root, "ambient-plugin"),
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -1739,6 +1749,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
                 helperPython,
+              "mcp_servers.cs_artifacts.args.0": path.join(
+                fixture.root,
+                `plugin-${index}`,
+                "mcp",
+                "server.mjs",
+              ),
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT":
+                path.join(fixture.root, `plugin-${index}`),
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
+                kind === "dedup" ? "reducer" : "worker",
             });
             assert.equal(process.env.PYTHON, python);
             assert.equal(

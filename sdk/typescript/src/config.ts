@@ -119,7 +119,7 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
   const selected = scanModelProvider(config);
-  const providers = config["model_providers"];
+  const providers = resolveCodexProfile(config)["model_providers"];
   const provider =
     typeof selected === "string" && isObject(providers)
       ? providers[selected]
@@ -133,8 +133,9 @@ export function resolveCommandAuthConfig(
   home: string,
 ): JsonObject {
   const resolved = structuredClone(config);
-  const providers = resolved["model_providers"];
+  const providers = resolveCodexProfile(resolved)["model_providers"];
   if (isObject(providers)) {
+    (selectedScanProfile(resolved) ?? resolved)["model_providers"] = providers;
     for (const provider of Object.values(providers)) {
       if (!isObject(provider) || !isObject(provider["auth"])) continue;
       const auth = provider["auth"];
