@@ -3879,6 +3879,7 @@ describe("CodexSecurity orchestration", () => {
     "gpt-5.5",
     "gpt-6-astra",
     "gpt-5.6-terra",
+    "gpt-5.6-cyber",
     "gpt-daybreak-blue-latest",
     "gpt-daybreak-red-latest",
   ];
