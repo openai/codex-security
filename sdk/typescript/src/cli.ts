@@ -7488,7 +7488,7 @@ async function runSkill(
       ),
       "Assess the immutable patch artifact described by this JSON object:",
       JSON.stringify(options.patchArtifact),
-      `Validate the JSON assessment with ${JSON.stringify(join(plugin, "skills", skill, "scripts", "validate_patch_risk_assessment.py"))} as required by the skill.`,
+      `For the skill's platform-specific validation command, <plugin-root> is this literal path (JSON string): ${JSON.stringify(plugin)}. Validate the JSON assessment as required by the skill.`,
       "Wrap only the concise Markdown report between these exact marker lines:",
       PATCH_RISK_SUMMARY_START,
       PATCH_RISK_SUMMARY_END,
