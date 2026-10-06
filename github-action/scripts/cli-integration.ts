@@ -19,6 +19,7 @@ try {
   const home = join(root, 'home');
   await mkdir(repository);
   await mkdir(home);
+  await mkdir(join(home, '.codex'), {mode:0o700});
   // Pass runner tool lookup/loader settings and isolated homes, without credentials or user configuration.
   const env = { PATH: process.env.PATH, LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH, HOME: home, CI: 'true', NO_COLOR: '1',
     CODEX_HOME: join(home, '.codex'), CODEX_SECURITY_STATE_DIR: join(root, 'state'),
@@ -155,7 +156,8 @@ try {
   await checkPython(venvPython, root, venvEnv);
   const selected = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
     import { execFileSync } from 'node:child_process';
-    const { resolvePluginPython } = await import(process.argv[1]);
+    const { resolvePluginPython, resolveCodexCommand, probeCodexSandbox } = await import(process.argv[1]);
+    await probeCodexSandbox(resolveCodexCommand(process.env), process.env);
     const python = await resolvePluginPython({environment:process.env, protectedRoot:process.cwd()});
     console.log(JSON.stringify({python,
       ...JSON.parse(execFileSync(python, ['-I', '-c', 'import json,os,sys; print(json.dumps(dict(prefix=sys.prefix,loader=os.environ.get("LD_LIBRARY_PATH"))))'],
@@ -187,7 +189,7 @@ try {
   assert.equal(result.policyStatus, 'not-evaluated');
   assert.equal(result.sarifUploadReady, false);
   assert.ok(result.errors.some(error => error.includes(cliError.message)));
-  console.log(`Pinned CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, MCP runner tracking, and failures passed without model calls.`);
+  console.log(`Pinned CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness, MCP runner tracking, and failures passed without model calls.`);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
