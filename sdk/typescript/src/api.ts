@@ -2815,14 +2815,17 @@ export class CodexSecurity {
         ),
       );
       scanEnvironment = {
-        ...selectedScanEnvironment(
-          commandAuth
-            ? withoutOpenAiApiKeys(runtimeEnvironment)
-            : runtimeEnvironment,
-          options.auth,
-          modelProvider,
+        ...withoutCodexHome(
+          selectedScanEnvironment(
+            commandAuth
+              ? withoutOpenAiApiKeys(runtimeEnvironment)
+              : runtimeEnvironment,
+            options.auth,
+            modelProvider,
+          ),
         ),
-        ...scanEnvironment,
+        ...withoutCodexHome(scanEnvironment),
+        CODEX_HOME: runtime.codexHome,
       };
       const effectiveConfig = scanCyberAccessConfig(
         requestedConfig,

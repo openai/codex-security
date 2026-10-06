@@ -654,6 +654,88 @@ describe("CodexSecurity finding validation", () => {
 });
 
 describe("CodexSecurity orchestration", () => {
+  test.each([false, true])(
+    "workbench usage uses the managed home with an explicit database override: %s",
+    async (overrideDatabase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const ambientHome = join(root, "ambient-home");
+      await mkdir(ambientHome);
+      const environment = {
+        CODEX_HOME: ambientHome,
+        CODEX_SQLITE_HOME: "",
+        CODEX_STATE_DB: overrideDatabase
+          ? join(codexHome, "state_5.sqlite")
+          : "",
+      };
+      let measured: JsonObject | undefined;
+      const client = new TestClient(
+        { codexOverrides: { model: "synthetic-unpriced-model" } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          environment,
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "complete-scan") {
+              const script = [
+                "import json, sqlite3, sys",
+                "from pathlib import Path",
+                "sys.path.insert(0, sys.argv[1])",
+                "from workbench_scan_usage import collect_scan_usage",
+                "home = Path(sys.argv[2])",
+                "rollout = home / 'synthetic-rollout.jsonl'",
+                "events = [",
+                "  {'type': 'session_meta', 'payload': {'id': 'thread-1', 'timestamp': '2026-07-26T12:00:00Z', 'source': 'exec'}},",
+                "  {'type': 'event_msg', 'timestamp': '2026-07-26T12:00:01Z', 'payload': {'type': 'task_started', 'turn_id': '019f9e4d-b3ba-7000-8000-000000000001', 'started_at': 1785067201}},",
+                "  {'type': 'event_msg', 'timestamp': '2026-07-26T12:00:02Z', 'payload': {'type': 'token_count', 'info': {'total_token_usage': {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}}}},",
+                "]",
+                "rollout.write_text(''.join(json.dumps(event) + chr(10) for event in events))",
+                "with sqlite3.connect(home / 'state_5.sqlite') as db:",
+                "  db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)')",
+                "  db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)')",
+                "  db.execute('INSERT INTO threads VALUES (?, ?)', ('thread-1', str(rollout)))",
+                "workbench = sqlite3.connect(':memory:')",
+                "workbench.row_factory = sqlite3.Row",
+                "workbench.execute('CREATE TABLE workspaces (id TEXT, thread_id TEXT)')",
+                "workbench.execute(\"INSERT INTO workspaces VALUES ('synthetic-workspace', 'thread-1')\")",
+                "scan = workbench.execute(\"SELECT 'synthetic-scan' AS id, 'synthetic-workspace' AS workspace_id, 'standard' AS mode, '2026-07-26T12:00:00Z' AS started_at, '2026-07-26T12:05:00Z' AS completed_at\").fetchone()",
+                "print(json.dumps(collect_scan_usage(workbench, scan, thread_id='thread-1')))",
+              ].join("\n");
+              measured = JSON.parse(
+                execFileSync(
+                  pythonExecutable(),
+                  [
+                    "-I",
+                    "-B",
+                    "-c",
+                    script,
+                    join(PLUGIN_ROOT, "scripts"),
+                    codexHome,
+                  ],
+                  {
+                    env: { ...process.env, ...options.environment },
+                    encoding: "utf8",
+                  },
+                ),
+              );
+            }
+            return mockWorkbench(args, input);
+          },
+          createCodex: completedCodex(root),
+        },
+      );
+      try {
+        await client.run(repository);
+        expect(measured).toMatchObject({
+          coverage: "complete",
+          inputTokens: 100,
+          outputTokens: 10,
+          totalTokens: 110,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("isolates per-run safety identifiers across clients and clears them on reuse", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
