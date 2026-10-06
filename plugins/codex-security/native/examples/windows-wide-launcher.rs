@@ -157,15 +157,16 @@ fn main() -> std::io::Result<()> {
         let repo = root.join(&cwds[0]).join(&repos[0]);
         let output_name = raw("out-", 0xdfff);
         let output = repo.join(&output_name);
-        let invoke = |args: &[PathBuf]| {
+        let invoke = |command: &str, args: &[PathBuf]| {
             Command::new(&node)
                 .arg(&script)
-                .args(["--helper", "resolve-security-md"])
+                .args(["--helper", command])
                 .args(args)
                 .current_dir(&repo)
                 .env("USERPROFILE", &repo)
                 .output()
         };
+        let policy = |args: &[PathBuf]| invoke("resolve-security-md", args);
         for (repo_arg, scope_arg, output_arg) in [
             (repo.clone(), PathBuf::from(&scopes[0]), output.clone()),
             (
@@ -179,7 +180,7 @@ fn main() -> std::io::Result<()> {
                 PathBuf::from(&output_name),
             ),
         ] {
-            let child = invoke(&[
+            let child = policy(&[
                 "--repo".into(),
                 repo_arg,
                 "--scope".into(),
@@ -206,7 +207,7 @@ fn main() -> std::io::Result<()> {
             fs::remove_file(&output)?;
         }
         for scope in [PathBuf::from("."), PathBuf::from(&scopes[0]).join("..")] {
-            let child = invoke(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
+            let child = policy(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
             let expected = b"## SECURITY.md source: \"SECURITY.md\"\n\nroot raw\n";
             if !child.status.success() || !child.stderr.is_empty() || child.stdout != expected {
                 return Err(io::Error::other(
@@ -214,7 +215,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        let listing = invoke(&["--repo".into(), "~".into(), "--list".into()])?;
+        let listing = policy(&["--repo".into(), "~".into(), "--list".into()])?;
         let expected =
             b"[\"SECURITY.md\", \"scope-\\udfff/SECURITY.md\", \"scope-\\ufffd/SECURITY.md\"]\n";
         if !listing.status.success() || !listing.stderr.is_empty() || listing.stdout != expected {
@@ -236,7 +237,7 @@ fn main() -> std::io::Result<()> {
         let sibling_policy = sibling.join("SECURITY.md");
         fs::write(&sibling_policy, "sibling policy\n")?;
         let verify_outside_root = |scope: &Path| -> io::Result<()> {
-            let result = invoke(&[
+            let result = policy(&[
                 "--repo".into(),
                 identity_root.clone(),
                 "--scope".into(),
@@ -292,20 +293,20 @@ fn main() -> std::io::Result<()> {
             "\n",
         );
         let candidate = |repo_arg: &Path, input: &Path, scope: &Path, output: &Path| {
-            Command::new(&node)
-                .arg(&script)
-                .args(["--helper", "normalize-candidates", "--repo-root"])
-                .arg(repo_arg)
-                .arg("--input")
-                .arg(input)
-                .arg("--in-scope-files")
-                .arg(scope)
-                .arg("--out")
-                .arg(output)
-                .arg("--allow-missing-in-scope")
-                .current_dir(&repo)
-                .env("USERPROFILE", &repo)
-                .output()
+            invoke(
+                "normalize-candidates",
+                &[
+                    "--repo-root".into(),
+                    repo_arg.into(),
+                    "--input".into(),
+                    input.into(),
+                    "--in-scope-files".into(),
+                    scope.into(),
+                    "--out".into(),
+                    output.into(),
+                    "--allow-missing-in-scope".into(),
+                ],
+            )
         };
         fs::write(&output, "previous output")?;
         for (index, prefix) in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")]
@@ -362,8 +363,319 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
+        let assessment_name = raw("assessment-", 0xd800);
+        let assessment_path = repo.join(&assessment_name);
+        let replacement_assessment = repo.join(raw("assessment-", 0xfffd));
+        let assessment = r#"{
+            "schemaVersion":1,
+            "patch":{"repository":"example/project","sourceType":"patch_file","base":"base","head":"head","changedFiles":["src/example.ts"],"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+            "recommendation":"no_op","workflowLabel":"no_op",
+            "impact":{"rating":"low","rationale":"No active path changes."},
+            "regressionLikelihood":{"rating":"low","rationale":"No live effect."},
+            "regressionProtection":{"rating":"strong","rationale":"Fixture validated.","exactHeadChecksPassed":true},
+            "recoverability":{"rating":"easy","rationale":"Local change."},
+            "confidence":{"rating":"high","rationale":"Known fixture."},
+            "applicability":{"status":"no_live_effect","rationale":"Synthetic input."},
+            "statusQuoRisk":{"rating":"low","rationale":"No live effect."},
+            "autoMergeExclusions":[],"affectedRuntimeRoots":[],"materialBoundaries":[],
+            "validation":[{"name":"fixture","status":"passed","protects":"Validator input."}],
+            "unknowns":[],"evidencePlan":[]
+        }"#;
+        fs::write(&assessment_path, assessment)?;
+        fs::write(&replacement_assessment, "replacement assessment sentinel")?;
+        for input in [assessment_path.clone(), PathBuf::from(&assessment_name)] {
+            let child = Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "validate-patch-risk-assessment"])
+                .arg(input)
+                .current_dir(&repo)
+                .output()?;
+            if !child.status.success() || !child.stdout.is_empty() || !child.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Wide assessment helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+        }
+        if fs::read(&assessment_path)? != assessment.as_bytes()
+            || fs::read(&replacement_assessment)? != b"replacement assessment sentinel"
+        {
+            return Err(io::Error::other("Assessment validation changed its input"));
+        }
+        let worklist_dir = raw("worklist-", 0xdc80);
+        let worklist_output = repo.join(&worklist_dir).join(&output_name);
+        let worklist_sentinel = repo
+            .join(raw("worklist-", 0xfffd))
+            .join(&replacement_output);
+        fs::create_dir_all(worklist_sentinel.parent().unwrap())?;
+        fs::write(&worklist_sentinel, "worklist output sentinel")?;
+        for (command, input_flag, row) in [
+            (
+                "copy-deep-review-input",
+                "--rank-input",
+                "{\"path\":\"source.py\",\"area\":\"src\",\"preview\":\"source line\"}\n",
+            ),
+            (
+                "select-deep-review-input",
+                "--rank-output",
+                "{\"path\":\"source.py\",\"area\":\"src\",\"score\":5,\"include\":true,\"reason\":\"source line\"}\n",
+            ),
+        ] {
+            fs::write(repo.join(&input_name), row)?;
+            for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+                let child = invoke(command, &[
+                    input_flag.into(), prefix.join(&input_name),
+                    "--out".into(), prefix.join(&worklist_dir).join(&output_name),
+                ])?;
+                if !child.status.success()
+                    || !child.stderr.is_empty()
+                    || fs::read(&worklist_output)? != b"{\"path\":\"source.py\",\"area\":\"src\"}\r\n"
+                {
+                    return Err(io::Error::other(format!(
+                        "Wide deep-review helper failed: {}",
+                        String::from_utf8_lossy(&child.stderr)
+                    )));
+                }
+                fs::remove_file(&worklist_output)?;
+            }
+        }
+        if fs::read(&worklist_sentinel)? != b"worklist output sentinel"
+            || fs::read(repo.join(raw("input-", 0xfffd)))? != b"invalid replacement input"
+        {
+            return Err(io::Error::other(
+                "Deep-review helper changed a replacement path",
+            ));
+        }
+        let shards_name = raw("shards-", 0xdc80);
+        let shards = repo.join(&shards_name);
+        let replacement_shards = repo.join(raw("shards-", 0xfffd));
+        fs::create_dir(&replacement_shards)?;
+        let shard_sentinel = replacement_shards.join("rank-shard-0001.input.jsonl");
+        fs::write(&shard_sentinel, "replacement shard sentinel")?;
+        let merge_parent = raw("merged-", 0xd800);
+        let merged = repo.join(&merge_parent).join(&output_name);
+        let merge_sentinel = repo.join(raw("merged-", 0xfffd)).join(&replacement_output);
+        fs::create_dir_all(merge_sentinel.parent().unwrap())?;
+        fs::write(&merge_sentinel, "replacement merge sentinel")?;
+        let input_rows = [
+            "{\"path\":\"first.py\",\"area\":\"src\",\"preview\":\"first\"}\r\n",
+            "{\"path\":\"second.py\",\"area\":\"src\",\"preview\":\"second\"}\r\n",
+        ];
+        let output_rows = [
+            "{\"path\":\"first.py\",\"area\":\"src\",\"score\":5,\"include\":true,\"reason\":\"review\"}\r\n",
+            "{\"path\":\"second.py\",\"area\":\"src\",\"score\":6,\"include\":true,\"reason\":\"review\"}\r\n",
+        ];
+        fs::write(repo.join(&input_name), input_rows.concat())?;
+        let made = invoke(
+            "make-rank-shards",
+            &[
+                "--rank-input".into(),
+                repo.join(&input_name),
+                "--out-dir".into(),
+                Path::new("~").join(&shards_name),
+                "--max-rows".into(),
+                "1".into(),
+            ],
+        )?;
+        if !made.status.success() || !made.stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "Wide shard creation failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            )));
+        }
+        for (index, input_row) in input_rows.iter().enumerate() {
+            let stem = format!("rank-shard-{:04}", index + 1);
+            if fs::read(shards.join(format!("{stem}.input.jsonl")))? != input_row.as_bytes() {
+                return Err(io::Error::other("Wide input shard bytes changed"));
+            }
+            fs::write(
+                shards.join(format!("{stem}.output.jsonl")),
+                output_rows[index],
+            )?;
+        }
+        let validated = invoke(
+            "validate-rank-shard",
+            &[
+                "--input".into(),
+                Path::new(&shards_name).join("rank-shard-0001.input.jsonl"),
+                "--output".into(),
+                Path::new(&shards_name).join("rank-shard-0001.output.jsonl"),
+            ],
+        )?;
+        let merge_args = [
+            "--rank-input".into(),
+            Path::new(".").join(&input_name),
+            "--shard-dir".into(),
+            shards.clone(),
+            "--out".into(),
+            Path::new("~").join(&merge_parent).join(&output_name),
+        ];
+        let merge_result = invoke("merge-rank-outputs", &merge_args)?;
+        if !validated.status.success()
+            || !validated.stderr.is_empty()
+            || !merge_result.status.success()
+            || !merge_result.stderr.is_empty()
+            || fs::read(&merged)? != output_rows.concat().as_bytes()
+        {
+            return Err(io::Error::other(format!(
+                "Wide shard validation/merge failed: {}{}",
+                String::from_utf8_lossy(&validated.stderr),
+                String::from_utf8_lossy(&merge_result.stderr)
+            )));
+        }
+        let mut malformed_name = raw("rank-shard-", 0xdfff);
+        malformed_name.push(".input.jsonl");
+        fs::write(shards.join(&malformed_name), "")?;
+        let malformed = invoke("merge-rank-outputs", &merge_args)?;
+        if malformed.status.code() != Some(1)
+            || !String::from_utf8_lossy(&malformed.stderr)
+                .contains("Rank input shards must use contiguous canonical names")
+            || !String::from_utf8_lossy(&malformed.stderr)
+                .contains("rank-shard-\\udfff.input.jsonl")
+            || fs::read(&merged)? != output_rows.concat().as_bytes()
+            || fs::read(&shard_sentinel)? != b"replacement shard sentinel"
+            || fs::read(&merge_sentinel)? != b"replacement merge sentinel"
+            || fs::read(repo.join(raw("input-", 0xfffd)))? != b"invalid replacement input"
+        {
+            return Err(io::Error::other(
+                "Wide shard discovery or replacement paths changed",
+            ));
+        }
+        fs::remove_file(shards.join(&malformed_name))?;
+        let pool_name = raw("pool-", 0xd800);
+        let plan_name = raw("plan-", 0xdfff);
+        let pool = repo.join(&pool_name);
+        let pool_shards = pool.join("rank_shards");
+        fs::create_dir(&pool)?;
+        fs::rename(&shards, &pool_shards)?;
+        let plan = pool.join(&plan_name);
+        let plan_sentinel = pool.join(raw("plan-", 0xfffd));
+        fs::write(&plan_sentinel, "replacement plan sentinel")?;
+        let made_plan = invoke(
+            "make-rank-pool-plan",
+            &[
+                "--shard-dir".into(),
+                Path::new("~").join(&pool_name).join("rank_shards"),
+                "--usable-worker-slots".into(),
+                "2".into(),
+                "--out".into(),
+                Path::new(&pool_name).join(&plan_name),
+            ],
+        )?;
+        if !made_plan.status.success() || !made_plan.stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "Wide pool plan creation failed: {}",
+                String::from_utf8_lossy(&made_plan.stderr)
+            )));
+        }
+        let plan_bytes = fs::read(&plan)?;
+        let expected_plan = concat!(
+            "{\r\n  \"ranking_worker_count\": 2,\r\n  \"schema_version\": 1,\r\n",
+            "  \"shard_count\": 2,\r\n  \"strategy\": \"round_robin\",\r\n  \"workers\": [\r\n",
+            "    {\r\n      \"input_shards\": [\r\n        \"rank-shard-0001.input.jsonl\"\r\n      ],\r\n",
+            "      \"output_shards\": [\r\n        \"rank-shard-0001.output.jsonl\"\r\n      ],\r\n      \"slot\": 1\r\n    },\r\n",
+            "    {\r\n      \"input_shards\": [\r\n        \"rank-shard-0002.input.jsonl\"\r\n      ],\r\n",
+            "      \"output_shards\": [\r\n        \"rank-shard-0002.output.jsonl\"\r\n      ],\r\n      \"slot\": 2\r\n    }\r\n  ]\r\n}\r\n",
+        );
+        if plan_bytes != expected_plan.as_bytes() {
+            return Err(io::Error::other("Wide pool assignment bytes changed"));
+        }
+        let pool_args = [
+            "--plan".into(),
+            plan.clone(),
+            "--shard-dir".into(),
+            Path::new(".").join(&pool_name).join("rank_shards"),
+        ];
+        let mut worker_args = pool_args.to_vec();
+        worker_args.extend(["--slot".into(), "1".into()]);
+        let worker = invoke("validate-rank-worker", &worker_args)?;
+        let complete = invoke("validate-rank-pool", &pool_args)?;
+        if !worker.status.success()
+            || !worker.stderr.is_empty()
+            || !worker.stdout.starts_with(b"RANK_WORKER_RECEIPT ")
+            || !complete.status.success()
+            || !complete.stderr.is_empty()
+            || complete.stdout != b"Validated 2 ranking workers, 2 shards, and 2 ranking rows\r\n"
+            || fs::read(&plan)? != plan_bytes
+            || fs::read(&plan_sentinel)? != b"replacement plan sentinel"
+        {
+            return Err(io::Error::other(format!(
+                "Wide pool validation failed: {}{}",
+                String::from_utf8_lossy(&worker.stderr),
+                String::from_utf8_lossy(&complete.stderr)
+            )));
+        }
+        let scopes_name = raw("requested-", 0xd800);
+        let manifest_name = raw("manifest-", 0xdc80);
+        let coverage_name = raw("coverage-", 0xdfff);
+        let scopes_path = repo.join(&scopes_name);
+        let manifest_path = repo.join(&manifest_name);
+        let coverage_path = repo.join(&coverage_name);
+        let scope_contents = r#"["src","\udfff","src"]"#;
+        fs::write(&scopes_path, scope_contents)?;
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            fs::write(repo.join(raw(prefix, 0xfffd)), "replacement scope sentinel")?;
+        }
+        let manifest_before =
+            r#"{"scan":{"scope":{"includePaths":["old"],"excludePaths":[]}},"sha256":"unchanged"}"#;
+        let coverage_before = r#"{"includePaths":["old"],"excludePaths":[]}"#;
+        let manifest_after = concat!(
+            "{\n  \"scan\": {\n    \"scope\": {\n      \"includePaths\": [\n",
+            "        \"src\",\n        \"\\udfff\",\n        \"src\"\n      ],\n",
+            "      \"excludePaths\": []\n    }\n  },\n  \"sha256\": \"unchanged\"\n}\n",
+        );
+        let coverage_after = concat!(
+            "{\n  \"includePaths\": [\n    \"src\",\n    \"\\udfff\",\n",
+            "    \"src\"\n  ],\n  \"excludePaths\": []\n}\n",
+        );
+        for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+            fs::write(
+                &manifest_path,
+                format!("{manifest_before}{}", " ".repeat(512)),
+            )?;
+            fs::write(
+                &coverage_path,
+                format!("{coverage_before}{}", " ".repeat(512)),
+            )?;
+            let bind_args = [
+                "--scopes-file".into(),
+                prefix.join(&scopes_name),
+                "--manifest".into(),
+                prefix.join(&manifest_name),
+                "--coverage".into(),
+                prefix.join(&coverage_name),
+            ];
+            let bound = invoke("bind-repo-scopes", &bind_args)?;
+            if !bound.status.success()
+                || !bound.stderr.is_empty()
+                || bound.stdout != b"Bound 3 requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != coverage_after.as_bytes()
+                || fs::read(&scopes_path)? != scope_contents.as_bytes()
+            {
+                return Err(io::Error::other(format!(
+                    "Wide scope binding failed: {}",
+                    String::from_utf8_lossy(&bound.stderr)
+                )));
+            }
+            fs::write(&coverage_path, "{")?;
+            let invalid = invoke("bind-repo-scopes", &bind_args)?;
+            if invalid.status.code() != Some(1)
+                || !invalid.stdout.is_empty()
+                || invalid.stderr != b"Unable to bind requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != b"{"
+            {
+                return Err(io::Error::other("Invalid wide scope contract was changed"));
+            }
+        }
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            if fs::read(repo.join(raw(prefix, 0xfffd)))? != b"replacement scope sentinel" {
+                return Err(io::Error::other("Scope binding changed a replacement path"));
+            }
+        }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }
