@@ -3830,6 +3830,18 @@ describe("CodexSecurity orchestration", () => {
             expect(options?.environment?.["SYNTHETIC_MATCH_HEADER"]).toBe(
               "synthetic-comparison-header",
             );
+            const nativeProfile = await import(
+              pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs"))
+                .href
+            );
+            const matcherArguments = nativeProfile.profileConfigOverrides(
+              options?.config?.codexOverrides ?? {},
+            ) as string[];
+            expect(
+              matcherArguments.some((value) =>
+                value.includes("synthetic-comparison-header"),
+              ),
+            ).toBe(false);
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");

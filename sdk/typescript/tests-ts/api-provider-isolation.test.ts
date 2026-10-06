@@ -131,189 +131,224 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test("concurrent provider snapshots do not inherit another scan's credentials", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const state = join(root, "state");
-  const sharedHome = join(state, "codex-home");
-  const sourceHome = join(root, "source-home");
-  await mkdir(repository);
-  await mkdir(sourceHome, { mode: 0o700 });
-  await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-  // Initialize native state before the mocked primary scans start concurrently.
-  await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
+test.each(["root", "profile override", "profile only"] as const)(
+  "concurrent provider snapshots preserve %s credentials",
+  async (selection) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const state = join(root, "state");
+    const sharedHome = join(state, "codex-home");
+    const sourceHome = join(root, "source-home");
+    await mkdir(repository);
+    await mkdir(sourceHome, { mode: 0o700 });
+    await mkdir(sharedHome, { recursive: true, mode: 0o700 });
+    // Initialize native state before the mocked primary scans start concurrently.
+    await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
 
-  const workerRuntimeSettings = await loadWorkerSettings(root);
+    const workerRuntimeSettings = await loadWorkerSettings(root);
 
-  const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-  const clients: TestClient[] = [];
-  const runs: Promise<unknown>[] = [];
-  const snapshots: string[] = [];
-  const filesystems: Array<Record<string, unknown>> = [];
-  try {
-    for (let index = 0; index < 2; index++) {
-      const scan = join(root, `scan-${index}`);
-      await mkdir(scan, { mode: 0o700 });
-      const provider = {
-        name: `Synthetic ${index}`,
-        base_url: `https://provider-${index}.example.test/v1`,
-        wire_api: "responses",
-        env_key: "SYNTHETIC_CUSTOM_API_KEY",
-        env_http_headers: {
-          "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
-          "X-Synthetic-Missing": "SYNTHETIC_UNSET",
-        },
-        ...(index === 1
-          ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
-          : {}),
-      };
-      const providerEnvironment = {
-        SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
-        SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
-        SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
-      };
-      clients.push(
-        new TestClient(
-          {
-            pluginPath: PLUGIN_ROOT,
-            codexOverrides: {
-              model_provider: "openrouter",
-              model_providers: {
-                openrouter: provider,
-                "required.gateway": {
-                  name: "Managed selection",
-                  wire_api: "responses",
-                  env_key: "SYNTHETIC_REQUIRED_KEY",
-                },
+    const ready = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    const clients: TestClient[] = [];
+    const runs: Promise<unknown>[] = [];
+    const snapshots: string[] = [];
+    const filesystems: Array<Record<string, unknown>> = [];
+    try {
+      for (let index = 0; index < 2; index++) {
+        const scan = join(root, `scan-${index}`);
+        await mkdir(scan, { mode: 0o700 });
+        const provider = {
+          name: `Synthetic ${index}`,
+          base_url: `https://provider-${index}.example.test/v1`,
+          wire_api: "responses",
+          env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          env_http_headers: {
+            "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+            "X-Synthetic-Missing": "SYNTHETIC_UNSET",
+          },
+          ...(index === 1
+            ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
+            : {}),
+        };
+        const providerEnvironment = {
+          SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
+          SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+          SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
+        };
+        clients.push(
+          new TestClient(
+            {
+              pluginPath: PLUGIN_ROOT,
+              codexOverrides: {
+                model_provider: "openrouter",
+                ...(selection === "profile only"
+                  ? {}
+                  : {
+                      model_providers: {
+                        openrouter:
+                          selection === "root"
+                            ? provider
+                            : {
+                                ...provider,
+                                env_key: "SYNTHETIC_UNUSED_KEY",
+                              },
+                        "required.gateway": {
+                          name: "Managed selection",
+                          wire_api: "responses",
+                          env_key: "SYNTHETIC_REQUIRED_KEY",
+                        },
+                      },
+                    }),
+                ...(selection === "root"
+                  ? {}
+                  : {
+                      profile: "selected",
+                      profiles: {
+                        selected: {
+                          model_provider: "openrouter",
+                          model_providers: {
+                            openrouter: provider,
+                            "required.gateway": {
+                              name: "Managed selection",
+                              wire_api: "responses",
+                              env_key: "SYNTHETIC_REQUIRED_KEY",
+                            },
+                          },
+                        },
+                      },
+                    }),
               },
             },
-          },
-          {
-            environment: {
-              CODEX_HOME: sourceHome,
-              CODEX_SECURITY_STATE_DIR: state,
-              OPENAI_API_KEY: "synthetic-account-key",
-              OPENROUTER_API_KEY: "synthetic-sdk-account-key",
-              ...providerEnvironment,
-              SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
-            },
-            resolvePluginPython: async () => "/managed/python",
-            prepareOutputDir: async () => scan,
-            repositoryRevision: async () => "deadbeef",
-            createCodex: (options) => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  const environment = options.env!;
-                  snapshots[index] =
-                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                  const permission = parseToml(
-                    options.configOverrides!.find((value) =>
-                      value.startsWith(
-                        "permissions.codex_security_scan.filesystem=",
-                      ),
-                    )!,
-                  )["permissions"] as Record<string, Record<string, unknown>>;
-                  filesystems[index] = permission["codex_security_scan"]![
-                    "filesystem"
-                  ] as Record<string, unknown>;
-                  ready[index]!.resolve();
-                  await ready[1]!.promise;
-                  expect(snapshots[0]).not.toBe(snapshots[1]);
-                  for (const snapshot of snapshots) {
-                    expect(dirname(dirname(snapshot))).toBe(sharedHome);
-                    for (const filesystem of filesystems) {
-                      // The same denied home protects both concurrent snapshots.
-                      expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
+            {
+              environment: {
+                CODEX_HOME: sourceHome,
+                CODEX_SECURITY_STATE_DIR: state,
+                OPENAI_API_KEY: "synthetic-account-key",
+                OPENROUTER_API_KEY: "synthetic-sdk-account-key",
+                ...providerEnvironment,
+                SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+              },
+              resolvePluginPython: async () => "/managed/python",
+              prepareOutputDir: async () => scan,
+              repositoryRevision: async () => "deadbeef",
+              createCodex: (options) => ({
+                startThread: () => ({
+                  id: null,
+                  async runStreamed() {
+                    const environment = options.env!;
+                    snapshots[index] =
+                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                    const permission = parseToml(
+                      options.configOverrides!.find((value) =>
+                        value.startsWith(
+                          "permissions.codex_security_scan.filesystem=",
+                        ),
+                      )!,
+                    )["permissions"] as Record<string, Record<string, unknown>>;
+                    filesystems[index] = permission["codex_security_scan"]![
+                      "filesystem"
+                    ] as Record<string, unknown>;
+                    ready[index]!.resolve();
+                    await ready[1]!.promise;
+                    expect(snapshots[0]).not.toBe(snapshots[1]);
+                    for (const snapshot of snapshots) {
+                      expect(dirname(dirname(snapshot))).toBe(sharedHome);
+                      for (const filesystem of filesystems) {
+                        // The same denied home protects both concurrent snapshots.
+                        expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
+                      }
                     }
-                  }
-                  const preflight = await readFile(
-                    environment["CODEX_SECURITY_CONFIG_PATH"]!,
-                    "utf8",
-                  );
-                  expect(preflight).not.toContain("synthetic-key-");
-                  expect(preflight).not.toContain("synthetic-header-");
-                  const workerSnapshotPath =
-                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                  const workerSnapshot = parseToml(
-                    await readFile(workerSnapshotPath, "utf8"),
-                  );
-                  expect(workerSnapshot["worker_runtime"]).toMatchObject({
-                    environment: providerEnvironment,
-                  });
-                  expect(
-                    (workerSnapshot["worker_runtime"] as JsonObject)[
-                      "environment"
-                    ],
-                  ).toEqual(providerEnvironment);
-                  if (process.platform !== "win32") {
-                    expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
-                      0o600,
+                    const preflight = await readFile(
+                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                      "utf8",
                     );
-                  }
-                  expect(
-                    JSON.stringify({
-                      config: options.config,
-                      overrides: options.configOverrides,
-                    }),
-                  ).not.toContain("synthetic-key-");
-                  const settings = await workerRuntimeSettings(environment);
-                  expect(settings.environment).toEqual(providerEnvironment);
-                  const actual = await effectiveProvider(
-                    environment,
-                    repository,
-                    settings.configOverrides ?? [],
-                    settings.nativeProfile,
-                  );
-                  expect(actual).toMatchObject(provider);
-                  expect(actual.http_headers ?? {}).toEqual(
-                    provider.http_headers ?? {},
-                  );
-                  expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
-                    providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
-                  );
-                  const saved = await readFile(
-                    join(sharedHome, "config.toml"),
-                    "utf8",
-                  );
-                  expect(saved).not.toContain("model_providers");
-                  expect(saved).not.toContain("synthetic-key-");
-                  expect(saved).not.toContain("synthetic-header-");
-                  throw new Error("synthetic provider configuration checked");
-                },
+                    expect(preflight).not.toContain("synthetic-key-");
+                    expect(preflight).not.toContain("synthetic-header-");
+                    const workerSnapshotPath =
+                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                    const workerSnapshot = parseToml(
+                      await readFile(workerSnapshotPath, "utf8"),
+                    );
+                    expect(workerSnapshot["worker_runtime"]).toMatchObject({
+                      environment: providerEnvironment,
+                    });
+                    expect(
+                      (workerSnapshot["worker_runtime"] as JsonObject)[
+                        "environment"
+                      ],
+                    ).toEqual(providerEnvironment);
+                    if (process.platform !== "win32") {
+                      expect(
+                        (await stat(workerSnapshotPath)).mode & 0o777,
+                      ).toBe(0o600);
+                    }
+                    expect(
+                      JSON.stringify({
+                        config: options.config,
+                        overrides: options.configOverrides,
+                      }),
+                    ).not.toContain("synthetic-key-");
+                    const settings = await workerRuntimeSettings(environment);
+                    expect(settings.environment).toEqual(providerEnvironment);
+                    const actual = await effectiveProvider(
+                      environment,
+                      repository,
+                      settings.configOverrides ?? [],
+                      settings.nativeProfile,
+                    );
+                    expect(actual).toMatchObject(provider);
+                    expect(actual.http_headers ?? {}).toEqual(
+                      provider.http_headers ?? {},
+                    );
+                    expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
+                      providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
+                    );
+                    const saved = await readFile(
+                      join(sharedHome, "config.toml"),
+                      "utf8",
+                    );
+                    expect(saved).not.toContain("model_providers");
+                    expect(saved).not.toContain("synthetic-key-");
+                    expect(saved).not.toContain("synthetic-header-");
+                    throw new Error("synthetic provider configuration checked");
+                  },
+                }),
               }),
-            }),
-          },
-        ),
+            },
+          ),
+        );
+      }
+      // A's snapshot exists before B updates the shared credential home.
+      runs.push(clients[0]!.run(repository, { mode: "deep" }));
+      await Promise.race([ready[0]!.promise, runs[0]]);
+      runs.push(
+        clients[1]!
+          .run(repository, { mode: "deep" })
+          .finally(() => ready[1]!.resolve()),
       );
+      const outcomes = await Promise.allSettled(runs);
+      for (const outcome of outcomes) {
+        expect(outcome).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "synthetic provider configuration checked",
+          }),
+        });
+      }
+    } finally {
+      ready.forEach((entry) => entry.resolve());
+      await Promise.allSettled(runs);
+      await Promise.all(clients.map((client) => client.close()));
     }
-    // A's snapshot exists before B updates the shared credential home.
-    runs.push(clients[0]!.run(repository, { mode: "deep" }));
-    await Promise.race([ready[0]!.promise, runs[0]]);
-    runs.push(
-      clients[1]!
-        .run(repository, { mode: "deep" })
-        .finally(() => ready[1]!.resolve()),
-    );
-    const outcomes = await Promise.allSettled(runs);
-    for (const outcome of outcomes) {
-      expect(outcome).toMatchObject({
-        status: "rejected",
-        reason: expect.objectContaining({
-          message: "synthetic provider configuration checked",
-        }),
-      });
+    for (const snapshot of snapshots) {
+      expect(existsSync(dirname(snapshot))).toBe(false);
     }
-  } finally {
-    ready.forEach((entry) => entry.resolve());
-    await Promise.allSettled(runs);
-    await Promise.all(clients.map((client) => client.close()));
-  }
-  for (const snapshot of snapshots) {
-    expect(existsSync(dirname(snapshot))).toBe(false);
-  }
-  expect(existsSync(sharedHome)).toBe(true);
-}, 30_000);
+    expect(existsSync(sharedHome)).toBe(true);
+  },
+  30_000,
+);
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
   const root = await temporaryDirectory();
@@ -549,268 +584,3 @@ test.each([
     }
   },
 );
-
-test.each([
-  ["profile override", true, true],
-  ["profile only", true, false],
-] as const)(
-  "concurrent provider snapshots preserve %s credentials",
-  async (_scenario, selectedProfile, rootDefinitions) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const state = join(root, "state");
-    const sharedHome = join(state, "codex-home");
-    await mkdir(repository);
-    await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-    // Initialize native state before the mocked primary scans start concurrently.
-    await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
-
-    const workerRuntimeSettings = await loadWorkerSettings(root);
-
-    const ready = [
-      Promise.withResolvers<void>(),
-      Promise.withResolvers<void>(),
-    ];
-    const snapshotPaths: string[] = [];
-    const clients: TestClient[] = [];
-    const runs: Promise<unknown>[] = [];
-    try {
-      for (let index = 0; index < 2; index++) {
-        const scan = join(root, `scan-${index}`);
-        await mkdir(scan, { mode: 0o700 });
-        const provider = {
-          name: `Synthetic ${index}`,
-          base_url: `https://provider-${index}.example.test/v1`,
-          wire_api: "responses",
-          env_key: selectedProfile
-            ? `SYNTHETIC_PROVIDER_KEY_${index}`
-            : "OPENROUTER_API_KEY",
-          ...(index === 1
-            ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
-            : {}),
-        };
-        clients.push(
-          new TestClient(
-            {
-              pluginPath: PLUGIN_ROOT,
-              codexOverrides: {
-                model_provider: "openrouter",
-                ...(rootDefinitions
-                  ? {
-                      model_providers: {
-                        openrouter: {
-                          ...provider,
-                          env_key: "OPENROUTER_API_KEY",
-                        },
-                      },
-                    }
-                  : {}),
-                ...(selectedProfile
-                  ? {
-                      profile: "selected",
-                      profiles: {
-                        selected: { model_providers: { openrouter: provider } },
-                      },
-                    }
-                  : {}),
-              },
-            },
-            {
-              environment: {
-                CODEX_SECURITY_STATE_DIR: state,
-                OPENROUTER_API_KEY:
-                  index === 0 ? "synthetic-key-A" : "synthetic-key-B",
-                ...(selectedProfile
-                  ? { [provider.env_key]: `synthetic-selected-${index}` }
-                  : {}),
-              },
-              resolvePluginPython: async () => "/managed/python",
-              prepareOutputDir: async () => scan,
-              repositoryRevision: async () => "deadbeef",
-              createCodex: (options) => ({
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    ready[index]!.resolve();
-                    await ready[1]!.promise;
-                    const environment = options.env!;
-                    const preflight = await readFile(
-                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
-                      "utf8",
-                    );
-                    expect(preflight).not.toContain("synthetic-key-");
-                    snapshotPaths[index] =
-                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-                    const settings = await workerRuntimeSettings(environment);
-                    expect(settings.environment).toEqual({
-                      [provider.env_key]: selectedProfile
-                        ? `synthetic-selected-${index}`
-                        : index === 0
-                          ? "synthetic-key-A"
-                          : "synthetic-key-B",
-                    });
-                    // All concurrent snapshots share the already denied credential home.
-                    expect(
-                      dirname(
-                        dirname(
-                          environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                        ),
-                      ),
-                    ).toBe(environment["CODEX_HOME"]!);
-                    const actual = await effectiveProvider(
-                      environment,
-                      repository,
-                      settings.configOverrides ?? [],
-                      settings.nativeProfile,
-                    );
-                    expect(actual).toMatchObject(provider);
-                    expect(actual.http_headers ?? {}).toEqual(
-                      provider.http_headers ?? {},
-                    );
-                    expect(environment["OPENROUTER_API_KEY"]).toBe(
-                      index === 0 ? "synthetic-key-A" : "synthetic-key-B",
-                    );
-                    const saved = await readFile(
-                      join(sharedHome, "config.toml"),
-                      "utf8",
-                    );
-                    expect(saved).not.toContain("model_providers");
-                    expect(saved).not.toContain("synthetic-key-");
-                    throw new Error("synthetic provider configuration checked");
-                  },
-                }),
-              }),
-            },
-          ),
-        );
-      }
-      // A's snapshot exists before B updates the shared credential home.
-      runs.push(clients[0]!.run(repository, { mode: "deep" }));
-      await Promise.race([ready[0]!.promise, runs[0]]);
-      runs.push(
-        clients[1]!
-          .run(repository, { mode: "deep" })
-          .finally(() => ready[1]!.resolve()),
-      );
-      const outcomes = await Promise.allSettled(runs);
-      expect(new Set(snapshotPaths).size).toBe(2);
-      for (const outcome of outcomes) {
-        expect(outcome).toMatchObject({
-          status: "rejected",
-          reason: expect.objectContaining({
-            message: "synthetic provider configuration checked",
-          }),
-        });
-      }
-    } finally {
-      ready.forEach((entry) => entry.resolve());
-      await Promise.allSettled(runs);
-      await Promise.all(clients.map((client) => client.close()));
-      for (const snapshot of snapshotPaths) {
-        await expect(readFile(snapshot, "utf8")).rejects.toHaveProperty(
-          "code",
-          "ENOENT",
-        );
-      }
-    }
-  },
-  30_000,
-);
-
-test("workers preserve native provider inheritance without an explicit selection", async () => {
-  const root = await temporaryDirectory();
-  const home = join(root, "native-home");
-  await mkdir(home, { mode: 0o700 });
-  const provider = {
-    name: "Inherited gateway",
-    base_url: "https://inherited.example.test/v1",
-    wire_api: "responses",
-  };
-  await writeFile(
-    join(home, "config.toml"),
-    stringifyToml({
-      model_provider: "inherited.gateway",
-      model_providers: { "inherited.gateway": provider },
-    }),
-  );
-  const snapshot = join(root, "snapshot.toml");
-  const workerSnapshot = join(root, "worker-snapshot.toml");
-  const environment = {
-    CODEX_HOME: home,
-    CODEX_SECURITY_CONFIG_PATH: snapshot,
-    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerSnapshot,
-  };
-  const workerRuntimeSettings = await loadWorkerSettings(root);
-  for (const providers of [
-    undefined,
-    {
-      "inherited.gateway": {
-        ...provider,
-        base_url: "https://selected.example.test/v1",
-      },
-    },
-  ]) {
-    await writeFile(snapshot, stringifyToml({}));
-    if (providers)
-      await writeFile(
-        join(home, "synthetic.config.toml"),
-        stringifyToml({ model_providers: providers }),
-      );
-    await writeFile(
-      workerSnapshot,
-      stringifyToml({
-        worker_runtime: providers ? { native_profile: "synthetic" } : {},
-      }),
-    );
-    const settings = await workerRuntimeSettings(environment);
-    expect(
-      settings.configOverrides?.some((value) =>
-        value.startsWith("model_provider="),
-      ),
-    ).not.toBe(true);
-    expect(
-      await effectiveProvider(
-        environment,
-        root,
-        settings.configOverrides ?? [],
-        settings.nativeProfile,
-      ),
-    ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
-  }
-});
-
-const legacyProviders: Array<[string, JsonObject]> = [
-  [
-    "explicit gateway",
-    {
-      model_provider: "openrouter",
-      model_providers: {
-        openrouter: {
-          name: "Synthetic gateway",
-          base_url: "https://gateway.example.test/v1",
-          wire_api: "responses",
-          env_key: "OPENROUTER_API_KEY",
-        },
-      },
-    },
-  ],
-  ["explicit OpenAI", { model_provider: "openai" }],
-  [
-    "profile-selected OpenAI",
-    {
-      profile: "selected",
-      profiles: { selected: { model_provider: "openai" } },
-    },
-  ],
-  [
-    "inherited provider definition",
-    {
-      model_providers: {
-        "amazon-bedrock": {
-          aws: { region: "us-east-1" },
-          base_url: "https://gateway.example.test/v1",
-        },
-      },
-    },
-  ],
-];
