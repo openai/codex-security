@@ -224,7 +224,7 @@ test.each([false, true])(
                       dirname(
                         environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
                       ),
-                    ).toBe(environment["CODEX_HOME"]);
+                    ).toBe(environment["CODEX_HOME"]!);
                     const actual = await effectiveProvider(
                       environment,
                       repository,
