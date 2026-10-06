@@ -17,6 +17,7 @@ from workbench_test_support import (
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -80,9 +81,8 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         workspace = create_saved_workspace(state_dir, target, thread_id="scan-parent")
         workspace_id = str(workspace["id"])
 
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -99,7 +99,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         target,
         str(started["scanId"]),
         Path(str(started["scanDir"])),
-        datetime.fromisoformat(row[0]),
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
         environment,
         mode,
         diff_target,
@@ -561,7 +561,7 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         target,
         scan_id,
         scan_dir,
-        datetime.fromisoformat(row[0]),
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
         environment,
         "deep",
     )

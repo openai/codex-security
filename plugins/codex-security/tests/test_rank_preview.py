@@ -8,7 +8,85 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
-from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for
+from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for, preview_for_bytes
+
+
+@pytest.fixture(
+    params=[("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
+    ids=["utf16-le", "utf16-be"],
+)
+def utf16_encoding(request: pytest.FixtureRequest) -> tuple[str, bytes]:
+    return request.param
+
+
+def test_preview_for_decodes_bom_marked_utf16(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "Write-Output 'café 😀'\n"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding)
+    path.write_bytes(data)
+    expected = (source.strip(), False)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == expected
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"header\0payload",
+        b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
+        b"\xfe\xff" + "text\0binary".encode("utf-16-be"),
+        "unmarked utf16".encode("utf-16-le"),
+    ],
+    ids=["generic-binary", "utf16-le-nul", "utf16-be-nul", "no-bom"],
+)
+def test_preview_for_rejects_binary_source_bytes(tmp_path: Path, data: bytes) -> None:
+    path = tmp_path / "source.ps1"
+    path.write_bytes(data)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == ("", True)
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == ("", True)
+
+
+def test_preview_for_handles_utf16_surrogate_at_sample_boundary(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "a" * 2046 + "😀\nWrite-Output 'done'\n"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding)
+    path.write_bytes(data)
+
+    assert preview_for(path, 8192) == (source.strip(), False)
+    assert preview_for_bytes(path, data, 8192) == (source.strip(), False)
+
+
+def test_preview_for_bounds_utf16_source_at_incomplete_character(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "a" * 32766 + "😀\nWrite-Output 'outside preview'\n"
+    path = tmp_path / "source.ps1"
+    path.write_bytes(bom + source.encode(encoding))
+
+    assert preview_for(path, 128, max_read_bytes=64 * 1024) == ("a" * 128, False)
+
+
+def test_preview_for_ignores_incomplete_utf16_tail(
+    tmp_path: Path, utf16_encoding: tuple[str, bytes]
+) -> None:
+    encoding, bom = utf16_encoding
+    source = "Write-Output 'café'"
+    path = tmp_path / "source.ps1"
+    data = bom + source.encode(encoding) + b"\0"
+    path.write_bytes(data)
+
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == (source, False)
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (source, False)
 
 
 def test_preview_for_does_not_fully_read_a_large_binary(tmp_path: Path) -> None:
@@ -29,6 +107,62 @@ def test_preview_for_bounds_a_source_like_binary_after_the_initial_sample(tmp_pa
         output.truncate(256 * 1024 * 1024)
 
     assert preview_for(source, DEFAULT_PREVIEW_BYTES, max_read_bytes=64 * 1024) == ("", True)
+
+
+@pytest.mark.parametrize("max_read_bytes", [None, 1024, 4096, 4097, 128 * 1024])
+def test_preview_for_bounds_large_text_reads(tmp_path: Path, max_read_bytes: int | None) -> None:
+    source = tmp_path / "large.py"
+    source.write_bytes(b"# source comment\n" * (128 * 1024))
+    limit = 64 * 1024 if max_read_bytes is None else max_read_bytes
+    bytes_read = 0
+    with source.open("rb") as reader:
+        read = reader.read
+
+        def bounded_read(size: int = -1) -> bytes:
+            nonlocal bytes_read
+            assert 0 <= size <= limit - bytes_read
+            data = read(size)
+            bytes_read += len(data)
+            return data
+
+        with (
+            patch.object(Path, "open", return_value=reader),
+            patch.object(reader, "read", side_effect=bounded_read),
+        ):
+            if max_read_bytes is None:
+                preview, binary = preview_for(source, 128)
+            else:
+                preview, binary = preview_for(source, 128, max_read_bytes=max_read_bytes)
+
+    assert bytes_read == limit
+    assert not binary
+    assert preview
+    assert len(preview.encode("utf-8")) <= 128
+
+
+@pytest.mark.parametrize("max_read_bytes", [0, -1])
+def test_preview_for_rejects_nonpositive_read_limit(max_read_bytes: int) -> None:
+    with patch.object(Path, "open", side_effect=AssertionError("unexpected file read")):
+        with pytest.raises(ValueError, match="max_read_bytes must be positive"):
+            preview_for(Path("source.py"), 128, max_read_bytes=max_read_bytes)
+
+
+@pytest.mark.parametrize(
+    ("filename", "prefix", "suffix", "expected"),
+    [
+        ("source.py", b"def visible():\n    value = (", b"1)\n", "function visible"),
+        ("source.css", b"body { color: red; }\n\xf0\x9f", b"\x98\x80", "body { color: red; }"),
+        ("source.css", b"body { color: red; }\n", b"\0binary", "body { color: red; }"),
+    ],
+)
+def test_preview_for_uses_only_the_bounded_prefix(
+    tmp_path: Path, filename: str, prefix: bytes, suffix: bytes, expected: str
+) -> None:
+    source = tmp_path / filename
+    source.write_bytes(prefix + suffix)
+
+    for _ in range(2):
+        assert preview_for(source, 128, max_read_bytes=len(prefix)) == (expected, False)
 
 
 def generate_preview(
@@ -264,6 +398,87 @@ def test_enterprise_language_previews_list_declarations(
     assert "function widget" not in preview
 
 
+@pytest.mark.parametrize("suffix", [".h", ".hpp", ".hh", ".hxx", ".HH", ".HXX"])
+def test_cpp_headers_use_structural_previews(tmp_path: Path, suffix: str) -> None:
+    source = """typedef void Callback();
+Widget widget(options);
+template <typename T>
+class Box {
+public:
+  Box() {}
+  T get() const { return value; }
+};
+inline int answer() { return 42; }
+"""
+    path = tmp_path / f"box{suffix}"
+    preview = generate_preview(tmp_path, path.name, source)
+
+    assert "class Box" in preview
+    assert "method Box.Box" in preview
+    assert "method Box.get" in preview
+    assert "function answer" in preview
+    assert "function Callback" not in preview
+    assert "function widget" not in preview
+    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
+        preview,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix", [".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm", ".CPP"]
+)
+def test_cpp_raw_string_does_not_hide_following_declarations(tmp_path: Path, suffix: str) -> None:
+    source = """void before() {}
+const char* text = R"tag("{)tag";
+class Service {
+public:
+  const char* value() { return R"("{)"; }
+  void visible() {}
+};
+void after() {}
+"""
+
+    preview = generate_preview(tmp_path, f"sample{suffix}", source)
+
+    assert preview.splitlines() == [
+        "function before",
+        "class Service",
+        "method Service.value",
+        "method Service.visible",
+        "function after",
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "u8", "u", "U", "L"])
+@pytest.mark.parametrize("delimiter", ["", "tag", "abcdefghijklmnop"])
+def test_cpp_raw_string_body_is_not_code(tmp_path: Path, prefix: str, delimiter: str) -> None:
+    source = f'''void before() {{}}
+const auto text = {prefix}R"{delimiter}(
+void fake() {{}}
+" {{ /*
+){delimiter}";
+void after() {{}}
+'''
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
+@pytest.mark.parametrize("macro", ["ERROR", "FORMAT_u8R", "x\u0301R"])
+def test_cpp_macro_before_string_is_not_a_raw_string(tmp_path: Path, macro: str) -> None:
+    source = f"""#define {macro} "error: "
+void before() {{}}
+const char* text = {macro}"(connection failed";
+void after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.cpp", source)
+
+    assert preview.splitlines() == ["function before", "function after"]
+
+
 def test_expression_bodied_function_does_not_consume_next_type_body(tmp_path: Path) -> None:
     source = """fun answer(): Int = 42
 class Service {
@@ -390,6 +605,63 @@ def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> 
     assert "method Controller.validate" in preview
 
 
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_php_heredoc_terminator_can_continue_expression(
+    tmp_path: Path, opener: str, indent: str
+) -> None:
+    source = f"""<?php
+function before() {{}}
+
+$values = [<<<{opener}
+{indent}hello
+{indent}TXT,
+];
+
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
+def test_php_heredoc_terminator_preserves_following_brace(tmp_path: Path, opener: str) -> None:
+    source = f"""<?php
+class Service {{
+  public function template() {{
+    return <<<{opener}
+hello
+TXT; }}
+  public function visible() {{}}
+}}
+"""
+
+    preview = generate_preview(tmp_path, "Service.php", source)
+
+    assert "method Service.template" in preview
+    assert "method Service.visible" in preview
+
+
+@pytest.mark.parametrize("opener", ["TXT", "'TXT'"])
+@pytest.mark.parametrize("suffix", ["_more", "2", "😀", "\u0301"])
+def test_php_heredoc_label_prefix_stays_in_body(tmp_path: Path, opener: str, suffix: str) -> None:
+    source = f"""<?php
+function before() {{}}
+$value = <<<{opener}
+TXT{suffix} {{
+TXT;
+function after() {{}}
+"""
+
+    preview = generate_preview(tmp_path, "sample.php", source)
+
+    assert "function before" in preview
+    assert "function after" in preview
+
+
 def test_php_heredoc_does_not_hide_following_method(tmp_path: Path) -> None:
     source = """<?php
 class Service {
@@ -408,6 +680,22 @@ TXT;
     assert "method Service.visible" in preview
 
 
+def test_go_raw_string_backslash_does_not_hide_following_function(tmp_path: Path) -> None:
+    source = r"""package sample
+
+func Before() {}
+
+const Root = `C:\`
+
+func After() {}
+"""
+
+    preview = generate_preview(tmp_path, "sample.go", source)
+
+    assert "function Before" in preview
+    assert "function After" in preview
+
+
 def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
     source = """import package
 broken = (
@@ -423,6 +711,28 @@ second_runtime_line()
         "first_runtime_line()",
         "second_runtime_line()",
     ]
+
+
+@pytest.mark.parametrize(
+    "prefix", ["", "def visible():\n    pass\n"], ids=["sampled-source", "simple-outline"]
+)
+def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str) -> None:
+    source = prefix + "value = 1\n"
+    path = tmp_path / "generated.py"
+    data = source.encode("utf-8")
+    path.write_bytes(data)
+
+    with patch("rank_preview.ast.parse", side_effect=RecursionError):
+        preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+        assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
+
+    assert not is_binary
+    assert preview
+    assert len(preview.encode("utf-8")) <= DEFAULT_PREVIEW_BYTES
+    if prefix:
+        assert preview == "function visible"
+    else:
+        assert source.startswith(preview)
 
 
 def test_fallback_preview_uses_head_and_evenly_sampled_nonblank_lines(tmp_path: Path) -> None:
@@ -449,10 +759,16 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
     assert "..." not in preview
 
 
-def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "filename",
+    ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Vault.vy", "Counter.svelte"],
+)
+def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
+    tmp_path: Path, filename: str
+) -> None:
     source = "\n".join(f"line_{index:02d} {'😀' * 20}" for index in range(40))
 
-    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=220)
+    preview = generate_preview(tmp_path, filename, source, preview_bytes=220)
 
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview

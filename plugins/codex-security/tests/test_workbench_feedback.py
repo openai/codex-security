@@ -11,6 +11,7 @@ from workbench_test_support import (
     create_saved_workspace,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
     write_completed_contract,
 )
 
@@ -23,9 +24,8 @@ def _create_workspace(state_dir: Path, target: Path) -> str:
 
 
 def _start_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> dict[str, Any]:
-    return run_workbench(
+    return start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",

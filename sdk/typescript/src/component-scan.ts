@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import {
   CodexSecurity,
   scanAuthentication,
@@ -19,10 +19,12 @@ import {
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { readThreatModelPath } from "./artifact-export.js";
+import { errorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
   matchScanFindings,
@@ -39,14 +41,7 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Pick<
-    ScanOptions,
-    | "auth"
-    | "knowledgeBasePaths"
-    | "scanPrompt"
-    | "postScanPrompt"
-    | "maxCostUsd"
-  >;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -72,6 +67,7 @@ export interface ComponentReceipt {
   status: "pending" | "started" | "completed" | "incomplete" | "failed";
   outputDir: string;
   scanId?: string;
+  threatModelPath?: string;
   coverage?: CoverageCompleteness;
   findingCount?: number;
   cost?: Readonly<ScanCost>;
@@ -120,6 +116,7 @@ export interface ComponentScanResult {
   findingCount?: number;
   sourceFindingCount?: number;
   deduplication?: ComponentDeduplicationSummary;
+  policyFailed?: boolean;
 }
 
 export async function runComponentScans(
@@ -156,6 +153,8 @@ export async function runComponentScans(
     repository,
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
+          auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config,
           environment,
           signal: options.signal,
@@ -182,11 +181,7 @@ export async function runComponentScans(
       outputDir: join(output, `component-${index + 1}`),
     }),
   );
-  notify(() =>
-    options.onPlan?.(
-      receipts.map((receipt) => ({ ...receipt, paths: [...receipt.paths] })),
-    ),
-  );
+  notify(() => options.onPlan?.(receipts.map(copyReceipt)));
   const results = new Map<string, ScanResult>();
   let next = 0;
   const settled = await Promise.allSettled(
@@ -199,9 +194,7 @@ export async function runComponentScans(
           const receipt = receipts[next++];
           if (receipt === undefined) return;
           receipt.status = "started";
-          notify(() =>
-            options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
-          );
+          notify(() => options.onProgress?.(copyReceipt(receipt)));
           const emit = (event: ComponentScanUpdate): void =>
             notify(() =>
               options.onScanEvent?.({ ...event, componentId: receipt.id }),
@@ -221,7 +214,7 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
-              mode: "standard",
+              mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths,
               outputDir: receipt.outputDir,
               signal: options.signal,
@@ -233,13 +226,21 @@ export async function runComponentScans(
             if (result.cost !== null) receipt.cost = result.cost;
             receipt.status =
               receipt.coverage === "complete" ? "completed" : "incomplete";
+            if (result.threatModelPath !== null)
+              receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
             receipt.status = "failed";
-            receipt.error = safeErrorMessage(error);
+            receipt.error = errorMessage(error);
+            if (!options.signal?.aborted) {
+              const path = await readThreatModelPath(receipt.outputDir, {
+                pythonPath: options.config?.pythonPath,
+                protectedRoot,
+                signal: options.signal,
+              });
+              if (path !== null) receipt.threatModelPath = path;
+            }
           }
-          notify(() =>
-            options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
-          );
+          notify(() => options.onProgress?.(copyReceipt(receipt)));
         }
       } finally {
         await security.close();
@@ -253,16 +254,11 @@ export async function runComponentScans(
       receipt.error = options.signal?.aborted
         ? "Scan canceled."
         : "Component scan did not finish.";
-      notify(() =>
-        options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
-      );
+      notify(() => options.onProgress?.(copyReceipt(receipt)));
     }
   }
-  const { findings, matches, uncertain, error } = await deduplicateFindings(
-    receipts,
-    results,
-    { ...options, environment },
-  );
+  const { findings, matches, uncertain, related, error } =
+    await deduplicateFindings(receipts, results, { ...options, environment });
   const deduplication: ComponentDeduplicationSummary = {
     status: error === undefined ? "completed" : "incomplete",
     confirmedGroups: matches.length,
@@ -278,6 +274,7 @@ export async function runComponentScans(
       : join(output, "retry-components.json");
   if (retryPlanPath !== undefined)
     await writeJson(retryPlanPath, { components: retryComponents });
+  const failureSeverity = options.scanOptions?.failureSeverity;
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
@@ -293,12 +290,19 @@ export async function runComponentScans(
       0,
     ),
     deduplication,
+    ...(failureSeverity === undefined
+      ? {}
+      : {
+          policyFailed: [...results.values()].some((result) =>
+            result.hasFindingsAtOrAbove(failureSeverity),
+          ),
+        }),
   };
   await writeJson(summary.findingsPath, {
     documentType: "codex-security.component-findings",
     schemaVersion: "1.0",
     findings,
-    deduplication: { ...deduplication, matches, uncertain },
+    deduplication: { ...deduplication, matches, uncertain, related },
   });
   await writeJson(summary.summaryPath, {
     ...summary,
@@ -348,16 +352,27 @@ async function deduplicateFindings(
   );
   const matching: ScanComparisonResult = { matches: [], uncertain: [] };
   const [first, ...remaining] = scans;
-  const previous = [...(first?.findings ?? [])];
+  const componentFindings = ({
+    receipt,
+    findings,
+  }: (typeof scans)[number]): Finding[] =>
+    findings.map((finding) => ({
+      ...finding,
+      findingId: `${receipt.id}:${finding.findingId}`,
+    }));
+  const previous = first === undefined ? [] : componentFindings(first);
   let error: string | undefined;
   try {
     options.signal?.throwIfAborted();
     if (remaining.length) notify(() => options.onDeduplicationStarted?.());
-    for (const { findings: current } of remaining) {
+    for (const component of remaining) {
+      const current = componentFindings(component);
       const comparison = await (options.matchFindings ?? matchScanFindings)(
         { before: [...previous], after: current },
         {
           allowHistoricalUncertainty: true,
+          auth: options.scanOptions?.auth,
+          cyberAccessProgram: options.scanOptions?.cyberAccessProgram,
           config: options.config ?? {},
           environment: options.environment,
           signal: options.signal,
@@ -366,6 +381,10 @@ async function deduplicateFindings(
       );
       matching.matches.push(...comparison.matches);
       matching.uncertain.push(...comparison.uncertain);
+      if (comparison.related !== undefined) {
+        matching.related ??= [];
+        matching.related.push(...comparison.related);
+      }
       for (const match of comparison.matches) {
         findings = mergeFindingGroups(
           findings,
@@ -377,20 +396,23 @@ async function deduplicateFindings(
   } catch (failure) {
     error = options.signal?.aborted
       ? "Cross-component matching was canceled."
-      : safeErrorMessage(failure);
+      : errorMessage(failure);
   }
-  matching.uncertain = matching.uncertain.filter(
-    ({ beforeOccurrenceId, afterOccurrenceId }) =>
-      !findings.some(
-        ({ sources }) =>
-          sources.some(
-            ({ occurrenceId }) => occurrenceId === beforeOccurrenceId,
-          ) &&
-          sources.some(
-            ({ occurrenceId }) => occurrenceId === afterOccurrenceId,
-          ),
-      ),
-  );
+  const remainSeparate = ({
+    beforeOccurrenceId,
+    afterOccurrenceId,
+  }: ScanComparisonResult["uncertain"][number]): boolean =>
+    !findings.some(
+      ({ sources }) =>
+        sources.some(
+          ({ occurrenceId }) => occurrenceId === beforeOccurrenceId,
+        ) &&
+        sources.some(({ occurrenceId }) => occurrenceId === afterOccurrenceId),
+    );
+  matching.uncertain = matching.uncertain.filter(remainSeparate);
+  if (matching.related !== undefined) {
+    matching.related = matching.related.filter(remainSeparate);
+  }
   return { findings, ...matching, ...(error === undefined ? {} : { error }) };
 }
 
@@ -457,10 +479,12 @@ function renderReport(
     "",
     "## Components",
     "",
-    ...receipts.map(
-      (receipt) =>
-        `- ${JSON.stringify(receipt.name)}: ${receipt.status}. [Scan files](./${receipt.id}/)${receipt.error ? ` — ${receipt.error}` : ""}`,
-    ),
+    ...receipts.map((receipt) => {
+      const modelLink = receipt.threatModelPath
+        ? ` · [Threat model](./${receipt.id}/${relative(receipt.outputDir, receipt.threatModelPath).split(sep).join("/")})`
+        : "";
+      return `- ${JSON.stringify(receipt.name)}: ${receipt.status}. [Scan files](./${receipt.id}/)${modelLink}${receipt.error ? ` — ${receipt.error}` : ""}`;
+    }),
     "",
     "## Findings",
     "",
@@ -477,4 +501,8 @@ async function writeJson(path: string, value: unknown): Promise<void> {
     flag: "wx",
     mode: 0o600,
   });
+}
+
+function copyReceipt(receipt: ComponentReceipt): ComponentReceipt {
+  return { ...receipt, paths: [...receipt.paths] };
 }

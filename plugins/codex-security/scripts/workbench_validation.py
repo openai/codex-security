@@ -14,6 +14,10 @@ from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import finalize_scan_contract as finalizer
+from workbench_scan_usage import _reject_nonstandard_json_number as reject_nonstandard_json_number
+
+reject_non_finite_json = finalizer._reject_non_finite_json
 
 
 def require_uuid(value: str, label: str) -> str:
@@ -41,9 +45,7 @@ def path_within_scope(path: str, scope: str) -> bool:
     requested = PurePosixPath(scope)
     if candidate.is_absolute() or ".." in candidate.parts:
         return False
-    if requested == PurePosixPath("."):
-        return True
-    return candidate == requested or requested in candidate.parents
+    return candidate.is_relative_to(requested)
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
@@ -53,17 +55,9 @@ def require_close_note(close_reason: str | None, note: str | None) -> None:
         raise SystemExit("Explain why this finding will not be fixed.")
 
 
-def user_text(value: str | None) -> str | None:
-    return optional_text(value)
-
-
 def user_context_argument(args: argparse.Namespace) -> str | None:
     value = sys.stdin.read() if getattr(args, "user_context_stdin", False) else args.user_context
-    return user_text(value)
-
-
-def reject_nonstandard_json_number(value: str) -> None:
-    raise ValueError(f"invalid JSON number {value}")
+    return optional_text(value)
 
 
 SCAN_USAGE_TOKEN_KEYS = (
@@ -191,9 +185,5 @@ def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sq
     return row
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

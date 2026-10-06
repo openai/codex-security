@@ -18,7 +18,7 @@ import {
 } from "./deduplication-prompts.js";
 
 // Increment when validation or review execution changes without a prompt/schema change.
-const REVIEW_CONTRACT_VERSION = 1;
+const REVIEW_CONTRACT_VERSION = 3;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
@@ -30,18 +30,17 @@ export async function reviewSettingsDigest(
     ),
     codexSecurityCredentialHome(environment),
   ]);
-  const configs = await Promise.all(
-    [...homes].map(async (home) => {
-      try {
-        return await readFile(join(home, "config.toml"), "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    }),
-  );
   return workflowDigest({
-    configs,
+    configs: await Promise.all(
+      [...homes].map(async (home) => {
+        try {
+          return await readFile(join(home, "config.toml"), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      }),
+    ),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
   });
@@ -72,6 +71,7 @@ export class CheckpointedReviewRunner {
       codexVersion: CODEX_EXECUTABLE_VERSION,
       source: this.source,
       scope: this.scope,
+      stage: review.stage,
       model: review.model,
       effort: review.effort,
       settingsDigest: this.settingsDigest,

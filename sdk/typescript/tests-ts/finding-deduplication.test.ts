@@ -1,25 +1,35 @@
-import { chmod, cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { emptyNeighborhoodReviewer } from "./support/deduplication.js";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
-import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
+import {
+  contradictionFreeSubgroups,
+  FindingDeduplicator,
+} from "../src/deduplication/deduplication.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
+  screeningPairSlot,
   validateReview,
   validateScreening,
   type DeduplicationReviewer,
   type DuplicateDecision,
   type ScreeningResult,
 } from "../src/deduplication/deduplication-reviewer.js";
-import { CodexSecurityError } from "../src/errors.js";
+import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
 import { FindingsClient } from "../src/findings-client.js";
-import { deduplicateScanInternal } from "../src/deduplication/scan.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { deduplicateScanDirectory } from "../src/index.js";
+import {
+  deduplicateScanDirectoryInternal,
+  deduplicateScanInternal,
+} from "../src/deduplication/scan.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
+import { fail } from "./support/errors.js";
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -41,11 +51,11 @@ function entry(index: number): Finding {
     },
   };
 }
-function candidates(findings: Finding[]) {
+function candidates(findings: Finding[], neighbors = findings) {
   return {
     potentialDuplicates: async (id: string) => ({
       finding: findings.find((finding) => finding.findingId === id)!,
-      potentialDuplicates: findings.filter(
+      potentialDuplicates: neighbors.filter(
         (finding) => finding.findingId !== id,
       ),
     }),
@@ -75,23 +85,414 @@ function screening(
   findings: readonly Finding[],
   nominated: ReadonlySet<string>,
 ): ScreeningResult {
+  const decisions = findings.slice(1).map((finding, index) => {
+    const pair: [string, string] = [findings[0]!.findingId, finding.findingId];
+    return [
+      screeningPairSlot(index),
+      nominated.has(pairKey(pair))
+        ? {
+            decision: "SAME" as const,
+            rationale: "One existing control corrects every path.",
+          }
+        : distinct,
+    ] as const;
+  });
   return {
-    decisions: findings.slice(1).map((finding) => {
-      const findingIds: [string, string] = [
-        findings[0]!.findingId,
-        finding.findingId,
-      ];
-      return {
-        findingIds,
-        ...(nominated.has(pairKey(findingIds))
-          ? same([findings[0]!, finding])
-          : distinct),
-      };
-    }),
+    // Deliberately reverse insertion order: slot names, not object order, bind pairs.
+    decisions: Object.fromEntries(decisions.reverse()),
   };
 }
 
-test("reviews nominated pairs once and groups accepted pairs by reported severity", async () => {
+const reviewSame = async (findings: readonly Finding[]) => same(findings);
+const screenNominations =
+  (nominate: (findings: readonly Finding[]) => ReadonlySet<string>) =>
+  async (findings: readonly Finding[]) =>
+    screening(findings, nominate(findings));
+
+test.each(["screening", "pair-review"])(
+  "%s fills each free slot immediately and preserves serial grouping",
+  async (stage) => {
+    const entries = [entry(1), entry(2), entry(3), entry(4)];
+    const neighbor = entry(5);
+    const ids = entries.map((finding) => finding.findingId);
+    const nominations = new Set(
+      ids.map((id) => pairKey([id, neighbor.findingId])),
+    );
+    const candidateStore = candidates(entries, [neighbor]);
+    const gates = entries.map(() => Promise.withResolvers<void>());
+    const started = entries.map(() => Promise.withResolvers<void>());
+    const starts: number[] = [];
+    const phases: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const hold = async (findings: readonly Finding[]) => {
+      const index = ids.indexOf(findings[0]!.findingId);
+      starts.push(index);
+      peak = Math.max(peak, ++active);
+      started[index]!.resolve();
+      await gates[index]!.promise;
+      active--;
+    };
+    const reviewer: DeduplicationReviewer = {
+      async screen(findings) {
+        phases.push("screening");
+        if (stage === "screening") await hold(findings);
+        return screening(findings, nominations);
+      },
+      async reviewPair(findings) {
+        phases.push("pair-review");
+        if (stage === "pair-review") await hold(findings);
+        return same(findings);
+      },
+    };
+    const result = new FindingDeduplicator(
+      candidateStore,
+      reviewer,
+      undefined,
+      2,
+    ).run(ids);
+    await Promise.all([started[0]!.promise, started[1]!.promise]);
+    expect(starts).toEqual([0, 1]);
+    gates[1]!.resolve();
+    await started[2]!.promise;
+    expect(starts).toEqual([0, 1, 2]);
+    gates[2]!.resolve();
+    await started[3]!.promise;
+    gates[3]!.resolve();
+    gates[0]!.resolve();
+    const parallel = await result;
+    expect(peak).toBe(2);
+    expect(phases.filter((phase) => phase === "screening")).toHaveLength(4);
+    expect(phases.filter((phase) => phase === "pair-review")).toHaveLength(4);
+    expect(parallel).toEqual(
+      await new FindingDeduplicator(candidateStore, reviewer, undefined, 1).run(
+        ids,
+      ),
+    );
+  },
+);
+
+test("ready pairs take free slots before pending screenings and share the concurrency cap", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const neighbor = entry(4);
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set(
+    ids.map((id) => pairKey([id, neighbor.findingId])),
+  );
+  const screeningGates = entries.map(() => Promise.withResolvers<void>());
+  const screeningStarts = entries.map(() => Promise.withResolvers<void>());
+  const pairGates = entries.map(() => Promise.withResolvers<void>());
+  const pairStarts = entries.map(() => Promise.withResolvers<void>());
+  const events: string[] = [];
+  let active = 0;
+  let peak = 0;
+  const hold = async (index: number, stage: "screen" | "pair") => {
+    events.push(`${stage}:${index}`);
+    peak = Math.max(peak, ++active);
+    (stage === "screen" ? screeningStarts : pairStarts)[index]!.resolve();
+    await (stage === "screen" ? screeningGates : pairGates)[index]!.promise;
+    active--;
+  };
+  const result = new FindingDeduplicator(
+    candidates(entries, [neighbor]),
+    {
+      async screen(findings) {
+        await hold(ids.indexOf(findings[0]!.findingId), "screen");
+        return screening(findings, nominations);
+      },
+      async reviewPair(findings) {
+        await hold(ids.indexOf(findings[0]!.findingId), "pair");
+        return same(findings);
+      },
+    },
+    undefined,
+    2,
+  ).run(ids);
+  try {
+    await Promise.all(
+      screeningStarts.slice(0, 2).map((start) => start.promise),
+    );
+    screeningGates[0]!.resolve();
+    await pairStarts[0]!.promise;
+    expect(events).toEqual(["screen:0", "screen:1", "pair:0"]);
+    expect(active).toBe(2);
+    pairGates[0]!.resolve();
+    await screeningStarts[2]!.promise;
+    screeningGates[1]!.resolve();
+    await pairStarts[1]!.promise;
+    expect(active).toBe(2);
+    pairGates[1]!.resolve();
+    screeningGates[2]!.resolve();
+    await pairStarts[2]!.promise;
+    pairGates[2]!.resolve();
+    expect((await result).duplicateGroups).toEqual([
+      [...ids, neighbor.findingId],
+    ]);
+    expect(peak).toBe(2);
+    expect(events).toEqual([
+      "screen:0",
+      "screen:1",
+      "pair:0",
+      "screen:2",
+      "pair:1",
+      "pair:2",
+    ]);
+  } finally {
+    for (const gate of [...screeningGates, ...pairGates]) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test("a pair waits for its delayed reciprocal screening and honors a DISTINCT veto", async () => {
+  const entries = [entry(1), entry(2)];
+  const ids = entries.map((finding) => finding.findingId);
+  const gates = entries.map(() => Promise.withResolvers<void>());
+  const started = entries.map(() => Promise.withResolvers<void>());
+  const finished = Promise.withResolvers<void>();
+  const reviewed: string[] = [];
+  const result = new FindingDeduplicator(
+    candidates(entries),
+    {
+      async screen(findings) {
+        const index = ids.indexOf(findings[0]!.findingId);
+        started[index]!.resolve();
+        await gates[index]!.promise;
+        if (index === 0) finished.resolve();
+        return screening(
+          findings,
+          index === 0 ? new Set([pairKey(ids)]) : new Set(),
+        );
+      },
+      async reviewPair(findings) {
+        reviewed.push(pairKey(findings.map((finding) => finding.findingId)));
+        return same(findings);
+      },
+    },
+    undefined,
+    2,
+  ).run(ids);
+  try {
+    await Promise.all(started.map((start) => start.promise));
+    gates[0]!.resolve();
+    await finished.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewed).toEqual([]);
+    gates[1]!.resolve();
+    expect(await result).toEqual({
+      uniqueFindingIds: ids,
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(reviewed).toEqual([]);
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test("reverse completion preserves pair orientation and the final input-order finding records", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const finalA = {
+    ...entry(1),
+    title: "Final candidate record",
+    severity: { ...entry(1).severity, level: "critical" as const },
+  };
+  const finalB = { ...entry(2), title: "Later anchor record" };
+  const neighborhoods = [
+    { finding: entries[0]!, potentialDuplicates: [entries[1]!] },
+    {
+      finding: finalB,
+      potentialDuplicates: [
+        { ...entries[0]!, title: "Intermediate candidate record" },
+      ],
+    },
+    { finding: entries[2]!, potentialDuplicates: [finalA] },
+  ];
+  const lookupStarts = entries.map(() => Promise.withResolvers<void>());
+  const lookupGates = entries.map(() => Promise.withResolvers<void>());
+  const screenStarts = entries.map(() => Promise.withResolvers<void>());
+  const screenGates = entries.map(() => Promise.withResolvers<void>());
+  const pairStarted = Promise.withResolvers<void>();
+  const reviewed: Finding[][] = [];
+  const result = new FindingDeduplicator(
+    {
+      async potentialDuplicates(id) {
+        const index = ids.indexOf(id);
+        lookupStarts[index]!.resolve();
+        await lookupGates[index]!.promise;
+        return neighborhoods[index]!;
+      },
+    },
+    {
+      async screen(findings) {
+        const index = ids.indexOf(findings[0]!.findingId);
+        screenStarts[index]!.resolve();
+        await screenGates[index]!.promise;
+        return screening(findings, new Set([pairKey(ids.slice(0, 2))]));
+      },
+      async reviewPair(findings) {
+        reviewed.push([...findings]);
+        pairStarted.resolve();
+        return same(findings);
+      },
+    },
+    undefined,
+    3,
+  ).run(ids);
+  try {
+    await Promise.all(lookupStarts.map((start) => start.promise));
+    for (const gate of [...lookupGates].reverse()) {
+      gate.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await Promise.all(screenStarts.map((start) => start.promise));
+    screenGates[1]!.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reviewed).toEqual([]);
+    screenGates[0]!.resolve();
+    await pairStarted.promise;
+    expect(reviewed).toEqual([[finalB, finalA]]);
+    screenGates[2]!.resolve();
+    expect(await result).toEqual({
+      uniqueFindingIds: [ids[0]!, ids[2]!],
+      duplicateGroups: [ids.slice(0, 2)],
+      deduplicationStatus: "completed",
+    });
+  } finally {
+    for (const gate of [...lookupGates, ...screenGates]) gate.resolve();
+    await result.catch(() => undefined);
+  }
+});
+
+test.each(["screen", "pair", "cancel"])(
+  "%s failure drains mixed active reviews and stops both pending queues",
+  async (failureStage) => {
+    const entries = [entry(1), entry(2), entry(3)];
+    const neighbors = [entry(4), entry(5)];
+    const ids = entries.map((finding) => finding.findingId);
+    const starts: string[] = [];
+    const completed: string[] = [];
+    const screenGate = Promise.withResolvers<void>();
+    const pairGate = Promise.withResolvers<void>();
+    const pairStarted = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    const failure = new Error("Synthetic mixed-stage failure");
+    const result = new FindingDeduplicator(
+      candidates(entries, neighbors),
+      {
+        async screen(findings) {
+          const index = ids.indexOf(findings[0]!.findingId);
+          starts.push(`screen:${index}`);
+          if (index === 1) await screenGate.promise;
+          completed.push(`screen:${index}`);
+          return screening(
+            findings,
+            new Set(
+              neighbors.map((neighbor) =>
+                pairKey([findings[0]!.findingId, neighbor.findingId]),
+              ),
+            ),
+          );
+        },
+        async reviewPair(findings) {
+          starts.push("pair");
+          pairStarted.resolve();
+          await pairGate.promise;
+          completed.push("pair");
+          return same(findings);
+        },
+      },
+      controller.signal,
+      2,
+    ).run(ids);
+    const observeSettled = mock((error: unknown) => {
+      return error;
+    });
+    const observed = result.catch(observeSettled);
+    try {
+      await pairStarted.promise;
+      expect(starts).toEqual(["screen:0", "screen:1", "pair"]);
+      if (failureStage === "screen") screenGate.reject(failure);
+      else if (failureStage === "pair") pairGate.reject(failure);
+      else controller.abort(failure);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(observeSettled).not.toHaveBeenCalled();
+      screenGate.resolve();
+      pairGate.resolve();
+      expect(await observed).toBe(failure);
+      expect(starts).toEqual(["screen:0", "screen:1", "pair"]);
+      expect(completed).toContain("screen:0");
+      if (failureStage !== "screen") expect(completed).toContain("screen:1");
+      if (failureStage !== "pair") expect(completed).toContain("pair");
+    } finally {
+      screenGate.resolve();
+      pairGate.resolve();
+      await observed;
+    }
+  },
+);
+
+test("terminal failure drains started reviews without starting queued jobs", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const gates = entries.map(() => Promise.withResolvers<void>());
+  const started = entries.map(() => Promise.withResolvers<void>());
+  const calls: string[] = [];
+  const failure = new Error("Synthetic review failure");
+  const result = new FindingDeduplicator(
+    candidates(entries),
+    {
+      async screen(findings) {
+        const index = entries.findIndex(
+          (entry) => entry.findingId === findings[0]!.findingId,
+        );
+        calls.push(findings[0]!.findingId);
+        started[index]!.resolve();
+        await gates[index]!.promise;
+        return screening(findings, new Set());
+      },
+      reviewPair: async () =>
+        fail("Pair review must not start after screening failure"),
+    },
+    undefined,
+    2,
+  ).run(entries.map((entry) => entry.findingId));
+  const observeSettled = mock((error: unknown) => {
+    return error;
+  });
+  const observed = result.catch(observeSettled);
+  await Promise.all([started[0]!.promise, started[1]!.promise]);
+  gates[0]!.reject(failure);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(observeSettled).not.toHaveBeenCalled();
+  gates[1]!.resolve();
+  expect(await observed).toBe(failure);
+  expect(calls).toEqual(entries.slice(0, 2).map((entry) => entry.findingId));
+});
+
+test("SDK rejects invalid concurrency before reading scan artifacts or history", async () => {
+  for (const concurrency of [
+    0,
+    -1,
+    1.5,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    const options = { findingsUrl: "http://synthetic.test", concurrency };
+    await expect(deduplicateScanInternal("synthetic", options)).rejects.toThrow(
+      "concurrency must be a positive safe integer",
+    );
+    await expect(
+      deduplicateScanDirectoryInternal("unused", {
+        ...options,
+        repository: "unused",
+      }),
+    ).rejects.toThrow("concurrency must be a positive safe integer");
+  }
+});
+
+test("reviews nominated pairs once and groups non-conflicting accepted pairs by severity", async () => {
   const entries = [entry(1), entry(2), entry(3), entry(4)];
   entries[1]!.severity.level = "critical";
   const ids = entries.map((finding) => finding.findingId);
@@ -123,21 +524,14 @@ test("reviews nominated pairs once and groups accepted pairs by reported severit
   };
   const service = new FindingDeduplicator(candidates(entries), reviewer);
   expect(await service.run([...ids, ids[0]!])).toEqual({
-    uniqueFindingIds: [ids[1]!, ids[3]!],
-    duplicateGroups: [[ids[1]!, ids[0]!, ids[2]!]],
+    uniqueFindingIds: [ids[1]!, ids[2]!, ids[3]!],
+    duplicateGroups: [[ids[1]!, ids[0]!]],
     deduplicationStatus: "completed",
   });
   expect(new Set(reviewedPairs)).toEqual(nominations);
   expect(reviewedPairs).toHaveLength(3);
-  expect(phases).toEqual([
-    "screen",
-    "screen",
-    "screen",
-    "screen",
-    "pair",
-    "pair",
-    "pair",
-  ]);
+  expect(phases.filter((phase) => phase === "screen")).toHaveLength(4);
+  expect(phases.filter((phase) => phase === "pair")).toHaveLength(3);
 });
 
 test("groups accepted neighbors transitively without screening them as anchors", async () => {
@@ -152,9 +546,7 @@ test("groups accepted neighbors transitively without screening them as anchors",
         new Set([pairKey([ids[0]!, ids[1]!]), pairKey([ids[1]!, ids[2]!])]),
       );
     },
-    async reviewPair(findings) {
-      return same(findings);
-    },
+    reviewPair: reviewSame,
   });
   expect(await service.run([ids[1]!])).toEqual({
     uniqueFindingIds: [ids[0]!],
@@ -164,18 +556,234 @@ test("groups accepted neighbors transitively without screening them as anchors",
   expect(screened).toEqual([ids[1]!]);
 });
 
+test("an explicit DISTINCT screening vetoes the same unordered pair", async () => {
+  const entries = [entry(1), entry(2)];
+  const ids = entries.map((finding) => finding.findingId);
+  for (const selected of [ids, [...ids].reverse()]) {
+    const reviewPair = mock(reviewSame.bind(undefined, entries));
+    const service = new FindingDeduplicator(candidates(entries), {
+      screen: screenNominations((findings) =>
+        findings[0]!.findingId === ids[0] ? new Set([pairKey(ids)]) : new Set(),
+      ),
+      reviewPair,
+    });
+    expect(await service.run(selected)).toEqual({
+      uniqueFindingIds: selected,
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(reviewPair).toHaveBeenCalledTimes(0);
+  }
+});
+
+test("does not connect DISTINCT findings through accepted transitive pairs", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[1]!, ids[2]!]),
+  ]);
+  const reviewedPairs: string[] = [];
+  const service = new FindingDeduplicator(candidates(entries), {
+    screen: screenNominations(() => nominations),
+    async reviewPair(findings) {
+      reviewedPairs.push(pairKey(findings.map((finding) => finding.findingId)));
+      return same(findings);
+    },
+  });
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[2]!],
+    duplicateGroups: [[ids[0]!, ids[1]!]],
+    deduplicationStatus: "completed",
+  });
+  expect(new Set(reviewedPairs)).toEqual(nominations);
+  expect(reviewedPairs).toHaveLength(2);
+});
+
+test("does not connect findings through a pair rejected by Sol", async () => {
+  const entries = [entry(1), entry(2), entry(3)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[0]!, ids[2]!]),
+    pairKey([ids[1]!, ids[2]!]),
+  ]);
+  const reviewedPairs: string[] = [];
+  const service = new FindingDeduplicator(candidates(entries), {
+    screen: screenNominations(() => nominations),
+    async reviewPair(findings) {
+      const key = pairKey(findings.map((finding) => finding.findingId));
+      reviewedPairs.push(key);
+      return key === pairKey([ids[0]!, ids[2]!]) ? distinct : same(findings);
+    },
+  });
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[2]!],
+    duplicateGroups: [[ids[0]!, ids[1]!]],
+    deduplicationStatus: "completed",
+  });
+  expect(new Set(reviewedPairs)).toEqual(nominations);
+  expect(reviewedPairs).toHaveLength(3);
+});
+
+test("prefers the better-supported legal subgroup in a conflicted star", async () => {
+  const entries = [entry(1), entry(2), entry(3), entry(4)];
+  const ids = entries.map((finding) => finding.findingId);
+  const nominations = new Set([
+    pairKey([ids[0]!, ids[1]!]),
+    pairKey([ids[0]!, ids[2]!]),
+    pairKey([ids[0]!, ids[3]!]),
+    pairKey([ids[2]!, ids[3]!]),
+  ]);
+  const neighborIndexes = [[1, 2, 3], [2, 3], [3], []];
+  const service = new FindingDeduplicator(
+    {
+      async potentialDuplicates(findingId) {
+        const index = ids.indexOf(findingId);
+        return {
+          finding: entries[index]!,
+          potentialDuplicates: neighborIndexes[index]!.map(
+            (neighbor) => entries[neighbor]!,
+          ),
+        };
+      },
+    },
+    {
+      screen: screenNominations(() => nominations),
+      reviewPair: reviewSame,
+    },
+  );
+  expect(await service.run(ids)).toEqual({
+    uniqueFindingIds: [ids[0]!, ids[1]!],
+    duplicateGroups: [[ids[0]!, ids[2]!, ids[3]!]],
+    deduplicationStatus: "completed",
+  });
+});
+
+test("keeps disconnected groups ordered and conflict ties in finding insertion order", async () => {
+  const aCenter = entry(30);
+  const bCenter = entry(40);
+  const aLeft = entry(10);
+  const bLeft = entry(20);
+  const aRight = entry(50);
+  const bRight = entry(60);
+  const cleanCenter = entry(80);
+  const cleanNeighbor = entry(70);
+  const isolated = entry(90);
+  const entries = [
+    aCenter,
+    bCenter,
+    aLeft,
+    bLeft,
+    aRight,
+    bRight,
+    cleanCenter,
+    cleanNeighbor,
+    isolated,
+  ];
+  for (const finding of entries) finding.severity.level = "medium";
+  aLeft.severity.level = aRight.severity.level = "critical";
+  const nominations = new Set(
+    [
+      [aCenter, aLeft],
+      [aCenter, aRight],
+      [bCenter, bLeft],
+      [bCenter, bRight],
+      [cleanCenter, cleanNeighbor],
+    ].map((pair) => pairKey(pair.map((finding) => finding.findingId))),
+  );
+  const selected = [aCenter, bCenter, aLeft, bLeft, cleanCenter, isolated];
+  for (const reverse of [false, true]) {
+    const aNeighbors = reverse ? [aRight, aLeft] : [aLeft, aRight];
+    const bNeighbors = reverse ? [bRight, bLeft] : [bLeft, bRight];
+    const neighborhoods = new Map<string, Finding[]>([
+      [
+        aCenter.findingId,
+        [
+          bCenter,
+          aNeighbors[0]!,
+          bNeighbors[0]!,
+          aNeighbors[1]!,
+          bNeighbors[1]!,
+          cleanCenter,
+          cleanNeighbor,
+          isolated,
+        ],
+      ],
+      [bCenter.findingId, [bLeft, bRight]],
+      [aLeft.findingId, [aRight]],
+      [bLeft.findingId, [bRight]],
+      [cleanCenter.findingId, [cleanNeighbor]],
+    ]);
+    const service = new FindingDeduplicator(
+      {
+        async potentialDuplicates(findingId) {
+          return {
+            finding: entries.find((entry) => entry.findingId === findingId)!,
+            potentialDuplicates: neighborhoods.get(findingId) ?? [],
+          };
+        },
+      },
+      {
+        screen: screenNominations(() => nominations),
+        reviewPair: reviewSame,
+      },
+    );
+    expect(
+      await service.run(selected.map((finding) => finding.findingId)),
+    ).toEqual({
+      uniqueFindingIds: (reverse
+        ? [aRight, bCenter, aLeft, bLeft, cleanNeighbor, isolated]
+        : [aLeft, bLeft, cleanNeighbor, isolated]
+      ).map((finding) => finding.findingId),
+      duplicateGroups: [
+        [aNeighbors[0]!, aCenter],
+        reverse ? [bCenter, bRight] : [bLeft, bCenter],
+        [cleanNeighbor, cleanCenter],
+      ].map((group) => group.map((finding) => finding.findingId)),
+      deduplicationStatus: "completed",
+    });
+  }
+});
+
+test("scales contradiction grouping with conflict neighbors instead of all clusters", () => {
+  const count = 200;
+  const ids = Array.from(
+    { length: count },
+    (_value, index) => `finding-${index}`,
+  );
+  const samePairs: [string, string][] = [];
+  for (let left = 0; left < count; left++) {
+    for (let right = left + 1; right < Math.min(count, left + 51); right++)
+      samePairs.push([ids[left]!, ids[right]!]);
+  }
+  const metrics = { candidateEvaluations: 0, conflictNeighborChecks: 0 };
+  const groups = contradictionFreeSubgroups(
+    ids,
+    samePairs,
+    [[ids[0]!, ids[count - 1]!]],
+    undefined,
+    metrics,
+  );
+  expect(groups).toHaveLength(1);
+  expect(groups[0]!.size).toBe(count - 1);
+  expect(groups[0]!.has(ids[0]!) && groups[0]!.has(ids[count - 1]!)).toBe(
+    false,
+  );
+  expect(metrics.candidateEvaluations).toBeLessThan(count * samePairs.length);
+  expect(metrics.conflictNeighborChecks).toBeLessThan(
+    metrics.candidateEvaluations * 3,
+  );
+});
+
 test("matches an import to an existing canonical", async () => {
   const existing = entry(1);
   const imported = entry(2);
   imported.severity.level = "low";
   const ids = [existing.findingId, imported.findingId];
   const service = new FindingDeduplicator(candidates([existing, imported]), {
-    async screen(findings) {
-      return screening(findings, new Set([pairKey(ids)]));
-    },
-    async reviewPair(findings) {
-      return same(findings);
-    },
+    screen: screenNominations(() => new Set([pairKey(ids)])),
+    reviewPair: reviewSame,
   });
   expect(await service.run([imported.findingId])).toEqual({
     uniqueFindingIds: [existing.findingId],
@@ -190,12 +798,8 @@ test("empty and isolated imports avoid models, while review failures propagate",
   const findings = [first];
   const failure = new CodexSecurityError("Synthetic review failed");
   const reviewer: DeduplicationReviewer = {
-    async screen() {
-      throw failure;
-    },
-    async reviewPair() {
-      throw failure;
-    },
+    screen: (Promise.reject<never>).bind(Promise, failure),
+    reviewPair: (Promise.reject<never>).bind(Promise, failure),
   };
   const service = new FindingDeduplicator(candidates(findings), reviewer);
   expect(await service.run([])).toEqual({
@@ -210,56 +814,120 @@ test("empty and isolated imports avoid models, while review failures propagate",
   await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
-test("validates complete screening assignments and rejects non-anchor pairs", () => {
+test.each(["screening", "pair-review"] as const)(
+  "a %s refusal keeps affected pairs separate without stopping other reviews",
+  async (stage) => {
+    const findings = [entry(1), entry(2), entry(3)];
+    const ids = findings.map((finding) => finding.findingId);
+    const refusedPair = pairKey([ids[0]!, ids[2]!]);
+    const nominations = new Set([
+      pairKey(ids.slice(0, 2)),
+      pairKey(ids.slice(1)),
+      refusedPair,
+    ]);
+    const failure = new DeduplicationReviewError({
+      stage,
+      model: stage === "screening" ? "gpt-5.6-luna" : "gpt-5.6-sol",
+      category: "refusal",
+      attempts: 1,
+      reason: "The model refused the deduplication review.",
+    });
+    const reviewed: string[] = [];
+    const result = await new FindingDeduplicator(candidates(findings), {
+      async screen(values) {
+        if (stage === "screening" && values[0]!.findingId === ids[0])
+          throw failure;
+        return screening(values, nominations);
+      },
+      async reviewPair(values) {
+        const key = pairKey(values.map((finding) => finding.findingId));
+        reviewed.push(key);
+        if (stage === "pair-review" && key === refusedPair) throw failure;
+        return same(values);
+      },
+    }).run(ids);
+
+    expect(result.deduplicationStatus).toBe("completed_with_refusals");
+    expect(result.refusals).toEqual([
+      {
+        decision: "NO_DECISION",
+        stage,
+        model: failure.metadata.model,
+        reason: failure.metadata.reason,
+        findingIds: stage === "screening" ? ids : [ids[2]!, ids[0]!],
+      },
+    ]);
+    expect(result.duplicateGroups.some((group) => group.length === 2)).toBe(
+      true,
+    );
+    expect(result.uniqueFindingIds).toHaveLength(2);
+    // A refused pair must not be reconnected through a third finding.
+    expect(
+      result.duplicateGroups.some(
+        (group) => group.includes(ids[0]!) && group.includes(ids[2]!),
+      ),
+    ).toBe(false);
+    if (stage === "screening") {
+      expect(result.uniqueFindingIds).toContain(ids[0]!);
+      expect(reviewed).toEqual([pairKey(ids.slice(1))]);
+    }
+  },
+);
+
+test("validates exact screening slots without model-owned finding identity", () => {
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
   expect(validateScreening(result, findings)).toEqual(result);
+  expect(Object.keys(result.decisions)).toEqual(["pair-2", "pair-1"]);
   for (const invalid of [
-    { decisions: result.decisions.slice(1) },
     {
-      decisions: [
+      decisions: { "pair-1": result.decisions["pair-1"] },
+    },
+    {
+      decisions: {
         ...result.decisions,
-        { findingIds: [ids[1], ids[0]], ...same(findings.slice(0, 2)) },
-      ],
+        "pair-3": { decision: "DISTINCT", rationale: "Outside assignment." },
+      },
     },
     {
-      decisions: [
-        ...result.decisions.slice(0, 2),
-        { findingIds: [ids[0], "outside"], ...same(findings.slice(0, 2)) },
-      ],
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          { ...decision, findingIds: [ids[0], "outside"] },
+        ]),
+      ),
     },
     {
-      decisions: [
-        ...result.decisions,
-        { findingIds: [ids[1], ids[2]], ...same(findings.slice(1)) },
-      ],
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          { ...decision, rationale: " " },
+        ]),
+      ),
     },
     {
-      decisions: [
-        ...result.decisions.slice(0, 2),
-        { findingIds: [ids[1], ids[2]], ...distinct },
-      ],
-    },
-    {
-      decisions: result.decisions.map((value) => ({
-        ...value,
-        rationale: " ",
-      })),
-    },
-    {
-      decisions: result.decisions.map((value) =>
-        value.decision === "SAME"
-          ? { ...value, canonicalFindingId: ids[2] }
-          : value,
+      decisions: Object.fromEntries(
+        Object.entries(result.decisions).map(([slot, decision]) => [
+          slot,
+          decision.decision === "SAME"
+            ? { ...decision, canonicalFindingId: ids[0] }
+            : decision,
+        ]),
       ),
     },
   ])
     expect(() => validateScreening(invalid, findings)).toThrow();
 });
 
-test("requires complete SAME tool outputs and keeps reviews independent", async () => {
+test("keeps recommendation-only screening independent from complete pair reviews", async () => {
   const findings = [entry(1), entry(2), entry(3)];
+  const linkedId = entry(4).findingId;
+  findings[0]!.extensions = {
+    ...findings[0]!.extensions,
+    parent: { id: "external-parent", url: "https://issues.example/parent" },
+    duplicateOf: { id: linkedId, url: "https://issues.example/duplicate" },
+  };
   const calls: CodexReview<unknown>[] = [];
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>(review: CodexReview<T>): Promise<T> {
@@ -272,11 +940,8 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
             pairKey(findings.slice(0, 2).map((finding) => finding.findingId)),
           ]),
         );
-        for (const decision of result.decisions) {
+        for (const decision of Object.values(result.decisions))
           decision.rationale = "SCREENING_ONLY_RATIONALE";
-          if (decision.decision === "SAME")
-            decision.mergedFinding["title"] = "SCREENING_ONLY_MERGED";
-        }
       } else {
         result = same(
           calls.length === 2 ? findings.slice(0, 2) : findings.slice(1),
@@ -288,19 +953,51 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
         review.schema as object,
       );
       expect(validateSchema(result)).toBe(true);
-      for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
-        for (const value of [undefined, null]) {
-          const invalid =
-            "decisions" in result
-              ? {
-                  decisions: result.decisions.map((decision) =>
-                    decision.decision === "SAME"
-                      ? { ...decision, [field]: value }
-                      : decision,
-                  ),
-                }
-              : { ...result, [field]: value };
+      if ("decisions" in result) {
+        expect(
+          validateSchema({
+            decisions: { "pair-1": result.decisions["pair-1"] },
+          }),
+        ).toBe(false);
+        expect(
+          validateSchema({
+            decisions: {
+              ...result.decisions,
+              "pair-3": result.decisions["pair-1"],
+            },
+          }),
+        ).toBe(false);
+        const decisionsWithFindingIds = Object.fromEntries(
+          Object.entries(result.decisions).map(([slot, decision]) => [
+            slot,
+            {
+              ...decision,
+              findingIds: [findings[0]!.findingId, findings[1]!.findingId],
+            },
+          ]),
+        );
+        expect(validateSchema({ decisions: decisionsWithFindingIds })).toBe(
+          false,
+        );
+        for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
+          const invalid = {
+            decisions: Object.fromEntries(
+              Object.entries(result.decisions).map(([slot, decision]) => [
+                slot,
+                decision.decision === "SAME"
+                  ? { ...decision, [field]: null }
+                  : decision,
+              ]),
+            ),
+          };
           expect(validateSchema(invalid)).toBe(false);
+        }
+      } else {
+        for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
+          for (const value of [undefined, null]) {
+            const invalid = { ...result, [field]: value };
+            expect(validateSchema(invalid)).toBe(false);
+          }
         }
       }
       return review.validate(result);
@@ -309,10 +1006,12 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
   await reviewer.screen(findings);
   await reviewer.reviewPair(findings.slice(0, 2));
   await reviewer.reviewPair(findings.slice(1));
-  expect(calls.map(({ model, effort }) => [model, effort])).toEqual([
-    ["gpt-5.6-luna", "xhigh"],
-    ["gpt-5.6-sol", "xhigh"],
-    ["gpt-5.6-sol", "xhigh"],
+  expect(
+    calls.map(({ stage, model, effort }) => [stage, model, effort]),
+  ).toEqual([
+    ["screening", "gpt-5.6-luna", "xhigh"],
+    ["pair-review", "gpt-5.6-sol", "high"],
+    ["pair-review", "gpt-5.6-sol", "high"],
   ]);
   expect(calls[0]!.prompt).toContain(JSON.stringify({ findings }));
   expect(calls[1]!.prompt).toContain(
@@ -328,10 +1027,41 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
         ({ prompt }) =>
           !prompt.includes("SCREENING_ONLY_RATIONALE") &&
           !prompt.includes("PAIR_ONLY_RATIONALE") &&
-          !prompt.includes("SCREENING_ONLY_MERGED") &&
           !prompt.includes("PAIR_ONLY_MERGED"),
       ),
   ).toBe(true);
+  expect(calls[0]!.prompt).not.toContain("canonicalFindingId");
+  expect(calls[0]!.prompt).not.toContain("mergedFinding");
+  for (const { prompt } of calls) {
+    expect(prompt).toMatch(/incomplete or insufficient.*DISTINCT/);
+    expect(prompt).toMatch(/failure prevents a required check.*submit_error/);
+    expect(prompt).toMatch(
+      /failed optional lookup.*continue when other available evidence is sufficient/,
+    );
+  }
+  for (const { prompt } of calls.slice(1)) {
+    expect(prompt).toMatch(/exactly the two supplied findings/);
+    expect(prompt).toMatch(
+      /Linked parent tickets, duplicate targets, and related-ticket records are metadata/,
+    );
+    expect(prompt).toMatch(/Do not fetch those records or expand the pair/);
+    expect(prompt).toMatch(
+      /unsupplied linked duplicate target is not automatically the canonical finding.*not itself an error/,
+    );
+    expect(prompt).toMatch(
+      /Necessary source-code investigation.*remains allowed/,
+    );
+  }
+  expect(() =>
+    validateReview(
+      {
+        ...same(findings.slice(0, 2)),
+        canonicalFindingId: linkedId,
+        mergedFinding: { ...findings[0], findingId: linkedId },
+      },
+      findings.slice(0, 2),
+    ),
+  ).toThrow("The canonical finding must belong to the assigned findings.");
 });
 
 test("accepts complete canonical and merged reviews and rejects invalid assignments", () => {
@@ -378,28 +1108,13 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
     { ...result, decision: "DISTINCT" },
   ]) {
     expect(() => validateReview(invalid, findings)).toThrow();
-    expect(() =>
-      validateScreening(
-        {
-          decisions: [
-            {
-              ...invalid,
-              findingIds: findings.map((finding) => finding.findingId),
-            },
-          ],
-        },
-        findings,
-      ),
-    ).toThrow();
   }
 });
 
 test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dedupe-scan-"));
   try {
-    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
-      recursive: true,
-    });
+    await copyCompletedScanFixture(directory);
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const original = await readFile(join(directory, "findings.json"), "utf8");
     for (const [requestedId, allRepositories] of [
@@ -436,14 +1151,7 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
               potentialDuplicates: [],
             });
           },
-          reviewer: {
-            async screen() {
-              throw new Error("No review for an empty neighborhood");
-            },
-            async reviewPair() {
-              throw new Error("No pair to review");
-            },
-          },
+          reviewer: emptyNeighborhoodReviewer(),
         },
       );
       expect(result).toEqual({
@@ -484,16 +1192,73 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
               progress: { status: "complete" },
             },
           }),
-          fetch: async () => {
-            throw new Error(
-              "Must not retrieve candidates for a mismatched scan",
-            );
-          },
+          fetch: async () =>
+            fail("Must not retrieve candidates for a mismatched scan"),
         },
       ),
     ).rejects.toThrow("do not match selected scan");
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deduplicates an explicit sealed scan directory without reading scan history", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dedupe-directory-"));
+  const repository = await mkdtemp(join(tmpdir(), "dedupe-repository-"));
+  try {
+    await copyCompletedScanFixture(directory);
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const original = await readFile(join(directory, "findings.json"), "utf8");
+    const commands: string[][] = [];
+    const requests: string[] = [];
+    const result = await deduplicateScanDirectoryInternal(
+      directory,
+      {
+        repository,
+        expectedScanId: "scan_example_001",
+        findingsUrl: "http://synthetic.test/api",
+      },
+      {
+        runWorkbench: async (args) => {
+          commands.push([...args]);
+          throw new Error("Explicit scan directories must not read history");
+        },
+        fetch: async (url, options) => {
+          requests.push(String(url));
+          expect(options?.method).toBeUndefined();
+          return Response.json({
+            finding: document.findings[0],
+            potentialDuplicates: [],
+          });
+        },
+        reviewer: emptyNeighborhoodReviewer(),
+      },
+    );
+    expect(result).toEqual({
+      scanId: "scan_example_001",
+      uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    });
+    expect(commands).toEqual([]);
+    expect(requests).toEqual([
+      `http://synthetic.test/api/v1/finding/${document.findings[0]!.findingId}/potential-duplicates?repositoryId=target_sha256_example`,
+    ]);
+    expect(await readFile(join(directory, "findings.json"), "utf8")).toBe(
+      original,
+    );
+    await expect(
+      deduplicateScanDirectory(directory, {
+        repository,
+        expectedScanId: "scan_other",
+        findingsUrl: "http://synthetic.test/api",
+      }),
+    ).rejects.toThrow("do not match selected scan");
+  } finally {
+    await Promise.all([
+      rm(directory, { recursive: true, force: true }),
+      rm(repository, { recursive: true, force: true }),
+    ]);
   }
 });
 
@@ -525,16 +1290,14 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
   ).rejects.toBe("synthetic cancellation");
 });
 
-test("writes accepted groups only after all reviews and fails when write-back fails", async () => {
+test("writes accepted groups only after all reviews and fails on review or write-back errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dedupe-writeback-"));
   try {
-    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
-      recursive: true,
-    });
+    await copyCompletedScanFixture(directory);
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const findings = [document.findings[0]!, entry(2), entry(3)];
     const ids = findings.map((finding) => finding.findingId);
-    for (const status of [201, 409]) {
+    for (const failure of ["none", "write", "review", "refusal"]) {
       const phases: string[] = [];
       const controller = new AbortController();
       const result = deduplicateScanInternal(
@@ -559,9 +1322,15 @@ test("writes accepted groups only after all reviews and fails when write-back fa
                 "http://synthetic.test/api/v1/dedupe-groups",
               );
               expect(JSON.parse(options.body as string)).toEqual({
-                groups: [[...ids].sort()],
+                groups: [
+                  failure === "refusal"
+                    ? ids.slice(0, 2).sort()
+                    : [...ids].sort(),
+                ],
               });
-              return Response.json([], { status });
+              return Response.json([], {
+                status: failure === "write" ? 409 : 201,
+              });
             }
             phases.push("lookup");
             return Response.json({
@@ -583,19 +1352,53 @@ test("writes accepted groups only after all reviews and fails when write-back fa
             },
             async reviewPair(values) {
               phases.push("pair");
+              if (failure === "refusal" && values[1]!.findingId === ids[2])
+                throw new DeduplicationReviewError({
+                  stage: "pair-review",
+                  model: "gpt-5.6-sol",
+                  category: "refusal",
+                  attempts: 1,
+                  reason: "The model refused the deduplication review.",
+                });
+              if (failure === "review" && values[1]!.findingId === ids[2])
+                throw new CodexSecurityError(
+                  "Required source revision could not be read.",
+                );
               return same(values);
             },
           },
         },
       );
-      if (status === 201) {
+      if (failure === "none") {
         expect((await result).duplicateGroups).toEqual([[...ids].sort()]);
+      } else if (failure === "refusal") {
+        expect(await result).toMatchObject({
+          deduplicationStatus: "completed_with_refusals",
+          duplicateGroups: [ids.slice(0, 2).sort()],
+          refusals: [
+            {
+              decision: "NO_DECISION",
+              stage: "pair-review",
+              findingIds: [ids[0], ids[2]],
+            },
+          ],
+        });
+      } else if (failure === "review") {
+        await expect(result).rejects.toThrow(
+          "Required source revision could not be read.",
+        );
       } else {
         await expect(result).rejects.toThrow(
           "POST /v1/dedupe-groups failed (HTTP 409)",
         );
       }
-      expect(phases).toEqual(["lookup", "screen", "pair", "pair", "store"]);
+      expect(phases).toEqual([
+        "lookup",
+        "screen",
+        "pair",
+        "pair",
+        ...(failure === "review" ? [] : ["store"]),
+      ]);
     }
     expect(
       JSON.parse(await readFile(join(directory, "findings.json"), "utf8")),

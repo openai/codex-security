@@ -7,7 +7,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from workbench_test_support import create_saved_workspace, run_workbench, write_completed_contract
+from workbench_test_support import (
+    run_workbench,
+    start_saved_scan,
+    write_completed_contract,
+)
 
 
 def update_remediation(
@@ -43,17 +47,7 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     target.mkdir()
     source = target / "source.txt"
     source.write_text("vulnerable\n")
-    saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])

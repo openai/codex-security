@@ -1,56 +1,31 @@
-<!-- release-version: 0.1.23 -->
+<!-- release-version: 0.1.32 -->
 
+<!-- release-section: highlights:start -->
 ## Highlights
 
-- Store complete findings and embeddings in the preview findings service, with
-  paginated listing, repository-scoped candidate retrieval, and durable duplicate
-  groups. Publish a completed scan with
-  `publish scan --to custom --scan SCAN_ID --findings-url URL`, or preview the
-  payload with `--dry-run`. See the
-  [findings service](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#findings-service-preview)
-  and [custom publication](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#publishing-to-a-custom-findings-service).
-- Review potential duplicates from the CLI or SDK with
-  `dedupe --scan SCAN_ID --findings-url URL`. Reviews run on the calling host and save accepted groups
-  without replacing original findings. Searches default to the scan's repository;
-  `--all-repositories` explicitly broadens the scope. Add `--workflow-id` to scan,
-  custom publication, and deduplication to reuse completed stages and checkpointed
-  reviews after interruption. See
-  [deduplication](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#deduplication-from-the-sdk-and-cli)
-  and [workflow recovery](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#resuming-a-local-findings-workflow).
-- Browse stored findings and duplicate groups in the service's read-only
-  `/dashboard`, with search, repository filters, sorting, and record details.
-  The dashboard shows service-owned data, not local scan or workflow history.
-  See the [dashboard guide](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#read-only-dashboard).
-- Add a separate findings-service container release and a Compose runner for the
-  existing scanner CLI, with persistent state and source mounts. Both images
-  support Linux `amd64` and `arm64`. See
-  [container releases and the workflow runner](https://github.com/openai/codex-security/blob/npm-v0.1.23/docker/README.md).
-- Preserve sealed scan artifacts when optional follow-up instructions fail,
-  propagate caller cancellation during cloud publication, respect the exact
-  POSIX `PATH` when resolving trusted executables, and retain nested attack-path
-  evidence strings in saved finding previews.
+- return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
+- keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
+- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
+- bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
+- bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
+- patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
+- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
+- include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
+- propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
+- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
+- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
+- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
+- calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
+- preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
+- create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
+- require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
+- bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
+- bump the codex group across 3 directories with 2 updates ([#1076](https://github.com/openai/codex-security/pull/1076))
+- default CLI and SDK to GPT-6 Sol xhigh ([#1078](https://github.com/openai/codex-security/pull/1078))
+<!-- release-section: highlights:end -->
 
+<!-- release-section: upgrades:start -->
 ## Upgrade notes
 
-- The findings API and dashboard have no built-in authentication. Keep the
-  service on a trusted local endpoint or behind an authenticated TLS proxy;
-  Compose publishes only to host loopback. Nonempty imports send complete finding
-  JSON to the OpenAI embeddings API and require an API key. A ChatGPT login is not
-  an embedding credential. Duplicate review uses the calling host's Codex
-  credentials separately, and embedding and review calls can incur usage charges.
-- Stop the findings service and back up its entire state directory before
-  upgrading. Startup applies SQLite migrations automatically; rollback requires
-  the pre-upgrade backup and previous image. Existing findings are not
-  automatically embedded: import them with their repository ID before using
-  repository-scoped deduplication. Keep runner state separate from service state.
-  See [backups and upgrades](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#upgrades-and-backups).
-- Container publication is separate from npm publication. Use a version or digest
-  only after the selected image release is available; source builds remain
-  supported. Follow the [container setup](https://github.com/openai/codex-security/blob/npm-v0.1.23/docker/README.md#ghcr-administrator-setup)
-  before the first registry release.
-- Source checkouts now generate the SDK's bundled plugin from
-  `plugins/codex-security`. Contributors should edit the canonical plugin source
-  and run `pnpm run build:plugin`; the published npm package still includes the
-  runtime payload. See [plugin source ownership](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/TESTING.md).
-
-The categorized list below contains the individual changes.
+Review compatibility and document any required migration steps before releasing.
+<!-- release-section: upgrades:end -->

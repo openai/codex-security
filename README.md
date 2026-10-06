@@ -1,6 +1,6 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
+`@openai/codex-security` is a CLI and TypeScript SDK for defining security policy and finding, validating, and fixing security vulnerabilities in your code.
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
 
@@ -14,13 +14,51 @@ Requires Node.js 22.13.0 or later and Python 3.10 or later.
 
 ```bash
 npm install @openai/codex-security
-codex-security login
-codex-security scan /path/to/directory
+npx @openai/codex-security login
+npx @openai/codex-security scan /path/to/directory
 ```
+
+On remote or headless machines, use `login --device-auth` if your workspace
+allows it. If device auth is disabled,
+[sign in over SSH](sdk/typescript/README.md#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
 
+## Generate SECURITY.md
+
+Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+```
+
+The command saves a draft outside the checkout; it does not install it or run a
+vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
+threat-model, and review documents stay outside the repository and may contain
+sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
+for headless generation, saved artifacts, and SDK usage.
+
+## Save and export threat models
+
+Scans and policy generation retain their threat model with the run and write
+a `threatmodel.md` copy when possible. Export the saved model without starting
+another analysis:
+
+```bash
+npx @openai/codex-security export --artifact threat-model
+npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output docs/threatmodel.md
+```
+
+The default source is the current repository's latest completed scan. Explicit
+scan IDs or result directories can export saved provisional models. See the
+[export guide](sdk/typescript/README.md#exports-and-ci) for policy results,
+stdout, and the offline TypeScript API.
+
 ## TypeScript SDK
+
+To suggest owners for existing findings from source and Git history, see
+[Suggest finding owners](sdk/typescript/README.md#suggest-finding-owners).
 
 Codex Security is a Javascript package:
 
@@ -52,7 +90,7 @@ findings service, use the same scanner image with the
 
 ## Findings service (preview)
 
-Run `codex-security serve` to start the service without Docker. See
+Run `npx @openai/codex-security serve` to start the service without Docker. See
 [running without Docker](sdk/typescript/README.md#running-without-docker)
 for prerequisites, credentials, and storage configuration.
 
@@ -64,28 +102,49 @@ findings with pagination. Its read-only dashboard at `/dashboard` refreshes ever
 five seconds and shows stored findings and duplicate groups from the service's
 database. It also returns potential duplicates by embedding similarity within a
 repository or an explicit all-repository scope. The
-`codex-security publish scan --to custom --findings-url http://localhost:3000`
+`npx @openai/codex-security publish scan --to custom --findings-url http://localhost:3000`
 command uploads completed findings and their repository ID. The SDK and
-`codex-security dedupe` command retrieve candidates, run independent Codex
+`npx @openai/codex-security dedupe` command retrieve candidates, run independent Codex
 reviews locally, and persist accepted duplicate groups; `--all-repositories`
 opts into the broader scope.
 
+Use `npx @openai/codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
+to assess selected findings under your own policy before publishing tickets.
+Scan classification checkpoints each finding in SQLite and reuses matching
+assessments on reruns; `--reprocess` forces reassessment. The SDK exposes the same
+classification operation; original scan severity stays unchanged. See [severity classification](sdk/typescript/README.md#classify-finding-severity).
+
 ## Other providers
 
-To use another inference provider, set its API key and select a model:
+Amazon Bedrock uses native Codex support; no connector or adapter is needed.
+Select an AWS profile, the region where your account can invoke the model, and
+the Bedrock model ID:
 
 ```bash
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_PROFILE="security-scan"
 export AWS_REGION="us-east-2"
-codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+```
 
+Run the exports and scan in the same shell. Bedrock also accepts bearer tokens
+and the AWS credential chain. Native Bedrock scans and local result viewing or
+export do not require an OpenAI CLI login. Daybreak Blue and Red still need
+[approved model access](docs/bedrock.md#daybreak-blue-and-red). Hosted publication has its
+own authentication requirements. See [Bedrock setup and verification](docs/bedrock.md).
+
+For other inference providers, set the provider's API key and select a model:
+
+```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
-codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
-codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 ```
 
 ## Documentation
 
 **👉👉 See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for full documentation.
+
+See [project configuration](docs/project-configuration.md) for reusable YAML/JSON
+settings, CLI overrides, and editor schema support.

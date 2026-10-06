@@ -120,6 +120,7 @@ export function createBulkScanDiscoveryDependencies(options: {
 export async function runBulkScanWizard(
   dependencies: BulkScanDiscoveryDependencies,
   signal?: AbortSignal,
+  defaultOutputDir = "./security-scans",
 ): Promise<BulkScanWizardResult | null> {
   const { prompt } = dependencies;
   if (!prompt.isInteractive()) {
@@ -146,14 +147,19 @@ export async function runBulkScanWizard(
   }
 
   prompt.write(`\nFound ${discovered.length} repositories.\n`);
-  const repositories = await selectGitHubRepositories(discovered, prompt);
+  const repositories = await selectGitHubRepositories(
+    discovered,
+    prompt,
+    signal,
+  );
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
     expandHome(
       await prompt.input(
         "Where should scan results be saved?",
-        "./security-scans",
+        defaultOutputDir,
+        signal,
       ),
     ),
   );
@@ -163,7 +169,7 @@ export async function runBulkScanWizard(
     `\nReady to scan ${repositories.length} repositories?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
-  if (!(await prompt.confirm("Start scanning?"))) {
+  if (!(await prompt.confirm("Start scanning?", false, signal))) {
     prompt.write("\nScan canceled.\n");
     return null;
   }
@@ -211,6 +217,8 @@ async function selectGitHubOwner(
     return await prompt.select(
       "Which account or organization should we scan?",
       owners.map((owner) => ({ label: owner, value: owner })),
+      undefined,
+      signal,
     );
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
@@ -220,6 +228,7 @@ async function selectGitHubOwner(
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
+  signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
@@ -236,6 +245,8 @@ async function selectGitHubRepositories(
           .filter(({ fullName }) => !selected.has(fullName))
           .map(({ fullName }) => ({ label: fullName, value: fullName })),
       ],
+      undefined,
+      signal,
     );
     if (!choice) break;
     selected.add(choice);
@@ -286,8 +297,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
@@ -315,7 +325,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
   const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {

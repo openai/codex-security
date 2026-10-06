@@ -13,9 +13,49 @@ publishing the multiarchitecture manifest. Anonymous
 pulls and attestation must succeed before promoting version, `sha-<commit>`, and
 `latest` tags. Stable version tags cannot be overwritten.
 
+## Image metadata and verification
+
+Release images include OCI metadata in each platform's image labels and in the
+final multiarchitecture index: title, description, source, license, vendor,
+version, source commit, build timestamp, release notes, and documentation pinned
+to that commit. GHCR reads the multiarchitecture description from the index,
+not from the Dockerfile labels alone.
+
+The workflow generates metadata once for both architectures, verifies it on the
+published candidate, then signs and promotes that exact digest. Metadata changes
+require a new digest and a new release; existing stable versions are not updated.
+The successful release run's summary includes the digest, supported platforms,
+documentation links, and commands to pull and verify the published image.
+
+Replace `VERSION` with an available stable version. Resolve its index digest once
+and use that reference for inspection, verification, and deployment:
+
+```bash
+image=ghcr.io/openai/codex-security
+version=VERSION
+digest="$(docker buildx imagetools inspect "$image:$version" --format '{{.Manifest.Digest}}')"
+reference="$image@$digest"
+
+docker buildx imagetools inspect "$reference" --raw | jq '.annotations'
+gh attestation verify "oci://$reference" --repo openai/codex-security
+docker pull "$reference"
+```
+
+Set `CODEX_SECURITY_IMAGE` or `CODEX_SECURITY_FINDINGS_IMAGE` to the verified
+`reference` when using Compose. The index selects the native `amd64` or `arm64`
+image. Its `unknown/unknown` entries contain the per-platform SBOM and build
+provenance; they are not runnable platforms and should not be removed.
+
+All labels, annotations, SBOMs, and provenance are public. Keep private URLs,
+scan data, and credentials out of them. BuildKit's maximum-mode provenance
+includes build arguments, so pass build credentials through secret mounts rather
+than build arguments.
+
 ## GHCR administrator setup
 
 Before the first release, an administrator must prepare the package:
+
+Prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs) before building an image from source.
 
 1. Allow organization package creation and, if the package is missing, bootstrap
    it with a reviewed image and a non-release tag:
@@ -91,13 +131,18 @@ docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
 
-For unattended use, provide `OPENAI_API_KEY` or `CODEX_API_KEY` instead of login.
+The `login --device-auth` command above signs the runner in with ChatGPT and
+requires device auth to be enabled in your workspace. If device auth is
+disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
+your host shell. Compose passes the key to the runner. Use API keys for
+unattended runs too.
+
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 `CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;
 the findings service's embedding credentials are configured separately.
 Use a version or digest in `CODEX_SECURITY_IMAGE` for repeatable deployments.
 To test an unreleased checkout, build the same scanner target locally instead
-of pulling:
+of pulling. First prepare the [universal native payload](../plugins/codex-security/native/README.md#package-inputs):
 
 ```bash
 docker build --target scanner -t codex-security:local .
@@ -181,10 +226,11 @@ no-new-privileges, and seccomp profile. It does not override Codex approval or
 filesystem settings. On hosts that restrict nested user namespaces, install the
 existing [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
 and append `-f compose.apparmor.yaml` to the runner Compose commands. This override
-works because both examples use the `codex-security` service name. The entrypoint's
-bulk-scan-specific Landlock selection remains unchanged; it is not applied to
-other commands. Source inspection needs a host that supports the selected Codex
-sandbox; do not disable sandboxing to work around host restrictions.
+works because both examples use the `codex-security` service name. Codex 0.156.1
+requires Bubblewrap for filesystem-restricted execution; the legacy Landlock
+fallback is no longer supported. The entrypoint preserves Codex sandbox settings.
+Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
+to work around host restrictions.
 
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.

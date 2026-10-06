@@ -15,6 +15,10 @@ packages and releases. Do not edit or commit files in that directory. See the
 [SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
 commands.
 
+Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
+source. Deterministic triage checks and the MCP reducer IPC regression remain
+part of normal CI.
+
 Search [existing issues](https://github.com/openai/codex-security/issues)
 before opening a new one.
 
@@ -35,6 +39,9 @@ customer data, and security findings before posting.
 
 Open an issue describing the problem and the workflow you want to support.
 Documentation corrections and safe examples are welcome.
+Use synthetic examples when documenting expected behavior.
+Keep example values fictional and safe to share.
+Do not include credentials or private information in examples.
 
 ## Report a security issue
 
@@ -51,6 +58,28 @@ Maintainers update package dependencies and committed lockfiles with the
 affected source. The public release workflow installs those locked graphs,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
+
+Workflow and composite-action changes run `workflow-quality` through the existing
+required Unix CI checks. actionlint validates workflow syntax, and ShellCheck
+checks shell scripts in workflow `run` steps for warnings and errors. zizmor's
+offline checks at medium severity and above cover workflows and composite
+actions. The pinned tool versions are in `.github/workflows/workflow-quality.yml`;
+run these checks locally with:
+
+```bash
+SHELLCHECK_OPTS=--severity=warning actionlint
+zizmor --offline --strict-collection --min-severity medium --config .github/zizmor.yml .github
+```
+
+The actionlint configuration preserves GitHub's supported release queue and
+job-level cache syntax until the linter supports them. The zizmor configuration
+records reviewed privileged triggers and their trust boundaries. Review these
+exceptions when changing the affected workflows.
+
+CI package builds and npm release validation require the production dependency
+audit to pass. Run it locally with `pnpm --dir sdk/typescript run audit:prod`.
+The existing policy checks production dependencies at the high-severity threshold.
+Resolve high or critical advisories, or audit service failures, before retrying.
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
 canonical changelog. Maintainers should follow [RELEASING.md](RELEASING.md) to

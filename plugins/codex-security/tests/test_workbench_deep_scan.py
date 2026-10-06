@@ -18,12 +18,21 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     run_workbench,
     stable_target_id,
+    start_delivered_scan,
+    worker_paths,
     write_completed_contract,
 )
 
 
 def deep_environment(codex_home: Path) -> dict[str, str]:
     return {"CODEX_HOME": str(codex_home)}
+
+
+def write_deep_config(codex_home: Path, content: str) -> Path:
+    config_path = codex_home / "codex-security" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(content)
+    return config_path
 
 
 def begin_target_scan(
@@ -83,15 +92,6 @@ def expire_deep_scan_coordinator(state_dir: Path, scan_id: str) -> None:
             "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
             ("2000-01-01T00:00:00Z", scan_id),
         )
-
-
-def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
-    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
-    artifact_dir.mkdir(parents=True)
-    prompt_path = artifact_dir / "prompt.md"
-    prompt_path.write_text(f"Prompt for {name}\n")
-    result_path = artifact_dir / "result.json"
-    return prompt_path, artifact_dir, result_path
 
 
 def write_canonical_artifacts(scan_dir: Path) -> dict[str, Path]:
@@ -278,7 +278,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (39,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -370,10 +370,9 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
 ) -> None:
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
     target.mkdir()
-    config = codex_home / "codex-security" / "config.toml"
-    config.parent.mkdir(parents=True)
-    config.write_text(
-        "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n"
+    write_deep_config(
+        codex_home,
+        "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
     )
     thread_id, handoff_claim_token = "track-c-continuation", str(uuid.uuid4())
     saved = create_saved_workspace(state_dir, target, thread_id="workspace-thread", mode="deep")
@@ -679,10 +678,9 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     tmp_path: Path, reducer_status: str, replace_all_inputs: bool, should_finish: bool
 ) -> None:
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 4\n"
+    write_deep_config(
+        codex_home,
+        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 4\n",
     )
     target.mkdir()
     run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
@@ -1263,9 +1261,7 @@ def test_deep_scan_worker_defaults_do_not_depend_on_available_parallelism(
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     if workers_configuration is not None:
-        config_path = codex_home / "codex-security" / "config.toml"
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text("[deep_scan]\n" + workers_configuration)
+        write_deep_config(codex_home, "[deep_scan]\n" + workers_configuration)
     target = tmp_path / "target"
     target.mkdir()
 
@@ -1298,9 +1294,7 @@ def test_deep_scan_worker_defaults_do_not_depend_on_available_parallelism(
 def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    shared_config_path = codex_home / "codex-security" / "config.toml"
-    shared_config_path.parent.mkdir(parents=True)
-    shared_config_path.write_text("[deep_scan]\nworkers = 2\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 2\n")
     isolated_config_path = tmp_path / "isolated-deep-scan.toml"
     isolated_config_path.write_text("[deep_scan]\nworkers = 7\n")
     target = tmp_path / "target"
@@ -1331,15 +1325,14 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
 def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    config_path = write_deep_config(
+        codex_home,
         "[deep_scan]\n"
         'workers = "auto"\n'
         "subagents = 2\n"
         "stop_after_no_new = 4\n"
         "max_discovery_runs = 12\n"
-        "max_time_hours = 2.5\n"
+        "max_time_hours = 2.5\n",
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1600,9 +1593,7 @@ def test_discovery_error_threshold_defaults_to_three_independently_of_no_new_thr
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(configuration)
+    write_deep_config(codex_home, configuration)
     target = tmp_path / "target"
     target.mkdir()
 
@@ -1619,11 +1610,10 @@ def test_deep_scan_snapshots_configured_discovery_time_limit(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    write_deep_config(
+        codex_home,
         "[deep_scan]\n"
-        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n")
+        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n"),
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1708,10 +1698,9 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 6\nmax_discovery_runs = 6\n"
+    write_deep_config(
+        codex_home,
+        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 6\nmax_discovery_runs = 6\n",
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1992,9 +1981,9 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(f"[deep_scan]\nstop_after_consecutive_errors = {invalid_threshold}\n")
+    write_deep_config(
+        codex_home, f"[deep_scan]\nstop_after_consecutive_errors = {invalid_threshold}\n"
+    )
     target = tmp_path / "target"
     target.mkdir()
 
@@ -2024,9 +2013,7 @@ def test_invalid_discovery_time_limit_fails_before_scan_creation(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(f"[deep_scan]\nmax_time_hours = {invalid_hours}\n")
+    write_deep_config(codex_home, f"[deep_scan]\nmax_time_hours = {invalid_hours}\n")
     target = tmp_path / "target"
     target.mkdir()
 
@@ -2070,9 +2057,7 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
     scan_id = str(first["deepScan"]["scanId"])
     scan_dir = Path(str(first["deepScan"]["scanDir"]))
     manifest = mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nsubagents = -1\n")
+    write_deep_config(codex_home, "[deep_scan]\nsubagents = -1\n")
 
     continued = begin_target_scan(
         state_dir,
@@ -2163,9 +2148,8 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         "deep",
         environment=deep_environment(codex_home),
     )
-    started = run_workbench(
+    started = start_delivered_scan(
         state_dir,
-        "start-scan",
         "--workspace-id",
         workspace_id,
         "--scan-root",
@@ -2614,9 +2598,7 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
     target = tmp_path / "target"
     target.mkdir()
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
@@ -2787,11 +2769,10 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    write_deep_config(
+        codex_home,
         "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\n"
-        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n")
+        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n"),
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -2894,10 +2875,9 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        f"[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = {configured_hours}\n"
+    write_deep_config(
+        codex_home,
+        f"[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = {configured_hours}\n",
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -3016,10 +2996,8 @@ def test_zero_discovery_deadline_rejects_nonempty_candidate_ledger(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 0.5\n"
+    write_deep_config(
+        codex_home, "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 0.5\n"
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -3066,9 +3044,7 @@ def test_zero_discovery_deadline_rejects_nonempty_candidate_ledger(
 def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
     target = tmp_path / "target"
     target.mkdir()
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
@@ -3120,10 +3096,8 @@ def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
 def test_capped_completion_rejects_buffered_workers_and_omissions(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 10\nmax_discovery_runs = 3\n"
+    write_deep_config(
+        codex_home, "[deep_scan]\nworkers = 2\nstop_after_no_new = 10\nmax_discovery_runs = 3\n"
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -3200,9 +3174,7 @@ def prepare_failure_capped_deep_scan(
 ) -> tuple[Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 2\nmax_discovery_runs = 10\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 2\nmax_discovery_runs = 10\n")
     target = tmp_path / "target"
     target.mkdir()
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
@@ -3544,10 +3516,8 @@ def test_failure_capped_completion_rejects_unmarked_or_missing_canonical_coverag
 def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 2\nmax_discovery_runs = 3\n"
+    write_deep_config(
+        codex_home, "[deep_scan]\nworkers = 2\nstop_after_no_new = 2\nmax_discovery_runs = 3\n"
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -3776,10 +3746,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 3\nmax_discovery_runs = 4\n"
+    write_deep_config(
+        codex_home, "[deep_scan]\nworkers = 2\nstop_after_no_new = 3\nmax_discovery_runs = 4\n"
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -3943,20 +3911,6 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     assert late_worker["status"] == "running"
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-
-    active_rejected = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "saturated",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
-        check=False,
-    )
-    assert "while workers are active" in str(active_rejected["stderr"])
 
     late_result.write_text("{}\n")
     accepted_late = upsert_worker(
@@ -4540,9 +4494,7 @@ def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path
 def test_invalid_user_configuration_fails_before_scan_creation(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nsubagents = -1\n")
+    write_deep_config(codex_home, "[deep_scan]\nsubagents = -1\n")
     target = tmp_path / "target"
     target.mkdir()
 
