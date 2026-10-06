@@ -29,6 +29,7 @@ Read `../../references/security-guidance.md` and resolve the applicable policy b
 When a running diff scan already supplies its file inventory through `list_codex_security_review_items`, review that inventory directly and record all candidates once with `record_codex_security_discovery_candidates`. Do not generate ranked worklists, per-finding ledgers, discovery receipts, or discovery reports. Skip the legacy workflow and artifact requirements below.
 
 ### Code Diff Workflow
+
 For a targeted code diff without an existing compact inventory:
 
 - Read `../security-scan/references/scan-artifacts-and-ledger.md`.
@@ -144,7 +145,6 @@ Otherwise, for each candidate include:
 - enough evidence that a later reviewer can understand why the candidate is technically plausible before validation
 
 For legacy diff-scoped discovery without a compact inventory, when candidates are emitted, create the per-finding directory from `../../references/scan-artifacts.md` and append one discovery receipt to that finding's candidate ledger. The ledger row should identify the candidate, scan scope, discovery status, affected locations, and the discovery artifact or evidence that produced it.
-
 
 ## Hard Rules
 
