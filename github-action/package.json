@@ -28,7 +28,7 @@
     "esbuild": "0.28.2",
     "prettier": "3.9.9",
     "tsx": "4.23.15",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "yaml": "2.9.1"
   }
 }
