@@ -137,6 +137,8 @@ for (const status of [0, 1, 2]) {
       "openai",
       "--auth",
       "api-key",
+      "--codex",
+      'openai_base_url="https://us.api.openai.com/v1"',
       "--model",
       "gpt-5.6-sol",
       "--effort",
@@ -159,6 +161,18 @@ for (const status of [0, 1, 2]) {
     );
   });
 }
+
+test("Invoice Desk keeps the trusted API endpoint despite an inherited override", () => {
+  const directory = fixture();
+  const result = runStep(scan, directory, {
+    OPENAI_BASE_URL: "https://untrusted.example/v1",
+  });
+  expect(result.status).toBe(0);
+  const arguments_ = argumentsFor(directory);
+  expect(arguments_[arguments_.indexOf("--codex") + 1]).toBe(
+    'openai_base_url="https://us.api.openai.com/v1"',
+  );
+});
 
 test("Invoice Desk reports a missing key without invoking the scanner", () => {
   const directory = fixture();
