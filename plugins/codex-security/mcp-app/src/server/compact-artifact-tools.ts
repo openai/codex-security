@@ -1,3 +1,4 @@
+import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
 import type { JsonObject as JsonRecord } from "../types.js";
@@ -64,20 +65,6 @@ export interface CompactArtifactToolOptions {
 
 const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
-};
-
-const readingAnnotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const writingAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
 };
 
 /** Prepare diff inventories and read existing diff or Deep inventories. */

@@ -110,7 +110,7 @@ PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
 
 
 def _decode_source(data: bytes) -> str:
-    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8"
+    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8-sig"
     return data.decode(encoding, errors="ignore")
 
 
@@ -118,6 +118,14 @@ def is_binary_sample(data: bytes) -> bool:
     if data.startswith(_UTF16_BOMS):
         return "\0" in _decode_source(data)
     return b"\0" in data
+
+
+def is_binary_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as source:
+            return is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES))
+    except OSError:
+        return True
 
 
 def compact_preview_line(line: str) -> str:
@@ -235,40 +243,7 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_regex_end(text: str, start: int) -> int | None:
-    if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
-        return None
-    previous = start - 1
-    while previous >= 0 and text[previous] in " \t\r":
-        previous -= 1
-    if previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
-        prefix = text[max(0, previous - 8) : previous + 1]
-        if not re.search(r"\b(?:case|return|throw)$", prefix):
-            return None
-
-    index = start + 1
-    in_character_class = False
-    while index < len(text):
-        char = text[index]
-        if char == "\n":
-            return None
-        if char == "\\" and index + 1 < len(text):
-            index += 2
-            continue
-        if char == "[":
-            in_character_class = True
-        elif char == "]":
-            in_character_class = False
-        elif char == "/" and not in_character_class:
-            index += 1
-            while index < len(text) and text[index].isalpha():
-                index += 1
-            return index
-        index += 1
-    return None
-
-
-def mask_c_style_source(text: str, suffix: str) -> str:
+def mask_c_style_source(text: str, suffix: str) -> str | None:
     masked: list[str] = []
     index = 0
     block_comment_depth = 0
@@ -408,12 +383,6 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 heredoc_terminator = heredoc_match.group(1)
                 index += len(token)
                 continue
-        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index)
-            if regex_end is not None:
-                masked.extend(" " * (regex_end - index))
-                index = regex_end
-                continue
         if char == "/" and next_char == "/":
             masked.extend((" ", " "))
             in_line_comment = True
@@ -429,6 +398,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             in_line_comment = True
             index += 1
             continue
+        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
+            # Regex literals and division need grammar context; sample the original source.
+            return None
         if char in {'"', "'", "`"}:
             quote = char
             masked.append(" ")
@@ -693,7 +665,10 @@ def strip_leading_annotations(original: str, masked: str) -> tuple[str, str, lis
 
 def brace_language_outline(text: str, suffix: str) -> list[str]:
     original_lines = text.splitlines()
-    masked_lines = mask_c_style_source(text, suffix).splitlines()
+    masked = mask_c_style_source(text, suffix)
+    if masked is None:
+        return []
+    masked_lines = masked.splitlines()
     outline: dict[str, None] = {}
     type_stack: list[tuple[str, int]] = []
     function_depths: list[int] = []
@@ -944,7 +919,7 @@ def simple_language_outline(text: str, suffix: str) -> list[str]:
 def json_outline(text: str) -> list[str]:
     try:
         parsed = json.loads(text)
-    except (json.JSONDecodeError, RecursionError, MemoryError):
+    except (ValueError, RecursionError, MemoryError):
         return []
     if not isinstance(parsed, dict):
         return []
@@ -995,7 +970,11 @@ def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str,
     text = _decode_source(data)
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
-    return fit_preview_lines(preview_lines, preview_bytes), False
+    try:
+        preview = fit_preview_lines(preview_lines, preview_bytes)
+    except UnicodeEncodeError:
+        preview = fit_preview_lines(select_preview_lines(text.splitlines()), preview_bytes)
+    return preview, False
 
 
 if __name__ == "__main__":

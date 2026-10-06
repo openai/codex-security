@@ -115,6 +115,8 @@ if (files.size !== entries.length) {
 const required = [
   "package/package.json",
   "package/README.md",
+  "package/docs/cli.md",
+  "package/docs/findings-service.md",
   "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
