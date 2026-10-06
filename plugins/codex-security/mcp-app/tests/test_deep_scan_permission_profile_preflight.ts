@@ -129,9 +129,9 @@ async function testAllowedProfileAndRawArgv() {
         "--config",
         rawOverrides[1],
         "--config",
-        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        'model_provider="synthetic.gateway"',
         "--config",
-        'model_provider="openai"',
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
         "app-server",
         "--stdio",
       ]);

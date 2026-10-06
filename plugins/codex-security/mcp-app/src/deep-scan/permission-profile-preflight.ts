@@ -17,7 +17,7 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
   readonly cwd: string;
-  /** Worker overrides; preflight checks permissions with native OpenAI account selection. */
+  /** Worker overrides, including the effective provider selection. */
   readonly configOverrides: readonly string[];
   /** Provider metadata needed for managed selection; credentials stay in private profiles. */
   readonly providerConfigOverrides?: readonly string[];
@@ -128,16 +128,12 @@ class AppServerPreflightClient {
   ) {
     const args: string[] = [];
     for (const override of options.configOverrides) {
-      if (override.startsWith("model_provider=")) continue;
       args.push("--config", override);
     }
+    // App-server loads credential-free metadata; exec reads private provider profiles.
     for (const override of options.providerConfigOverrides ?? []) {
       args.push("--config", override);
     }
-    // App-server has no private profile-file option. Check permissions and
-    // native OpenAI account selection without putting provider credentials in argv.
-    // Managed provider requirements still take precedence over this selection.
-    args.push("--config", 'model_provider="openai"');
     args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {

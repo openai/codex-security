@@ -19,7 +19,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
@@ -942,7 +942,22 @@ async function testSdkInvocationAndThreadCapture() {
 
 async function testOpenAiCredentialsReachWorker() {
   const noAccount = { account: null, requiresOpenaiAuth: true };
-  const cases = [
+  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+  const nativeLauncher = path.join(
+    path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
+    "bin",
+    "codex.js",
+  );
+  const cases: {
+    openai?: string;
+    codex?: string;
+    expected?: string;
+    accountResult?: {
+      account: { type: string } | null;
+      requiresOpenaiAuth: boolean;
+    };
+    nativeProvider?: string;
+  }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
     {
       openai: "  synthetic-openai-key  ",
@@ -967,6 +982,15 @@ async function testOpenAiCredentialsReachWorker() {
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
+    {
+      openai: "synthetic-openai-key",
+      nativeProvider: "synthetic.gateway",
+    },
+    {
+      openai: "synthetic-openai-key",
+      nativeProvider: "openai",
+      expected: "synthetic-openai-key",
+    },
     {},
     { openai: " " },
   ];
@@ -988,19 +1012,52 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      if (entry.nativeProvider !== undefined) {
+        await writeFile(
+          path.join(fixture.root, "config.toml"),
+          `model_provider = ${JSON.stringify(entry.nativeProvider)}
+cli_auth_credentials_store = "file"
+[features]
+plugins = false
+api_key_model_discovery = false
+[model_providers."synthetic.gateway"]
+name = "Synthetic gateway"
+wire_api = "responses"
+base_url = "https://provider.example.test/v1"
+requires_openai_auth = false
+env_key = "CODEX_API_KEY"
+`,
+        );
+      }
+      let nativePreflight:
+        { codexHome: string | undefined; argv: readonly string[] } | undefined;
       childProcess.spawn = ((
         command: string,
         args: readonly string[],
         options: SpawnOptions,
-      ) =>
-        originalSpawn(
-          command,
+      ) => {
+        const nodeExecutable =
           command === process.execPath ||
-            command === path.toNamespacedPath(process.execPath)
-            ? [fixture.executablePath, ...args]
-            : args,
+          command === path.toNamespacedPath(process.execPath);
+        // Keep real account/config selection, while the existing fake exec
+        // observes credentials without starting a model turn.
+        if (
+          nodeExecutable &&
+          entry.nativeProvider !== undefined &&
+          args.includes("app-server")
+        ) {
+          nativePreflight = {
+            codexHome: options.env?.CODEX_HOME,
+            argv: args,
+          };
+          return originalSpawn(command, [nativeLauncher, ...args], options);
+        }
+        return originalSpawn(
+          command,
+          nodeExecutable ? [fixture.executablePath, ...args] : args,
           options,
-        )) as typeof childProcess.spawn;
+        );
+      }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
       const promptPath = path.join(fixture.root, "prompt.md");
       await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH\n");
@@ -1017,7 +1074,10 @@ async function testOpenAiCredentialsReachWorker() {
             resumeThreadId,
             signal: new AbortController().signal,
           });
-          const preflight = await readJson(fixture.preflightMarkerPath);
+          const preflight =
+            entry.nativeProvider === undefined
+              ? await readJson(fixture.preflightMarkerPath)
+              : nativePreflight!;
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.codexHome, fixture.root);
           assert.equal(invocation.codexHome, fixture.root);
@@ -1033,6 +1093,10 @@ async function testOpenAiCredentialsReachWorker() {
           assert.equal(process.env.OPENAI_API_KEY, entry.openai);
           assert.equal(
             invocation.argv.some((arg: string) => arg.includes("synthetic-")),
+            false,
+          );
+          assert.equal(
+            preflight.argv.some((arg: string) => arg.includes("synthetic-")),
             false,
           );
         }
@@ -1624,7 +1688,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 `cache-${workerConfigurations.indexOf(selectedProvider)}`,
               ),
             );
-            assert.ok(preflight.argv.includes('model_provider="openai"'));
+            assert.deepEqual(
+              preflight.argv.filter((arg: string) =>
+                arg.startsWith("model_provider="),
+              ),
+              selectedProvider.provider === undefined
+                ? []
+                : [
+                    `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+                  ],
+            );
             const providerOverrides = preflight.argv.filter((arg: string) =>
               arg.startsWith("model_providers="),
             );
