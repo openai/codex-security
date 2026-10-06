@@ -169,6 +169,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
           ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
           : {}),
       };
+      const webSearch = index === 0 ? "disabled" : "cached";
       const featureOverrides = {
         shell_tool: index === 1,
         unified_exec: false,
@@ -185,7 +186,10 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
             pluginPath: PLUGIN_ROOT,
             codexOverrides: {
               profile: "selected",
-              profiles: { selected: { features: featureOverrides } },
+              web_search: index === 0 ? "live" : "disabled",
+              profiles: {
+                selected: { features: featureOverrides, web_search: webSearch },
+              },
               model_provider: "openrouter",
               model_providers: {
                 openrouter: provider,
@@ -250,7 +254,9 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   expect(workerSnapshot["worker_runtime"]).toMatchObject({
                     environment: providerEnvironment,
                     features: featureOverrides,
+                    web_search: webSearch,
                   });
+                  expect(options.config!["web_search"]).toBe(webSearch);
                   expect(options.config!["features"]).toMatchObject(
                     featureOverrides,
                   );
@@ -273,6 +279,9 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   const settings = await workerRuntimeSettings(environment);
                   expect(settings.environment).toEqual(providerEnvironment);
                   expect(settings.features).toMatchObject(featureOverrides);
+                  expect(settings.configOverrides).toContain(
+                    `web_search=${JSON.stringify(webSearch)}`,
+                  );
                   const actual = await effectiveProvider(
                     environment,
                     repository,

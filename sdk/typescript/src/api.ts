@@ -5028,7 +5028,13 @@ function selectedWorkerRuntimeConfig(
   }
   return {
     ...Object.fromEntries(
-      ["features", "model_instructions_file", "model_verbosity", "windows"]
+      [
+        "features",
+        "model_instructions_file",
+        "model_verbosity",
+        "web_search",
+        "windows",
+      ]
         .filter((key) => resolved[key] !== undefined)
         .map((key) => [key, resolved[key]!]),
     ),

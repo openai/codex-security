@@ -1365,6 +1365,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               : index % 2 === 0
                 ? "unelevated"
                 : "elevated";
+          const webSearch =
+            index === 0 ? undefined : ["disabled", "cached", "live"][index % 3];
           const features =
             index === 0
               ? undefined
@@ -1439,6 +1441,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             instructionsFile,
             verbosity,
             windowsSandbox,
+            webSearch,
             features,
             configuration: {
               ...parsedConfiguration,
@@ -1476,6 +1479,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     : {
                         model_instructions_file: entry.instructionsFile,
                         model_verbosity: entry.verbosity,
+                        web_search: entry.webSearch,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
@@ -1651,6 +1655,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
               model_verbosity: workerConfigurations[index].verbosity,
+              web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
             assert.equal(
@@ -1779,6 +1784,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
+              web_search: selectedProvider.webSearch,
               "windows.sandbox": selectedProvider.windowsSandbox,
             });
             assert.equal(
@@ -1856,7 +1862,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),

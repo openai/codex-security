@@ -592,7 +592,11 @@ async function workerRuntimeSettings(
   const provider = isRecord(workerConfig)
     ? workerConfig.model_provider
     : undefined;
-  for (const key of ["model_instructions_file", "model_verbosity"]) {
+  for (const key of [
+    "model_instructions_file",
+    "model_verbosity",
+    "web_search",
+  ]) {
     const value = isRecord(workerConfig) ? workerConfig[key] : undefined;
     if (typeof value === "string") {
       (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);

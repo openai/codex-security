@@ -847,7 +847,11 @@ describe("plugin runtime preparation", () => {
         : process.platform === "win32"
           ? "node.exe"
           : "node";
-      const argumentsAfterEntry = ["--stdio", "synthetic ! % & argument"];
+      const argumentsAfterEntry = [
+        "--stdio",
+        "synthetic ! % & argument",
+        "./mcp/server.mjs",
+      ];
       const mcp = {
         mcpServers: {
           "codex-security": {
@@ -943,8 +947,10 @@ ${directNode ? "}" : ""}
       const installedMcp = JSON.parse(
         await readFile(join(installed.installedRoot, ".mcp.json"), "utf8"),
       );
-      expect(installedMcp.mcpServers["codex-security"]).toEqual({
-        ...mcp.mcpServers["codex-security"],
+      expect(installedMcp.mcpServers["codex-security"]).toMatchObject({
+        cwd: mcp.mcpServers["codex-security"].cwd,
+        startup_timeout_sec:
+          mcp.mcpServers["codex-security"].startup_timeout_sec,
         env_vars: declaredRoot
           ? mcp.mcpServers["codex-security"].env_vars
           : [
@@ -966,7 +972,7 @@ ${directNode ? "}" : ""}
         }
       }
 
-      const readRoot = async (pluginRoot: string) => {
+      const readRoot = async (pluginRoot?: string) => {
         const child = childProcess.spawn(
           executablePathForSpawn(command.command),
           ["app-server", "--stdio"],
@@ -975,7 +981,9 @@ ${directNode ? "}" : ""}
             env: {
               ...environment,
               CODEX_HOME: home,
-              CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+              ...(pluginRoot === undefined
+                ? {}
+                : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
             },
             windowsHide: true,
           },
@@ -1013,25 +1021,44 @@ ${directNode ? "}" : ""}
       // Warm native session storage independently of this concurrent root check.
       await readRoot(selected);
       const servers = await Promise.all([readRoot(selected), readRoot(second)]);
-      for (const [index, pluginRoot] of [selected, second].entries()) {
-        expect(structuredClone(servers[index])).toMatchObject({
+      const assertServer = async (
+        server: Awaited<ReturnType<typeof readRoot>>,
+        pluginRoot: string,
+      ) => {
+        expect(structuredClone(server)).toMatchObject({
           pluginId: "codex-security@codex-security-sdk",
           tools: { probe: { description: expect.any(String) } },
         });
-        expect(servers[index].tools.probe.description).toStartWith(
+        expect(server.tools.probe.description).toStartWith(
           await realpath(pluginRoot),
         );
         const details = JSON.parse(
-          servers[index].tools.probe.description.match(/\n(\{.+\})/)![1],
+          server.tools.probe.description.match(/\n(\{.+\})/)![1],
         );
         expect(details.args).toEqual(argumentsAfterEntry);
-        expect(details.cwd).toBe(await realpath(installed.installedRoot));
+        expect(details.cwd).toBe(
+          process.platform === "win32" && !directNode
+            ? parse(await realpath(pluginRoot)).root
+            : await realpath(installed.installedRoot),
+        );
         if (directNode) {
           expect(details.execArgv).toEqual(nodeOptions);
           expect(details.entry).toBe(
             join(await realpath(pluginRoot), "mcp", "server.mjs"),
           );
         }
+      };
+      for (const [index, pluginRoot] of [selected, second].entries()) {
+        await assertServer(servers[index], pluginRoot);
+      }
+      await assertServer(await readRoot(), installed.installedRoot);
+      await rm(selected, { recursive: true });
+      await rm(second, { recursive: true });
+      await assertServer(await readRoot(), installed.installedRoot);
+      for (const [path, contents] of originals) {
+        expect(await readFile(join(installed.installedRoot, path))).toEqual(
+          contents,
+        );
       }
     },
   );
@@ -1847,7 +1874,7 @@ ${directNode ? "}" : ""}
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
       const mcp = JSON.parse(await readFile(join(staged, ".mcp.json"), "utf8"));
       expect(mcp.mcpServers["codex-security"]).toEqual({
-        command: "./scripts/launch_codex_security_mcp",
+        command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
         env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
@@ -1859,6 +1886,35 @@ ${directNode ? "}" : ""}
         (await stat(join(selected, "scripts", "launch_codex_security_mcp")))
           .mode & 0o111,
       );
+      let installs = 1;
+      for (const cache of [staged, installed]) {
+        for (const name of [
+          "launch_codex_security_mcp_sdk",
+          "launch_codex_security_mcp_sdk.cmd",
+        ]) {
+          const shim = join(cache, "scripts", name);
+          const contents = await readFile(shim);
+          await writeFile(shim, "synthetic changed shim");
+          await bootstrap();
+          expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+            ++installs,
+          );
+          expect(await readFile(shim)).toEqual(contents);
+        }
+      }
+      if (process.platform !== "win32") {
+        const shim = join(
+          installed,
+          "scripts",
+          "launch_codex_security_mcp_sdk",
+        );
+        await chmod(shim, 0o644);
+        await bootstrap();
+        expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+          ++installs,
+        );
+        expect((await stat(shim)).mode & 0o111).toBe(0o111);
+      }
       const script = join(selected, "scripts", "launch_codex_security_mcp.cmd");
       await writeFile(
         script,
@@ -1868,7 +1924,9 @@ ${directNode ? "}" : ""}
         ]),
       );
       await bootstrap();
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+        ++installs,
+      );
       expect(
         await readFile(
           join(installed, "scripts", "launch_codex_security_mcp.cmd"),
@@ -1894,11 +1952,29 @@ ${directNode ? "}" : ""}
     });
 
     test("reuses the root-independent direct Node server across clients", async () => {
-      const { selected, installed, calls, bootstrap } = await fixture("node");
+      const { selected, staged, installed, calls, bootstrap } =
+        await fixture("node");
       const second = join(dirname(selected), "second plugin");
       await cp(selected, second, { recursive: true });
       expect((await bootstrap(second)).installedRoot).toBe(installed);
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
+      let installs = 1;
+      for (const cache of [staged, installed]) {
+        const shim = join(cache, "mcp", "codex_security_sdk_bridge.mjs");
+        const contents = await readFile(shim);
+        await rm(shim);
+        await bootstrap();
+        expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+          ++installs,
+        );
+        expect(await readFile(shim)).toEqual(contents);
+        await writeFile(shim, "synthetic changed bridge");
+        await bootstrap();
+        expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+          ++installs,
+        );
+        expect(await readFile(shim)).toEqual(contents);
+      }
     });
 
     test("preserves generated installed files during reuse", async () => {
