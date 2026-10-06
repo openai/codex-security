@@ -1,3 +1,4 @@
+import type { inspectPublicationStore } from "../../src/publication-store.js";
 import { expect } from "bun:test";
 import type { JsonObject } from "../../src/config.js";
 import type { runWorkbench } from "../../src/runtime.js";
@@ -90,4 +91,15 @@ export function checkpointWorkbench(workflowId: string, source: JsonObject) {
     }) satisfies typeof runWorkbench,
   };
   return fixture;
+}
+
+export function cancelInspection(
+  controller: AbortController,
+  reason: Error,
+): typeof inspectPublicationStore {
+  return async (_publication, _environment, signal) => {
+    expect(signal).toBe(controller.signal);
+    controller.abort(reason);
+    throw signal!.reason;
+  };
 }

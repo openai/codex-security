@@ -225,8 +225,7 @@ describe("interactive patch finding browser", () => {
       expect(reviewed).toContain("›   │");
       expect(reviewed).toContain("includeDeleted: false");
       expect(reviewed).toContain("7 │   audit.record(tenant);");
-      expect(reviewed).toContain("[redacted]");
-      expect(reviewed).not.toContain("SYNTHETIC_KEY_123");
+      expect(reviewed).toContain('const token = "sk-proj-SYNTHETIC_KEY_123";');
       expect(reviewed).toContain("../outside.ts:1");
       expect(reviewed).toContain("src/outside-link.ts:1");
       expect(reviewed).not.toContain("OUTSIDE_PRIVATE_SOURCE");
@@ -381,7 +380,7 @@ describe("interactive patch finding browser", () => {
     }
   });
 
-  test("sanitizes terminal escapes and credential-bearing finding details", () => {
+  test("strips terminal escapes and preserves credential-shaped finding details", () => {
     const [finding] = findings(["high"]);
     finding!.title = "\u001B[31mUnsafe title\u001B[0m\nforged line";
     finding!.summary = "sk-proj-SYNTHETIC_KEY_123";
@@ -395,8 +394,7 @@ describe("interactive patch finding browser", () => {
     );
 
     expect(app.lastFrame()).toContain("Unsafe title forged line");
-    expect(app.lastFrame()).toContain("[redacted]");
-    expect(app.lastFrame()).not.toContain("SYNTHETIC_KEY_123");
+    expect(app.lastFrame()).toContain("sk-proj-SYNTHETIC_KEY_123");
     expect(app.lastFrame()).not.toContain("\u001B[31m");
   });
 

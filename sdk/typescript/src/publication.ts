@@ -1,3 +1,4 @@
+import { findingEntry } from "./value.js";
 import {
   loadContractWithScanDirectory,
   type LoadedContract,
@@ -124,12 +125,7 @@ export async function prepareScanPublication(
       options.environment,
     );
   }
-  const assessments = new Map(
-    classification?.assessments.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const assessments = new Map(classification?.assessments.map(findingEntry));
   const selected = selectClassificationFindings(
     contract.findings.findings,
     options.findingIds ??
@@ -162,27 +158,24 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: selected
-      .filter(
-        ({ findingId }) => assessments.get(findingId)?.decision !== "excluded",
-      )
-      .map((finding) => {
-        const assessment = assessments.get(finding.findingId);
-        const level = assessment?.level ?? finding.severity.level;
-        const priority = LINEAR_PRIORITIES[level];
-        return {
-          findingId: finding.findingId,
-          occurrenceId: finding.occurrenceId,
-          title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
-          description: renderFindingDescription(
-            contract,
-            finding,
-            uploadedAt,
-            assessment,
-          ),
-          ...(priority === undefined ? {} : { priority }),
-        };
-      }),
+    issues: selected.flatMap((finding) => {
+      const assessment = assessments.get(finding.findingId);
+      if (assessment?.decision === "excluded") return [];
+      const level = assessment?.level ?? finding.severity.level;
+      const priority = LINEAR_PRIORITIES[level];
+      return {
+        findingId: finding.findingId,
+        occurrenceId: finding.occurrenceId,
+        title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+        description: renderFindingDescription(
+          contract,
+          finding,
+          uploadedAt,
+          assessment,
+        ),
+        ...(priority === undefined ? {} : { priority }),
+      };
+    }),
   };
 }
 
@@ -336,16 +329,15 @@ function renderCodeEvidence(
   target: ScanTargetRecord,
   evidence: FindingCodeEvidence,
 ): string[] {
-  const location: FindingLocation = {
-    path: evidence.path,
-    startLine: evidence.startLine,
-    ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-    ...(evidence.role === undefined ? {} : { role: evidence.role }),
-  };
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, location),
+    renderLocation(target, {
+      path: evidence.path,
+      startLine: evidence.startLine,
+      ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
+      ...(evidence.role === undefined ? {} : { role: evidence.role }),
+    }),
     "",
     fencedCode(evidence.code, evidence.language),
     "",

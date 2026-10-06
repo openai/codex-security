@@ -1,10 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { nodeCommand } from "./support/shell.js";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -14,23 +13,21 @@ import {
 import { PluginBootstrapError } from "../src/index.js";
 import { runCodexCommand } from "../src/runtime.js";
 import type { CodexCommand } from "../src/index.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { throwing } from "./support/errors.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-auth-",
+  false,
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function fakeCodex(): Promise<{
   command: CodexCommand;
   environment: NodeJS.ProcessEnv;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-auth-"));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectory();
   const script = join(root, "codex.mjs");
   await writeFile(
     script,
@@ -39,18 +36,13 @@ import { basename } from "node:path";
 
 const args = [basename(process.argv[1]), ...process.argv.slice(2)];
 if (args.join(" ") === "login --with-api-key") {
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
+  const input = await process.stdin.reduce((text, chunk) => text + chunk, "");
   if (input.trim() !== "secret-key") {
     console.error("wrong key");
     process.exitCode = 2;
-  } else {
-    console.log("API key stored");
   }
 } else if (args.join(" ") === "login status") {
   console.log("Logged in using ChatGPT");
-} else if (args.join(" ") === "logout") {
-  console.log("Logged out");
 } else if (args[0] === "login") {
   console.error("Listening on http://localhost:1455.");
   console.error("Listening on http://localhost.:1455.");
@@ -67,8 +59,7 @@ if (args.join(" ") === "login --with-api-key") {
   console.error('Open "\\u001b[32mhttps://127.auth.example.test/device\\u001b[0m"');
   console.error("Enter this one-time code");
   console.error("\\u001b[36m8356-V2EGR\\u001b[0m");
-  process.exit(0);
-} else {
+} else if (args.join(" ") !== "logout") {
   console.error("unexpected args: " + args.join(" "));
   process.exitCode = 3;
 }
@@ -76,11 +67,7 @@ process.exit(process.exitCode ?? 0);
 `,
   );
   return {
-    command: {
-      command: execFileSync("node", ["-p", "process.execPath"], {
-        encoding: "utf8",
-      }).trim(),
-    },
+    command: nodeCommand(),
     environment: {
       ...process.env,
       NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
@@ -103,8 +90,7 @@ describe("Codex authentication process boundary", () => {
   });
 
   test("handles a child closing API-key stdin before the write completes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-epipe-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-epipe-");
     const script = join(root, "exit.mjs");
     await writeFile(script, "process.exit(1);\n");
     await expect(
@@ -118,8 +104,7 @@ describe("Codex authentication process boundary", () => {
   });
 
   test("retains large noninteractive authentication output", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-output-");
     const output = "verbose authentication output ".repeat(3_000);
     for (const stream of ["stdout", "stderr"] as const) {
       const script = join(root, `${stream}.mjs`);
@@ -148,25 +133,45 @@ describe("Codex authentication process boundary", () => {
 
   test("captures quoted interactive login metadata and completion", async () => {
     const { command, environment } = await fakeCodex();
-    let succeeded = false;
+    const observeSucceeded = mock();
     const handle = new CodexLoginHandle(
       command,
       ["login", "--device-auth"],
       environment,
-      () => {
-        succeeded = true;
-      },
+      observeSucceeded,
     );
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
     expect(handle.loginId).toBeNull();
     expect(handle.verificationUrl).toBe("https://127.auth.example.test/device");
     expect(handle.userCode).toBe("8356-V2EGR");
-    expect(succeeded).toBe(true);
+    expect(observeSucceeded).toHaveBeenCalled();
   });
 
+  test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(
+    "ignores URL parameters when reading device instructions: %s",
+    async (instruction) => {
+      const root = await temporaryDirectory("codex-security-auth-code-");
+      const script = join(root, "login.mjs");
+      const url = "https://auth.example.test/device?code=WRONG-CODE";
+      await writeFile(
+        script,
+        `process.stderr.write(${JSON.stringify(`Open ${url}\n${instruction}\n`)}, () => process.exit(0));\n`,
+      );
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        [script],
+        process.env,
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(url);
+      expect(handle.userCode).toBe("RIGHT-CODE");
+    },
+  );
+
   test("retains large interactive output and login instructions", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-output-");
     const script = join(root, "login.mjs");
     const output = "verbose authentication output ".repeat(3_000);
     await writeFile(
@@ -179,14 +184,12 @@ setTimeout(() => {
 }, 10);
 `,
     );
-    let succeeded = false;
+    const observeSucceeded = mock();
     const handle = new CodexLoginHandle(
       { command: process.execPath },
       [script, "login", "--device-auth"],
       process.env,
-      () => {
-        succeeded = true;
-      },
+      observeSucceeded,
     );
 
     await handle.waitForInstructions({ deviceCode: true });
@@ -195,12 +198,11 @@ setTimeout(() => {
     const result = await handle.wait();
     expect(result).toMatchObject({ success: true, exitCode: 0, stdout: "" });
     expect(result.stderr).toContain(output);
-    expect(succeeded).toBe(true);
+    expect(observeSucceeded).toHaveBeenCalled();
   });
 
   test("drains native login stderr before resolving authentication", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-stderr-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-stderr-");
     const script = join(root, "login-stderr.mjs");
     const message = "network timeout while authenticating";
     await writeFile(
@@ -225,8 +227,7 @@ setTimeout(() => {
   test.skipIf(process.platform === "win32")(
     "drains inherited stderr before resolving interactive login",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-drain-"));
-      temporaryDirectories.push(root);
+      const root = await temporaryDirectory("codex-security-auth-drain-");
       const script = join(root, "inherited-stderr.mjs");
       const ready = join(root, "grandchild-ready");
       const release = join(root, "release-grandchild");
@@ -308,8 +309,7 @@ grandchild.once("error", (error) => {
   );
 
   test("escalates cancellation when a login child ignores SIGTERM", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-sigkill-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-sigkill-");
     const script = join(root, "codex.mjs");
     await writeFile(
       script,
@@ -320,31 +320,26 @@ process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `,
     );
-    let succeeded = false;
+    const observeSucceeded = mock();
     const handle = new CodexLoginHandle(
       { command: process.execPath },
       [script, "login", "--device-auth"],
       process.env,
-      () => {
-        succeeded = true;
-      },
+      observeSucceeded,
     );
     await handle.waitForInstructions({ deviceCode: true });
     handle.cancel();
     await expect(
       Promise.race([
         handle.wait(),
-        delay(5_000).then(() => {
-          throw new Error("Login cancellation did not settle.");
-        }),
+        delay(5_000).then(throwing("Login cancellation did not settle.")),
       ]),
     ).resolves.toMatchObject({ success: false });
-    expect(succeeded).toBe(false);
+    expect(observeSucceeded).not.toHaveBeenCalled();
   });
 
   test("does not report a canceled interactive login as successful", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("codex-security-auth-cancel-");
     const script = join(root, "codex.mjs");
     await writeFile(
       script,
@@ -355,18 +350,16 @@ process.on("SIGTERM", () => process.exit(0));
 setInterval(() => {}, 1000);
 `,
     );
-    let succeeded = false;
+    const observeSucceeded = mock();
     const handle = new CodexLoginHandle(
       { command: process.execPath },
       [script, "login", "--device-auth"],
       process.env,
-      () => {
-        succeeded = true;
-      },
+      observeSucceeded,
     );
     await handle.waitForInstructions({ deviceCode: true });
     handle.cancel();
     await expect(handle.wait()).resolves.toMatchObject({ success: false });
-    expect(succeeded).toBe(false);
+    expect(observeSucceeded).not.toHaveBeenCalled();
   });
 });

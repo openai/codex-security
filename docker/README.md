@@ -131,7 +131,12 @@ docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
 
-For unattended use, provide `OPENAI_API_KEY` or `CODEX_API_KEY` instead of login.
+The `login --device-auth` command above signs the runner in with ChatGPT and
+requires device auth to be enabled in your workspace. If device auth is
+disabled, skip that command and export `OPENAI_API_KEY` or `CODEX_API_KEY` in
+your host shell. Compose passes the key to the runner. Use API keys for
+unattended runs too.
+
 Git authentication uses the existing `GH_TOKEN`/`GITHUB_TOKEN` and optional
 `CODEX_SECURITY_GIT_HOST` settings. Pass only the credentials the runner needs;
 the findings service's embedding credentials are configured separately.
@@ -221,10 +226,11 @@ no-new-privileges, and seccomp profile. It does not override Codex approval or
 filesystem settings. On hosts that restrict nested user namespaces, install the
 existing [AppArmor profile](../sdk/typescript/README.md#containerized-bulk-scans)
 and append `-f compose.apparmor.yaml` to the runner Compose commands. This override
-works because both examples use the `codex-security` service name. The entrypoint's
-bulk-scan-specific Landlock selection remains unchanged; it is not applied to
-other commands. Source inspection needs a host that supports the selected Codex
-sandbox; do not disable sandboxing to work around host restrictions.
+works because both examples use the `codex-security` service name. Codex 0.156.1
+requires Bubblewrap for filesystem-restricted execution; the legacy Landlock
+fallback is no longer supported. The entrypoint preserves Codex sandbox settings.
+Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
+to work around host restrictions.
 
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.

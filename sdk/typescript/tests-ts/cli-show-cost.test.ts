@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { dependencies, fakeResult } from "./cli-fixtures.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 const result = fakeResult([], "complete", {
   input_tokens: 1250,
@@ -14,13 +15,11 @@ test.each([false, true])("scan cost visibility with TTY %p", async (tty) => {
     ["--show-cost"],
     ["--show-cost=false", "--max-cost", "20"],
   ]) {
-    const stdout = capture();
-    const stderr = capture(tty);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: tty });
+
     expect(
-      await main(
+      await runCli(
         ["scan", ".", ...costFlags, ...(tty ? [] : ["--json"])],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           result,
           costUpdates: [result.cost!],
@@ -45,12 +44,10 @@ test.each(["resume", "rerun"])(
       [["--show-cost"], undefined, true],
       [[], 20, true],
     ] as const) {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["scans", command, "scan-original", ...flags],
-          capture().stream,
-          stderr.stream,
           dependencies({
             result,
             costUpdates: [result.cost!],
@@ -76,12 +73,10 @@ test.each(["resume", "rerun"])(
 test.each([false, true])(
   "missing pricing follows cost visibility: %j",
   async (showCost) => {
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scan", ...(showCost ? ["--show-cost"] : [])],
-        capture().stream,
-        stderr.stream,
         dependencies(),
       ),
     ).toBe(0);

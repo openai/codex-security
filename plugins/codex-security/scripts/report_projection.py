@@ -32,18 +32,10 @@ def _text(value: Any, fallback: str) -> str:
         return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
-    rendered: list[str] = []
-    cursor = 0
-    for match in re.finditer(r"(?<!`)`([^`\n]+)`(?!`)", normalized):
-        rendered.append(_escape_markdown_text(normalized[cursor : match.start()]))
-        rendered.append(f"`{match.group(1)}`")
-        cursor = match.end()
-    rendered.append(_escape_markdown_text(normalized[cursor:]))
-    return "".join(rendered)
-
-
-def _escape_markdown_text(value: str) -> str:
-    return re.sub(r"([\\`*\[\]<>])", r"\\\1", value)
+    return "".join(
+        part if index % 2 else re.sub(r"([\\`*\[\]<>])", r"\\\1", part)
+        for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
+    )
 
 
 def _strings(value: Any) -> list[str]:
@@ -61,10 +53,6 @@ def _strings(value: Any) -> list[str]:
 
 def _cell(value: Any) -> str:
     return _text(value, "none").replace("|", "\\|").replace("\n", "<br>")
-
-
-def _link_label(value: Any, fallback: str) -> str:
-    return _cell(value) or _cell(fallback)
 
 
 def _deep_report_id(finding: dict[str, Any]) -> str:
@@ -141,10 +129,6 @@ def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
     return normalized, None
 
 
-def _deep_finding_title(finding: dict[str, Any]) -> str:
-    return _deep_title_parts(finding)[0]
-
-
 def _deep_finding_groups(
     findings: list[dict[str, Any]], writeup_paths: list[str | None]
 ) -> list[list[tuple[int, dict[str, Any], str | None]]]:
@@ -155,12 +139,9 @@ def _deep_finding_groups(
 
 
 def _deep_group_titles(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
-    titles: list[str] = []
-    for _, finding, _ in group:
-        title = _cell(_deep_finding_title(finding))
-        if title not in titles:
-            titles.append(title)
-    return "<br>".join(titles)
+    return "<br>".join(
+        dict.fromkeys(_cell(_deep_title_parts(finding)[0]) for _, finding, _ in group)
+    )
 
 
 def _deep_group_levels(
@@ -197,7 +178,7 @@ def _deep_group_report_labels(
 def _deep_group_report_links(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
     labels = _deep_group_report_labels(group)
     return "<br>".join(
-        f"[{_link_label(label, 'Unidentified report')}](#finding-{number})"
+        f"[{_cell(label)}](#finding-{number})"
         for label, (number, _, _) in zip(labels, group, strict=True)
     )
 
@@ -206,7 +187,7 @@ def _deep_group_writeup_links(group: list[tuple[int, dict[str, Any], str | None]
     labels = _deep_group_report_labels(group)
     links: list[str] = []
     for label, (_, _, report_path) in zip(labels, group, strict=True):
-        report_id = _link_label(label, "Unidentified report")
+        report_id = _cell(label)
         links.append(
             f"[Open {report_id}]({report_path})" if report_path else f"{report_id}: inline below"
         )
@@ -282,15 +263,11 @@ def _section_code_evidence(
                     and isinstance(item.get("code"), str)
                     and item["code"].strip()
                 )
-    unique: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
     for item in resolved:
         key = (str(item.get("id", "")), item["code"])
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
+        unique.setdefault(key, item)
+    return list(unique.values())
 
 
 def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
@@ -822,7 +799,6 @@ def build_report_markdown(
         f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
-        f"- Runtime or test status: {_text(scope.get('runtimeStatus'), 'not recorded')}",
     ]
     artifacts_reviewed = _strings(scope.get("artifactsReviewed"))
     if artifacts_reviewed:
@@ -868,26 +844,32 @@ def build_report_markdown(
             "",
             "## Threat Model",
             "",
+        ]
+    )
+    content = threat_model.get("content")
+    if threat_model.get("format") == "markdown" and isinstance(content, str) and content.strip():
+        lines.append(content)
+    else:
+        lines.append(
             _text(
                 threat_model.get("summary"),
                 "No explicit canonical threat-model summary was recorded.",
+            )
+        )
+        for heading, key, fallback in (
+            ("Assets", "assets", "No assets were recorded."),
+            ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
+            (
+                "Attacker Capabilities",
+                "attackerCapabilities",
+                "No attacker capabilities were recorded.",
             ),
-        ]
-    )
-    for heading, key, fallback in (
-        ("Assets", "assets", "No assets were recorded."),
-        ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
-        (
-            "Attacker Capabilities",
-            "attackerCapabilities",
-            "No attacker capabilities were recorded.",
-        ),
-        ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
-        ("Assumptions", "assumptions", "No assumptions were recorded."),
-    ):
-        values = _strings(threat_model.get(key))
-        if values:
-            lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+            ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
+            ("Assumptions", "assumptions", "No assumptions were recorded."),
+        ):
+            values = _strings(threat_model.get(key))
+            if values:
+                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:
@@ -914,7 +896,7 @@ def build_report_markdown(
             for number, (finding, report_path) in enumerate(
                 zip(findings, writeup_paths, strict=True), 1
             ):
-                title = _link_label(finding["title"], "Untitled finding")
+                title = _cell(finding["title"])
                 finding_link = f"[{title}](#finding-{number})"
                 writeup_link = f"[Open report]({report_path})" if report_path else "inline below"
                 lines.append(
@@ -1079,11 +1061,7 @@ def generate_report_markdown(
     return build_report_markdown(manifest, findings, coverage).encode("utf-8")
 
 
-def main() -> int:
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(0)

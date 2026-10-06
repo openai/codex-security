@@ -25,8 +25,7 @@ import { VERSION } from "../version.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
-  type DeduplicationReviewStage,
-  safeErrorMessage,
+  errorMessage,
 } from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import {
@@ -40,17 +39,19 @@ import {
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
 import { retryDelay, waitForRetry } from "./retry.js";
+import type { DeduplicationReviewRequest } from "./review.js";
+import { isReviewRefusal } from "./refusal.js";
 
 const reviewErrorSchema = z
   .object({ reason: z.string().trim().min(1) })
   .strict();
 
-export interface CodexReview<T> {
-  stage: DeduplicationReviewStage;
-  model: string;
-  effort: string;
-  prompt: string;
-  schema: unknown;
+export interface CodexReview<T> extends Pick<
+  DeduplicationReviewRequest,
+  "stage" | "model" | "effort" | "prompt" | "schema"
+> {
+  /** Exact comparison participants, supplied by the structured reviewer. */
+  findingIds?: readonly string[];
   validate(value: unknown): T;
 }
 
@@ -93,6 +94,7 @@ interface Message {
     tool?: string;
     namespace?: string | null;
     arguments?: unknown;
+    item?: { type: string; text?: string };
   };
 }
 
@@ -163,14 +165,14 @@ export class CodexReviewRunner {
         error instanceof ReviewAttemptError
           ? error.supportReason
           : "Codex review transport failed.";
-      const displayReason = safeErrorMessage(error);
+      const displayReason = errorMessage(error);
       throw new DeduplicationReviewError(
         {
           stage: review.stage,
           model: review.model,
           category,
           attempts: state.attempts,
-          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+          reason: supportReason,
         },
         displayReason,
       );
@@ -346,12 +348,14 @@ export class CodexReviewRunner {
       let turnId: string | undefined;
       let accepted: T | undefined;
       let validationFailure: string | undefined;
+      let finalResponse: string | undefined;
       let turns = 0;
       const startTurn = (prompt: string) => {
         this.signal?.throwIfAborted();
         turns++;
         turnId = undefined;
         validationFailure = undefined;
+        finalResponse = undefined;
         send({
           id: 3 + state.attempts,
           method: "turn/start",
@@ -433,9 +437,11 @@ export class CodexReviewRunner {
               });
               if (reportedFailure !== undefined)
                 throw new ReviewAttemptError(
-                  "model",
+                  isReviewRefusal(reportedFailure) ? "refusal" : "model",
                   `Required review check could not be completed: ${reportedFailure}`,
-                  "A required review check could not be completed.",
+                  isReviewRefusal(reportedFailure)
+                    ? "The model refused the deduplication review."
+                    : "A required review check could not be completed.",
                 );
             } else {
               send({
@@ -444,11 +450,18 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
+            const refused = isReviewRefusal(
+              message.error.message,
+              message.error.data?.codexErrorInfo,
+            );
             throw new ReviewAttemptError(
-              "transport",
+              refused ? "refusal" : "transport",
               message.error?.message ?? "Codex rejected the review request",
-              "Codex rejected the review request.",
-              transientCodexError(message.error.data?.codexErrorInfo),
+              refused
+                ? "The model refused the deduplication review."
+                : "Codex rejected the review request.",
+              !refused &&
+                transientCodexError(message.error.data?.codexErrorInfo),
             );
           } else if (message.id === 1) {
             send({ method: "initialized" });
@@ -479,6 +492,13 @@ export class CodexReviewRunner {
           ) {
             turnId = params?.turn?.id;
           } else if (
+            message.method === "item/completed" &&
+            params?.threadId === threadId &&
+            params?.turnId === turnId &&
+            params?.item?.type === "agentMessage"
+          ) {
+            finalResponse = params.item.text;
+          } else if (
             message.method === "turn/completed" &&
             params !== undefined &&
             threadId !== undefined &&
@@ -487,15 +507,30 @@ export class CodexReviewRunner {
             params.turn?.id === turnId
           ) {
             if (params.turn.status !== "completed") {
-              throw new ReviewAttemptError(
-                "model",
+              const reason =
                 params.turn.error?.message ??
-                  `Codex review turn ${params.turn.status}`,
-                "Codex review turn failed.",
-                transientCodexError(params.turn.error?.codexErrorInfo),
+                `Codex review turn ${params.turn.status}`;
+              const refused = isReviewRefusal(
+                reason,
+                params.turn.error?.codexErrorInfo,
+              );
+              throw new ReviewAttemptError(
+                refused ? "refusal" : "model",
+                reason,
+                refused
+                  ? "The model refused the deduplication review."
+                  : "Codex review turn failed.",
+                !refused &&
+                  transientCodexError(params.turn.error?.codexErrorInfo),
               );
             }
             if (accepted === undefined) {
+              if (finalResponse && isReviewRefusal(finalResponse))
+                throw new ReviewAttemptError(
+                  "refusal",
+                  finalResponse,
+                  "The model refused the deduplication review.",
+                );
               if (turns === 1) {
                 state.attempts++;
                 startTurn(

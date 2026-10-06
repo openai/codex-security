@@ -1,13 +1,7 @@
+import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
@@ -21,12 +15,21 @@ import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
+import { isReviewRefusal } from "../src/deduplication/refusal.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
 const failureReasons: Record<string, string> = {
+  "policy-turn-code": "Request blocked.",
+  "policy-request-code": "Request blocked.",
+  "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-request": "Request rejected: cyber_policy.",
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-reported-error":
+    "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "server-error": "Provider temporarily unavailable",
@@ -35,7 +38,7 @@ const failureReasons: Record<string, string> = {
   "bad-request-turn": "Invalid model configuration",
   "unknown-turn": "Unknown model failure",
   "request-error": "Authentication required",
-  "credential-error": "[redacted]",
+  "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
   "required-source-error":
@@ -67,6 +70,8 @@ const recoveredScenarios: Record<string, string> = {
   "recover-no-submission": "text-only",
 };
 const modelFailures = new Set([
+  "policy-turn-code",
+  "policy-turn",
   "failed-turn",
   "server-error",
   "connection-error",
@@ -144,9 +149,7 @@ for (const {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
-    const checkout = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-review-source-")),
-    );
+    const checkout = await temporaryDirectory("codex-review-source-", true);
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
@@ -251,21 +254,39 @@ for (const {
           },
         },
       );
-      let validations = 0;
+      const validate = mock((value: unknown) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("decision" in value) ||
+          value.decision !==
+            (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
+        )
+          throw new Error("Invalid decision");
+        return { decision: value.decision };
+      });
       const checkpoints = checkpointWorkbench("blocked-review", {
         repository: checkout,
       });
       const reportsBlocker =
         scenario.startsWith("required-source-error") ||
+        scenario === "policy-reported-error" ||
         scenario === "invalid-review-error";
-      const reviewRunner = reportsBlocker
-        ? new CheckpointedReviewRunner(
-            new FindingWorkflow("blocked-review", process.env, checkpoints.run),
-            runner,
-            checkpoints.source,
-            { allRepositories: true },
-          )
-        : runner;
+      const refused =
+        scenario.startsWith("policy-") || scenario === "refusal-text";
+      const reviewRunner =
+        reportsBlocker || refused
+          ? new CheckpointedReviewRunner(
+              new FindingWorkflow(
+                "blocked-review",
+                process.env,
+                checkpoints.run,
+              ),
+              runner,
+              checkpoints.source,
+              { allRepositories: true },
+            )
+          : runner;
       const result = reviewRunner.run({
         stage: "pair-review",
         model: "gpt-5.6-sol",
@@ -277,18 +298,7 @@ for (const {
           required: ["decision"],
           additionalProperties: false,
         },
-        validate(value: unknown) {
-          validations++;
-          if (
-            typeof value !== "object" ||
-            value === null ||
-            !("decision" in value) ||
-            value.decision !==
-              (scenario === "incomplete-content" ? "DISTINCT" : "SAME")
-          )
-            throw new Error("Invalid decision");
-          return { decision: value.decision };
-        },
+        validate,
       });
       if (
         recovery ||
@@ -300,7 +310,7 @@ for (const {
         ].includes(scenario)
       ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           recovery
             ? recovery === "invalid-submission"
               ? 3
@@ -317,7 +327,7 @@ for (const {
         expect(await result).toEqual({
           decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
         });
-        expect(validations).toBe(1);
+        expect(validate).toHaveBeenCalledTimes(1);
       } else if (
         ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
       ) {
@@ -342,8 +352,9 @@ for (const {
         expect(reviewFailure.metadata).toEqual({
           stage: "pair-review",
           model: "gpt-5.6-sol",
-          category:
-            scenario === "invalid-submission"
+          category: refused
+            ? "refusal"
+            : scenario === "invalid-submission"
               ? "validation"
               : scenario === "text-only"
                 ? "no-submission"
@@ -358,26 +369,25 @@ for (const {
             ].includes(scenario)
               ? 2
               : 1) * sessions,
-          reason:
-            scenario === "credential-error"
-              ? "[redacted]"
-              : scenario === "invalid-submission"
-                ? "The submitted review failed semantic validation."
-                : scenario === "text-only"
-                  ? "Codex did not submit a validated review."
-                  : modelFailures.has(scenario)
-                    ? "Codex review turn failed."
-                    : reportsBlocker
-                      ? "A required review check could not be completed."
-                      : scenario === "request-error"
-                        ? "Codex rejected the review request."
-                        : "Codex review transport failed.",
+          reason: refused
+            ? "The model refused the deduplication review."
+            : scenario === "invalid-submission"
+              ? "The submitted review failed semantic validation."
+              : scenario === "text-only"
+                ? "Codex did not submit a validated review."
+                : modelFailures.has(scenario)
+                  ? "Codex review turn failed."
+                  : reportsBlocker
+                    ? "A required review check could not be completed."
+                    : ["request-error", "credential-error"].includes(scenario)
+                      ? "Codex rejected the review request."
+                      : "Codex review transport failed.",
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
         expect(supportBundle).not.toContain(checkout);
         expect(supportBundle).not.toContain("review-thread");
-        expect(validations).toBe(
+        expect(validate).toHaveBeenCalledTimes(
           scenario === "invalid-submission"
             ? 2 * sessions
             : modelFailures.has(scenario) ||
@@ -385,7 +395,8 @@ for (const {
               ? sessions
               : 0,
         );
-        if (reportsBlocker) expect(checkpoints.saved).toHaveLength(0);
+        if (reportsBlocker || refused)
+          expect(checkpoints.saved).toHaveLength(0);
       }
       expect(starts).toBe(sessions);
       expect(delays).toEqual(
@@ -421,16 +432,10 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const messages = (await readFile(transcript, "utf8"))
-          .trim()
-          .split("\n")
-          .map(
-            (line) =>
-              JSON.parse(line) as {
-                method?: string;
-                params?: { apiKey?: string };
-              },
-          );
+        const messages = parseJsonLines<{
+          method?: string;
+          params?: { apiKey?: string };
+        }>(await readFile(transcript, "utf8"));
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
         );
@@ -453,7 +458,12 @@ for (const {
                 "required-source-error-after-text",
               ].includes(scenario)
                 ? 2
-                : ["request-error", "credential-error"].includes(scenario)
+                : [
+                      "request-error",
+                      "credential-error",
+                      "policy-request",
+                      "policy-request-code",
+                    ].includes(scenario)
                   ? 0
                   : 1) * sessions,
         );
@@ -475,6 +485,37 @@ for (const {
     }
   });
 }
+
+test.each([
+  "cyber_policy",
+  "Request blocked by a safety policy violation.",
+  "Request flagged for potentially high-risk cyber activity.",
+  "I cannot help with this request.",
+  "I’m sorry, but I can’t assist with your request.",
+  "I can't help analyze or merge these vulnerability reports.",
+  "I'm unable to assist with this comparison.",
+])("recognizes explicit review refusals: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(true);
+});
+
+test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+  "recognizes structured policy refusal codes independently of message wording: %s",
+  (code) => {
+    expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
+  },
+);
+
+test.each([
+  "Rate limit exceeded",
+  "Authentication required",
+  "Required source revision could not be read.",
+  "I cannot complete the review because the source is unavailable.",
+  "Connection refused",
+  "Here is the review JSON.",
+])("does not turn other failures into refused reviews: %s", (message) => {
+  expect(isReviewRefusal(message)).toBe(false);
+});
 
 test("empty credential paths use default directories without denying cwd", async () => {
   if (
@@ -576,7 +617,7 @@ test("retry backoff grows exponentially with jitter and preserves cancellation",
 test("a missing Codex executable is not retried", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-review-missing-command-"));
   let starts = 0;
-  const delays: number[] = [];
+  const delays = mock(async (_delay: number) => {});
   try {
     await writeFile(join(root, "config.toml"), "");
     const runner = new CodexReviewRunner(
@@ -588,9 +629,7 @@ test("a missing Codex executable is not retried", async () => {
       undefined,
       root,
       {
-        wait: async (delay) => {
-          delays.push(delay);
-        },
+        wait: delays,
       },
     );
     await expect(
@@ -604,7 +643,7 @@ test("a missing Codex executable is not retried", async () => {
       }),
     ).rejects.toThrow("ENOENT");
     expect(starts).toBe(1);
-    expect(delays).toEqual([]);
+    expect(delays).not.toHaveBeenCalled();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
