@@ -126,6 +126,7 @@ async function loadWorkerSettings(root: string) {
       configOverrides?: string[];
       nativeProfile?: string;
       environment?: Record<string, string>;
+      features?: JsonObject;
     }>;
   };
 
@@ -168,6 +169,11 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
           ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
           : {}),
       };
+      const featureOverrides = {
+        shell_tool: index === 1,
+        unified_exec: false,
+        view_image: index === 0,
+      };
       const providerEnvironment = {
         SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
         SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
@@ -178,6 +184,8 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
           {
             pluginPath: PLUGIN_ROOT,
             codexOverrides: {
+              profile: "selected",
+              profiles: { selected: { features: featureOverrides } },
               model_provider: "openrouter",
               model_providers: {
                 openrouter: provider,
@@ -241,7 +249,11 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   );
                   expect(workerSnapshot["worker_runtime"]).toMatchObject({
                     environment: providerEnvironment,
+                    features: featureOverrides,
                   });
+                  expect(options.config!["features"]).toMatchObject(
+                    featureOverrides,
+                  );
                   expect(
                     (workerSnapshot["worker_runtime"] as JsonObject)[
                       "environment"
@@ -260,6 +272,7 @@ test("concurrent provider snapshots do not inherit another scan's credentials", 
                   ).not.toContain("synthetic-key-");
                   const settings = await workerRuntimeSettings(environment);
                   expect(settings.environment).toEqual(providerEnvironment);
+                  expect(settings.features).toMatchObject(featureOverrides);
                   const actual = await effectiveProvider(
                     environment,
                     repository,

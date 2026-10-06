@@ -35,8 +35,6 @@ export async function providerPreflightCommand(
 ): Promise<CodexCommand> {
   const resolved = resolveCodexProfile(config);
   const overrides: string[] = [];
-  if (resolved["model_provider"] !== undefined)
-    overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
   const providers = resolved["model_providers"];
   if (isRecord(providers) && Object.keys(providers).length > 0) {
     const client = await nativeProfileClient();
@@ -48,6 +46,8 @@ export async function providerPreflightCommand(
         ...modelProviderConfigOverride({ model_providers: definitions }),
       );
   }
+  if (resolved["model_provider"] !== undefined)
+    overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
   if (overrides.length === 0) return command;
   return {
     ...command,

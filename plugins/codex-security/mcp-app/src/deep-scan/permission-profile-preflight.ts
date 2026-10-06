@@ -69,7 +69,13 @@ export async function readDeepScanRuntimeConfig(
   } catch (error) {
     await client.close();
     const stderr = client.stderrText;
-    if (error instanceof Error && stderr) error.message += "\n" + stderr;
+    if (error instanceof Error && stderr)
+      Object.defineProperty(error, "message", {
+        value: error.message + "\n" + stderr,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
     throw error;
   } finally {
     await client.close();
@@ -137,7 +143,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
   } catch (error) {
     await client.close();
     const stderr = client.stderrText;
-    if (error instanceof Error && stderr) error.message += "\n" + stderr;
+    if (error instanceof Error && stderr)
+      Object.defineProperty(error, "message", {
+        value: error.message + "\n" + stderr,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
     throw error;
   } finally {
     await client.close();

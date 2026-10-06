@@ -1365,6 +1365,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               : index % 2 === 0
                 ? "unelevated"
                 : "elevated";
+          const features =
+            index === 0
+              ? undefined
+              : {
+                  shell_tool: index % 2 === 0,
+                  unified_exec: false,
+                  view_image: index % 2 !== 0,
+                  multi_agent_v2: {
+                    enabled: true,
+                    max_concurrent_threads_per_session: index + 2,
+                  },
+                  enable_fanout: true,
+                };
           const entryPath = `${configPath}.${index}`;
           const deepPath = `${entryPath}.deep`;
           const nativeProfile =
@@ -1426,6 +1439,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             instructionsFile,
             verbosity,
             windowsSandbox,
+            features,
             configuration: {
               ...parsedConfiguration,
               ...(index === 0
@@ -1466,6 +1480,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
+                        features: entry.features,
                       },
               }),
             ),
@@ -1725,6 +1740,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.deepConfigPath,
               workerConfigurations[index].deepPath,
             );
+            const workerFeatures = parseToml(
+              invocation.argv
+                .filter((arg: string) => /^features[.=]/.test(arg))
+                .join("\n"),
+            ).features;
+            assert.deepEqual(JSON.parse(JSON.stringify(workerFeatures)), {
+              ...workerConfigurations[index].features,
+              multi_agent_v2: {
+                enabled: false,
+                max_concurrent_threads_per_session: 1,
+              },
+              enable_fanout: false,
+            });
             assertReadOnlyWorkerPolicy(invocation.argv);
             assertWorkerSubagentPolicy(invocation.argv, 0);
           }
@@ -1828,7 +1856,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),
