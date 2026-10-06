@@ -24,7 +24,7 @@ const DEFAULT_GIT_CACHE_ROOT = path.join(
   "artifacts",
   "sastbench-git-cache",
 );
-const PROMPTFOO_BIN = path.join(EVAL_ROOT, "node_modules", ".bin", "promptfoo");
+const PROMPTFOO_ROOT = path.join(EVAL_ROOT, "node_modules", "promptfoo");
 
 function copyDirectory(
   sourceRoot: string,
@@ -128,11 +128,19 @@ export function runPromptfoo(promptfooArgs: string[]) {
     SASTBENCH_GIT_CACHE_ROOT: DEFAULT_GIT_CACHE_ROOT,
   };
   try {
-    childProcess.execFileSync(PROMPTFOO_BIN, promptfooArgs, {
-      cwd: EVAL_ROOT,
-      env,
-      stdio: "inherit",
-    });
+    const { bin } = JSON.parse(
+      fs.readFileSync(path.join(PROMPTFOO_ROOT, "package.json"), "utf8"),
+    );
+    const promptfooBin = path.resolve(PROMPTFOO_ROOT, bin.promptfoo);
+    childProcess.execFileSync(
+      process.execPath,
+      [promptfooBin, ...promptfooArgs],
+      {
+        cwd: EVAL_ROOT,
+        env,
+        stdio: "inherit",
+      },
+    );
     return 0;
   } catch (error) {
     const status = (error as { status?: number }).status;

@@ -5,7 +5,7 @@ import childProcess from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runPromptfoo, stageSkillRuntime } from "./run-promptfoo.mts";
+import { stageSkillRuntime } from "./run-promptfoo.mts";
 import runtimeVars from "./runtime-vars.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
@@ -15,9 +15,7 @@ const ambient = fs.mkdtempSync(path.join(os.tmpdir(), "ambient-eval-plugin-"));
 const previousHome = process.env.CODEX_HOME;
 const previousRuntime = process.env.TRIAGE_RUNTIME_ROOT;
 const previousTargets = process.env.CALIBRATION_TARGET_ROOT;
-const originalExec = childProcess.execFileSync;
 let runtime: string | undefined;
-let launchedRuntime: string | undefined;
 try {
   fs.mkdirSync(path.dirname(path.join(ambient, skill)), { recursive: true });
   fs.writeFileSync(
@@ -104,77 +102,95 @@ try {
     runtimeVars({ target_repo: "synthetic/fixture" }).target_repo,
     "synthetic/fixture",
   );
-  childProcess.execFileSync = ((
-    command: string,
-    args: string[],
-    options: childProcess.ExecFileSyncOptionsWithStringEncoding,
-  ) => {
-    assert.equal(
-      command,
-      path.join(evalRoot, "node_modules", ".bin", "promptfoo"),
-    );
-    assert.deepEqual(args, ["eval", "--filter-range", "0:1"]);
-    assert.equal(options.cwd, evalRoot);
-    launchedRuntime = options.env!.TRIAGE_RUNTIME_ROOT;
-    assert.equal(options.env!.SASTBENCH_RUNTIME_ROOT, launchedRuntime);
-    assert.equal(
-      options.env!.CALIBRATION_TARGET_ROOT,
-      path.join(evalRoot, "artifacts", "calibration-repos"),
-    );
-    assert.equal(
-      options.env!.SASTBENCH_TARGET_ROOT,
-      path.join(evalRoot, "artifacts", "sastbench-targets"),
-    );
-    assert.equal(
-      options.env!.SASTBENCH_GIT_CACHE_ROOT,
-      path.join(evalRoot, "artifacts", "sastbench-git-cache"),
-    );
-    assert.equal(
-      fs.readFileSync(path.join(launchedRuntime!, skill), "utf8"),
-      fs.readFileSync(path.join(sourceRoot, skill), "utf8"),
-    );
-    throw new Error("Synthetic evaluation failed");
-  }) as unknown as typeof childProcess.execFileSync;
-  assert.throws(
-    () => runPromptfoo(["eval", "--filter-range", "0:1"]),
-    /Synthetic evaluation failed/,
+  const fixtureEval = path.join(runtime, "evals", "triage-finding");
+  const fixtureScript = path.join(fixtureEval, "scripts", "run-promptfoo.mts");
+  fs.mkdirSync(path.dirname(fixtureScript), { recursive: true });
+  fs.copyFileSync(
+    path.join(import.meta.dirname, "run-promptfoo.mts"),
+    fixtureScript,
   );
-  assert.ok(!fs.existsSync(launchedRuntime!));
-  childProcess.execFileSync = originalExec;
-  const preload = path.join(ambient, "failed-promptfoo.cjs");
+  const packageRoot = path.join(fixtureEval, "node_modules", "promptfoo");
+  fs.mkdirSync(packageRoot, { recursive: true });
   fs.writeFileSync(
-    preload,
-    `require("node:child_process").execFileSync = (_command, _args, options) => {
-    require("node:fs").writeFileSync(process.env.EVAL_TEST_RUNTIME, options.env.TRIAGE_RUNTIME_ROOT);
-    throw Object.assign(new Error("Child evaluation failed"), { status: Number(process.env.EVAL_TEST_EXIT_CODE) });
-  };`,
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({ bin: { promptfoo: "cli entrypoint.cjs" } }),
   );
-  for (const status of [100, 17]) {
-    const marker = path.join(ambient, "runtime.txt");
-    const result = childProcess.spawnSync(
+  fs.writeFileSync(
+    path.join(packageRoot, "cli entrypoint.cjs"),
+    `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const env = process.env;
+    fs.writeFileSync(env.EVAL_TEST_RECORD, JSON.stringify({
+      args: process.argv.slice(2), cwd: process.cwd(),
+      runtime: env.TRIAGE_RUNTIME_ROOT,
+      sastbenchRuntime: env.SASTBENCH_RUNTIME_ROOT,
+      calibrationTargets: env.CALIBRATION_TARGET_ROOT,
+      sastbenchTargets: env.SASTBENCH_TARGET_ROOT,
+      gitCache: env.SASTBENCH_GIT_CACHE_ROOT,
+      skill: fs.readFileSync(path.join(env.TRIAGE_RUNTIME_ROOT, ${JSON.stringify(skill)}), "utf8"),
+    }));
+    process.exitCode = Number(env.EVAL_TEST_EXIT_CODE);
+  `,
+  );
+  const temporary = path.join(ambient, "child temporary");
+  fs.mkdirSync(temporary);
+  const marker = path.join(ambient, "launch.json");
+  const args = [
+    "eval",
+    "--filter-range",
+    "0:1",
+    "-c",
+    'config with spaces & "quotes".yaml',
+  ];
+  const launch = (status: number) =>
+    childProcess.spawnSync(
       process.execPath,
-      [
-        "--experimental-strip-types",
-        "--require",
-        preload,
-        path.join(import.meta.dirname, "run-promptfoo.mts"),
-        "eval",
-      ],
+      ["--experimental-strip-types", fixtureScript, ...args],
       {
         env: {
           ...process.env,
-          EVAL_TEST_RUNTIME: marker,
+          TMPDIR: temporary,
+          TMP: temporary,
+          TEMP: temporary,
+          EVAL_TEST_RECORD: marker,
           EVAL_TEST_EXIT_CODE: String(status),
         },
         encoding: "utf8",
       },
     );
+  for (const status of [0, 100, 17]) {
+    const result = launch(status);
     assert.equal(result.status, status, result.stderr);
-    assert.doesNotMatch(result.stderr, /Error: Child evaluation failed/);
-    assert.ok(!fs.existsSync(fs.readFileSync(marker, "utf8")));
+    const record = JSON.parse(fs.readFileSync(marker, "utf8"));
+    assert.deepEqual(record.args, args);
+    assert.equal(record.cwd, fixtureEval);
+    assert.equal(record.sastbenchRuntime, record.runtime);
+    assert.equal(
+      record.calibrationTargets,
+      path.join(fixtureEval, "artifacts", "calibration-repos"),
+    );
+    assert.equal(
+      record.sastbenchTargets,
+      path.join(fixtureEval, "artifacts", "sastbench-targets"),
+    );
+    assert.equal(
+      record.gitCache,
+      path.join(fixtureEval, "artifacts", "sastbench-git-cache"),
+    );
+    assert.equal(
+      record.skill,
+      fs.readFileSync(path.join(sourceRoot, skill), "utf8"),
+    );
+    assert.ok(!fs.existsSync(record.runtime));
+    assert.deepEqual(fs.readdirSync(temporary), []);
   }
+  fs.rmSync(path.join(packageRoot, "package.json"));
+  const missing = launch(0);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /ENOENT/);
+  assert.deepEqual(fs.readdirSync(temporary), []);
 } finally {
-  childProcess.execFileSync = originalExec;
   if (runtime) fs.rmSync(runtime, { recursive: true, force: true });
   fs.rmSync(ambient, { recursive: true, force: true });
   if (previousRuntime === undefined) delete process.env.TRIAGE_RUNTIME_ROOT;
