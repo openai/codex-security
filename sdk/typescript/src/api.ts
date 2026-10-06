@@ -234,6 +234,7 @@ import {
 } from "./targets.js";
 import {
   inspectTrustedExecutable,
+  isWithin,
   type InspectedExecutable,
 } from "./trusted-executable.js";
 
@@ -1374,6 +1375,8 @@ export class CodexSecurity {
         scanDir,
         runtime.environment,
       );
+      const workerCodexConfig = { ...workerRuntimeConfig };
+      delete workerCodexConfig["environment"];
       const workerSnapshot = { ...workerRuntimeConfig };
       delete workerSnapshot["model_providers"];
       if (runtime.providerProfile !== undefined) {
@@ -2301,7 +2304,7 @@ export class CodexSecurity {
                 ...scanPreflightCodexConfig(
                   resolveCodexProfile(session.sessionConfig),
                 ),
-                ...workerRuntimeConfig,
+                ...workerCodexConfig,
               },
             },
             model,
@@ -2611,6 +2614,9 @@ export class CodexSecurity {
     this.#runtime = null;
     await runtime?.providerProfile?.cleanup();
     if (runtime?.bootstrapWorkspace !== undefined) {
+      if (runtime.deepScanConfigPath !== undefined) {
+        await rm(runtime.deepScanConfigPath, { force: true });
+      }
       await cleanupSdkDirectory(runtime.bootstrapWorkspace);
     }
   }
@@ -2722,7 +2728,9 @@ export class CodexSecurity {
           ":root": "read",
           ":workspace_roots": "write",
           [runtimeHome]: { ".": "deny" },
-          [runtime.deepScanConfigPath]: { ".": "deny" },
+          ...(isWithin(runtimeHome, runtime.deepScanConfigPath)
+            ? {}
+            : { [runtime.deepScanConfigPath]: { ".": "deny" } }),
         })}`,
         ...configOverrides,
       ];
@@ -3078,11 +3086,21 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
     };
-    runtime.deepScanConfigPath =
-      runtime.bootstrapWorkspace !== undefined &&
-      (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
-        ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
-        : undefined;
+    if (runtime.bootstrapWorkspace !== undefined) {
+      if (
+        await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot)
+      ) {
+        runtime.deepScanConfigPath ??= join(
+          runtime.codexHome,
+          `codex-security-deep-scan-${randomUUID()}.toml`,
+        );
+      } else {
+        if (runtime.deepScanConfigPath !== undefined) {
+          await rm(runtime.deepScanConfigPath, { force: true });
+        }
+        runtime.deepScanConfigPath = undefined;
+      }
+    }
   }
 
   async #validatePolicyInputs(
@@ -3552,7 +3570,7 @@ export class CodexSecurity {
       const deepScanConfigPath = (await pluginSupportsIsolatedDeepScanConfig(
         plugin.pluginRoot,
       ))
-        ? join(bootstrapWorkspace, "deep-scan-config.toml")
+        ? join(codexHome, `codex-security-deep-scan-${randomUUID()}.toml`)
         : undefined;
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
@@ -4880,7 +4898,7 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
-  const providers = config["model_providers"];
+  const providers = resolved["model_providers"];
   const definition =
     provider !== undefined && isRecord(providers)
       ? providers[provider]

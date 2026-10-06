@@ -92,6 +92,7 @@ test.each([false, true])(
     await mkdir(scan, { mode: 0o700 });
     const original = runtime.requirePrivateCredentialHome;
     let protectedDirectory: string | undefined;
+    let workerFile: string | undefined;
     let launched = false;
     let operation: "deep" | "standard" | "validation" = "deep";
     const guard = spyOn(
@@ -153,27 +154,27 @@ test.each([false, true])(
               expect(await readFile(file, "utf8")).not.toContain(
                 "synthetic-selected-provider-key",
               );
-              const workerFile = join(
-                protectedDirectory!,
-                "deep-scan-config.toml",
-              );
+              if (operation === "deep") {
+                workerFile =
+                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+              }
               expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
                 operation === "deep" ? workerFile : undefined,
               );
-              expect(dirname(workerFile)).toBe(protectedDirectory!);
-              expect(await readFile(workerFile, "utf8")).not.toContain(
+              expect(dirname(workerFile!)).toBe(options.env!["CODEX_HOME"]!);
+              expect(await readFile(workerFile!, "utf8")).not.toContain(
                 "synthetic-client-secret",
               );
               expect(
                 (
-                  parseToml(await readFile(workerFile, "utf8"))[
+                  parseToml(await readFile(workerFile!, "utf8"))[
                     "worker_runtime"
                   ] as Record<string, unknown>
                 )["environment"],
               ).toEqual({
                 SYNTHETIC_GATEWAY_KEY: "synthetic-selected-provider-key",
               });
-              expect(await readFile(workerFile, "utf8")).not.toContain(
+              expect(await readFile(workerFile!, "utf8")).not.toContain(
                 "synthetic-unrelated-key",
               );
               const profileFile = join(
@@ -199,8 +200,8 @@ test.each([false, true])(
                     string,
                     unknown
                   >
-                )[workerFile],
-              ).toEqual({ ".": "deny" });
+                )[workerFile!],
+              ).toBeUndefined();
               expect(
                 (
                   filesystem["codex_security_scan"]!["filesystem"] as Record<
@@ -245,5 +246,6 @@ test.each([false, true])(
       await client.close();
     }
     expect(existsSync(protectedDirectory!)).toBe(false);
+    if (workerFile !== undefined) expect(existsSync(workerFile)).toBe(false);
   },
 );

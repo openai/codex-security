@@ -3674,6 +3674,7 @@ describe("CodexSecurity orchestration", () => {
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["matching uses provider credentials", "credential", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "cost-limited matching needs additional context",
@@ -3712,14 +3713,18 @@ describe("CodexSecurity orchestration", () => {
       let observedSingleTurn: boolean | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
+      let matcherArguments: string[] | undefined;
       const providerConfig = {
-        model_provider: "synthetic.provider",
+        model_provider:
+          failure === "credential" ? "openrouter" : "synthetic.provider",
         model_providers: {
-          "synthetic.provider": {
+          [failure === "credential" ? "openrouter" : "synthetic.provider"]: {
             name: "Synthetic provider",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
-            auth: { command: "synthetic-auth" },
+            ...(failure === "credential"
+              ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+              : { auth: { command: "synthetic-auth" } }),
           },
         },
       };
@@ -3744,6 +3749,21 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          ...(failure === "credential"
+            ? {
+                environment: {
+                  OPENROUTER_API_KEY: "synthetic-router-key",
+                  SYNTHETIC_PROVIDER_KEY: "synthetic-worker-credential",
+                },
+                prepareRuntime: runtimePreparer(codexHome, () => ({
+                  environment: {
+                    CODEX_HOME: codexHome,
+                    OPENROUTER_API_KEY: "synthetic-router-key",
+                    SYNTHETIC_PROVIDER_KEY: "synthetic-worker-credential",
+                  },
+                })),
+              }
+            : {}),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -3781,7 +3801,8 @@ describe("CodexSecurity orchestration", () => {
               }
               return {
                 findings:
-                  failure === "matcher"
+                  failure === "matcher" ||
+                  (failure === "credential" && !matched)
                     ? [previous]
                     : [{ findingId: "another-open-finding" }],
               };
@@ -3797,6 +3818,18 @@ describe("CodexSecurity orchestration", () => {
             expect(options?.config?.codexOverrides).toMatchObject(
               providerConfig,
             );
+            if (failure === "credential") {
+              const nativeProfile = await import(
+                pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs"))
+                  .href
+              );
+              matcherArguments = nativeProfile.profileConfigOverrides(
+                options?.config?.codexOverrides ?? {},
+              );
+              expect(options?.environment?.["SYNTHETIC_PROVIDER_KEY"]).toBe(
+                "synthetic-worker-credential",
+              );
+            }
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -3859,10 +3892,16 @@ describe("CodexSecurity orchestration", () => {
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");
+      if (failure === "credential") {
+        expect(matcherArguments).toBeDefined();
+        expect(matcherArguments!.join("\n")).not.toContain(
+          "synthetic-worker-credential",
+        );
+      }
       expect(
         result.repositoryFindings?.map(({ findingId }) => findingId),
       ).toEqual(
-        failure === "budget"
+        failure === "budget" || failure === "credential"
           ? ["another-open-finding"]
           : failure === "dismissed"
             ? []
