@@ -26,7 +26,7 @@ bashTest(
   "selects workflow checks for workflow changes and main pushes",
   async () => {
     const scope = ci.jobs["validate-title"]!.steps.find(
-      (step) => step.name === "Decide CI mode",
+      (step) => step.name === "Select additional checks",
     )!;
     const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
     try {

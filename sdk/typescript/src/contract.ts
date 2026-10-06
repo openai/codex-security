@@ -234,6 +234,7 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     }
 
     for (const [sectionName, listFields] of [
+      ["rootCause", ["evidenceRefs", "evidence_refs"]],
       ["root_cause", ["evidenceRefs", "evidence_refs"]],
       [
         "validation",
@@ -432,8 +433,31 @@ function validateCanonicalContract(
     }
   }
 
+  const findingIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
+    if (findingIds.has(finding.findingId)) {
+      throw new ContractValidationError(`${context}: duplicate finding id.`);
+    }
+    findingIds.add(finding.findingId);
+    for (const [field, value] of [
+      ["title", finding.title],
+      ["summary", finding.summary],
+      ["remediation", finding.remediation],
+      ["confidence.rationale", finding.confidence.rationale],
+      ["taxonomy.category", finding.taxonomy.category],
+      ["provenance.source", finding.provenance.source],
+      ...(finding.severity.score === undefined
+        ? []
+        : [["severity.scoringSystem", finding.severity.scoringSystem]]),
+    ]) {
+      // Match the producer's Python str.strip without changing saved text.
+      if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(value ?? "")) {
+        throw new ContractValidationError(
+          `${context}.${field}: expected a non-empty string.`,
+        );
+      }
+    }
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
       try {
@@ -442,6 +466,11 @@ function validateCanonicalContract(
         throw new ContractValidationError(
           `${locationContext}.path: expected a safe repository-relative POSIX path.`,
           { cause: error },
+        );
+      }
+      if ((location.endLine ?? location.startLine) < location.startLine) {
+        throw new ContractValidationError(
+          `${locationContext}.endLine: expected an integer >= startLine.`,
         );
       }
     }
