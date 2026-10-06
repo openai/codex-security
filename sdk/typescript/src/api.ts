@@ -2902,11 +2902,11 @@ export class CodexSecurity {
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       if (isRecord(providers) && Object.keys(providers).length > 0) {
         const previousProfile = runtime.providerProfile;
+        await previousProfile?.cleanup();
         runtime.providerProfile = await createProviderProfile(
           runtimeHome,
           effectiveConfig,
         );
-        await previousProfile?.cleanup();
       } else {
         await runtime.providerProfile?.cleanup();
         delete runtime.providerProfile;
@@ -4881,6 +4881,17 @@ function selectedWorkerRuntimeConfig(
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   const providers = config["model_providers"];
+  const definition =
+    provider !== undefined && isRecord(providers)
+      ? providers[provider]
+      : undefined;
+  const credentialKey = isRecord(definition)
+    ? definition["env_key"]
+    : undefined;
+  const credentialValue =
+    typeof credentialKey === "string"
+      ? environmentValue(environment, credentialKey)
+      : undefined;
   const instructionsFile = resolved["model_instructions_file"];
   if (typeof instructionsFile === "string") {
     resolved["model_instructions_file"] = resolve(
@@ -4895,6 +4906,9 @@ function selectedWorkerRuntimeConfig(
         .map((key) => [key, resolved[key]!]),
     ),
     ...(provider === undefined ? {} : { model_provider: provider }),
+    ...(typeof credentialKey === "string" && credentialValue !== undefined
+      ? { environment: { [credentialKey]: credentialValue } }
+      : {}),
     ...(isRecord(providers)
       ? {
           model_providers:

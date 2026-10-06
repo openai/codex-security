@@ -1237,6 +1237,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   name: `Synthetic gateway ${index}`,
                   base_url: `https://gateway-${index}.example.test/v1`,
                   wire_api: "responses",
+                  env_key: "SYNTHETIC_GATEWAY_KEY",
                   ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                   experimental_bearer_token: `synthetic-bearer-${index}`,
                   auth: {
@@ -1303,6 +1304,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         model_verbosity: entry.verbosity,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
+                        environment: {
+                          SYNTHETIC_GATEWAY_KEY: `synthetic-snapshot-key-${entry.nativeProfile}`,
+                        },
                       },
               }),
             ),
@@ -1470,7 +1474,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.codexHome, await realpath(codexHome));
-            assert.equal(invocation.providerKey, providerKeys[index]);
+            const expectedProviderKey =
+              index === 0
+                ? providerKeys[index]
+                : `synthetic-snapshot-key-${workerConfigurations[index].nativeProfile}`;
+            assert.equal(invocation.providerKey, expectedProviderKey);
+            assert.equal(
+              workerLaunch.args.some((arg) =>
+                arg.includes(expectedProviderKey!),
+              ),
+              false,
+            );
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               process.env.SYNTHETIC_GATEWAY_KEY,

@@ -61,6 +61,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  environment?: Record<string, string>;
   configOverrides?: string[];
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
@@ -96,6 +97,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
+      for (const [name, value] of Object.entries(
+        runtimeSettings.environment ?? {},
+      )) {
+        if (process.platform === "win32") {
+          for (const key of Object.keys(childEnv)) {
+            if (key.toUpperCase() === name.toUpperCase()) delete childEnv[key];
+          }
+        }
+        childEnv[name] = value;
+      }
       configOverrides.push(...(runtimeSettings.configOverrides ?? []));
       const openAiApiKey = environmentVariable(
         childEnv,
@@ -531,6 +542,16 @@ async function workerRuntimeSettings(
   const workerConfig = workerConfigPath
     ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
     : undefined;
+  const credentialEnvironment = isRecord(workerConfig)
+    ? workerConfig.environment
+    : undefined;
+  if (isRecord(credentialEnvironment)) {
+    settings.environment = Object.fromEntries(
+      Object.entries(credentialEnvironment).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  }
   const nativeProfile = isRecord(workerConfig)
     ? workerConfig.native_profile
     : undefined;
