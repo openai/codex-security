@@ -701,7 +701,7 @@ describe("CodexSecurity orchestration", () => {
               ].join("\n");
               measured = JSON.parse(
                 execFileSync(
-                  pythonExecutable(),
+                  pythonExecutable()!,
                   [
                     "-I",
                     "-B",
