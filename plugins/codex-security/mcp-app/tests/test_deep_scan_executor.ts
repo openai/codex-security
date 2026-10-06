@@ -1411,6 +1411,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   auth: {
                     type: "command",
                     command: "synthetic-auth",
+                    cwd: path.join(codexHome, `helpers ${index}`),
                     args: [String(index)],
                     env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                   },
