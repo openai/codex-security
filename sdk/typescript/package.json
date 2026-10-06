@@ -40,6 +40,8 @@
     "_bundled_plugin",
     "LICENSE",
     "README.md",
+    "docs/cli.md",
+    "docs/findings-service.md",
     "docs/dedupe-records.md"
   ],
   "publishConfig": {
