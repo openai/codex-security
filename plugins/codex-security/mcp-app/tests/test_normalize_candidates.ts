@@ -47,11 +47,33 @@ const cases = [
     candidate: "file\r",
   },
   {
+    name: "does not strip an unterminated missing literal filename",
+    files: ["file"],
+    inventory: "file\r",
+    candidate: "file",
+    error: /ENOENT/,
+  },
+  {
+    name: "keeps an unterminated missing literal outside a diff scope",
+    files: ["file"],
+    inventory: "file\r",
+    candidate: "file",
+    allowMissing: true,
+    error: /expected at least one in-scope file/,
+  },
+  {
+    name: "does not infer CRLF from an unterminated row",
+    files: ["file", "file\r", "other"],
+    inventory: "file\r\nother\r",
+    candidate: "file",
+    error: /ambiguous carriage-return paths/,
+  },
+  {
     name: "rejects an ambiguous inventory without selecting another file",
     files: ["file", "file\r"],
     inventory: "file\r\n",
     candidate: "file",
-    ambiguous: true,
+    error: /ambiguous carriage-return paths/,
   },
   {
     name: "keeps CRLF normalization for missing diff-scope files",
@@ -104,9 +126,9 @@ for (const fixture of cases) {
       inventory,
       ...(fixture.allowMissing ? ["--allow-missing-in-scope"] : []),
     ]);
-    if (fixture.ambiguous) {
+    if (fixture.error) {
       assert.equal(status, 2);
-      assert.match(errors.join("\n"), /ambiguous carriage-return paths/);
+      assert.match(errors.join("\n"), fixture.error);
       await assert.rejects(readFile(output), { code: "ENOENT" });
     } else {
       assert.equal(status, 0, errors.join("\n"));

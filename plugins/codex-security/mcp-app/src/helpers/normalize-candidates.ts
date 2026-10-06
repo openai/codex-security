@@ -143,28 +143,27 @@ function readScope(
       }
     }
   }
-  const crlfEvidence =
-    lines.includes("\r") ||
-    [...carriageRows.values()].some(
-      ([literal, stripped]) => stripped && !literal,
-    );
+  const crlfEvidence = lines.slice(0, -1).some((line) => {
+    if (line === "\r") return true;
+    const paths = carriageRows.get(line);
+    return paths !== undefined && paths[1] && !paths[0];
+  });
   const literalEvidence = [...carriageRows.values()].some(
     ([literal, stripped]) => literal && !stripped,
   );
   const scope = new Set<string>();
   for (const [index, row] of lines.entries()) {
     let line = row;
-    if (windows || line === "\r") {
+    const finalLiteral = index === lines.length - 1;
+    if (!finalLiteral && (windows || line === "\r")) {
       if (line.endsWith("\r")) line = line.slice(0, -1);
-    } else if (line.endsWith("\r")) {
+    } else if (!finalLiteral && line.endsWith("\r")) {
       const [literal, stripped] = carriageRows.get(line)!;
       const trimmed = line.slice(0, -1);
       if (stripped && !literal) {
         line = trimmed;
       } else if (stripped && literal) {
-        const finalLiteral =
-          index === lines.length - 1 && !contents.endsWith("\n");
-        if (!finalLiteral && !listedRows.has(trimmed)) {
+        if (!listedRows.has(trimmed)) {
           if (crlfEvidence && !literalEvidence) {
             line = trimmed;
           } else if (!literalEvidence || crlfEvidence) {
