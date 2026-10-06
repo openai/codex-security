@@ -128,6 +128,132 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
+test.skipIf(process.platform === "win32")(
+  "preserves helper argument bytes, stdin, and exit status",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-helper-pipe-")),
+    );
+    try {
+      const scripts = join(root, "plugin with spaces", "scripts");
+      const mcp = join(root, "plugin with spaces", "mcp");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(mcp);
+      const launcher = join(scripts, "launch_codex_security_mcp");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+        launcher,
+      );
+      await chmod(launcher, 0o700);
+      await writeFile(
+        join(mcp, "helpers.mjs"),
+        `import { readFileSync } from "node:fs";
+const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
+console.log(JSON.stringify({
+  args: process.argv.slice(2),
+  payload: payload.toString("hex"),
+  stdin: readFileSync(0).toString("hex"),
+}));
+process.exitCode = 23;
+`,
+      );
+      const argument = 'space "quote" back\\slash\nline\t雪';
+      const largeArgument = "x".repeat(70_000);
+      const input = Buffer.from("original stdin\n\0tail");
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          'exec "$1" --helper probe "$2" "" "raw-$(printf \'\\377\')" "$3"',
+          "helper-test",
+          launcher,
+          argument,
+          largeArgument,
+        ],
+        {
+          input,
+          encoding: "utf8",
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+          maxBuffer: Infinity,
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(23);
+      expect(result.stderr).toBe("");
+      const expectedPayload = Buffer.concat([
+        Buffer.from(
+          [
+            process.env["HOME"] === undefined ? "" : "x",
+            process.env["HOME"] ?? "",
+            "probe",
+            argument,
+            "",
+            "raw-",
+          ].join("\0"),
+        ),
+        Buffer.from([0xff, 0]),
+        Buffer.from(largeArgument + "\0"),
+      ]);
+      expect(JSON.parse(result.stdout)).toEqual({
+        args: ["--helper"],
+        payload: expectedPayload.toString("hex"),
+        stdin: input.toString("hex"),
+      });
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "resolves security policy with filesystem writes denied",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-read-only-helper-")),
+    );
+    try {
+      const repository = join(root, "repository with spaces");
+      await mkdir(join(repository, "service"), { recursive: true });
+      await writeFile(join(repository, "SECURITY.md"), "root policy\n");
+      await writeFile(
+        join(repository, "service", "SECURITY.md"),
+        "scoped policy\n",
+      );
+      const result = spawnSync(
+        "/usr/bin/sandbox-exec",
+        [
+          "-p",
+          "(version 1) (allow default) (deny file-write*)",
+          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+          "--helper",
+          "resolve-security-md",
+          "--repo",
+          repository,
+          "--scope",
+          "service",
+          "--out",
+          "-",
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_MCP_NODE_PATH: node },
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("root policy\n");
+      expect(result.stdout).toContain("scoped policy\n");
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
 test.each(["server", "helper"] as const)(
   "starts the packaged %s with managed Node and an empty PATH",
   async (mode) => {
