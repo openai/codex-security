@@ -96,6 +96,7 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
+  "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
   "gpt-daybreak-blue-latest": [4_000, 400, 5_000, 20_000],
   "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
@@ -247,9 +248,11 @@ export function estimateScanCost(
           : "https://developers.openai.com/api/docs/pricing",
       asOf: bedrockPricing
         ? bedrockPricing.asOf
-        : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-          ? "2026-09-30"
-          : "2026-09-14",
+        : pricingModel === "gpt-5.6-cyber"
+          ? "2026-10-06"
+          : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+            ? "2026-09-30"
+            : "2026-09-14",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),
