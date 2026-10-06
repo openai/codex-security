@@ -7,6 +7,7 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const files = execFileSync("git", ["ls-files", "-z", "--", "*.md"], {
   cwd: root,
   encoding: "utf8",
+  maxBuffer: Infinity,
 })
   .split("\0")
   .filter(
