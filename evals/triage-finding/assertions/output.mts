@@ -26,6 +26,31 @@ export function hasTriageJson(text: string) {
       // Ignore quoted prose that is not a JSON field.
     }
   }
+  let depth = 0;
+  let start = 0;
+  for (const match of text.matchAll(
+    /"(?:\\.|[^"\\])*"|(?<!\w)'(?:\\.|[^'\\])*'|[{}]/g,
+  )) {
+    if (match[0] === "{") {
+      if (depth++ === 0) start = match.index;
+    } else if (match[0] === "}" && depth > 0 && --depth === 0) {
+      try {
+        const result = JSON.parse(text.slice(start, match.index + 1));
+        if (
+          !("schema_version" in result) &&
+          Array.isArray(result.findings) &&
+          (result.findings.length === 0 ||
+            result.findings.some(
+              (finding: { message?: unknown } | null) =>
+                typeof finding?.message !== "string",
+            ))
+        )
+          return true;
+      } catch {
+        // Keep prose and incomplete JSON out of the findings-envelope check.
+      }
+    }
+  }
   return false;
 }
 
