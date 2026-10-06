@@ -1,3 +1,4 @@
+import { writingAnnotations } from "./tool-annotations.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
@@ -50,12 +51,7 @@ export function registerScanHandoffTools(
       description:
         "App-only. Record that the launched scan instructions were delivered to Codex.",
       inputSchema: handoffClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, claimToken }) => {
@@ -77,12 +73,7 @@ export function registerScanHandoffTools(
       description:
         "App-only. Durably claim scan handoff delivery before sending continuation instructions to Codex.",
       inputSchema: handoffTakeoverSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, claimToken, takeOverStale }) => {
@@ -105,12 +96,7 @@ export function registerScanHandoffTools(
       description:
         "App-only. Release a failed scan handoff delivery claim so the app can retry it.",
       inputSchema: handoffClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, claimToken }) => {
@@ -132,12 +118,7 @@ export function registerScanHandoffTools(
       description:
         "App-only. Persist the normal local Codex thread created for a claimed scan handoff.",
       inputSchema: scanContinuationThreadSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, claimToken, threadId }) => {

@@ -1,0 +1,102 @@
+name: Action CI
+
+on:
+  push:
+    paths:
+      - action.yml
+      - github-action/**
+      - .github/workflows/action-ci.yml
+  pull_request:
+    paths:
+      - action.yml
+      - github-action/**
+      - .github/workflows/action-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: action-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: github-action
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run validate
+      - name: Install the pinned CLI for integration tests
+        run: npm ci --prefix runtime --ignore-scripts --no-audit --no-fund
+      - name: Published CLI result and SARIF compatibility (no model calls)
+        run: npm run test:cli
+      - name: Packaged Linux configuration smoke test (no model calls)
+        run: node scripts/linux-smoke.mjs
+      - name: Save generated release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: action-release-metadata
+          path: github-action/build/*.json
+          retention-days: 7
+          if-no-files-found: error
+
+  smoke:
+    name: Hosted Action smoke test
+    # Fork PRs are unsupported; their push workflows exercise the Action instead.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Run the packaged Action without credentials or model calls
+        id: smoke
+        uses: ./
+        with:
+          dry-run: 'true'
+      - name: Verify dry-run outputs
+        env:
+          SCAN_STATUS: ${{ steps.smoke.outputs.scan-status }}
+          SKIP_REASON: ${{ steps.smoke.outputs.skip-reason }}
+          EXIT_CODE: ${{ steps.smoke.outputs.exit-code }}
+          SCANNED_SHA: ${{ steps.smoke.outputs.scanned-sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SARIF_UPLOAD_READY: ${{ steps.smoke.outputs.sarif-upload-ready }}
+        run: |
+          test "$SCAN_STATUS" = skipped
+          test "$SKIP_REASON" = dry-run
+          test "$EXIT_CODE" = 0
+          test "$SCANNED_SHA" = "$EXPECTED_SHA"
+          test "$SARIF_UPLOAD_READY" = false
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Check action dependencies
+        run: npm audit --audit-level=high
+      - name: Check locked CLI dependencies
+        if: always()
+        run: npm audit --prefix runtime --omit=dev --audit-level=high
