@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
-import { nullIfMissingFile } from "./targets.js";
+import { isGitMetadataDirectory, nullIfMissingFile } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -141,6 +141,9 @@ async function discover(
         if (candidate.dev === marker.dev && candidate.ino === marker.ino) {
           continue;
         }
+      }
+      if (entry.isDirectory() && (await isGitMetadataDirectory(path, signal))) {
+        continue;
       }
     }
     if (entry.isDirectory()) {

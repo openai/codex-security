@@ -233,6 +233,5 @@ async function* execute(options, args, input, signal) {
   } finally {
     lines.close();
     if (child.exitCode === null && child.signalCode === null) child.kill();
-    await closed;
   }
 }

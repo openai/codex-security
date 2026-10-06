@@ -108,16 +108,51 @@ describe("scan knowledge bases", () => {
     [".git", "directory"],
     [".GIT", "directory"],
     [".GIT", "directory link"],
+    [".GIT", "Git file"],
   ] as const)(
     "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
     async (metadataName, metadataKind) => {
       const linked = metadataKind === "directory link";
+      const gitFile = metadataKind === "Git file";
       const root = await temporaryDirectory();
-      await mkdir(join(root, metadataName));
+      if (gitFile) {
+        const template = await temporaryDirectory();
+        const initialized = spawnSync(
+          "git",
+          [
+            "init",
+            "--quiet",
+            `--template=${template}`,
+            "--initial-branch=synthetic",
+            root,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(initialized.status, initialized.stderr).toBe(0);
+        await filesystem.rename(join(root, ".git"), join(root, ".GIT"));
+        const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+          () => true,
+          () => false,
+        );
+        // Case-insensitive filesystems cannot represent this separate Git file.
+        if (!aliasesGit) await writeFile(join(root, ".git"), "gitdir: .GIT\n");
+        const recognized = spawnSync(
+          "git",
+          ["-C", root, "rev-parse", "--absolute-git-dir"],
+          { encoding: "utf8" },
+        );
+        expect(recognized.status, recognized.stderr).toBe(0);
+        expect(await filesystem.realpath(recognized.stdout.trim())).toBe(
+          await filesystem.realpath(join(root, ".GIT")),
+        );
+      } else {
+        await mkdir(join(root, metadataName));
+      }
       const metadata = join(root, metadataName, "config");
       await writeFile(
         metadata,
-        "[http]\nextraheader = synthetic-authorization\n",
+        (gitFile ? await readFile(metadata, "utf8") : "") +
+          "[http]\nextraheader = synthetic-authorization\n",
       );
       await writeFile(
         join(root, "guide.md"),
