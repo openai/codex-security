@@ -950,7 +950,15 @@ for await (const line of createInterface({ input: process.stdin })) {
               );
               send(2, "mcpServerStatus/list", { detail: "full" });
             }
-            if (response.id === 2) return response.result.data[0];
+            if (response.id === 2) {
+              const server = response.result.data[0];
+              if (server?.tools?.probe === undefined) {
+                throw new Error(
+                  `Native MCP probe is missing: ${JSON.stringify(response.result)}\n${stderr}`,
+                );
+              }
+              return server;
+            }
           }
           throw new Error(`Native MCP status did not finish: ${stderr}`);
         } finally {
