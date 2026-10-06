@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { parse } from 'yaml';
+import { format } from 'prettier';
 
 const data = parse(await readFile(new URL('../../action.yml', import.meta.url), 'utf8'));
 const escape = value => String(value).replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -16,7 +17,7 @@ const current = await readFile(path, 'utf8');
 const start = '<!-- action-reference:start -->';
 const end = '<!-- action-reference:end -->';
 assert.ok(current.includes(start) && current.includes(end), 'README must contain action reference markers');
-const updated = current.slice(0, current.indexOf(start)) + start + '\n\n' + reference + '\n' + current.slice(current.indexOf(end));
+const updated = await format(current.slice(0, current.indexOf(start)) + start + '\n\n' + reference + '\n' + current.slice(current.indexOf(end)), { parser: 'markdown' });
 if (process.argv.includes('--check')) {
   assert.equal(current, updated, 'Action reference differs from action.yml. Run npm run docs.');
 } else {
