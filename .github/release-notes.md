@@ -4,54 +4,41 @@
 
 ## Highlights
 
-- **Save and export threat models.** Standard, Deep, Diff, and policy workflows
-  retain threat models with their results. Export a saved model without another
-  model call using `codex-security export --artifact threat-model`, select a run
-  with `--scan`, or use the SDK's `exportArtifact` helper. Retained content remains
-  exportable if its Markdown document could not be written.
+- Threat models are now saved with Standard, Deep, and Diff scan results and
+  generated security policies. Export a saved model without another model call
+  using `codex-security export --artifact threat-model` or the SDK's
+  `exportArtifact` helper.
   ([#1133](https://github.com/openai/codex-security/pull/1133))
-- **Detect credentials exposed in source.** Scans now explicitly assess
-  credentials embedded in source, including unused code and tests, and distinguish
-  supported exposures from placeholders and public material. This assessment runs
-  offline and does not use discovered credentials or contact their services.
+- Scans now check for exposed credentials in source code, including unused code
+  and tests, and distinguish suspected exposures from placeholders. This check
+  runs offline, without trying discovered credentials against a service.
   ([#1134](https://github.com/openai/codex-security/pull/1134))
-- **Use consistent model controls across workflows.** Choose `--model` and
-  `--effort` for patching, validation, fix verification, and saved-scan matching and
-  comparison. Reasoning-effort values pass through to Codex instead of being
-  restricted to a fixed wrapper list. Deep Scan workers and inline patches retain
-  the scan's configured service tier.
+- Use `--model` and `--effort` when generating patches, validating findings,
+  verifying fixes, or matching and comparing saved scans. Deep Scan workers and
+  patches generated during a scan also respect your selected service tier.
   ([#1143](https://github.com/openai/codex-security/pull/1143),
-  [#1237](https://github.com/openai/codex-security/pull/1237),
   [#1238](https://github.com/openai/codex-security/pull/1238),
   [#1274](https://github.com/openai/codex-security/pull/1274))
-- **Improve provider and authentication support.** Standalone patch, validation,
-  and fix-verification commands honor custom provider configuration and
-  authentication. Native Amazon Bedrock scans provide more relevant authentication
-  diagnostics and Blue/Red cost estimates. Eligible OpenAI API-key scans can select
-  a Cyber access program per scan, including resumed Deep Scan workers.
+- Patch, validation, and fix-verification commands now respect custom model
+  providers and their authentication settings. Amazon Bedrock users get clearer
+  authentication errors and cost estimates for Daybreak Blue and Red. Eligible
+  OpenAI API-key users can select a Cyber access program for each scan.
   ([#1131](https://github.com/openai/codex-security/pull/1131),
   [#1187](https://github.com/openai/codex-security/pull/1187),
   [#1188](https://github.com/openai/codex-security/pull/1188),
   [#1185](https://github.com/openai/codex-security/pull/1185))
-- **Cover more source files accurately.** Scan inventories and ranking include
-  previously omitted C++ headers, EJS/ERB/PHTML templates, and Vyper sources.
-  Source previews also handle C++ raw strings, Go raw strings, and PHP heredocs
-  more accurately.
+- Scans include previously overlooked C++ headers (`.hh` and `.hxx`),
+  server-rendered templates (EJS, ERB, and PHTML), and Vyper source files when
+  selecting code to review.
   ([#1079](https://github.com/openai/codex-security/pull/1079),
   [#1197](https://github.com/openai/codex-security/pull/1197),
-  [#1306](https://github.com/openai/codex-security/pull/1306),
-  [#1279](https://github.com/openai/codex-security/pull/1279),
-  [#1235](https://github.com/openai/codex-security/pull/1235),
-  [#1236](https://github.com/openai/codex-security/pull/1236))
-- **Make scan startup and saved results more reliable.** Unix sandbox readiness
-  is checked before billed inference starts, and concurrent scans reuse unchanged
-  plugin installations. Completed artifacts survive follow-up cancellation, scan
-  history remains readable during registration, and CSV round trips preserve
-  distinct finding occurrences and literal leading apostrophes.
+  [#1306](https://github.com/openai/codex-security/pull/1306))
+- On Unix, scans check that the sandbox works before starting paid model calls.
+  Completed results are kept if you cancel follow-up work. CSV exports can now be
+  reimported without rejecting multiple occurrences of a finding or losing
+  leading apostrophes.
   ([#1084](https://github.com/openai/codex-security/pull/1084),
-  [#1082](https://github.com/openai/codex-security/pull/1082),
   [#1057](https://github.com/openai/codex-security/pull/1057),
-  [#1272](https://github.com/openai/codex-security/pull/1272),
   [#1247](https://github.com/openai/codex-security/pull/1247))
 
 <!-- release-section: highlights:end -->
@@ -60,29 +47,28 @@
 
 ## Upgrade notes
 
-- **Threat-model consumers:** `SecurityPolicyDraft.threatModelPath` is now
-  `string | null`; check it before opening the document. Policy generation writes
-  `threatmodel.md` instead of `THREAT_MODEL.md`, so prefer the returned path over a
-  hard-coded filename. Readers of saved model data must handle Markdown content
-  (`format: "markdown"`, `content`) as well as legacy structured models.
-  Historical structured models remain readable and exportable; no saved-data
-  migration is required.
+- If your integration reads threat models, check `SecurityPolicyDraft.threatModelPath`
+  for `null` before opening the file. Policy generation now writes `threatmodel.md`
+  instead of `THREAT_MODEL.md`; use the returned path. Saved models can contain
+  Markdown (`format: "markdown"`, `content`) or the previous structured format, so
+  readers must handle both. Existing models remain readable and exportable
+  without migration.
   ([#1133](https://github.com/openai/codex-security/pull/1133))
-- **Findings service clients:** send `Content-Type: application/json` to
-  `POST /v1/bulk/findings` and `POST /v1/dedupe-groups`. Missing or other media types
-  now return HTTP 400 `invalid_request`; JSON with a charset parameter is accepted.
+- Findings service clients must send `Content-Type: application/json` to
+  `POST /v1/bulk/findings` and `POST /v1/dedupe-groups`. Missing or other content
+  types return HTTP 400 `invalid_request`. A charset parameter is accepted.
   ([#1277](https://github.com/openai/codex-security/pull/1277))
-- **Diagnostic output:** the wrapper now preserves original diagnostic text,
-  including credential-shaped values, in CLI output and saved failure,
-  publication, and patch-risk summaries. Review logs and artifacts for sensitive
-  information before sharing them.
+- Codex Security no longer masks diagnostic text that looks like credentials.
+  CLI output and saved error, publication, and patch-risk summaries can contain
+  sensitive values. Review them before sharing.
   ([#1179](https://github.com/openai/codex-security/pull/1179))
-- **Effort schemas:** reasoning effort is a nonempty string rather than a closed
-  enum. Supported values still depend on Codex and the chosen model/provider.
+- SDK types and CLI schemas now accept any nonempty string for reasoning effort.
+  Update integrations that assume a fixed list. The chosen value must still be
+  supported by Codex and your model provider.
   ([#1237](https://github.com/openai/codex-security/pull/1237))
-- **Older CSV exports:** new exports preserve leading apostrophes, but ambiguous
-  prefixes in older CSV files cannot be reconstructed. Use JSON export when those
-  original values are needed.
+- Older CSV exports may have ambiguous leading apostrophes that cannot be
+  recovered from the CSV alone. Export the original saved results as JSON if you
+  need those exact values.
   ([#1247](https://github.com/openai/codex-security/pull/1247))
 
 <!-- release-section: upgrades:end -->
