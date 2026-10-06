@@ -82,6 +82,13 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
     }
   }
 
+  if (fs.lstatSync(path.join(job.targetDir, ".git")).isDirectory()) {
+    runGit(
+      ["init", "--separate-git-dir", `${job.targetDir}.git`],
+      job.targetDir,
+    );
+  }
+
   const currentHead = gitOutput(["rev-parse", "HEAD"], job.targetDir);
   if (currentHead === job.checkoutRef) {
     return "already current";

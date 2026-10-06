@@ -62,7 +62,7 @@ paths and query parameters as JSON. Other intake cases use freeform answers.
 
 ## Calibration Dataset
 
-`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Re-run `calibration:hydrate` after upgrading from the older named checkout layout.
+`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Hydration keeps Git metadata in opaque sibling directories outside the model-readable checkout. Re-run `calibration:hydrate` to update older checkout layouts.
 
 ELI5: the dataset says "this exact old commit should be affected" and "this exact fixed commit should not be affected." The generator turns those rows into Promptfoo test prompts. The hydrator downloads the exact repo commits so Codex can inspect real code instead of synthetic snippets.
 
