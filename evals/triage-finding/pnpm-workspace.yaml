@@ -10,7 +10,7 @@ overrides:
   "@huggingface/transformers@4.2.0>sharp": 0.35.4
   "@openai/codex": "$@openai/codex-sdk"
   "@openai/codex-sdk": "$@openai/codex-sdk"
-  "@openai/codex-security@0.1.27>fast-uri": 3.1.8
+  "@openai/codex-security@0.1.31>smol-toml": 1.9.0
   "@opencode-ai/sdk": "$@opencode-ai/sdk"
   "ibm-cloud-sdk-core@5.6.0>axios": 1.20.0
   "get-uri@8.0.1>basic-ftp": 6.2.1
