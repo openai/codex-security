@@ -888,6 +888,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       await cp(selected, second, { recursive: true });
       const environment = {
         PATH: process.env["PATH"],
+        PATHEXT: process.env["PATHEXT"],
         SystemRoot: process.env["SystemRoot"],
         CODEX_MCP_NODE_PATH: process.execPath,
       };
