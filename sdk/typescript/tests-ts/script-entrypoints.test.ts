@@ -173,7 +173,12 @@ test.each([
     ] as const) {
       const result = await runCommand(
         command,
-        ["--import", preload, ...mode, direct],
+        [
+          "--import",
+          command === "node" ? pathToFileURL(preload).href : preload,
+          ...mode,
+          direct,
+        ],
         { env: environment, timeout: 30_000 },
       );
       expect(result.status, result.stderr).toBe(0);
