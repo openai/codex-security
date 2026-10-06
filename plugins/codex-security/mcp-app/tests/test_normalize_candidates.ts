@@ -82,6 +82,21 @@ const cases = [
     candidate: "file",
     allowMissing: true,
   },
+  {
+    name: "does not replace a missing CRLF path with its literal sibling",
+    files: ["file\r", "other"],
+    inventory: "file\r\nother\r\n",
+    candidate: "file\r",
+    allowMissing: true,
+    error: /ambiguous carriage-return paths/,
+  },
+  {
+    name: "preserves explicitly listed literal siblings in a diff scope",
+    files: ["file\r"],
+    inventory: "file\nfile\r\n",
+    candidate: "file\r",
+    allowMissing: true,
+  },
 ];
 
 for (const fixture of cases) {

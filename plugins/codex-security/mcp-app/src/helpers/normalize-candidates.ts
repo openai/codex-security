@@ -160,6 +160,11 @@ function readScope(
     } else if (!finalLiteral && line.endsWith("\r")) {
       const [literal, stripped] = carriageRows.get(line)!;
       const trimmed = line.slice(0, -1);
+      if (allowMissing && literal && !stripped && !listedRows.has(trimmed)) {
+        throw new Error(
+          `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+        );
+      }
       if (stripped && !literal) {
         line = trimmed;
       } else if (stripped && literal) {
