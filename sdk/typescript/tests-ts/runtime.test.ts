@@ -568,7 +568,7 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("projects only the unchanged external payload from the source checkout", async () => {
+  test("preserves the external payload while routing the MCP launcher", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
     await mkdir(workspace);
@@ -623,10 +623,17 @@ describe("plugin runtime preparation", () => {
           readFile(sourcePath),
           readFile(projectedPath),
         ]);
-        expect({
-          path,
-          unchanged: projectedContents.equals(sourceContents),
-        }).toEqual({ path, unchanged: true });
+        if (path === ".mcp.json") {
+          const expected = JSON.parse(sourceContents.toString());
+          expected.mcpServers["codex-security"].command =
+            "./scripts/launch_codex_security_mcp_sdk";
+          expect(JSON.parse(projectedContents.toString())).toEqual(expected);
+        } else {
+          expect({
+            path,
+            unchanged: projectedContents.equals(sourceContents),
+          }).toEqual({ path, unchanged: true });
+        }
       }),
     );
     await expect(stat(join(projected, ".internal"))).rejects.toThrow();
@@ -816,12 +823,13 @@ describe("plugin runtime preparation", () => {
 
   test.each([
     "shell",
+    "shell with root",
     "node",
     "direct node",
     "direct node with root",
     "direct node with flags",
   ])(
-    "keeps legacy %s MCP roots isolated outside the credential home",
+    "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
       const selected = await plugin(root);
@@ -833,7 +841,7 @@ describe("plugin runtime preparation", () => {
       await mkdir(join(selected, "mcp"));
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
       const directNode = interpreter.startsWith("direct node");
-      const declaredRoot = interpreter === "direct node with root";
+      const declaredRoot = interpreter.endsWith("with root");
       const nodeOptions =
         interpreter === "direct node with flags"
           ? ["--enable-source-maps"]
@@ -2509,7 +2517,7 @@ ${directNode ? "}" : ""}
       };
       const server = configuration.mcpServers["codex-security"];
 
-      expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+      expect(server?.command).toBe("./scripts/launch_codex_security_mcp_sdk");
       expect(server?.env_vars).toContain("CODEX_SAFETY_IDENTIFIER");
       expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
       expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
