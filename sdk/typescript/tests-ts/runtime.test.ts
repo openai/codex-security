@@ -1882,6 +1882,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       const { home, staged, installed, record, calls, bootstrap } =
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
+      const manifest = join(
+        home,
+        "sdk-marketplace",
+        ".agents",
+        "plugins",
+        "marketplace.json",
+      );
+      const expectedManifest = await readFile(manifest, "utf8");
       switch (damage) {
         case "missing file":
           await rm(helper);
@@ -1934,27 +1942,24 @@ for await (const line of createInterface({ input: process.stdin })) {
           break;
       }
 
+      const expectedInstallCount = damage.endsWith("marketplace manifest")
+        ? 1
+        : 2;
       await bootstrap();
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+        expectedInstallCount,
+      );
       expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
       expect(existsSync(join(staged, "stale.py"))).toBe(false);
-      expect(
-        existsSync(
-          join(
-            home,
-            "sdk-marketplace",
-            ".agents",
-            "plugins",
-            "marketplace.json",
-          ),
-        ),
-      ).toBe(true);
+      expect(await readFile(manifest, "utf8")).toBe(expectedManifest);
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
         installedPath: installed,
         version: "1.2.3",
       });
       await bootstrap();
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(
+        expectedInstallCount,
+      );
     });
   });
 
