@@ -1369,12 +1369,27 @@ export class CodexSecurity {
       );
       checkOpen();
 
+      const workerProviderEnvironment = {
+        ...withoutOpenAiApiKeys(
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+          ),
+        ),
+        ...(session.apiKey === null
+          ? {}
+          : {
+              [session.externalProvider?.env_key ?? "CODEX_API_KEY"]:
+                session.apiKey,
+            }),
+      };
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
-          runtime.environment,
+          workerProviderEnvironment,
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,

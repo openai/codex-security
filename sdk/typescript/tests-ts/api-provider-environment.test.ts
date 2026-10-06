@@ -134,105 +134,123 @@ async function nativePluginStatus(
   }
 }
 
-test("native plugin workers recover provider variables omitted from the MCP environment", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const scan = join(root, "scan");
-  const sourceHome = join(root, "source-home");
-  const report = join(root, "environment.json");
-  await mkdir(repository);
-  await mkdir(scan, { mode: 0o700 });
-  await mkdir(sourceHome, { mode: 0o700 });
-  const plugin = await createPluginProbe(root, report);
-  const providerEnvironment = {
-    SYNTHETIC_CUSTOM_API_KEY: " synthetic-custom-key ",
-    SYNTHETIC_CUSTOM_HEADER: " synthetic-custom-header ",
-    SYNTHETIC_REQUIRED_KEY: "synthetic-required-key",
-  };
-  const client = new TestClient(
-    {
-      pluginPath: plugin,
-      codexOverrides: {
-        model_provider: "synthetic.gateway",
-        model_providers: {
-          "synthetic.gateway": {
-            name: "Synthetic gateway",
-            wire_api: "responses",
-            base_url: "https://provider.example.test/v1",
-            env_key: "SYNTHETIC_CUSTOM_API_KEY",
-            env_http_headers: {
-              "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
-              "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
+test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
+  "native plugin workers recover the selected %s and other provider variables",
+  async (providerKey) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const sourceHome = join(root, "source-home");
+    const report = join(root, "environment.json");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await mkdir(sourceHome, { mode: 0o700 });
+    const plugin = await createPluginProbe(root, report);
+    const providerEnvironment = {
+      [providerKey]: " synthetic-custom-key ",
+      SYNTHETIC_CUSTOM_HEADER: " synthetic-custom-header ",
+      SYNTHETIC_REQUIRED_KEY: "synthetic-required-key",
+    };
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        codexOverrides: {
+          model_provider: "synthetic.gateway",
+          model_providers: {
+            "synthetic.gateway": {
+              name: "Synthetic gateway",
+              wire_api: "responses",
+              base_url: "https://provider.example.test/v1",
+              env_key: providerKey,
+              env_http_headers: {
+                "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+                "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
+              },
             },
-          },
-          "required.gateway": {
-            name: "Managed selection",
-            wire_api: "responses",
-            env_key: "SYNTHETIC_REQUIRED_KEY",
+            "required.gateway": {
+              name: "Managed selection",
+              wire_api: "responses",
+              env_key: "SYNTHETIC_REQUIRED_KEY",
+            },
           },
         },
       },
-    },
-    {
-      environment: {
-        CODEX_HOME: sourceHome,
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        OPENAI_API_KEY: "synthetic-account-key",
-        ...providerEnvironment,
-        SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
-      },
-      resolvePluginPython: async () => "/managed/python",
-      prepareOutputDir: async () => scan,
-      repositoryRevision: async () => "deadbeef",
-      createCodex: (options) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed() {
-            const status = await nativePluginStatus(options.env!, repository);
-            expect(status.data).toHaveLength(1);
-            expect(status.data[0].name).toBe("codex-security");
-            expect(status.data[0].toolsError).toBeNull();
-            expect(status.data[0].tools).toHaveProperty(
-              "synthetic_environment",
-            );
-            expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
-              inherited: {
-                SYNTHETIC_CUSTOM_API_KEY: null,
-                SYNTHETIC_CUSTOM_HEADER: null,
-                SYNTHETIC_REQUIRED_KEY: null,
-                SYNTHETIC_UNUSED_KEY: null,
-              },
-              recovered: providerEnvironment,
-            });
-            for (const text of [
-              await readFile(
-                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                "utf8",
-              ),
-              await readFile(
-                join(options.env!["CODEX_HOME"]!, "config.toml"),
-                "utf8",
-              ),
-              JSON.stringify({
-                config: options.config,
-                overrides: options.configOverrides,
-              }),
-            ]) {
-              for (const marker of Object.values(providerEnvironment)) {
-                expect(text).not.toContain(marker);
+      {
+        environment: {
+          CODEX_HOME: sourceHome,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-account-key",
+          ...providerEnvironment,
+          SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(options.apiKey).toBe("synthetic-account-key");
+              const status = await nativePluginStatus(
+                {
+                  ...options.env!,
+                  ...(options.apiKey === undefined
+                    ? {}
+                    : { CODEX_API_KEY: options.apiKey }),
+                },
+                repository,
+              );
+              expect(status.data).toHaveLength(1);
+              expect(status.data[0].name).toBe("codex-security");
+              expect(status.data[0].toolsError).toBeNull();
+              expect(status.data[0].tools).toHaveProperty(
+                "synthetic_environment",
+              );
+              expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
+                inherited: {
+                  SYNTHETIC_CUSTOM_API_KEY: null,
+                  SYNTHETIC_CUSTOM_HEADER: null,
+                  SYNTHETIC_REQUIRED_KEY: null,
+                  SYNTHETIC_UNUSED_KEY: null,
+                },
+                recovered: {
+                  ...providerEnvironment,
+                  ...(providerKey === "CODEX_API_KEY"
+                    ? { CODEX_API_KEY: "synthetic-account-key" }
+                    : {}),
+                },
+              });
+              for (const text of [
+                await readFile(
+                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+                await readFile(
+                  join(options.env!["CODEX_HOME"]!, "config.toml"),
+                  "utf8",
+                ),
+                JSON.stringify({
+                  config: options.config,
+                  overrides: options.configOverrides,
+                }),
+              ]) {
+                for (const marker of Object.values(providerEnvironment)) {
+                  expect(text).not.toContain(marker);
+                }
               }
-            }
-            throw new Error("synthetic native plugin environment checked");
-          },
+              throw new Error("synthetic native plugin environment checked");
+            },
+          }),
         }),
-      }),
-    },
-  );
-  try {
-    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-      "synthetic native plugin environment checked",
+      },
     );
-  } finally {
-    await client.close();
-  }
-}, 30_000);
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "synthetic native plugin environment checked",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+  30_000,
+);
