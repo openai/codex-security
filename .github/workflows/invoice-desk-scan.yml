@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
-    environment: invoice-desk-inference
+    environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     cache-mode: read
@@ -164,7 +164,7 @@ jobs:
           CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
         run: |
           if [[ -z "$OPENAI_API_KEY" ]]; then
-            echo "::error::Configure OPENAI_API_KEY in the protected invoice-desk-inference environment."
+            echo "::error::Configure OPENAI_API_KEY in the protected codex-security-smoke-test environment."
             echo "exit-code=2" >> "$GITHUB_OUTPUT"
             echo "elapsed-seconds=0" >> "$GITHUB_OUTPUT"
             exit 2
@@ -173,6 +173,7 @@ jobs:
           scan_status=0
           "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" scan . \
             --provider openai --auth api-key \
+            --codex 'openai_base_url="https://us.api.openai.com/v1"' \
             --model gpt-5.6-sol --effort high --mode standard \
             --headless --format json \
             --output-dir "$RUNNER_TEMP/invoice-desk-scan" \
