@@ -28,11 +28,11 @@ The Codex provider runs from a throwaway directory containing only the runtime s
 
 ## Verdict mapping
 
-| Triage verdict | SastBench interpretation |
-| --- | --- |
-| `confirmed` | predicts true positive |
-| `not_actionable` | predicts false positive |
-| `needs_review` | abstains |
+| Triage verdict   | SastBench interpretation |
+| ---------------- | ------------------------ |
+| `confirmed`      | predicts true positive   |
+| `not_actionable` | predicts false positive  |
+| `needs_review`   | abstains                 |
 
 Strict metrics count an abstention as incorrect for that row. Decided-only metrics exclude abstentions and report coverage. Workflow metrics separately measure true-positive retention, unsafe closure, false-alert auto-closure, false-alert escalation, confirmed precision, abstention, and remaining analyst workload. Model errors and invalid output remain unresolved work.
 

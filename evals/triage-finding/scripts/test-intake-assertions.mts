@@ -30,6 +30,10 @@ for (const text of [
   '{"input_id":"example","message":"Paste the scanner finding here"}',
   JSON.stringify({ example: '"schema_version": "triage-finding/v0"' }),
   JSON.stringify({ example: '"verdict": "confirmed"' }),
+  JSON.stringify({ example: '{"findings":[]}' }),
+  JSON.stringify({ example: { findings: [] } }),
+  JSON.stringify({ example: { findings: [{}] } }),
+  "An example payload is '{\"findings\":[]}'.",
   '{"verdict":"unknown"}',
   JSON.stringify({ example: '{schema_version: "triage-finding/v0"}' }),
   JSON.stringify({ example: "{verdict: confirmed}" }),
@@ -39,6 +43,19 @@ for (const text of [
   expectPass(missingInput, `${request}\n${text}`);
 }
 for (const text of [
+  ...[[], [{}], [{ input_id: "synthetic", source_type: "freeform" }]].flatMap(
+    (findings) => {
+      const payload = JSON.stringify({ findings });
+      return [
+        payload,
+        JSON.stringify({ findings }, null, 2),
+        `The triage result is: ${payload}`,
+        `\`\`\`json\n${payload}\n\`\`\``,
+        `Response: {"error":"forbidden"}\n${payload}`,
+      ];
+    },
+  ),
+  "Here's the triage result: {\"findings\":[]}. I'll await your input.",
   triage,
   `\`\`\`json\n${triage}\n\`\`\``,
   `\`\`\`sh\ncat finding.sarif\n\`\`\`\n${triage}`,

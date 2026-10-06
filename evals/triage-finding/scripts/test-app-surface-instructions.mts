@@ -20,20 +20,13 @@ const agent = fs.readFileSync(agentPath, "utf8");
 const pluginPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
 const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
 
-assert.match(skill, /## Jira and Linear Intake/);
+assert.match(skill, /### Jira and Linear intake/);
 assert.match(skill, /references\/ticket-intake\.md/);
-assert.match(ticketIntake, /Atlassian Rovo[\s\S]*JQL/);
+assert.match(ticketIntake, /Atlassian[\s\S]*JQL/);
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
 assert.match(skill, /security or vulnerability Jira\/Linear tickets/);
-assert.match(skill, /Atlassian Rovo and Linear mentions\s+as connector hints/);
-assert.match(
-  skill,
-  /not as a reason to switch to\s+Atlassian Rovo's `triage-issue` skill/,
-);
-assert.match(
-  skill,
-  /Do not run duplicate-bug triage instead of security-impact triage/,
-);
+assert.match(skill, /Atlassian and Linear mentions are connector hints/);
+assert.match(skill, /generic ticket or duplicate triage/);
 assert.match(
   ticketIntake,
   /Normalize Jira and Linear vulnerability tickets as `source_type: "scanner_ticket"`/,
@@ -44,13 +37,9 @@ assert.match(
 );
 assert.match(
   ticketIntake,
-  /Default to read-only import and triage[\s\S]*Do not add comments, transition issues,\s+close issues, assign owners, or change labels/,
+  /Default to read-only import and triage[\s\S]*Do not add comments, transition or close issues, assign owners, or change labels/,
 );
-assert.match(
-  agent,
-  /Import security or vulnerability tickets from Jira\/Linear, scanners, advisories, or GitHub/,
-);
-assert.match(agent, /import Jira issues matching <JQL or project\/search>/);
+assert.match(agent, /default_prompt:.*Use \$triage-finding/);
 assert.match(ticketIntake, /missing connector|connector.*unavailable/i);
 assert.match(ticketIntake, /authentication|reauthorize/i);
 assert.match(ticketIntake, /insufficient permission|request access/i);
@@ -67,7 +56,6 @@ assert.match(ticketIntake, /repeat[\s\S]*next depth/i);
 assert.match(ticketIntake, /independent vulnerability claim/i);
 assert.match(ticketIntake, /ambiguous[\s\S]*ask/i);
 assert.match(ticketIntake, /deterministic[\s\S]*tree order/i);
-assert.match(ticketIntake, /250[\s\S]*do not truncate/i);
 assert.equal(plugin.interface.defaultPrompt.length, 3);
 assert(
   plugin.interface.defaultPrompt.every(

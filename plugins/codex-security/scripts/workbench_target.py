@@ -51,7 +51,11 @@ def git_output(
     work_tree: Path | None = None,
 ) -> str | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
-    output = os.fsdecode(completed.stdout).strip()
+    output = os.fsdecode(completed.stdout)
+    if sys.platform == "win32" and output.endswith("\r\n"):
+        output = output[:-2]
+    else:
+        output = output.removesuffix("\n")
     return output if completed.returncode == 0 and output else None
 
 
