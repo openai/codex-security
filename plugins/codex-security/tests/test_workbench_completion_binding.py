@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -9,32 +11,24 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
+    start_workspace_scan,
+    write_checkpoint,
     write_completed_contract,
 )
 
 
 def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     return state_dir, scan_id, scan_dir
 
@@ -46,15 +40,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     run_workbench(
         state_dir,
         "begin-deep-scan",
@@ -69,7 +55,13 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     return state_dir, scan_id, scan_dir
 
 
-def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str, Any]:
+def register_cli_scan(
+    state_dir: Path,
+    target: Path,
+    scan_dir: Path,
+    *,
+    scan_target: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
         state_dir,
@@ -84,10 +76,191 @@ def register_cli_scan(state_dir: Path, target: Path, scan_dir: Path) -> dict[str
                 "config": {},
                 "mode": "standard",
                 "repository": str(target),
-                "target": {"kind": "repository", "paths": []},
+                "target": scan_target or {"kind": "repository", "paths": []},
             }
         ),
     )
+
+
+def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("changed fixture\n")
+    subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=target, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if kind == "commit":
+        workspace_id = str(uuid.uuid4())
+        for command in ("create-workspace", "save-workspace"):
+            run_workbench(
+                state_dir,
+                command,
+                "--workspace-id",
+                workspace_id,
+                "--target-path",
+                str(target),
+                "--scope",
+                ".",
+                "--mode",
+                "diff",
+                "--diff-target-kind",
+                kind,
+                "--diff-head-revision",
+                head,
+            )
+        registered = start_delivered_scan(
+            state_dir,
+            "--workspace-id",
+            workspace_id,
+            "--scan-root",
+            str(tmp_path / "scans"),
+        )["results"]
+    else:
+        if kind == "working_tree":
+            (target / "README.md").write_text("uncommitted fixture\n")
+            base = head
+        registered = register_cli_scan(
+            state_dir,
+            target,
+            tmp_path / "scan",
+            scan_target={
+                "kind": "refs" if kind == "range" else "working_tree",
+                "paths": [],
+                "base": base,
+                "head": head,
+            },
+        )
+    diff_target = registered["contract"]["diffTarget"]
+    write_completed_contract(
+        Path(registered["scanDir"]),
+        registered["scanId"],
+        target,
+        relative_path="README.md",
+        target_kind="git_diff",
+        diff_base_revision=diff_target["baseRevision"],
+        diff_head_revision=diff_target["headRevision"],
+        snapshot_digest=f"codex-security-snapshot/v1:sha256:{'a' * 64}",
+        coverage_mode="branch_diff" if kind == "range" else kind,
+        inventory_strategy="diff",
+    )
+    return state_dir, target, registered
+
+
+def _seal_draft(scan_dir: Path, target: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parent.parent / "scripts" / "finalize_scan_contract.py"),
+            "--scan-dir",
+            str(scan_dir),
+            "--source-root",
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+
+
+def _sealed_artifacts(scan_dir: Path) -> dict[str, bytes]:
+    return {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+
+@pytest.mark.parametrize("kind", ["commit", "range", "working_tree"])
+@pytest.mark.parametrize("draft_digest", [None, "incorrect-draft-digest"])
+def test_completion_binds_diff_snapshot_digest(
+    tmp_path: Path, kind: str, draft_digest: str | None
+) -> None:
+    state_dir, _, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    diff_target = registered["contract"]["diffTarget"]
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if draft_digest is None:
+        manifest["scan"]["target"].pop("snapshotDigest")
+    else:
+        manifest["scan"]["target"]["snapshotDigest"] = draft_digest
+    manifest_path.write_text(json.dumps(manifest))
+
+    prepared = run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+
+    assert prepared["scan"]["progress"]["status"] == "running"
+    if kind == "working_tree":
+        expected = diff_target["contentDigest"]
+    else:
+        digest = hashlib.sha256(
+            f"codex-security-diff/v1\0{kind}\0{diff_target['baseRevision']}\0"
+            f"{diff_target['headRevision']}".encode()
+        ).hexdigest()
+        expected = f"codex-security-snapshot/v1:sha256:{digest}"
+    sealed_manifest = json.loads(manifest_path.read_text())
+    assert sealed_manifest["scan"]["target"]["snapshotDigest"] == expected
+    assert sealed_manifest["scan"]["sealedAt"]
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    for _ in range(2):
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+        assert completed["scan"]["progress"]["status"] == "complete"
+        assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+
+@pytest.mark.parametrize("kind", ["commit", "range"])
+def test_completion_preserves_legacy_sealed_diff_snapshot_digest(tmp_path: Path, kind: str) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    _seal_draft(scan_dir, target)
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    for command in ("prepare-scan-completion", "complete-scan", "complete-scan"):
+        run_workbench(state_dir, command, "--scan-id", scan_id)
+        assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+
+@pytest.mark.parametrize("kind", ["commit", "range"])
+def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: str) -> None:
+    state_dir, target, registered = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, scan_dir = registered["scanId"], Path(registered["scanDir"])
+    legacy_digest = f"codex-security-snapshot/v1:sha256:{'a' * 64}"
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["status"] = "failed"
+    manifest_path.write_text(json.dumps(manifest))
+    _seal_draft(scan_dir, target)
+    original_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, failure_message = ? WHERE id = ?",
+            (manifest["scan"]["completedAt"], "Scan stopped.", scan_id),
+        )
+
+    recovered = run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+
+    assert recovered["scan"]["progress"]["status"] == "failed"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
+    assert manifest["scan"]["preservedSources"]
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert _sealed_artifacts(scan_dir) == sealed_artifacts
+
+    late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+    )
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
+    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
+    assert late_review in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+    sealed_artifacts = _sealed_artifacts(scan_dir)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
 
 def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) -> None:
@@ -116,6 +289,94 @@ def test_cli_registration_returns_authoritative_target_contract(tmp_path: Path) 
             assert target_contract["requiredSnapshotDigest"] == snapshot_digest
         else:
             assert "requiredSnapshotDigest" not in target_contract
+
+
+@pytest.mark.parametrize("target_kind", ["directory_snapshot", "git_revision", "git_worktree"])
+@pytest.mark.parametrize("omit_target", [True, False])
+def test_cli_scan_completes_when_draft_omits_registered_target(
+    tmp_path: Path, target_kind: str, omit_target: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    if target_kind == "directory_snapshot":
+        repository.mkdir()
+    else:
+        initialize_git_repository(repository)
+        if target_kind == "git_worktree":
+            (repository / "README.md").write_text("Changed source\n")
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(state_dir, repository, scan_dir)
+    scan_id = registered["scanId"]
+    registered_target = registered["contract"]["target"]
+    write_completed_contract(scan_dir, scan_id, repository)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["target"]
+    if not omit_target:
+        draft["scan"]["target"] = {}
+    manifest_path.write_text(json.dumps(draft))
+    (scan_dir / "report.md").unlink()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert completed["scan"]["reportAvailable"] is True
+    manifest = json.loads(manifest_path.read_text())
+    target = manifest["scan"]["target"]
+    assert target["kind"] == target_kind
+    assert target["targetId"] == registered_target["targetId"]
+    assert target["displayName"] == registered_target["displayName"]
+    if target_kind == "git_revision":
+        assert "snapshotDigest" not in target
+    else:
+        assert target["snapshotDigest"] == registered_target["requiredSnapshotDigest"]
+    if target_kind != "directory_snapshot":
+        assert target["revision"] == registered["targetRevision"]
+    assert manifest["scan"]["sealedAt"]
+    assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("omit_scope", [True, False])
+def test_cli_scan_completes_when_draft_omits_registered_scope(
+    tmp_path: Path, omit_scope: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for path in ("src", "tests"):
+        (repository / path).mkdir()
+    scan_dir = tmp_path / "scan"
+    registered = register_cli_scan(
+        state_dir,
+        repository,
+        scan_dir,
+        scan_target={"kind": "paths", "paths": ["src", "tests"]},
+    )
+    scan_id = registered["scanId"]
+    write_completed_contract(scan_dir, scan_id, repository)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["scope"]
+    if not omit_scope:
+        draft["scan"]["scope"] = {}
+    manifest_path.write_text(json.dumps(draft))
+    (scan_dir / "report.md").unlink()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+
+    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["findingCount"] == 1
+    assert completed["scan"]["reportAvailable"] is True
+    manifest = json.loads(manifest_path.read_text())
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    expected_scope = {"includePaths": ["src", "tests"], "excludePaths": []}
+    assert manifest["scan"]["scope"] == expected_scope
+    assert coverage["includePaths"] == expected_scope["includePaths"]
+    assert coverage["excludePaths"] == expected_scope["excludePaths"]
+    assert coverage["mode"] == "scoped_path"
+    assert manifest["scan"]["sealedAt"]
+    assert (scan_dir / "report.md").is_file()
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
@@ -230,19 +491,7 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["target"].pop("snapshotDigest")
     manifest_path.write_text(json.dumps(manifest))
-    subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve().parent.parent / "scripts" / "finalize_scan_contract.py"),
-            "--scan-dir",
-            str(scan_dir),
-            "--source-root",
-            str(target),
-        ],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
+    _seal_draft(scan_dir, target)
 
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
@@ -287,15 +536,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
             "--mode",
             mode,
         )
-        started = start_delivered_scan(
-            state_dir,
-            "--workspace-id",
-            workspace_id,
-            "--scan-root",
-            str(tmp_path / "scans"),
-        )
-        scan_id = str(started["results"]["scanId"])
-        scan_dir = Path(str(started["results"]["scanDir"]))
+        scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
         if mode == "deep":
             run_workbench(
                 state_dir,
@@ -332,20 +573,11 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         assert coverage["mode"] == expected
 
 
-def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+@pytest.mark.parametrize("omit_metadata", [True, False])
+def test_completion_populates_workbench_owned_unsealed_envelope(
+    tmp_path: Path, omit_metadata: bool
+) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     findings = json.loads((scan_dir / "findings.json").read_text())
@@ -384,6 +616,26 @@ def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) 
     coverage["mode"] = "scoped_path"
     coverage["includePaths"] = ["wrong/"]
     coverage["excludePaths"] = ["wrong/"]
+    if omit_metadata:
+        for document in (manifest, findings, coverage):
+            for field in ("documentType", "schemaVersion", "scanId"):
+                document.pop(field, None)
+        for field in (
+            "id",
+            "producer",
+            "status",
+            "startedAt",
+            "completedAt",
+            "target",
+            "scope",
+            "coverageRef",
+            "findingsRef",
+        ):
+            del manifest["scan"][field]
+        for field in ("findingId", "occurrenceId", "fingerprints"):
+            del findings["findings"][0][field]
+        for field in ("mode", "includePaths", "excludePaths"):
+            del coverage[field]
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
@@ -458,14 +710,19 @@ def test_completion_keeps_invalid_prewrite_drafts_resumable(
     assert completed["findingCount"] == 1
 
 
+@pytest.mark.parametrize("invalid_inventory", [None, "", "invalid_strategy", 42])
 def test_completion_keeps_recoverable_prewrite_failures_resumable(
     tmp_path: Path,
+    invalid_inventory: str | int | None,
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
     inventory_strategy = coverage["inventoryStrategy"]
-    coverage["inventoryStrategy"] = ""
+    if invalid_inventory is None:
+        coverage.pop("inventoryStrategy")
+    else:
+        coverage["inventoryStrategy"] = invalid_inventory
     coverage_path.write_text(json.dumps(coverage))
 
     failed = run_workbench(
@@ -478,6 +735,7 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
 
     assert failed["returncode"] != 0
     assert "inventoryStrategy" in str(failed["stderr"])
+    assert not (scan_dir / "checkpoint-head.json").exists()
     pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert pending["progress"]["status"] == "running"
     coverage["inventoryStrategy"] = inventory_strategy
@@ -485,6 +743,118 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
+
+
+def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage_path.write_text("{}")
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage["inventoryStrategy"] == "repository"
+    assert coverage["completeness"] == "partial"
+
+
+@pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
+@pytest.mark.parametrize("defect", ["target", "unicode"])
+@pytest.mark.parametrize("existing_head", [False, True])
+def test_rejected_completion_restores_parent_head_before_corrected_retry(
+    tmp_path: Path, workbench_api, command: str, defect: str, existing_head: bool
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    saved_results = workbench_api["saved_results"]
+    manifest_path = scan_dir / "scan-manifest.json"
+    findings_path = scan_dir / "findings.json"
+    coverage_path = scan_dir / "coverage.json"
+    manifest = json.loads(manifest_path.read_text())
+    findings = json.loads(findings_path.read_text())
+    coverage = json.loads(coverage_path.read_text())
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
+    independent = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "deferred": [{"id": "other-review", "reason": "Independent earlier review."}],
+            },
+        },
+    )
+    os.utime(independent, ns=(50, 50))
+    head_path = scan_dir / "checkpoint-head.json"
+    if existing_head:
+        checkpoint = write_checkpoint(
+            scan_dir / "checkpoints",
+            saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
+        )
+        os.utime(checkpoint, ns=(100, 100))
+        head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
+        os.utime(head_path, ns=(100, 100))
+        saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+
+    def head_state():
+        head = (
+            (head_path.read_bytes(), head_path.stat().st_mtime_ns) if head_path.exists() else None
+        )
+        snapshots = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (scan_dir / "checkpoint-heads").glob("*.json")
+        }
+        return head, snapshots
+
+    previous_head = head_state()
+    previous_checkpoints = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (scan_dir / "checkpoints").glob("*.json")
+    }
+    target_kind = manifest["scan"]["target"]["kind"]
+    if defect == "target":
+        manifest["scan"]["target"]["kind"] = "unsupported_target"
+    else:
+        coverage["deferred"][0]["reason"] = "Invalid review: \ud800"
+    manifest_path.write_text(json.dumps(manifest))
+    coverage_path.write_text(json.dumps(coverage))
+    for path in (manifest_path, findings_path, coverage_path):
+        os.utime(path, ns=(200, 200))
+    original_documents = {
+        path: path.read_bytes() for path in (manifest_path, findings_path, coverage_path)
+    }
+
+    failed = run_workbench(state_dir, command, "--scan-id", scan_id, check=False)
+
+    assert failed["returncode"] != 0
+    assert ("target.kind" if defect == "target" else "coverage") in failed["stderr"]
+    assert head_state() == previous_head
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (scan_dir / "checkpoints").glob("*.json")
+    } == previous_checkpoints
+    assert all(path.read_bytes() == contents for path, contents in original_documents.items())
+    # Correct the rejected documents without rewriting unchanged findings.
+    if defect == "target":
+        manifest["scan"]["target"]["kind"] = target_kind
+        manifest_path.write_text(json.dumps(manifest))
+        os.utime(manifest_path, ns=(300, 300))
+    coverage["deferred"] = []
+    coverage["resolvedDeferred"] = [{"id": "review", "reason": "Review completed."}]
+    coverage["completeness"] = "complete"
+    coverage_path.write_text(json.dumps(coverage))
+    os.utime(coverage_path, ns=(300, 300))
+    assert findings_path.stat().st_mtime_ns == 200
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    final_coverage = json.loads(coverage_path.read_text())
+    assert final_coverage["deferred"] == []
+    assert final_coverage["resolvedDeferred"] == coverage["resolvedDeferred"]
 
 
 def test_deep_completion_derives_inventory_without_downgrading_coverage(
@@ -643,6 +1013,55 @@ def test_deep_completion_retries_transient_report_failure_within_one_invocation(
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["findingCount"] == 1
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("already_completed", [False, True])
+def test_completion_persists_optional_model_projection_warnings(
+    tmp_path: Path, mode: str, already_completed: bool
+) -> None:
+    start = (
+        _start_deep_scan_with_draft_findings if mode == "deep" else _start_scan_with_draft_findings
+    )
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    model = {"summary": "Queue producers and consumers cross a service boundary."}
+    manifest["scan"]["threatModel"] = model
+    manifest_path.write_text(json.dumps(manifest))
+    document = scan_dir / "threatmodel.md"
+    if already_completed:
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+        assert completed["warnings"] == []
+    else:
+        document.write_text("# Provisional model\n")
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    document.unlink()
+    document.mkdir()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert completed["threatModelAvailable"] is True
+    assert "threatModelPath" not in completed
+    assert "threatModel" not in completed["artifacts"]
+    warnings = completed["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Automatic threat model save failed:")
+    assert json.loads(manifest_path.read_text())["scan"]["threatModel"] == model
+    if already_completed:
+        assert {name: (scan_dir / name).read_bytes() for name in before} == before
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"] == warnings
+    )
+    assert (
+        run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]["warnings"]
+        == warnings
+    )
 
 
 def test_completion_recovers_malformed_finding_identity(tmp_path: Path) -> None:

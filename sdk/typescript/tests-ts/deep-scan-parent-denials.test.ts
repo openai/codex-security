@@ -14,13 +14,17 @@ async function bundledPolicy() {
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const source = runtime.slice(start, end);
+  const recordSource = runtime.match(
+    /\/\/ src\/record\.ts\n[\s\S]*?(?=\n\/\/ )/u,
+  )?.[0];
+  expect(recordSource).toBeDefined();
   const imports = [
     ...new Set(source.match(/import_node_(?:path|url|util)\d*/gu)),
   ];
   const resolve = new Function(
     ...imports,
     "DeepScanNonRetryableError",
-    `${source}\nreturn resolveDeepWorkerParentSandbox;`,
+    `${recordSource}\n${source}\nreturn resolveDeepWorkerParentSandbox;`,
   )(
     ...imports.map((name) =>
       name.startsWith("import_node_path")

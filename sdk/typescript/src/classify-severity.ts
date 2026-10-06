@@ -1,7 +1,7 @@
+import { findingEntry } from "./value.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
-import type { CodexSecurityConfig } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { prepareKnowledgeBase } from "./knowledge-base.js";
@@ -20,18 +20,19 @@ export type SeverityClassificationFinding = Pick<
   Partial<Pick<Finding, "occurrenceId" | "severity">> &
   Record<string, unknown>;
 
-export interface ClassifySeverityOptions {
+export interface ClassifySeverityOptions extends Pick<
+  ReadOnlyCodexOptions,
+  | "config"
+  | "environment"
+  | "model"
+  | "reasoningEffort"
+  | "signal"
+  | "workingDirectory"
+> {
   /** Classification policy. Omit to inherit existing severity without a model call. */
   rubricPath?: string;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
-  config?: CodexSecurityConfig;
-  environment?: NodeJS.ProcessEnv;
-  model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
-  signal?: AbortSignal;
-  workingDirectory?: string;
   /** @internal Test client for the shared read-only runtime. */
   codex?: ReadOnlyCodexOptions["codex"];
 }
@@ -146,12 +147,7 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
-  const cached = new Map(
-    (await checkpoint?.load(result))?.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const cached = new Map((await checkpoint?.load(result))?.map(findingEntry));
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
@@ -263,7 +259,7 @@ export function validateSeverityClassification(
   result: SeverityClassification,
   findings: readonly SeverityClassificationFinding[],
 ): SeverityClassification {
-  const byId = new Map(findings.map((finding) => [finding.findingId, finding]));
+  const byId = new Map(findings.map(findingEntry));
   for (const assessment of result.assessments) {
     const finding = byId.get(assessment.findingId);
     if (

@@ -26,7 +26,7 @@ def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 def test_cli_loads_preview_helper_with_safe_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-P", str(SCRIPT), "--help"],
+        [sys.executable, "-I", str(SCRIPT), "--help"],
         check=True,
         capture_output=True,
         text=True,
@@ -173,6 +173,54 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     )
 
 
+def test_make_repo_rank_input_keeps_declarations_after_cpp_raw_strings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.cpp").write_text(
+        """void before() {}
+const char* text = R"tag("{)tag";
+void after() {}
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli("make-repo-rank-input", "--repo", str(repo), "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["sample.cpp"]
+    assert rows[0]["preview"] == "function before\nfunction after"
+
+
+def test_make_repo_rank_input_keeps_python_with_ast_recursion(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    source = "value = " + " + ".join(["x"] * 10000) + "\n"
+    (repo / "src" / "generated.py").write_text(source, encoding="utf-8")
+    (repo / "src" / "normal.py").write_text("value = 1\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    run_cli(
+        "make-repo-rank-input",
+        "--repo",
+        str(repo),
+        "--scope",
+        "src",
+        "--preview-bytes",
+        "128",
+        "--out",
+        str(output),
+    )
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == ["src/generated.py", "src/normal.py"]
+    preview = rows[0]["preview"]
+    assert preview
+    assert source.startswith(preview)
+    assert len(preview.encode("utf-8")) <= 128
+    assert rows[1]["preview"] == "value = 1"
+
+
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
 def test_rank_input_bounds_large_text_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
@@ -295,6 +343,52 @@ def test_rank_input_includes_objective_c(tmp_path: Path, mode: str) -> None:
     ]
 
 
+@pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
+def test_rank_input_includes_cpp_headers(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    include = repo / "include"
+    include.mkdir(parents=True)
+    initialize_repo(repo)
+    names = ["base.h", "base.hpp", "lower.hh", "lower.hxx", "upper.HH", "upper.HXX"]
+    for name in names:
+        (include / name).write_text("inline int before() { return 1; }\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    for name in names:
+        (include / name).write_text("inline int after() { return 2; }\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode in {"revisions", "staged"}:
+        git(repo, "add", ".")
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "include"]
+    else:
+        diff_mode = "revisions" if mode == "revisions" else "local-patch"
+        arguments = [
+            "make-diff-rank-input",
+            "--repo",
+            str(repo),
+            "--base",
+            base,
+            "--mode",
+            diff_mode,
+        ]
+        if mode == "revisions":
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    rows = read_jsonl(output)
+    assert [row["path"] for row in rows] == [f"include/{name}" for name in sorted(names)]
+    for row in rows:
+        assert row["area"] == ("include" if mode == "repo" else "diff")
+        assert "function after" in row["preview"]
+        assert "before" not in row["preview"]
+
+
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
 def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
@@ -332,13 +426,62 @@ def test_rank_input_includes_solidity(tmp_path: Path, mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-def test_rank_input_includes_svelte(tmp_path: Path, mode: str) -> None:
+def test_rank_input_includes_vyper(tmp_path: Path, mode: str) -> None:
+    repo = tmp_path / "repo"
+    contracts = repo / "contracts"
+    contracts.mkdir(parents=True)
+    initialize_repo(repo)
+    source = contracts / "Vault.vy"
+    source.write_text("stored: public(uint256)\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    changed = "stored: public(uint256)\nowner: public(address)"
+    source.write_text(changed + "\n", encoding="utf-8")
+    output = tmp_path / "rank_input.jsonl"
+
+    if mode == "repo":
+        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "contracts"]
+    else:
+        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
+        if mode == "revisions":
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "change")
+            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+            git(repo, "checkout", "-q", base)
+
+    run_cli(*arguments, "--out", str(output))
+
+    assert read_jsonl(output) == [
+        {
+            "path": "contracts/Vault.vy",
+            "area": "contracts" if mode == "repo" else "diff",
+            "preview": changed,
+        }
+    ]
+
+
+@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        (
+            "Counter.svelte",
+            '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>',
+        ),
+        ("profile.EJS", "<% const count = 0; %>\n<p><%= count %></p>"),
+        ("show.html.erb", "<% count = 0 %>\n<p><%= count %></p>"),
+        ("card.phtml", "<?php $count = 0; ?>\n<p><?= $count ?></p>"),
+    ],
+)
+def test_rank_input_includes_templates(
+    tmp_path: Path, mode: str, filename: str, content: str
+) -> None:
     repo = tmp_path / "repo"
     components = repo / "src"
     components.mkdir(parents=True)
     initialize_repo(repo)
-    source = components / "Counter.svelte"
-    content = '<script lang="ts">\nlet count = 0;\n</script>\n<button>{count}</button>'
+    source = components / filename
     source.write_text(content + "\n", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
@@ -361,7 +504,7 @@ def test_rank_input_includes_svelte(tmp_path: Path, mode: str) -> None:
 
     assert read_jsonl(output) == [
         {
-            "path": "src/Counter.svelte",
+            "path": f"src/{filename}",
             "area": "src" if mode == "repo" else "diff",
             "preview": changed,
         }
