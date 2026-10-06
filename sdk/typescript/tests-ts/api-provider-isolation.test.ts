@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -121,17 +122,435 @@ async function loadWorkerSettings(root: string) {
     pathToFileURL(bundledPath).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      environment?: Record<string, string>;
       configOverrides?: string[];
       nativeProfile?: string;
+      environment?: Record<string, string>;
     }>;
   };
 
   return workerRuntimeSettings;
 }
 
+test("concurrent provider snapshots do not inherit another scan's credentials", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const state = join(root, "state");
+  const sharedHome = join(state, "codex-home");
+  const sourceHome = join(root, "source-home");
+  await mkdir(repository);
+  await mkdir(sourceHome, { mode: 0o700 });
+  await mkdir(sharedHome, { recursive: true, mode: 0o700 });
+  // Initialize native state before the mocked primary scans start concurrently.
+  await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
+
+  const workerRuntimeSettings = await loadWorkerSettings(root);
+
+  const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const clients: TestClient[] = [];
+  const runs: Promise<unknown>[] = [];
+  const snapshots: string[] = [];
+  const filesystems: Array<Record<string, unknown>> = [];
+  try {
+    for (let index = 0; index < 2; index++) {
+      const scan = join(root, `scan-${index}`);
+      await mkdir(scan, { mode: 0o700 });
+      const provider = {
+        name: `Synthetic ${index}`,
+        base_url: `https://provider-${index}.example.test/v1`,
+        wire_api: "responses",
+        env_key: "SYNTHETIC_CUSTOM_API_KEY",
+        env_http_headers: {
+          "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+          "X-Synthetic-Missing": "SYNTHETIC_UNSET",
+        },
+        ...(index === 1
+          ? { http_headers: { "X-Gateway-Token": "synthetic-key-B" } }
+          : {}),
+      };
+      const providerEnvironment = {
+        SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
+        SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+        SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
+      };
+      clients.push(
+        new TestClient(
+          {
+            pluginPath: PLUGIN_ROOT,
+            codexOverrides: {
+              model_provider: "openrouter",
+              model_providers: {
+                openrouter: provider,
+                "required.gateway": {
+                  name: "Managed selection",
+                  wire_api: "responses",
+                  env_key: "SYNTHETIC_REQUIRED_KEY",
+                },
+              },
+            },
+          },
+          {
+            environment: {
+              CODEX_HOME: sourceHome,
+              CODEX_SECURITY_STATE_DIR: state,
+              OPENAI_API_KEY: "synthetic-account-key",
+              OPENROUTER_API_KEY: "synthetic-sdk-account-key",
+              ...providerEnvironment,
+              SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+            },
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scan,
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options) => ({
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  const environment = options.env!;
+                  snapshots[index] =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const permission = parseToml(
+                    options.configOverrides!.find((value) =>
+                      value.startsWith(
+                        "permissions.codex_security_scan.filesystem=",
+                      ),
+                    )!,
+                  )["permissions"] as Record<string, Record<string, unknown>>;
+                  filesystems[index] = permission["codex_security_scan"]![
+                    "filesystem"
+                  ] as Record<string, unknown>;
+                  ready[index]!.resolve();
+                  await ready[1]!.promise;
+                  expect(snapshots[0]).not.toBe(snapshots[1]);
+                  for (const snapshot of snapshots) {
+                    expect(dirname(dirname(snapshot))).toBe(sharedHome);
+                    for (const filesystem of filesystems) {
+                      // The same denied home protects both concurrent snapshots.
+                      expect(filesystem[sharedHome]).toEqual({ ".": "deny" });
+                    }
+                  }
+                  const preflight = await readFile(
+                    environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  );
+                  expect(preflight).not.toContain("synthetic-key-");
+                  expect(preflight).not.toContain("synthetic-header-");
+                  const workerSnapshotPath =
+                    environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                  const workerSnapshot = parseToml(
+                    await readFile(workerSnapshotPath, "utf8"),
+                  );
+                  expect(workerSnapshot["worker_runtime"]).toMatchObject({
+                    environment: providerEnvironment,
+                  });
+                  expect(
+                    (workerSnapshot["worker_runtime"] as JsonObject)[
+                      "environment"
+                    ],
+                  ).toEqual(providerEnvironment);
+                  if (process.platform !== "win32") {
+                    expect((await stat(workerSnapshotPath)).mode & 0o777).toBe(
+                      0o600,
+                    );
+                  }
+                  expect(
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ).not.toContain("synthetic-key-");
+                  const settings = await workerRuntimeSettings(environment);
+                  expect(settings.environment).toEqual(providerEnvironment);
+                  const actual = await effectiveProvider(
+                    environment,
+                    repository,
+                    settings.configOverrides ?? [],
+                    settings.nativeProfile,
+                  );
+                  expect(actual).toMatchObject(provider);
+                  expect(actual.http_headers ?? {}).toEqual(
+                    provider.http_headers ?? {},
+                  );
+                  expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
+                    providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
+                  );
+                  const saved = await readFile(
+                    join(sharedHome, "config.toml"),
+                    "utf8",
+                  );
+                  expect(saved).not.toContain("model_providers");
+                  expect(saved).not.toContain("synthetic-key-");
+                  expect(saved).not.toContain("synthetic-header-");
+                  throw new Error("synthetic provider configuration checked");
+                },
+              }),
+            }),
+          },
+        ),
+      );
+    }
+    // A's snapshot exists before B updates the shared credential home.
+    runs.push(clients[0]!.run(repository, { mode: "deep" }));
+    await Promise.race([ready[0]!.promise, runs[0]]);
+    runs.push(
+      clients[1]!
+        .run(repository, { mode: "deep" })
+        .finally(() => ready[1]!.resolve()),
+    );
+    const outcomes = await Promise.allSettled(runs);
+    for (const outcome of outcomes) {
+      expect(outcome).toMatchObject({
+        status: "rejected",
+        reason: expect.objectContaining({
+          message: "synthetic provider configuration checked",
+        }),
+      });
+    }
+  } finally {
+    ready.forEach((entry) => entry.resolve());
+    await Promise.allSettled(runs);
+    await Promise.all(clients.map((client) => client.close()));
+  }
+  for (const snapshot of snapshots) {
+    expect(existsSync(dirname(snapshot))).toBe(false);
+  }
+  expect(existsSync(sharedHome)).toBe(true);
+}, 30_000);
+
+test("workers preserve native provider inheritance without an explicit selection", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "native-home");
+  await mkdir(home, { mode: 0o700 });
+  const provider = {
+    name: "Inherited gateway",
+    base_url: "https://inherited.example.test/v1",
+    wire_api: "responses",
+  };
+  await writeFile(
+    join(home, "config.toml"),
+    stringifyToml({
+      model_provider: "inherited.gateway",
+      model_providers: { "inherited.gateway": provider },
+    }),
+  );
+  const snapshot = join(root, "snapshot.toml");
+  const workerSnapshot = join(root, "worker-snapshot.toml");
+  const environment = {
+    CODEX_HOME: home,
+    CODEX_SECURITY_CONFIG_PATH: snapshot,
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerSnapshot,
+  };
+  const workerRuntimeSettings = await loadWorkerSettings(root);
+  for (const providers of [
+    undefined,
+    {
+      "inherited.gateway": {
+        ...provider,
+        base_url: "https://selected.example.test/v1",
+      },
+    },
+  ]) {
+    await writeFile(snapshot, stringifyToml({}));
+    if (providers)
+      await writeFile(
+        join(home, "synthetic.config.toml"),
+        stringifyToml({ model_providers: providers }),
+      );
+    await writeFile(
+      workerSnapshot,
+      stringifyToml({
+        worker_runtime: providers ? { native_profile: "synthetic" } : {},
+      }),
+    );
+    const settings = await workerRuntimeSettings(environment);
+    expect(
+      settings.configOverrides?.some((value) =>
+        value.startsWith("model_provider="),
+      ),
+    ).not.toBe(true);
+    expect(
+      await effectiveProvider(
+        environment,
+        root,
+        settings.configOverrides ?? [],
+        settings.nativeProfile,
+      ),
+    ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
+  }
+});
+
+const legacyProviders: Array<[string, JsonObject]> = [
+  [
+    "explicit gateway",
+    {
+      model_provider: "openrouter",
+      model_providers: {
+        openrouter: {
+          name: "Synthetic gateway",
+          base_url: "https://gateway.example.test/v1",
+          wire_api: "responses",
+          env_key: "OPENROUTER_API_KEY",
+        },
+      },
+    },
+  ],
+  [
+    "OpenAI with custom definitions",
+    {
+      model_provider: "openai",
+      model_providers: {
+        synthetic: {
+          name: "Synthetic",
+          wire_api: "responses",
+          base_url: "https://gateway.example.test/v1",
+          env_key: "SYNTHETIC_OPENAI_API_KEY",
+        },
+      },
+    },
+  ],
+  [
+    "profile OpenAI with custom definitions",
+    {
+      profile: "selected",
+      profiles: {
+        selected: {
+          model_provider: "openai",
+          model_providers: {
+            synthetic: {
+              name: "Synthetic",
+              wire_api: "responses",
+              base_url: "https://gateway.example.test/v1",
+              env_key: "SYNTHETIC_OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    },
+  ],
+  [
+    "inherited provider definition",
+    {
+      model_providers: {
+        "amazon-bedrock": {
+          aws: { region: "us-east-1" },
+          base_url: "https://gateway.example.test/v1",
+        },
+      },
+    },
+  ],
+];
+test.each(legacyProviders)(
+  "checks older custom worker compatibility before launching %s",
+  async (_name, overrides) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const plugin = join(root, "custom-plugin");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await cp(PLUGIN_ROOT, plugin, { recursive: true });
+    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.codexSecurity = { workerProviderSnapshot: 3 };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    let launched = false;
+    const client = new TestClient(
+      { pluginPath: plugin, codexOverrides: overrides },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-openai-key",
+          OPENROUTER_API_KEY: "synthetic-gateway-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          launched = true;
+          throw new Error("unexpected model launch");
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "Update the custom plugin or use the bundled plugin",
+      );
+      expect(launched).toBe(false);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
 test.each([
-  ["root", false, true],
+  ["standard", "standard", {}],
+  ["deep", "deep", {}],
+  ["standard with explicit provider", "standard", legacyProviders[0]![1]],
+  ["deep with explicit OpenAI", "deep", { model_provider: "openai" }],
+  [
+    "deep with profile-selected OpenAI",
+    "deep",
+    {
+      profile: "selected",
+      profiles: { selected: { model_provider: "openai" } },
+    },
+  ],
+] as const)(
+  "keeps older custom plugins working for %s scans",
+  async (_scenario, mode, overrides) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const plugin = join(root, "custom-plugin");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await cp(PLUGIN_ROOT, plugin, { recursive: true });
+    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.codexSecurity;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        codexOverrides: overrides,
+      },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-openai-key",
+          OPENROUTER_API_KEY: "synthetic-gateway-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const config = parseToml(
+                await readFile(
+                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+              );
+              expect(
+                resolveCodexProfile(config as JsonObject)["model_provider"],
+              ).toBe(resolveCodexProfile(overrides)["model_provider"]);
+              throw new Error("synthetic compatible scan started");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "synthetic compatible scan started",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
   ["profile override", true, true],
   ["profile only", true, false],
 ] as const)(
@@ -233,7 +652,9 @@ test.each([
                     // All concurrent snapshots share the already denied credential home.
                     expect(
                       dirname(
-                        environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                        dirname(
+                          environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                        ),
                       ),
                     ).toBe(environment["CODEX_HOME"]!);
                     const actual = await effectiveProvider(
@@ -393,111 +814,3 @@ const legacyProviders: Array<[string, JsonObject]> = [
     },
   ],
 ];
-test.each(legacyProviders)(
-  "checks older custom worker compatibility before launching %s",
-  async (_name, overrides) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const scan = join(root, "scan");
-    const plugin = join(root, "custom-plugin");
-    await mkdir(repository);
-    await mkdir(scan, { mode: 0o700 });
-    await cp(PLUGIN_ROOT, plugin, { recursive: true });
-    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.codexSecurity = { workerProviderSnapshot: true };
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    let launched = false;
-    const client = new TestClient(
-      { pluginPath: plugin, codexOverrides: overrides },
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
-          OPENROUTER_API_KEY: "synthetic-gateway-key",
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scan,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => {
-          launched = true;
-          throw new Error("unexpected model launch");
-        },
-      },
-    );
-    try {
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "Update the custom plugin or use the bundled plugin",
-      );
-      expect(launched).toBe(false);
-    } finally {
-      await client.close();
-    }
-  },
-);
-
-test.each(["standard", "deep", "standard with explicit provider"] as const)(
-  "checks older custom plugin compatibility for %s scans",
-  async (scenario) => {
-    const mode = scenario === "deep" ? "deep" : "standard";
-    const explicitProvider = scenario === "standard with explicit provider";
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const scan = join(root, "scan");
-    const plugin = join(root, "custom-plugin");
-    await mkdir(repository);
-    await mkdir(scan, { mode: 0o700 });
-    await cp(PLUGIN_ROOT, plugin, { recursive: true });
-    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    delete manifest.codexSecurity;
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    let launched = false;
-    const client = new TestClient(
-      {
-        pluginPath: plugin,
-        ...(explicitProvider ? { codexOverrides: legacyProviders[0]![1] } : {}),
-      },
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
-          OPENROUTER_API_KEY: "synthetic-gateway-key",
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scan,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => {
-          launched = true;
-          return {
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                const config = parseToml(
-                  await readFile(
-                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                    "utf8",
-                  ),
-                );
-                expect(config["model_provider"]).toBe(
-                  explicitProvider ? "openrouter" : undefined,
-                );
-                throw new Error("synthetic compatible scan started");
-              },
-            }),
-          };
-        },
-      },
-    );
-    try {
-      await expect(client.run(repository, { mode })).rejects.toThrow(
-        mode === "deep"
-          ? "Update the custom plugin or use the bundled plugin"
-          : "synthetic compatible scan started",
-      );
-      expect(launched).toBe(mode !== "deep");
-    } finally {
-      await client.close();
-    }
-  },
-);

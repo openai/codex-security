@@ -542,15 +542,11 @@ async function workerRuntimeSettings(
   const workerConfig = workerConfigPath
     ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
     : undefined;
-  const credentialEnvironment = isRecord(workerConfig)
+  const workerEnvironment = isRecord(workerConfig)
     ? workerConfig.environment
     : undefined;
-  if (isRecord(credentialEnvironment)) {
-    settings.environment = Object.fromEntries(
-      Object.entries(credentialEnvironment).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
+  if (isRecord(workerEnvironment)) {
+    settings.environment = workerEnvironment as Record<string, string>;
   }
   const nativeProfile = isRecord(workerConfig)
     ? workerConfig.native_profile
@@ -603,6 +599,12 @@ async function workerRuntimeSettings(
     if (typeof value === "string") {
       (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
     }
+  }
+  const windows = isRecord(workerConfig) ? workerConfig.windows : undefined;
+  if (isRecord(windows) && typeof windows.sandbox === "string") {
+    (settings.configOverrides ??= []).push(
+      `windows.sandbox=${JSON.stringify(windows.sandbox)}`,
+    );
   }
   if (typeof provider === "string") {
     (settings.configOverrides ??= []).push(

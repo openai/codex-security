@@ -3,8 +3,6 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as runtime from "../src/runtime.js";
-import * as providerProfiles from "../src/provider-profile.js";
-import { preparedRuntime } from "./support/api-events.js";
 import { TestClient } from "./support/api-client.js";
 import { parse as parseToml } from "smol-toml";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -12,75 +10,6 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
-
-test("retries prior private provider cleanup from close when replacement fails", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const scan = join(root, "scan");
-  const codexHome = join(root, "codex-home");
-  await mkdir(repository);
-  await mkdir(scan, { mode: 0o700 });
-  await mkdir(codexHome, { mode: 0o700 });
-  const createProfile = providerProfiles.createProviderProfile;
-  let firstProfile: string | undefined;
-  let failCleanup = false;
-  const profiles = spyOn(
-    providerProfiles,
-    "createProviderProfile",
-  ).mockImplementation(async (...args) => {
-    const profile = await createProfile(...args);
-    firstProfile ??= profile.path;
-    return {
-      ...profile,
-      async cleanup() {
-        if (profile.path === firstProfile && failCleanup) {
-          failCleanup = false;
-          throw new Error("synthetic profile cleanup failure");
-        }
-        await profile.cleanup();
-      },
-    };
-  });
-  const client = new TestClient(
-    {
-      codexOverrides: {
-        model_provider: "synthetic.provider",
-        model_providers: {
-          "synthetic.provider": {
-            name: "Synthetic provider",
-            wire_api: "responses",
-            http_headers: { "X-Synthetic-Key": "synthetic-provider-secret" },
-          },
-        },
-      },
-    },
-    {
-      prepareRuntime: async () => preparedRuntime(codexHome),
-      resolvePluginPython: async () => "/managed/python",
-      prepareOutputDir: async () => scan,
-      repositoryRevision: async () => "deadbeef",
-      createCodex: () => {
-        throw new Error("synthetic scan reached");
-      },
-    },
-  );
-  try {
-    await expect(client.run(repository)).rejects.toThrow(
-      "synthetic scan reached",
-    );
-    expect(firstProfile).toBeDefined();
-    expect(existsSync(firstProfile!)).toBe(true);
-    failCleanup = true;
-    await expect(client.run(repository)).rejects.toThrow(
-      "synthetic profile cleanup failure",
-    );
-    await client.close();
-    expect(existsSync(firstProfile!)).toBe(false);
-  } finally {
-    profiles.mockRestore();
-    await client.close();
-  }
-});
 
 test.each([false, true])(
   "protects provider snapshots across runtime reuse (ACL failure: %j)",
@@ -120,7 +49,6 @@ test.each([false, true])(
               name: "Synthetic provider",
               base_url: "https://provider.example.test/v1",
               wire_api: "responses",
-              env_key: "SYNTHETIC_GATEWAY_KEY",
               auth: {
                 command: "synthetic-auth",
                 env: { CLIENT_SECRET: "synthetic-client-secret" },
@@ -130,11 +58,7 @@ test.each([false, true])(
         },
       },
       {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          SYNTHETIC_GATEWAY_KEY: "synthetic-selected-provider-key",
-          SYNTHETIC_UNRELATED_KEY: "synthetic-unrelated-key",
-        },
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
@@ -151,31 +75,16 @@ test.each([false, true])(
               expect(await readFile(file, "utf8")).not.toContain(
                 "synthetic-client-secret",
               );
-              expect(await readFile(file, "utf8")).not.toContain(
-                "synthetic-selected-provider-key",
-              );
-              if (operation === "deep") {
-                workerFile =
-                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
-              }
+              workerFile ??=
+                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
               expect(options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]).toBe(
                 operation === "deep" ? workerFile : undefined,
               );
-              expect(dirname(workerFile!)).toBe(options.env!["CODEX_HOME"]!);
+              expect(dirname(dirname(workerFile!))).toBe(
+                options.env!["CODEX_HOME"]!,
+              );
               expect(await readFile(workerFile!, "utf8")).not.toContain(
                 "synthetic-client-secret",
-              );
-              expect(
-                (
-                  parseToml(await readFile(workerFile!, "utf8"))[
-                    "worker_runtime"
-                  ] as Record<string, unknown>
-                )["environment"],
-              ).toEqual({
-                SYNTHETIC_GATEWAY_KEY: "synthetic-selected-provider-key",
-              });
-              expect(await readFile(workerFile!, "utf8")).not.toContain(
-                "synthetic-unrelated-key",
               );
               const profileFile = join(
                 options.env!["CODEX_HOME"]!,
@@ -200,20 +109,16 @@ test.each([false, true])(
                     string,
                     unknown
                   >
-                )[workerFile!],
-              ).toBeUndefined();
-              expect(
-                (
-                  filesystem["codex_security_scan"]!["filesystem"] as Record<
-                    string,
-                    unknown
-                  >
                 )[dirname(profileFile)],
               ).toEqual({ ".": "deny" });
               if (process.platform !== "win32") {
                 expect((await stat(profileFile)).mode & 0o777).toBe(0o600);
                 expect((await stat(file)).mode & 0o777).toBe(0o600);
                 expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
+                expect((await stat(workerFile!)).mode & 0o777).toBe(0o600);
+                expect((await stat(dirname(workerFile!))).mode & 0o777).toBe(
+                  0o700,
+                );
               }
               throw new Error("synthetic scan reached");
             },
@@ -246,6 +151,8 @@ test.each([false, true])(
       await client.close();
     }
     expect(existsSync(protectedDirectory!)).toBe(false);
-    if (workerFile !== undefined) expect(existsSync(workerFile)).toBe(false);
+    if (workerFile !== undefined) {
+      expect(existsSync(dirname(workerFile))).toBe(false);
+    }
   },
 );

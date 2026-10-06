@@ -1145,12 +1145,15 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "SYNTHETIC_HEADER_VALUE",
     "XDG_CACHE_HOME",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
+    delete process.env.SYNTHETIC_GATEWAY_KEY;
+    delete process.env.SYNTHETIC_HEADER_VALUE;
     for (const [configuration, expected] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
@@ -1199,6 +1202,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
+      const providerKeys = settings.map((_, index) =>
+        index === 0 ? undefined : ` synthetic-gateway-key-${index} `,
+      );
+      const providerHeaders = settings.map((_, index) =>
+        index === 0 ? undefined : ` synthetic-header-${index}\t`,
+      );
       const workerConfigurations = Array.from(
         { length: settings.length },
         (_, index) => {
@@ -1214,6 +1223,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(fixture.root, `instructions ${index}.md`);
           const verbosity = [undefined, "low", "medium", "high"][index];
+          const windowsSandbox =
+            index === 0
+              ? undefined
+              : index % 2 === 0
+                ? "unelevated"
+                : "elevated";
           const entryPath = `${configPath}.${index}`;
           const deepPath = `${entryPath}.deep`;
           const nativeProfile =
@@ -1238,6 +1253,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   base_url: `https://gateway-${index}.example.test/v1`,
                   wire_api: "responses",
                   env_key: "SYNTHETIC_GATEWAY_KEY",
+                  env_http_headers: { "X-Synthetic": "SYNTHETIC_HEADER_VALUE" },
                   ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                   experimental_bearer_token: `synthetic-bearer-${index}`,
                   auth: {
@@ -1263,9 +1279,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             },
             provider,
             providerConfig,
+            environment:
+              index === 0
+                ? undefined
+                : {
+                    SYNTHETIC_GATEWAY_KEY: providerKeys[index],
+                    SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                  },
             serviceTier,
             instructionsFile,
             verbosity,
+            windowsSandbox,
             configuration: {
               ...parsedConfiguration,
               ...(index === 0
@@ -1304,9 +1328,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         model_verbosity: entry.verbosity,
                         model_provider: entry.provider,
                         native_profile: entry.nativeProfile,
-                        environment: {
-                          SYNTHETIC_GATEWAY_KEY: `synthetic-snapshot-key-${entry.nativeProfile}`,
-                        },
+                        environment: entry.environment,
+                        windows: { sandbox: entry.windowsSandbox },
                       },
               }),
             ),
@@ -1366,9 +1389,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         );
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
-      const providerKeys = settings.map((_, index) =>
-        index < 2 ? `synthetic-gateway-key-${index}` : undefined,
-      );
       const executors = settings.map(
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
@@ -1397,11 +1417,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
-              if (providerKeys[index] === undefined) {
-                delete process.env.SYNTHETIC_GATEWAY_KEY;
-              } else {
-                process.env.SYNTHETIC_GATEWAY_KEY = providerKeys[index];
-              }
               return executor.run({
                 kind,
                 promptPath,
@@ -1474,28 +1489,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.codexHome, await realpath(codexHome));
-            const expectedProviderKey =
-              index === 0
-                ? providerKeys[index]
-                : `synthetic-snapshot-key-${workerConfigurations[index].nativeProfile}`;
-            assert.equal(invocation.providerKey, expectedProviderKey);
-            assert.equal(
-              workerLaunch.args.some((arg) =>
-                arg.includes(expectedProviderKey!),
-              ),
-              false,
-            );
+            assert.equal(invocation.providerKey, providerKeys[index]);
+            assert.equal(invocation.providerHeader, providerHeaders[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
-            assert.equal(
-              process.env.SYNTHETIC_GATEWAY_KEY,
-              providerKeys.at(-1),
-            );
+            assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
+            assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
               model_verbosity: workerConfigurations[index].verbosity,
+              "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
             assert.equal(
               invocation.cacheDirectory,
@@ -1563,6 +1568,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.argv.some(
                 (arg: string) =>
                   arg.startsWith("model_providers=") ||
+                  arg.includes("synthetic-gateway-key-") ||
+                  arg.includes("synthetic-header-") ||
                   arg.includes("synthetic-bearer-") ||
                   arg.includes("synthetic-client-secret-"),
               ),
@@ -1597,9 +1604,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same scan environment",
             );
+            assert.equal(
+              preflight.providerKey,
+              selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
+            );
+            assert.equal(
+              preflight.providerHeader,
+              selectedProvider.environment?.SYNTHETIC_HEADER_VALUE,
+            );
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
+              "windows.sandbox": selectedProvider.windowsSandbox,
             });
             assert.equal(
               preflight.cacheDirectory,
@@ -1640,6 +1656,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               preflight.argv.some(
                 (arg: string) =>
+                  arg.includes("synthetic-gateway-key-") ||
+                  arg.includes("synthetic-header-") ||
                   arg.includes("synthetic-bearer-") ||
                   arg.includes("synthetic-client-secret-"),
               ),
@@ -1665,7 +1683,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n',
+                  '[worker_runtime]\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),
@@ -2524,7 +2542,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2567,7 +2585,7 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

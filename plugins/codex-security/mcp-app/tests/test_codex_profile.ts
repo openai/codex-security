@@ -1,10 +1,10 @@
+import { syncBuiltinESMExports } from "node:module";
+import childProcess, { type SpawnOptions } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import childProcess, { type SpawnOptions } from "node:child_process";
-import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
@@ -92,17 +92,22 @@ async function fixture(mode = "success") {
       emit({ type: "turn.failed", error: { message: "synthetic token=fixture-secret: upstream turn failure" } });
       process.exit(0);
     } else if (process.env.PROFILE_TEST_MODE === "wait") {
-      await new Promise(() => setInterval(() => {}, 1000));
+      setInterval(() => {}, 1000);
+      await new Promise(() => {});
     } else if (process.env.PROFILE_TEST_MODE.startsWith("fallback_")) {
       emit({ type: "item.completed", item: { type: "agent_message", id: "discarded-item", text: "discarded synthetic response" } });
       const message = "Configured value for \u0060permission_profile\u0060 is disallowed by requirements; falling back from \u0060synthetic_read_only\u0060 to required value \u0060:workspace\u0060.";
       emit(process.env.PROFILE_TEST_MODE === "fallback_item"
         ? { type: "item.completed", item: { type: "error", message } }
         : { type: "error", message });
-      await new Promise(() => setInterval(() => {}, 1000));
+      setInterval(() => {}, 1000);
+      await new Promise(() => {});
     } else {
       emit({ type: "item.completed", item: { type: "agent_message", id: "fixture-item", text: "synthetic token=fixture-secret" } });
-      emit({ type: "turn.completed", ...(process.env.PROFILE_TEST_MODE === "missing_usage" ? {} : { usage: process.env.PROFILE_TEST_MODE === "null_usage" ? null : { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) } }) });
+      const completion = { type: "turn.completed" };
+      if (process.env.PROFILE_TEST_MODE === "null_usage") completion.usage = null;
+      else if (process.env.PROFILE_TEST_MODE !== "missing_usage") completion.usage = { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3, reasoning_output_tokens: 0, ...(args.includes("resume") ? { cache_write_input_tokens: 9 } : {}) };
+      emit(completion);
       process.exit(0);
     }
   `,
@@ -153,7 +158,6 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
         features: { plugins: true },
         empty: {},
         values: [1, { "dotted.key": "value" }],
-        mcp_servers: { "synthetic.server": { enabled: false } },
       },
       configOverrides: ["features.plugins=false"],
     });
@@ -208,8 +212,6 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       "--config",
       'values=[1, {"dotted.key" = "value"}]',
       "--config",
-      'mcp_servers={"synthetic.server" = {enabled = false}}',
-      "--config",
       "features.plugins=false",
       "--config",
       'openai_base_url="https://provider.example.test/v1"',
@@ -253,11 +255,6 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
     const second = await f.record();
     assert.ok(!second.args.includes("--thread-source"));
     assert.deepEqual(second.args.slice(-2), ["resume", "fixture-thread"]);
-    assert.ok(
-      second.args.includes(
-        'mcp_servers={"synthetic.server" = {enabled = false}}',
-      ),
-    );
     const resumed = client.resumeThread("existing-fixture", {
       webSearchEnabled: false,
     });
@@ -270,11 +267,6 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       "existing-fixture",
     ]);
     assert.equal(resumed.id, "existing-fixture");
-    assert.ok(
-      third.args.includes(
-        'mcp_servers={"synthetic.server" = {enabled = false}}',
-      ),
-    );
   } finally {
     if (previousEnvironment === undefined)
       delete process.env.PROFILE_CLIENT_SHOULD_NOT_LEAK;
@@ -309,28 +301,55 @@ test("native profile children hide Windows console windows", async () => {
   }
 });
 
-test("native profile completions retain unavailable optional usage", async () => {
-  for (const mode of ["null_usage", "missing_usage"]) {
-    const f = await fixture(mode);
-    try {
-      const thread = createCodexProfileClient(f.options).startThread();
-      const { events } = await thread.runStreamed("synthetic prompt");
-      const received = [];
-      for await (const event of events) received.push(event);
-      assert.deepEqual(
-        received.at(-1),
-        mode === "null_usage"
-          ? { type: "turn.completed", usage: null }
-          : { type: "turn.completed" },
-      );
-      const result = await thread.run("resumed synthetic prompt");
-      assert.equal(result.finalResponse, "synthetic token=fixture-secret");
-      assert.equal(result.usage, mode === "null_usage" ? null : undefined);
-    } finally {
-      await f.cleanup();
+for (const mode of ["null_usage", "missing_usage"]) {
+  for (const resumed of [false, true]) {
+    for (const streamed of [false, true]) {
+      test(`native profile ${resumed ? "resumed" : "fresh"} ${streamed ? "streamed" : "collected"} turns preserve ${mode}`, async () => {
+        const f = await fixture(mode);
+        try {
+          const client = createCodexProfileClient(f.options);
+          const thread = resumed
+            ? client.resumeThread("existing-fixture")
+            : client.startThread();
+          const turnOptions = { outputSchema: { type: "object" } };
+          if (streamed) {
+            const { events } = await thread.runStreamed(
+              "synthetic prompt",
+              turnOptions,
+            );
+            const received = [];
+            for await (const event of events) received.push(event);
+            assert.equal(received.length, 3);
+            assert.deepEqual(received.at(-1), {
+              type: "turn.completed",
+              ...(mode === "null_usage" ? { usage: null } : {}),
+            });
+          } else {
+            const result = await thread.run("synthetic prompt", turnOptions);
+            assert.equal(
+              result.finalResponse,
+              "synthetic token=fixture-secret",
+            );
+            assert.equal(result.items.length, 1);
+            assert.equal(
+              result.usage,
+              mode === "null_usage" ? null : undefined,
+            );
+          }
+          assert.equal(
+            thread.id,
+            resumed ? "existing-fixture" : "fixture-thread",
+          );
+          const record = await f.record();
+          assert.equal(record.args.includes("resume"), resumed);
+          await assert.rejects(readFile(record.schemaPath), { code: "ENOENT" });
+        } finally {
+          await f.cleanup();
+        }
+      });
     }
   }
-});
+}
 
 test("native profile failures preserve upstream diagnostics and remove schema files", async () => {
   for (const mode of ["error", "malformed", "turn_failed"]) {
