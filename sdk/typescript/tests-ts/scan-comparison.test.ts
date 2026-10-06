@@ -438,6 +438,7 @@ describe("semantic scan comparison", () => {
       await writeFile(
         join(home, "config.toml"),
         stringify({
+          default_permissions: permissionId,
           permissions: {
             [permissionId]: {
               extends: ":read-only",
