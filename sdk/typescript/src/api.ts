@@ -1437,7 +1437,7 @@ export class CodexSecurity {
             );
       if (discoveryPrompt !== undefined)
         session.sessionConfig = await customValidationConfig(
-          session.sessionConfig,
+          resolveCodexProfile(session.sessionConfig),
           runtime.plugin.installedRoot,
         );
       const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
