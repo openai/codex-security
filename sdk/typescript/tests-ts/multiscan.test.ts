@@ -1036,24 +1036,66 @@ describe("multiscan", () => {
       NonNullable<MultiscanOptions["onProgress"]>
     >[0][] = [];
 
+    const warnings = [
+      "Could not run post-scan instructions.",
+      "Repository changed during the scan.",
+    ];
     const summary = await runMultiscan(
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
-          scanOptions.onWarning?.("Could not run post-scan instructions.");
+          for (const warning of warnings) scanOptions.onWarning?.(warning);
           return await completedScan(scanOptions.outputDir!);
         }),
         { onProgress: (event) => progress.push(event) },
       ),
     );
 
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({
+      completed: 1,
+      incomplete: 0,
+      failed: 0,
+      warnings: [
+        {
+          repository: "follow-up-warning",
+          warnings,
+        },
+      ],
+    });
     expect(progress).toContainEqual({
       repository: "follow-up-warning",
       attempt: 1,
       status: "started",
       warning: "Could not run post-scan instructions.",
     });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        id: "follow-up-warning",
+        status: "completed",
+        warnings,
+      },
+    ]);
+
+    const resumedProgress: typeof progress = [];
+    const resumed = await runMultiscan(
+      options(
+        paths,
+        client(async () => Promise.reject(new Error("must not rerun"))),
+        {
+          onProgress: (event) => resumedProgress.push(event),
+        },
+      ),
+    );
+
+    expect(resumed).toEqual({ ...summary, skipped: 1 });
+    for (const warning of warnings) {
+      expect(resumedProgress).toContainEqual({
+        repository: "follow-up-warning",
+        attempt: 1,
+        status: "completed",
+        warning,
+      });
+    }
   });
 
   test.each([false, true])(
@@ -2091,6 +2133,7 @@ describe("multiscan", () => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
           if (attempts === 1) {
+            scanOptions.onWarning?.("Warning from the failed attempt.");
             throw new Error(failure);
           }
           return await completedScan(scanOptions.outputDir!);
@@ -2101,8 +2144,15 @@ describe("multiscan", () => {
 
     expect(attempts).toBe(2);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
+    expect(summary).not.toHaveProperty("warnings");
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "retry", status: "failed", attempt: 1, error: failure },
+      {
+        id: "retry",
+        status: "failed",
+        attempt: 1,
+        error: failure,
+        warnings: ["Warning from the failed attempt."],
+      },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
   });
