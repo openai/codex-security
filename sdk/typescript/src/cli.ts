@@ -1830,6 +1830,9 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  let filteredScanFailure:
+    { format: string; data: Record<string, unknown> } | undefined;
+  let renderedScanFailure: string | undefined;
   const finishScan = (
     outcome: ScanOutcome,
     format: string,
@@ -1844,8 +1847,12 @@ export async function main(
     if (outcome.error === undefined) return outcome.data;
     if (format === "json" || format === "jsonl") {
       const message = errorMessage(outcome.error);
-      if (!argv.includes("--full-output"))
-        return { status: "failed", code, message };
+      if (!argv.includes("--full-output")) {
+        const data = { status: "failed", code, message };
+        if (argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument)))
+          filteredScanFailure = { format, data };
+        return data;
+      }
       // Incur would wrap returned data in an ok: true envelope.
       scanStructuredError = true;
       return incurError({ code, message, exitCode });
@@ -5828,6 +5835,34 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  if (filteredScanFailure !== undefined) {
+    // Success-field filters do not apply to diagnostics. Reuse Incur's format
+    // and token controls without running the saved scan a second time.
+    const failureOutput = captureOutput();
+    const failureArguments = ["render", "--format", filteredScanFailure.format];
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index]!;
+      if (!/^--token-(?:count|limit|offset)(?:=|$)/u.test(argument)) continue;
+      const separator = argument.indexOf("=");
+      if (separator !== -1)
+        failureArguments.push(
+          argument.slice(0, separator),
+          argument.slice(separator + 1),
+        );
+      else {
+        failureArguments.push(argument);
+        if (argument !== "--token-count") failureArguments.push(argv[++index]!);
+      }
+    }
+    const failure = filteredScanFailure.data;
+    await Cli.create("codex-security-scan-error")
+      .command("render", { run: () => failure })
+      .serve(failureArguments, {
+        stdout: failureOutput.stream.write,
+        exit: () => undefined,
+      });
+    renderedScanFailure = failureOutput.text();
+  }
   const frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
@@ -5855,6 +5890,7 @@ export async function main(
     await writeCliOutput(
       output,
       logOutput ??
+        renderedScanFailure ??
         renderedPolicy ??
         renderedPatch ??
         renderedPublication ??

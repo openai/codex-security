@@ -30,10 +30,11 @@ function scanDependencies() {
   });
 }
 
-function failingScan(message: string) {
+function failingScan(message: string, onRun?: () => void) {
   const deps = scanDependencies();
   deps.createSecurity = () => ({
     run: async () => {
+      onRun?.();
       throw new CodexSecurityError(message);
     },
     preflight: async () => fakePreflight(),
@@ -314,5 +315,122 @@ test.each([
     expect(
       failure.properties.code.enum ?? [failure.properties.code.const],
     ).toEqual(codes);
+  },
+);
+
+test.each(commands.slice(1))(
+  "preserves diagnostics and token controls for filtered %s failures",
+  async (_name, command) => {
+    const message =
+      "Synthetic saved scan failure with its complete diagnostic.";
+    for (const formatArgs of [["--json"], ["--format", "jsonl"]]) {
+      for (const tokens of [
+        [],
+        ["--token-count"],
+        ["--token-limit", "4"],
+        ["--token-offset=4", "--token-limit=4"],
+      ]) {
+        const reference = capture();
+        expect(
+          await main(
+            [...command, ...formatArgs, ...tokens],
+            reference.stream,
+            capture().stream,
+            failingScan(message),
+          ),
+        ).toBe(2);
+        for (const filter of [
+          ["--filter-output", "manifest,findings"],
+          ["--filter-output=manifest,findings"],
+        ]) {
+          const stdout = capture();
+          const stderr = capture();
+          let runs = 0;
+          expect(
+            await main(
+              [...command, ...formatArgs, ...filter, ...tokens],
+              stdout.stream,
+              stderr.stream,
+              failingScan(message, () => runs++),
+            ),
+          ).toBe(2);
+          expect(runs).toBe(1);
+          expect(stdout.text()).toBe(reference.text());
+          expect(stderr.text()).toContain(message);
+        }
+      }
+    }
+  },
+);
+
+test.each(["rerun", "resume"])(
+  "preserves filtered %s preparation failures",
+  async (command) => {
+    const stdout = capture();
+    const deps = scanDependencies();
+    deps.runWorkbench = async () => ({
+      scanId: "saved-scan",
+      scanDir: "/tmp/saved-scan",
+    });
+    expect(
+      await main(
+        [
+          "scans",
+          command,
+          "saved-scan",
+          "--json",
+          "--filter-output",
+          "manifest,findings",
+        ],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(2);
+    expectFailure(
+      stdout.text(),
+      false,
+      command === "rerun"
+        ? "SCAN_REPLAY_UNAVAILABLE"
+        : "SCAN_RESUME_UNAVAILABLE",
+      "This scan does not have a saved launch recipe.",
+    );
+  },
+);
+
+test.each(commands.slice(1))(
+  "preserves success filtering and full error envelopes for %s",
+  async (_name, command) => {
+    const success = capture();
+    expect(
+      await main(
+        [...command, "--json", "--filter-output", "manifest,findings"],
+        success.stream,
+        capture().stream,
+        scanDependencies(),
+      ),
+    ).toBe(0);
+    const original = fakeResult().toJSON();
+    expect(JSON.parse(success.text())).toEqual({
+      manifest: original["manifest"],
+      findings: original["findings"],
+    });
+    const failure = capture();
+    const message = "Synthetic full envelope failure.";
+    expect(
+      await main(
+        [
+          ...command,
+          "--json",
+          "--full-output",
+          "--filter-output",
+          "manifest,findings",
+        ],
+        failure.stream,
+        capture().stream,
+        failingScan(message),
+      ),
+    ).toBe(2);
+    expectFailure(failure.text(), true, "SCAN_FAILED", message);
   },
 );
