@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { check } from "prettier";
 
 type Change = {
   title: string;
@@ -758,6 +759,17 @@ describe("pre-1.0 release policy", () => {
     expect(
       nextReleaseVersion("0.1.23", [change("fix: first fix"), breaking]),
     ).toBe("0.2.0");
+  });
+
+  test("generates formatted release notes", async () => {
+    for (const changes of [
+      [],
+      [change("fix: repair behavior")],
+      [change("fix!: change behavior")],
+    ]) {
+      const notes = createReleasePlan(history(changes)).files[notesPath]!;
+      expect(await check(notes, { parser: "markdown" })).toBe(true);
+    }
   });
 
   test("recomputes the whole cycle, including hidden changes, without incrementing on reruns", () => {

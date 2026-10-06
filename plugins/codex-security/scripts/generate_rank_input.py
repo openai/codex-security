@@ -40,7 +40,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_in_scope_files import windows_stream_component
 from rank_preview import (
     DEFAULT_PREVIEW_BYTES,
+    DEFAULT_PREVIEW_READ_BYTES,
     TEXT_CODE_EXTENSIONS,
+    is_binary_sample,
     preview_for,
     preview_for_bytes,
 )
@@ -701,7 +703,11 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 raise SystemExit(
                     f"Unable to read committed diff blob: {args.head}:{rel.as_posix()}"
                 )
-            preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
+            if is_binary_sample(content):
+                continue
+            preview, is_binary = preview_for_bytes(
+                rel, content[:DEFAULT_PREVIEW_READ_BYTES], args.preview_bytes
+            )
             if is_binary:
                 continue
         elif status != "D" and not path.is_symlink() and path.is_file():
