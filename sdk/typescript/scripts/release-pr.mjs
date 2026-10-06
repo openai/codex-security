@@ -96,7 +96,7 @@ export function generateNoteSections(changes) {
 }
 
 function sectionBlock(id, content) {
-  return `<!-- release-section: ${id}:start -->\n${content}\n<!-- release-section: ${id}:end -->`;
+  return `<!-- release-section: ${id}:start -->\n\n${content}\n\n<!-- release-section: ${id}:end -->`;
 }
 
 function findSection(notes, id) {

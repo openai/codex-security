@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      ci-mode: ${{ steps.scope.outputs.ci-mode }}
       container-validate: ${{ steps.scope.outputs.container-validate }}
       test-quality: ${{ steps.scope.outputs.test-quality }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
@@ -32,7 +31,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Decide CI mode
+      - name: Select additional checks
         id: scope
         shell: bash
         env:
@@ -40,8 +39,6 @@ jobs:
           BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
-          ci_mode=full
-          check_markdown=false
           container_validate=false
           if [[ "$EVENT_NAME" == "push" ]]; then
             container_validate=true
@@ -61,22 +58,7 @@ jobs:
             trap 'rm -f "$changed_files"' EXIT
             git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
 
-            changed=false
-            markdown_only=true
-            test_inputs_changed=false
             while IFS= read -r -d '' path; do
-              changed=true
-              if [[ "$path" != *.md ]]; then
-                markdown_only=false
-              fi
-              if [[ "$path" == plugins/codex-security/* ||
-                    "$path" == sdk/typescript/_bundled_plugin/* ||
-                    "$path" == README.md || "$path" == RELEASING.md ||
-                    "$path" == sdk/typescript/README.md ||
-                    "$path" == .github/PULL_REQUEST_TEMPLATE.md ||
-                    "$path" == .github/release-notes.md ]]; then
-                test_inputs_changed=true
-              fi
               case "$path" in
                 .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
                   docker/verify-container-compose.sh)
@@ -102,15 +84,7 @@ jobs:
                   ;;
               esac
             done < "$changed_files"
-            if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
-              check_markdown=true
-              if [[ "$test_inputs_changed" == "false" ]]; then
-                ci_mode=markdown
-              fi
-            fi
           fi
-          printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
-          printf 'check-markdown=%s\n' "$check_markdown" >> "$GITHUB_OUTPUT"
           printf 'container-validate=%s\n' "$container_validate" >> "$GITHUB_OUTPUT"
           printf 'test-quality=%s\n' "$test_quality" >> "$GITHUB_OUTPUT"
           printf 'workflow-quality=%s\n' "$workflow_quality" >> "$GITHUB_OUTPUT"
@@ -129,38 +103,6 @@ jobs:
             exit 1
           fi
 
-      - name: Set up TypeScript tools
-        if: steps.scope.outputs.check-markdown == 'true'
-        uses: ./.github/actions/setup-tools
-
-      - name: Install dependencies
-        if: steps.scope.outputs.check-markdown == 'true'
-        run: pnpm --dir sdk/typescript install --frozen-lockfile
-
-      - name: Compile CI scripts
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        run: pnpm --dir sdk/typescript run build:ci
-
-      - name: Check plugin source compatibility
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        run: |
-          node .github/scripts/check_plugin_source_compatibility.mjs
-
-      - name: Check Markdown formatting
-        if: steps.scope.outputs.check-markdown == 'true'
-        shell: bash
-        run: |
-          files=()
-          while IFS= read -r -d '' path; do
-            if [[ -f "$GITHUB_WORKSPACE/$path" &&
-                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
-              files+=("$GITHUB_WORKSPACE/$path")
-            fi
-          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
-          if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
-          fi
-
   workflow-quality:
     needs: validate-title
     if: needs.validate-title.outputs.workflow-quality == 'true'
@@ -169,7 +111,6 @@ jobs:
   static-checks:
     name: typecheck and formatting
     needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -197,7 +138,6 @@ jobs:
 
   native:
     needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full' || needs.validate-title.outputs.container-validate == 'true' || needs.validate-title.outputs.test-quality == 'true'
     uses: ./.github/workflows/native-artifacts.yml
 
   container-validate:
@@ -215,7 +155,6 @@ jobs:
   package:
     name: build and check package
     needs: [validate-title, native]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -257,7 +196,6 @@ jobs:
   test:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: [validate-title, package]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -323,7 +261,6 @@ jobs:
   compatibility:
     name: installed package / ${{ matrix.os }} / node-${{ matrix.node }}
     needs: [validate-title, package]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -357,7 +294,6 @@ jobs:
   mcp:
     name: MCP app tests
     needs: [validate-title, package]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -398,7 +334,6 @@ jobs:
   plugin-host:
     name: standalone plugin / ${{ matrix.os }}
     needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -425,7 +360,6 @@ jobs:
   plugin-source:
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -549,7 +483,7 @@ jobs:
         if: needs.validate-title.outputs.workflow-quality == 'true' && needs.workflow-quality.result != 'success'
         run: exit 1
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')
         run: exit 1
       - name: Require selected container coverage
         if: needs.validate-title.outputs.container-validate == 'true' && needs.container-validate.result != 'success'
@@ -558,7 +492,6 @@ jobs:
   windows-test:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -635,7 +568,6 @@ jobs:
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: [validate-title, package]
-    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -686,5 +618,5 @@ jobs:
         node: ["22.13.0", "24"]
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')
         run: exit 1

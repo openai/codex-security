@@ -1,14 +1,17 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  cp,
   mkdir,
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
@@ -59,63 +62,189 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
-  test("builds the MCP runtime without invoking an npm launcher", async () => {
-    const root = await temporaryDirectory();
-    const bin = join(root, "bin");
-    const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
-    await writeFixture(
-      bin,
-      launcher,
-      process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
-    );
-    if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+  test.each(["missing", "stale"])(
+    "builds the MCP runtime from source with %s native wrappers and no npm launcher",
+    async (emitted) => {
+      const root = await temporaryDirectory();
+      const plugin = fileURLToPath(
+        new URL("../../../plugins/codex-security/", import.meta.url),
+      );
+      const source = join(root, "plugin");
+      await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
+        recursive: true,
+        filter: (path) =>
+          !["node_modules", ".preview"].includes(basename(path)),
+      });
+      await cp(join(plugin, "schemas"), join(source, "schemas"), {
+        recursive: true,
+      });
+      await writeFixture(
+        source,
+        "scripts/reserved_artifact_paths.json",
+        await readFile(
+          join(plugin, "scripts", "reserved_artifact_paths.json"),
+          "utf8",
+        ),
+      );
+      await symlink(
+        join(plugin, "mcp-app", "node_modules"),
+        join(source, "mcp-app", "node_modules"),
+        "junction",
+      );
+      for (const name of await readdir(join(plugin, "native"))) {
+        if (name.endsWith(".mts")) {
+          await writeFixture(
+            source,
+            `native/${name}`,
+            await readFile(join(plugin, "native", name), "utf8"),
+          );
+        }
+      }
+      await symlink(
+        join(plugin, "native", "prebuilt"),
+        join(source, "native", "prebuilt"),
+        "junction",
+      );
+      await writeFixture(
+        source,
+        "plugin-files.json",
+        await readFile(join(plugin, "plugin-files.json"), "utf8"),
+      );
+      const platformSource = join(source, "native", "platform.mts");
+      await writeFile(
+        platformSource,
+        `Object.defineProperty(globalThis, "syntheticNativeWrapper", { value: "fresh-wrapper-source" });\n${await readFile(platformSource, "utf8")}`,
+      );
+      if (emitted === "stale") {
+        await writeFixture(
+          source,
+          "native/platform.mjs",
+          'throw new Error("stale-wrapper-output");\n',
+        );
+      }
+      const bin = join(root, "bin");
+      const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
+      await writeFixture(
+        bin,
+        launcher,
+        process.platform === "win32"
+          ? "@exit /b 91\r\n"
+          : "#!/bin/sh\nexit 91\n",
+      );
+      if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
 
-    const destination = join(root, "mcp");
-    await execFileAsync(
-      "node",
-      [
-        fileURLToPath(
+      const destination = join(root, "mcp");
+      await execFileAsync(
+        "node",
+        [
+          join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
+          "--output",
+          destination,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
+          },
+        },
+      );
+
+      const contract = JSON.parse(
+        await readFile(
           new URL(
-            "../../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs",
+            "../../../plugins/codex-security/plugin-files.json",
             import.meta.url,
           ),
+          "utf8",
         ),
-        "--output",
-        destination,
-      ],
-      {
-        env: {
-          ...process.env,
-          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
-        },
-      },
-    );
+      ) as { shippedExact: string[] };
+      expect(await files(destination)).toEqual(
+        contract.shippedExact
+          .filter((path) => path.startsWith("mcp/"))
+          .map((path) => path.slice(4))
+          .sort(),
+      );
+      const chunks = (await readdir(destination))
+        .filter((name) => name.startsWith("helpers.mjs.br.part-"))
+        .sort();
+      const runtime = brotliDecompressSync(
+        Buffer.concat(
+          await Promise.all(
+            chunks.map((name) => readFile(join(destination, name))),
+          ),
+        ),
+      ).toString("utf8");
+      expect(runtime.includes("fresh-wrapper-source")).toBe(true);
+      expect(runtime.includes("stale-wrapper-output")).toBe(false);
+      const helper = await execFileAsync("node", [
+        join(destination, "helpers.mjs"),
+        "resolve-security-md",
+        "--repo",
+        root,
+        "--list",
+      ]);
+      expect(helper.stdout).toBe("[]\n");
+      expect(helper.stderr).toBe("");
+    },
+  );
 
-    const contract = JSON.parse(
-      await readFile(
-        new URL(
-          "../../../plugins/codex-security/plugin-files.json",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    ) as { shippedExact: string[] };
-    expect(await files(destination)).toEqual(
-      contract.shippedExact
-        .filter((path) => path.startsWith("mcp/"))
-        .map((path) => path.slice(4))
-        .sort(),
-    );
-    const helper = await execFileAsync("node", [
-      join(destination, "helpers.mjs"),
-      "resolve-security-md",
-      "--repo",
-      root,
-      "--list",
-    ]);
-    expect(helper.stdout).toBe("[]\n");
-    expect(helper.stderr).toBe("");
-  });
+  test.each(["compiler", "file contract"])(
+    "preserves the previous bundle when the %s fails",
+    async (failure) => {
+      const root = await temporaryDirectory();
+      const packageRoot = join(root, "sdk", "typescript");
+      const source = join(root, "plugins", "codex-security");
+      const destination = join(packageRoot, "_bundled_plugin");
+      for (const script of ["build-plugin", "plugin-contract", "is-main"]) {
+        await writeFixture(
+          packageRoot,
+          `scripts/${script}.mjs`,
+          await readFile(
+            new URL(`../scripts/${script}.mjs`, import.meta.url),
+            "utf8",
+          ),
+        );
+      }
+      await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
+      await writeFixture(
+        source,
+        "plugin-files.json",
+        JSON.stringify({
+          externalOwnedExact: [".codex-plugin/plugin.json"],
+          shippedExact: ["mcp/server.mjs"],
+        }),
+      );
+      await writeFixture(
+        source,
+        "mcp-app/scripts/build_mcp_app.mjs",
+        failure === "compiler"
+          ? 'console.log("Synthetic compiler diagnostic"); process.exit(2);\n'
+          : `import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+const output = process.argv[process.argv.indexOf("--output") + 1];
+await mkdir(output, { recursive: true });
+await writeFile(join(output, "server.mjs"), "generated runtime");
+await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
+      );
+      await writeFixture(
+        destination,
+        "server.mjs",
+        "export const usable = true;\n",
+      );
+      const previous = await snapshot(destination);
+      const result = await execFileAsync("node", [
+        join(packageRoot, "scripts", "build-plugin.mjs"),
+      ]).catch((error) => error);
+      expect(result.code).toBe(1);
+      if (failure === "compiler")
+        expect(result.stdout).toContain("Synthetic compiler diagnostic");
+      else
+        expect(result.stderr).toContain(
+          "Bundled plugin generated files outside its contract.",
+        );
+      expect(await snapshot(destination)).toEqual(previous);
+    },
+  );
 
   test("builds from a source snapshot without Git metadata", async () => {
     const root = await temporaryDirectory();

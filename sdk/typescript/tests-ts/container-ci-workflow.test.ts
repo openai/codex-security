@@ -104,7 +104,7 @@ test.each([
     const directory = mkdtempSync(join(tmpdir(), "container-ci-scope-"));
     const output = join(directory, "outputs");
     const script = ci.jobs["validate-title"]!.steps!.find(
-      (step) => step.name === "Decide CI mode",
+      (step) => step.name === "Select additional checks",
     )!.run!;
     try {
       const result = spawnSync(
