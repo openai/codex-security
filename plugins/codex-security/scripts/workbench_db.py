@@ -42,12 +42,6 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
-from filesystem_identity import (
-    serialize_filesystem_identity as serialize_filesystem_identity,
-)
-from filesystem_identity import (
-    stored_filesystem_identity_matches as stored_filesystem_identity_matches,
-)
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -110,9 +104,6 @@ from workbench_schema import (
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
-)
-from workbench_schema import (
-    sql_statements as sql_statements,
 )
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
@@ -1580,7 +1571,7 @@ def complete_scan_locked(
         )
         cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = manifest["scan"]["completedAt"]
         scan = require_scan(connection, scan["id"])
         if scan["status"] == "complete":
@@ -1632,10 +1623,6 @@ def complete_scan_locked(
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     context = scan_context(connection, scan["id"])
     context["targetWarnings"] = target_warnings
     return context
@@ -1866,24 +1853,6 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
 
-def preserve_scan_results_locked(connection: sqlite3.Connection, scan_id: str) -> bool:
-    return saved_results.preserve_scan_results_locked(_WORKBENCH_DB_CONTEXT, connection, scan_id)
-
-
-def recover_scan_results(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def cancel_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.cancel_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def preserve_stopped_results_after_transition(connection: sqlite3.Connection, scan_id: str) -> None:
     saved_results.preserve_stopped_results_after_transition(
         _WORKBENCH_DB_CONTEXT, connection, scan_id
@@ -1988,7 +1957,7 @@ def request_finding_remediation(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2077,10 +2046,6 @@ def request_finding_remediation(
                 timestamp,
             ),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2089,7 +2054,7 @@ def request_finding_remediation_action(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2153,10 +2118,6 @@ def request_finding_remediation_action(
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2166,7 +2127,7 @@ def claim_finding_remediation_resend(
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
@@ -2233,10 +2194,6 @@ def claim_finding_remediation_resend(
             unavailable = "This remediation host request is still owned by another panel. Retry after its lease expires."
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     result = scan_context(connection, occurrence["scan_id"])
     result["actionToken"] = claimed_token
     return result
@@ -2410,10 +2367,6 @@ def set_finding_remediation(
                 "This remediation request changed. Refresh it before recording an update."
             )
     return scan_context(connection, occurrence["scan_id"])
-
-
-def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
 
 
 def require_reviewed_patch_applied(
@@ -2825,6 +2778,7 @@ def scan_result(
         "mode": scan["mode"],
         "model": scan["model"],
         "diffTarget": stored_diff_target(scan),
+        "name": scan["name"],
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
         "remediationAvailable": remediation_available,
@@ -3317,22 +3271,18 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals())
-
-
-_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
+_WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
 def main() -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
-    deep_scan.configure(
-        SimpleNamespace(
-            **globals(),
-            preserve_stopped_results=preserve_stopped_results_after_transition,
-        )
+    command_context = SimpleNamespace(
+        **globals(),
+        preserve_stopped_results=preserve_stopped_results_after_transition,
     )
+    deep_scan.configure(command_context)
     if args.command == "resolve-scan-root":
         print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
         return
@@ -3403,6 +3353,10 @@ def main() -> None:
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "rename-scan":
+            result = scan_history.rename_scan(
+                connection, require_scan(connection, args.scan_id), args.name
+            )
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
@@ -3426,15 +3380,10 @@ def main() -> None:
             scan = require_scan(connection, args.scan_id)
             try:
                 result = scan_history.cli_scan_resume(
+                    command_context,
                     connection,
                     scan,
                     require_workspace(connection, scan["workspace_id"]),
-                    parse_scan_recipe=parse_scan_recipe,
-                    scan_contract=scan_contract,
-                    require_scan_directory=require_canonical_scan_directory,
-                    artifact_path=artifact_path,
-                    read_json_object=read_json_object,
-                    workbench_completion_binding=workbench_completion_binding,
                 )
             except SystemExit as exc:
                 if not args.allow_unavailable:
@@ -3464,10 +3413,10 @@ def main() -> None:
             result = native_indexes.list_repositories(connection, args)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
-        elif args.command in {"update-progress", "update-scan-context"}:
-            result = progress.update(
-                connection, args, now, require_scan, require_workspace, scan_context
-            )
+        elif args.command == "update-progress":
+            result = progress.update_progress(command_context, connection, args)
+        elif args.command == "update-scan-context":
+            result = progress.update_context(command_context, connection, args)
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
                 connection, args, prepare_only=args.command == "prepare-scan-completion"
@@ -3477,49 +3426,23 @@ def main() -> None:
         elif args.command == "cancel-scan":
             result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "fail-scan":
-            result = fail_scan(connection, args)
+            result = saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "preserve-scan-results":
             result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "recover-scan-results":
-            result = recover_scan_results(connection, args)
+            result = saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "write-scan-draft":
             result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "save-scan-artifact":
             result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
-            result = handoff.mark_handoff_delivered(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                require_workspace=require_workspace,
-                workspace_state=workspace_state,
-            )
+            result = handoff.mark_handoff_delivered(command_context, connection, args)
         elif args.command == "claim-handoff-delivery":
-            result = handoff.claim_handoff_delivery(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                stale_claim_before=stale_claim_before,
-                workspace_state=workspace_state,
-            )
+            result = handoff.claim_handoff_delivery(command_context, connection, args)
         elif args.command == "release-handoff-delivery":
-            result = handoff.release_handoff_delivery(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                workspace_state=workspace_state,
-            )
+            result = handoff.release_handoff_delivery(command_context, connection, args)
         elif args.command == "attach-scan-continuation-thread":
-            result = handoff.attach_scan_continuation_thread(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                workspace_state=workspace_state,
-            )
+            result = handoff.attach_scan_continuation_thread(command_context, connection, args)
         elif args.command == "set-finding-triage":
             result = set_finding_triage(connection, args)
         elif args.command == "request-finding-remediation":
@@ -3548,7 +3471,7 @@ def main() -> None:
                 _WORKBENCH_PUBLICATION_CONTEXT, connection, args
             )
         elif args.command == "export-findings":
-            result = export_findings(connection, args)
+            result = publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
         elif args.command == "severity-classification":

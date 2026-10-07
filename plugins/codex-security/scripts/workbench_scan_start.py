@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -27,10 +29,7 @@ from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    segment = "".join(
-        character if character.isalnum() or character in "._-" else "-" for character in value
-    )
-    return segment.strip("-") or "scan"
+    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
 
 
 def compact_timestamp() -> str:
@@ -132,6 +131,18 @@ def archive_scan(
     moved = False
     try:
         if archived_scan_dir is None:
+            protected_directories = [
+                state_dir(),
+                *(
+                    Path(row[2]).resolve().parent
+                    for row in connection.execute("PRAGMA database_list")
+                    if row[2]
+                ),
+            ]
+            if any(path == scan_dir or scan_dir in path.parents for path in protected_directories):
+                raise SystemExit(
+                    "Cannot archive output containing the workbench state or active database."
+                )
             if artifacts and not has_contents:
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
@@ -175,6 +186,7 @@ def archive_scan(
             try:
                 scan_dir.rmdir()
             except FileNotFoundError:
+                # Registration may fail before recreating the empty output directory.
                 pass
             archived_scan_dir.rename(scan_dir)
         raise

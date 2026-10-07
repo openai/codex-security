@@ -31,6 +31,7 @@ import {
   type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
+  type ScanWorkerEvent,
   type ScanResult,
   type ScanSettings,
   type ValidationOptions,
@@ -115,6 +116,10 @@ const options: ScanOptions = {
   target: DiffTarget.refs({ base: "HEAD~1" }),
   onProgress(progress: ScanProgress) {
     progress.filesCompleted satisfies number;
+  },
+  onWorkerEvent(event: ScanWorkerEvent) {
+    event.kind satisfies "observed";
+    event.worker satisfies number;
   },
 };
 

@@ -16,6 +16,7 @@ import {
   scriptedWorkbench,
 } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { runCommand } from "./support/shell.js";
 
 const distinct: DuplicateDecision = {
   decision: "DISTINCT",
@@ -244,4 +245,51 @@ test("normalizes a workflow destination without storing URL credentials", () => 
   expect(workflowDestination("http://synthetic:password@synthetic.test")).toBe(
     "http://synthetic.test/",
   );
+});
+
+test("blank home digests follow effective Codex configuration", async () => {
+  await using fixture = await workflowFixture();
+  const home = join(fixture.root, "home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  const moduleUrl = new URL(
+    "../src/deduplication/checkpointed-review.ts",
+    import.meta.url,
+  ).href;
+  const result = await runCommand(
+    process.execPath,
+    [
+      "-e",
+      `
+    import {writeFile} from "node:fs/promises";
+    import {join} from "node:path";
+    const {reviewSettingsDigest} = await import(${JSON.stringify(moduleUrl)});
+    const env = {...process.env, CODEX_HOME: ""};
+    const effective = join(process.env.HOME, ".codex", "config.toml");
+    await writeFile(effective, 'model="first"\\n');
+    const initial = await reviewSettingsDigest(env);
+    await writeFile(effective, 'model="second"\\n');
+    const changed = await reviewSettingsDigest(env);
+    await writeFile("config.toml", 'model="irrelevant"\\n');
+    const unrelated = await reviewSettingsDigest(env);
+    console.log(JSON.stringify({changed: initial !== changed, unrelated: changed === unrelated,
+      whitespace: changed === await reviewSettingsDigest({...env, CODEX_HOME: "  "})}));
+  `,
+    ],
+    {
+      cwd: fixture.root,
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_SECURITY_STATE_DIR: fixture.environment.CODEX_SECURITY_STATE_DIR,
+      },
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    changed: true,
+    unrelated: true,
+    whitespace: true,
+  });
 });

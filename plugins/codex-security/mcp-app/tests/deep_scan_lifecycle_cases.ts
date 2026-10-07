@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 
@@ -182,23 +182,43 @@ export async function testDeepScanLifecycle({
     const fixture = await fixtureRun(config);
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    const publishing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
     let publications = 0;
+    let cancellationSettled = false;
     const coordinator = createCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
       onStopped: async () => {
+        publishing.resolve();
+        await release.promise;
         publications += 1;
       },
     });
     coordinator.start();
     const terminal = coordinator.settled().catch((error: Error) => error);
     await executor.discoveryStarted.promise;
-    await assert.rejects(
-      coordinator.cancelAfterPersistence("fixture cancellation", async () => {
+    const cancellation = coordinator
+      .cancelAfterPersistence("fixture cancellation", async () => {
         store.run.status = "canceled";
         throw new Error("fixture cancellation response lost");
-      }),
-      /response lost/,
-    );
+      })
+      .catch((error: Error) => {
+        cancellationSettled = true;
+        return error;
+      });
+    await publishing.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      assert.equal(
+        cancellationSettled,
+        false,
+        "lost response must wait for saved result publication",
+      );
+    } finally {
+      release.resolve();
+      await terminal;
+    }
+    assert.match((await cancellation).message, /response lost/);
     const result = await terminal;
     assert.equal(
       publications,
@@ -306,40 +326,46 @@ export async function testDeepScanLifecycle({
   }
 
   async function orphanWorkerDirectoriesAreNotReused() {
-    const fixture = await fixtureRun(config);
-    for (const [directory, label] of [
-      ["workers", "discovery-0001"],
-      ["dedup", "dedup-0001"],
-    ]) {
-      const root = path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        directory,
-        label,
-      );
-      await mkdir(root, { recursive: true });
-      await writeFile(
-        path.join(root, "prompt.md"),
-        "interrupted before worker registration\n",
-      );
+    for (const suffix of ["0001", "9007199254740992"]) {
+      const fixture = await fixtureRun(config);
+      const savedPrompts: string[] = [];
+      for (const [directory, kind] of [
+        ["workers", "discovery"],
+        ["dedup", "dedup"],
+      ]) {
+        const root = path.join(
+          fixture.run.scanDir,
+          "artifacts",
+          "deep_discovery",
+          directory,
+          `${kind}-${suffix}`,
+        );
+        await mkdir(root, { recursive: true });
+        const prompt = path.join(root, "prompt.md");
+        savedPrompts.push(prompt);
+        await writeFile(prompt, "interrupted before worker registration\n");
+      }
+      const store = new FakeStore(fixture.run);
+      const executor = new FakeExecutor();
+      const coordinator = createCoordinator(fixture, store, executor);
+      coordinator.start();
+      const terminal = await coordinator.wait(undefined, 5_000);
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      const next = String(BigInt(suffix) + 1n).padStart(4, "0");
+      for (const kind of ["discovery", "dedup"]) {
+        assert.ok(
+          [...store.workers.values()].some((worker) =>
+            worker.promptPath.includes(`${kind}-${next}`),
+          ),
+        );
+      }
+      for (const prompt of savedPrompts) {
+        assert.equal(
+          await readFile(prompt, "utf8"),
+          "interrupted before worker registration\n",
+        );
+      }
     }
-    const store = new FakeStore(fixture.run);
-    const executor = new FakeExecutor();
-    const coordinator = createCoordinator(fixture, store, executor);
-    coordinator.start();
-    const terminal = await coordinator.wait(undefined, 5_000);
-    assert.equal(terminal?.status, "succeeded", terminal?.error);
-    assert.ok(
-      [...store.workers.values()].some((worker) =>
-        worker.promptPath.includes("discovery-0002"),
-      ),
-    );
-    assert.ok(
-      [...store.workers.values()].some((worker) =>
-        worker.promptPath.includes("dedup-0002"),
-      ),
-    );
   }
 
   async function ancestorNamesDoNotChooseWorkerSequence() {
