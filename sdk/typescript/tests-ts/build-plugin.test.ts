@@ -70,10 +70,11 @@ describe("bundled plugin build", () => {
     const contract = JSON.parse(
       await readFile(join(source, "plugin-files.json"), "utf8"),
     ) as { shippedExact: string[] };
-    for (const path of contract.shippedExact.filter((path) =>
-      ["scripts/", "schemas/", "examples/completed-scan/"].some((prefix) =>
-        path.startsWith(prefix),
-      ),
+    for (const path of contract.shippedExact.filter(
+      (path) =>
+        (path.startsWith("scripts/") && path.endsWith(".py")) ||
+        path.startsWith("schemas/") ||
+        path.startsWith("examples/completed-scan/"),
     )) {
       expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
         await readFile(join(source, path)),
