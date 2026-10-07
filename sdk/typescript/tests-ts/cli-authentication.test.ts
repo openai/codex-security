@@ -1,4 +1,5 @@
 import { readJsonLines } from "./support/json.js";
+import { runProviderSkill } from "./support/cli-provider-authentication.js";
 import { resolving } from "./support/promises.js";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -42,10 +43,21 @@ import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
 import {
+  selectionPrompt,
   createCliTest,
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
+
+const GATEWAY_CONFIGURATION = [
+  'model_provider="gateway"',
+  "[model_providers.gateway]",
+  'name="Synthetic gateway"',
+  'base_url="https://gateway.example.test/v1"',
+  'wire_api="responses"',
+  'env_key="GATEWAY_API_KEY"',
+  "requires_openai_auth=true",
+].join("\n");
 
 let stateDirectory: string;
 
@@ -476,8 +488,8 @@ describe("CLI authentication", () => {
     const deps = dependencies({
       environment: { AWS_PROFILE: "synthetic-profile" },
     });
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "aws_credentials",
           source: "AWS_PROFILE",
@@ -486,10 +498,7 @@ describe("CLI authentication", () => {
         throw new CodexSecurityError(
           "403 ExpiredTokenException: security token has expired",
         );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
     expect(
       await stderr.run(
         ["scan", "--codex", 'model_provider="amazon-bedrock"'],
@@ -537,14 +546,11 @@ describe("CLI authentication", () => {
       const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
 
       const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
           options?.onAuthentication?.({ method: "command", verified: false });
           throw new CodexSecurityError(detail);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+        });
       expect(
         await runCli(
           [
@@ -596,17 +602,13 @@ describe("CLI authentication", () => {
         onWorkbench: () => savedRecipe(),
       });
       deps.hasStoredChatGPTSignIn = async () => true;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (message, options) => {
           question = message;
           choices = options;
           return options.find((option) => option.value === selection)!.value;
         },
-      };
+      );
 
       expect(await stderr.run(argv, deps)).toBe(0);
       expect(onTurn.mock.results.at(-1)?.value).toBe(selection);
@@ -640,15 +642,9 @@ describe("CLI authentication", () => {
       deps.createSecurity = createSecurity;
       deps.hasStoredChatGPTSignIn = (signal) =>
         stage === "status" ? interrupt(signal) : Promise.resolve(true);
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: <Value extends string>(
-          _message: string,
-          _options: readonly { label: string; value: Value }[],
-          _presentation?: { header?: string },
-          signal?: AbortSignal,
-        ) => interrupt(signal),
-      };
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        (_message, _options, _presentation, signal) => interrupt(signal),
+      );
 
       expect(
         await main(["scan"], capture().stream, capture(true).stream, deps),
@@ -770,16 +766,13 @@ describe("CLI authentication", () => {
               },
       });
       deps.hasStoredChatGPTSignIn = hasStoredChatGPTSignIn;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => scenario.inputInteractive !== false,
-        select: async <Value extends string>(
-          _message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => {
           prompts += 1;
           return options[0]!.value;
         },
-      };
+        () => scenario.inputInteractive !== false,
+      );
 
       expect(await runCli(scenario.argv, deps)).toBe(0);
       expect(prompts).toBe(0);
@@ -1259,90 +1252,6 @@ describe("CLI authentication", () => {
 });
 
 describe("skill authentication", () => {
-  async function runProviderSkill({
-    command = "patch",
-    auth = "api-key",
-    overrides,
-    environment,
-    ambientConfig,
-    storedCredentials = false,
-  }: {
-    command?: "validate" | "patch" | "verify-fix";
-    auth?: "auto" | "chatgpt" | "api-key";
-    overrides: readonly string[];
-    environment?: NodeJS.ProcessEnv;
-    ambientConfig?: string;
-    storedCredentials?: boolean;
-  }) {
-    const repository = join(stateDirectory, "repository");
-    const ambientHome = join(stateDirectory, "ambient");
-    const log = join(stateDirectory, "provider.jsonl");
-    await mkdir(repository);
-    await mkdir(ambientHome);
-    if (ambientConfig !== undefined) {
-      await writeFile(join(ambientHome, "config.toml"), ambientConfig);
-    }
-    if (storedCredentials) {
-      await writeFile(
-        join(ambientHome, "auth.json"),
-        JSON.stringify({
-          auth_mode: "apikey",
-          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
-        }),
-        { mode: 0o600 },
-      );
-    }
-    const { stderr, runCli } = createCliTest(main);
-
-    const status = await runCli(
-      [
-        command,
-        "Synthetic issue",
-        "--auth",
-        auth,
-        ...overrides.flatMap((value) => ["--codex", value]),
-      ],
-      dependencies({
-        currentDirectory: repository,
-        environment: {
-          ...environment,
-          CODEX_HOME: ambientHome,
-          SYNTHETIC_PROVIDER_LOG: log,
-          SYNTHETIC_SKILL_COMMAND: command,
-        },
-        onCodex: async (args, output, environment, input) => {
-          const originalOverrides = structuredClone(output?.codexOverrides);
-          const result = await runCodexSkillCommand(
-            [
-              fileURLToPath(
-                new URL("./fixtures/skill-provider-auth.mjs", import.meta.url),
-              ),
-              ...args,
-            ],
-            output,
-            { command: process.execPath },
-            environment,
-            input,
-          );
-          expect(output?.codexOverrides).toEqual(originalOverrides);
-          return result;
-        },
-      }),
-    );
-    const records = existsSync(log) ? await readJsonLines(log) : [];
-    if (ambientConfig !== undefined) {
-      expect(await readFile(join(ambientHome, "config.toml"), "utf8")).toBe(
-        ambientConfig,
-      );
-    }
-    return {
-      status,
-      stderr: stderr.text(),
-      launch: records[0],
-      requests: records.slice(1),
-    };
-  }
-
   test.each([
     ["validate", "auto", "gateway"],
     ["validate", "api-key", "gateway"],
@@ -1354,7 +1263,7 @@ describe("skill authentication", () => {
   ] as const)(
     "%s uses the custom provider env_key with %s auth (%s)",
     async (command, auth, provider) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         auth,
         overrides: [
@@ -1383,7 +1292,7 @@ describe("skill authentication", () => {
   );
 
   test("rejects a missing custom provider API key before launch", async () => {
-    const result = await runProviderSkill({
+    const result = await runProviderSkill(stateDirectory, {
       overrides: [
         'model_provider="gateway"',
         'model_providers.gateway.env_key="GATEWAY_API_KEY"',
@@ -1397,7 +1306,7 @@ describe("skill authentication", () => {
   test.each(["patch", "verify-fix"] as const)(
     "%s preserves valid names in unrelated ambient configuration",
     async (command) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: [],
         ambientConfig: [
@@ -1423,7 +1332,7 @@ describe("skill authentication", () => {
   test.each([true, false])(
     "patch uses a custom provider table override with ambient selection (new key present: %p)",
     async (hasSelectedKey) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         overrides: ['model_providers.gateway.env_key="GATEWAY_API_KEY"'],
         ambientConfig: [
           'model_provider="gateway"',
@@ -1459,7 +1368,7 @@ describe("skill authentication", () => {
   ] as const)(
     "%s keeps ambient provider authentication with explicit selection (partial override: %p, profile: %p)",
     async (command, partialOverride, profile) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: [
           'model_provider="gateway"',
@@ -1513,7 +1422,7 @@ describe("skill authentication", () => {
   ] as const)(
     "patch ignores replacement authentication for native provider %s with %s auth",
     async (provider, auth) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         auth,
         overrides: [`model_provider=${JSON.stringify(provider)}`],
         ambientConfig: [
@@ -1540,7 +1449,7 @@ describe("skill authentication", () => {
   test.each(["patch", "verify-fix"] as const)(
     "%s keeps native OpenAI authentication despite a provider table override",
     async (command) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: ['model_provider="openai"'],
         ambientConfig: [
@@ -1576,19 +1485,11 @@ describe("skill authentication", () => {
   ] as const)(
     "%s uses the custom provider key before OpenAI login with %s auth",
     async (command, auth) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         auth,
         overrides: ['model_provider="gateway"'],
-        ambientConfig: [
-          'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
-          'env_key="GATEWAY_API_KEY"',
-          "requires_openai_auth=true",
-        ].join("\n"),
+        ambientConfig: GATEWAY_CONFIGURATION,
         environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
       });
       expect(result.status, result.stderr).toBe(0);
@@ -1601,105 +1502,10 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each(
-    (
-      [
-        ["validate", "override"],
-        ["patch", "override"],
-        ["verify-fix", "override"],
-        ["patch", "ambient"],
-        ["verify-fix", "ambient"],
-        ["patch", "profile"],
-        ["verify-fix", "profile"],
-      ] as const
-    ).flatMap(([command, source]) =>
-      [true, false, undefined].flatMap((requiresOpenAiAuth) =>
-        ["env_key", "bearer"].map(
-          (credential) =>
-            [command, source, requiresOpenAiAuth, credential] as const,
-        ),
-      ),
-    ),
-  )(
-    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p, credential: %s)",
-    async (command, source, requiresOpenAiAuth, credential) => {
-      const configuredEnvKey =
-        process.platform === "win32" ? "gateway_api_key" : "GATEWAY_API_KEY";
-      const environment = { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" };
-      const providerConfig = {
-        name: "Synthetic gateway",
-        base_url: "https://gateway.example.test/v1",
-        wire_api: "responses",
-        ...(requiresOpenAiAuth === undefined
-          ? {}
-          : { requires_openai_auth: requiresOpenAiAuth }),
-      };
-      const providerSettings = [
-        ...Object.entries(providerConfig).map(
-          ([key, value]) => `${key}=${JSON.stringify(value)}`,
-        ),
-        ...(credential === "env_key"
-          ? [`env_key=${JSON.stringify(configuredEnvKey)}`]
-          : []),
-        ...(credential === "bearer" || requiresOpenAiAuth === false
-          ? ['experimental_bearer_token="SYNTHETIC_FALLBACK_KEY"']
-          : []),
-      ];
-      const result = await runProviderSkill({
-        command,
-        auth: "chatgpt",
-        overrides:
-          source === "override"
-            ? [
-                'model_provider="gateway"',
-                ...providerSettings.map(
-                  (setting) => `model_providers.gateway.${setting}`,
-                ),
-              ]
-            : [],
-        ...(source === "override"
-          ? {}
-          : {
-              ambientConfig: [
-                ...(source === "profile"
-                  ? ['profile="gateway-profile"', "[profiles.gateway-profile]"]
-                  : []),
-                'model_provider="gateway"',
-                "[model_providers.gateway]",
-                ...providerSettings,
-              ].join("\n"),
-            }),
-        environment,
-        storedCredentials: true,
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.launch.environment).toEqual(
-        credential === "env_key" ? {} : environment,
-      );
-      expect(parseToml(result.launch.config)["model_providers"]).toEqual({
-        gateway: { ...providerConfig, requires_openai_auth: true },
-      });
-      const providerOverride = result.launch.args.findLast((arg: string) =>
-        arg.startsWith("model_providers="),
-      );
-      if (source === "override") {
-        expect(parseToml(providerOverride)["model_providers"]).toEqual({
-          gateway: { ...providerConfig, requires_openai_auth: true },
-        });
-      } else {
-        expect(providerOverride).toBeUndefined();
-      }
-      expect(result.requests.map((request) => request.method)).not.toContain(
-        "account/login/start",
-      );
-      expect(environment.GATEWAY_API_KEY).toBe("SYNTHETIC_GATEWAY_KEY");
-    },
-  );
-
   test.each(["patch", "verify-fix"] as const)(
     "%s keeps ambient provider credentials out of process arguments",
     async (command) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         auth: "chatgpt",
         overrides: [
@@ -1749,18 +1555,10 @@ describe("skill authentication", () => {
   test.each(["patch", "verify-fix"] as const)(
     "%s rejects a missing custom provider key despite an available OpenAI key",
     async (command) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: ['model_provider="gateway"'],
-        ambientConfig: [
-          'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
-          'env_key="GATEWAY_API_KEY"',
-          "requires_openai_auth=true",
-        ].join("\n"),
+        ambientConfig: GATEWAY_CONFIGURATION,
         environment: { OPENAI_API_KEY: "SYNTHETIC_UNRELATED_OPENAI_KEY" },
       });
       expect(result.status).toBe(2);
@@ -1779,7 +1577,7 @@ describe("skill authentication", () => {
     async (command, envKey) => {
       const configuredEnvKey =
         process.platform === "win32" ? envKey.toLowerCase() : envKey;
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: ['model_provider="gateway"'],
         ambientConfig: [
@@ -1809,7 +1607,7 @@ describe("skill authentication", () => {
   );
 
   test("resolves custom provider key casing according to the platform", async () => {
-    const result = await runProviderSkill({
+    const result = await runProviderSkill(stateDirectory, {
       overrides: [
         'model_provider="gateway"',
         'model_providers.gateway.env_key="GATEWAY_API_KEY"',
@@ -1836,7 +1634,7 @@ describe("skill authentication", () => {
   ] as const)(
     "preserves OPENAI_API_KEY when configured as the %s provider key with %s auth",
     async (provider, auth) => {
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         auth,
         overrides: [
           `model_provider=${JSON.stringify(provider)}`,
@@ -1880,7 +1678,7 @@ describe("skill authentication", () => {
       const settings = Object.entries(providerConfig).map(
         ([key, value]) => `${key}=${JSON.stringify(value)}`,
       );
-      const result = await runProviderSkill({
+      const result = await runProviderSkill(stateDirectory, {
         command,
         auth: "auto",
         overrides: [

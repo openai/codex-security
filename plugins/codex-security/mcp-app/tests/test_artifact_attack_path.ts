@@ -38,9 +38,9 @@ async function testSchemaMatchesDocumentedAttackPathDecisions() {
   );
 
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.deepEqual(schema.required, ["scanId", "attackPaths"]);
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.$defs.input.required, schema.required);
+  assert.deepEqual(schema.$defs.input.required, ["scanId", "attackPaths"]);
+  assert.equal(schema.$defs.input.additionalProperties, false);
+  assert.equal(schema.$ref, "#/$defs/input");
   assert.deepEqual(schema.$defs.updatesPayload.required, ["attackPaths"]);
   assert.deepEqual(schema.$defs.reportableAttackPath.properties.severity.enum, [
     "critical",

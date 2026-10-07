@@ -442,7 +442,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("keeps persistent credentials and their ancestry read-only", () => {
+  test("denies model commands access to the persistent credential home", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");
     const config = scanRuntimeCodexConfig({}, credentialHome);
@@ -452,7 +452,7 @@ describe("CodexSecurity preflight configuration", () => {
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
-          [credentialHome]: "read",
+          [credentialHome]: { ".": "deny" },
         },
       },
       codex_security_policy: {
@@ -562,6 +562,34 @@ describe("CodexSecurity preflight configuration", () => {
       request_trace: "preserve-configured-metadata",
     });
   });
+
+  test.each([
+    [undefined, undefined],
+    ["https://root.example.test/v1", undefined],
+    [undefined, "https://selected.example.test/v1"],
+    ["https://root.example.test/v1", "https://selected.example.test/v1"],
+  ])(
+    "projects effective endpoint with root %p and selected profile %p",
+    (rootEndpoint, profileEndpoint) => {
+      const projected = scanPreflightCodexConfig({
+        ...(rootEndpoint === undefined
+          ? {}
+          : { openai_base_url: rootEndpoint }),
+        profile: "selected",
+        profiles: {
+          selected:
+            profileEndpoint === undefined
+              ? {}
+              : { openai_base_url: profileEndpoint },
+          unselected: { openai_base_url: "https://unused.example.test/v1" },
+        },
+      });
+      const expected = profileEndpoint ?? rootEndpoint;
+      if (expected === undefined)
+        expect(projected).not.toHaveProperty("openai_base_url");
+      else expect(projected["openai_base_url"]).toBe(expected);
+    },
+  );
 
   test("projects capability, endpoint and trust settings into the readable preflight config", async () => {
     const root = await temporaryDirectory();

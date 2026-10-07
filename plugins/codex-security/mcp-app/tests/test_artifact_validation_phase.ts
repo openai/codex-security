@@ -22,7 +22,8 @@ assert.equal(
   toolSchema.$schema,
   "https://json-schema.org/draft/2020-12/schema",
 );
-assert.deepEqual(toolSchema.required, ["scanId", "validations"]);
+assert.deepEqual(toolSchema.$defs.input.required, ["scanId", "validations"]);
+assert.equal(toolSchema.$ref, "#/$defs/input");
 assert.deepEqual(toolSchema.$defs.validationUpdate.required, [
   "candidateId",
   "validation",

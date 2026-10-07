@@ -20,6 +20,7 @@ describe("delegated scan attribution", () => {
     ["standard", true],
     ["deep", true],
     ["standard", false],
+    ["deep", false],
   ] as const)(
     "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p",
     async (mode, selectProgram) => {
@@ -66,8 +67,19 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
-                openai_base_url: endpoint,
-                ...(surface === "sdk" ? { features } : {}),
+                ...(surface === "sdk"
+                  ? {
+                      ...(selectProgram
+                        ? {
+                            openai_base_url:
+                              "https://overridden.example.test/v1",
+                          }
+                        : {}),
+                      profile: "selected",
+                      profiles: { selected: { openai_base_url: endpoint } },
+                      features,
+                    }
+                  : { openai_base_url: endpoint }),
               },
             },
             {
@@ -153,6 +165,17 @@ describe("delegated scan attribution", () => {
                       configPaths.add(configPath!);
                       const initialConfig = await readFile(configPath!, "utf8");
                       const runtimeConfig = parseToml(initialConfig);
+                      if (mode === "deep") {
+                        const deepConfigPath =
+                          options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                        expect(deepConfigPath).toBeString();
+                        const deepConfig = parseToml(
+                          await readFile(deepConfigPath!, "utf8"),
+                        );
+                        expect(deepConfig["worker_runtime"]).toMatchObject({
+                          openai_base_url: endpoint,
+                        });
+                      }
                       expect(runtimeConfig).toMatchObject({
                         openai_base_url: endpoint,
                         features,

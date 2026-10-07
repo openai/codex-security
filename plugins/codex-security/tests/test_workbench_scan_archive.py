@@ -4,11 +4,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from workbench_test_support import run_workbench
+from workbench_test_support import fail_scan, run_workbench
 
 
 def register_scan(
-    state_dir: Path, repository: Path, scan_dir: Path, *arguments: str
+    state_dir: Path, repository: Path, scan_dir: Path, *arguments: str, check: bool = True
 ) -> dict[str, object]:
     return run_workbench(
         state_dir,
@@ -27,6 +27,7 @@ def register_scan(
             }
         ),
         *arguments,
+        check=check,
     )
 
 
@@ -39,14 +40,7 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
     repository.mkdir()
     scan_dir.mkdir(mode=0o700)
     previous = register_scan(state_dir, repository, scan_dir)
-    run_workbench(
-        state_dir,
-        "fail-scan",
-        "--scan-id",
-        str(previous["scanId"]),
-        "--message",
-        "The previous scan was interrupted.",
-    )
+    fail_scan(state_dir, str(previous["scanId"]), "The previous scan was interrupted.")
     (scan_dir / "previous.txt").write_text("keep the previous scan\n")
     report_path = scan_dir / "report.md"
     report_path.write_text("# Previous scan\n")
@@ -98,13 +92,8 @@ def test_empty_failed_scan_can_be_archived_and_reused(tmp_path: Path) -> None:
     repository.mkdir()
     scan_dir.mkdir(mode=0o700)
     previous = register_scan(state_dir, repository, scan_dir)
-    run_workbench(
-        state_dir,
-        "fail-scan",
-        "--scan-id",
-        str(previous["scanId"]),
-        "--message",
-        "The previous scan failed before writing artifacts.",
+    fail_scan(
+        state_dir, str(previous["scanId"]), "The previous scan failed before writing artifacts."
     )
 
     current = register_scan(state_dir, repository, scan_dir, "--archive-existing")
@@ -129,14 +118,7 @@ def test_archive_requires_previous_directory_when_artifacts_exist(tmp_path: Path
     repository.mkdir()
     scan_dir.mkdir(mode=0o700)
     previous = register_scan(state_dir, repository, scan_dir)
-    run_workbench(
-        state_dir,
-        "fail-scan",
-        "--scan-id",
-        str(previous["scanId"]),
-        "--message",
-        "The previous scan was interrupted.",
-    )
+    fail_scan(state_dir, str(previous["scanId"]), "The previous scan was interrupted.")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "INSERT INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, ?, ?, ?)",
@@ -148,25 +130,7 @@ def test_archive_requires_previous_directory_when_artifacts_exist(tmp_path: Path
             ),
         )
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "archived scan directory is required" in str(rejected["stderr"])
@@ -180,25 +144,7 @@ def test_archive_does_not_replace_a_running_scan(tmp_path: Path) -> None:
     scan_dir.mkdir(mode=0o700)
     previous = register_scan(state_dir, repository, scan_dir)
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "Cannot archive the output of a running scan." in str(rejected["stderr"])
