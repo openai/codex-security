@@ -350,6 +350,14 @@ def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -
     return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
 
 
+def preserve_scan_results(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "preserve-scan-results", scan_id, "--thread-id", thread_id, **options
+    )
+
+
 def start_scan_command(
     state_dir: Path, workspace_id: str, *extra: str, **options: Any
 ) -> dict[str, object]:

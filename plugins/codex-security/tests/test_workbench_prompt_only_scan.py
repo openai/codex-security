@@ -18,6 +18,7 @@ from test_workbench_db import (
     initialize_git_repository,
     run_workbench,
 )
+from workbench_test_support import get_scan, scan_command, start_scan_command, update_progress
 
 
 def start_prompt_only_scan(
@@ -199,10 +200,9 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
     scan_id = str(started["scan"]["scanId"])
     updated_context = "Prioritize password-reset token validation."
-    updated = run_workbench(
+    updated = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--thread-id",
         "thread-prompt-only-scan",
@@ -211,14 +211,7 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     )
     assert updated["scan"]["userContext"] == updated_context
 
-    next_phase = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-    )
+    next_phase = update_progress(state_dir, scan_id, "--phase", "discovery")
     assert next_phase["scan"]["progress"]["phase"] == "discovery"
     assert next_phase["scan"]["userContext"] == updated_context
 
@@ -287,14 +280,7 @@ def test_prompt_only_scan_does_not_join_setup_owned_scans(tmp_path: Path) -> Non
         target,
         thread_id="thread-prompt-only-scan",
     )
-    pending = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(scan_root),
-    )
+    pending = start_scan_command(state_dir, str(saved["id"]), "--scan-root", str(scan_root))
     assert pending["results"]["handoffStatus"] == "pending"
     prompt_only = start_prompt_only_scan(state_dir, target, scan_root)
     assert prompt_only["startDisposition"] == "created"
@@ -373,7 +359,7 @@ def test_prompt_registration_keeps_existing_scans_readable(
             )
 
     def read_scans():
-        read = run_workbench(state_dir, "get-scan", "--scan-id", str(scan_id))
+        read = get_scan(state_dir, str(scan_id))
         listed = run_workbench(state_dir, "list-scans")
         assert read["scan"]["scanId"] == scan_id
         assert any(scan["scanId"] == scan_id for scan in listed["scans"])
