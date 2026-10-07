@@ -1,18 +1,16 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -20,7 +18,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const newline = process.platform === "win32" ? "\r\n" : "\n";
-const roots: string[] = [];
+const roots = createTemporaryDirectoriesSync(true);
 interface Worker {
   slot: number;
   input_shards: string[];
@@ -48,8 +46,7 @@ const ranked = (index: number) => ({
   reason: "runtime surface",
 });
 function fixture(count = 5) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "rank-pool-")));
-  roots.push(root);
+  const root = roots.create("rank-pool-");
   const directory = join(root, "rank_shards");
   mkdirSync(directory);
   for (let index = 1; index <= count; index++)
@@ -68,7 +65,7 @@ function run(f: Fixture, command: string, args: string[], env = process.env) {
     input: "stdin is not a plan",
   });
 }
-function make(f: Fixture, slots = "2", extra: string[] = []) {
+function make(f: Fixture, slots = "2") {
   return run(f, "make-rank-pool-plan", [
     "--shard-dir",
     f.directory,
@@ -76,7 +73,6 @@ function make(f: Fixture, slots = "2", extra: string[] = []) {
     slots,
     "--out",
     f.plan,
-    ...extra,
   ]);
 }
 function validate(f: Fixture, slot?: string, extra: string[] = []) {
@@ -113,10 +109,7 @@ function complete(f: Fixture, slots?: number[]) {
     }
   }
 }
-afterEach(() => {
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
-});
+afterEach(roots.cleanup);
 
 describe("rank pool helpers", () => {
   test("writes stable sorted JSON and assigns every shard round-robin", () => {

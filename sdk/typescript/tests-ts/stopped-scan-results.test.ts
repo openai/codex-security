@@ -1,17 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const path of temporaryDirectories.splice(0)) {
-    rmSync(path, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 const stoppedScanProbe = [
   "import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, sys, uuid",
@@ -162,8 +156,7 @@ function runStoppedScanProbe(
 ) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
-  const root = mkdtempSync(join(tmpdir(), prefix));
-  temporaryDirectories.push(root);
+  const root = temporaryDirectories.create(prefix);
   const result = runNodePython(python!, [
     "-c",
     stoppedScanProbe,
