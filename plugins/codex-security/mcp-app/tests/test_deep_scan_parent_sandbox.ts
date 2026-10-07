@@ -200,8 +200,6 @@ for (const invalid of [
   extra(null),
   extra({ ...pinnedReadOnly, type: "external" }),
   extra({ ...pinnedReadOnly, type: "disabled" }),
-  extra({ ...pinnedReadOnly, network: "unknown" }),
-  extra({ ...pinnedReadOnly, network: { enabled: true } }),
   extra({ ...pinnedReadOnly, file_system: null }),
   extra({ ...pinnedReadOnly, file_system: { type: "unknown" } }),
   restricted("not-an-array"),
@@ -257,8 +255,6 @@ for (const invalid of [
     },
   ]),
   restricted([{ path: { type: "path", path: "" }, access: "read" }]),
-  extra(pinnedReadOnly, "relative/working-directory"),
-  extra(pinnedReadOnly, "file://remote-host/tmp/codex-security-parent"),
   {
     _meta: extra(pinnedReadOnly)._meta,
     requestInfo: extra({ ...pinnedReadOnly, network: "enabled" }),

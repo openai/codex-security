@@ -1,5 +1,5 @@
 import type { JsonObject as JsonRecord } from "../types.js";
-import { asRecord as record, isNonEmptyString } from "../record.js";
+import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
@@ -55,10 +55,7 @@ type RuntimeConfigReadOptions = Pick<
 export async function readDeepScanRuntimeConfig(
   options: RuntimeConfigReadOptions,
 ): Promise<JsonRecord> {
-  if (options.signal.aborted) throw abortError(options.signal.reason);
-  const client = new AppServerPreflightClient(options);
-  try {
-    await client.initialize();
+  return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
       cwd: options.cwd,
       includeLayers: false,
@@ -66,20 +63,7 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
-  } catch (error) {
-    await client.close();
-    const stderr = client.stderrText;
-    if (error instanceof Error && stderr)
-      Object.defineProperty(error, "message", {
-        value: error.message + "\n" + stderr,
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-    throw error;
-  } finally {
-    await client.close();
-  }
+  });
 }
 
 /**
@@ -98,12 +82,7 @@ export async function readDeepScanRuntimeConfig(
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
 ): Promise<{ useOpenAiApiKey: boolean }> {
-  validateOptions(options);
-  if (options.signal.aborted) throw abortError(options.signal.reason);
-
-  const client = new AppServerPreflightClient(options);
-  try {
-    await client.initialize();
+  return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
       includeLayers: false,
@@ -140,6 +119,18 @@ export async function preflightDeepScanWorkerPermissionProfile(
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
+  });
+}
+
+async function withPreflightClient<T>(
+  options: RuntimeConfigReadOptions,
+  operation: (client: AppServerPreflightClient) => Promise<T>,
+): Promise<T> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  const client = new AppServerPreflightClient(options);
+  try {
+    await client.initialize();
+    return await operation(client);
   } catch (error) {
     await client.close();
     const stderr = client.stderrText;
@@ -273,13 +264,6 @@ class AppServerPreflightClient {
         }
         if (typeof entry.allowed !== "boolean")
           throw malformedPreflightError(this.options.context);
-        if (
-          entry.description !== null &&
-          entry.description !== undefined &&
-          typeof entry.description !== "string"
-        ) {
-          throw malformedPreflightError(this.options.context);
-        }
         entries.push(entry);
       }
 
@@ -450,14 +434,8 @@ function verifyPreflightResult(
     throw profileNotSelectedError(options.context);
   }
 
-  const expectedProfile = comparableProfile(
-    options.expectedProfile,
-    options.context,
-  );
-  const actualWithoutDescription = comparableProfile(
-    actualProfile,
-    options.context,
-  );
+  const expectedProfile = comparableProfile(options.expectedProfile);
+  const actualWithoutDescription = comparableProfile(actualProfile);
   if (!isDeepStrictEqual(actualWithoutDescription, expectedProfile)) {
     throw profileCollisionError(options.context);
   }
@@ -485,19 +463,14 @@ function existingAllowlistExcludesProfile(
 /**
  * `config/read` serializes omitted TOML options as null. Drop only those null
  * placeholders; every unexpected non-null field still participates in the
- * strict comparison. A display description is intentionally not security
- * relevant, but it must remain a string when present.
+ * strict comparison. A display description does not affect permissions.
  */
 function comparableProfile(
   value: Readonly<Record<string, unknown>>,
-  context?: "helper",
 ): JsonRecord {
-  const normalized = stripNullObjectFields(value) as JsonRecord;
-  const description = normalized.description;
-  if (description !== undefined && typeof description !== "string") {
-    throw malformedPreflightError(context);
-  }
-  const { description: _description, ...rest } = normalized;
+  const { description: _description, ...rest } = stripNullObjectFields(
+    value,
+  ) as JsonRecord;
   return rest;
 }
 
@@ -515,23 +488,6 @@ function stripNullObjectFields(value: unknown): unknown {
       .filter(([, entry]) => entry !== null)
       .map(([key, entry]) => [key, stripNullObjectFields(entry)]),
   );
-}
-
-function validateOptions(
-  options: DeepScanPermissionProfilePreflightOptions,
-): void {
-  if (
-    !isNonEmptyString(options.codexPath) ||
-    !isNonEmptyString(options.cwd) ||
-    !Array.isArray(options.configOverrides) ||
-    options.configOverrides.some((value) => !isNonEmptyString(value)) ||
-    !record(options.expectedProfile) ||
-    !options.signal ||
-    typeof options.signal.addEventListener !== "function"
-  ) {
-    throw malformedPreflightError(options.context);
-  }
-  comparableProfile(options.expectedProfile, options.context);
 }
 
 // Verified permission incompatibilities explicitly stop the scan. A failed

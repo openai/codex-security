@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -30,59 +30,6 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-provider-profile-",
 );
 afterEach(cleanup);
-
-test("private native profiles disable inherited literal MCP server names", async () => {
-  const home = await temporaryDirectory();
-  const sharedConfig =
-    '[mcp_servers."synthetic.server"]\ncommand = "synthetic-never-run"\n';
-  await writeFile(join(home, "config.toml"), sharedConfig);
-  const profile = await createProviderProfile(home, config);
-  const { profileConfigOverrides } = await import(
-    pathToFileURL(
-      join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
-    ).href
-  );
-  try {
-    const command = resolveCodexCommand({});
-    const environment = {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      CODEX_HOME: home,
-    };
-    const inherited = await runCodexCommand(
-      command,
-      ["mcp", "list", "--json"],
-      environment,
-    );
-    expect(inherited.success, inherited.stderr).toBe(true);
-    expect(JSON.parse(inherited.stdout)).toMatchObject([
-      { name: "synthetic.server", enabled: true },
-    ]);
-    const result = await runCodexCommand(
-      command,
-      [
-        "--profile",
-        profile.name,
-        ...profileConfigOverrides({
-          mcp_servers: { "synthetic.server": { enabled: false } },
-        }).flatMap((value: string) => ["-c", value]),
-        "mcp",
-        "list",
-        "--json",
-      ],
-      environment,
-    );
-    expect(result.success, result.stderr).toBe(true);
-    expect(JSON.parse(result.stdout)).toMatchObject([
-      { name: "synthetic.server", enabled: false },
-    ]);
-    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
-      sharedConfig,
-    );
-  } finally {
-    await profile.cleanup();
-  }
-});
 
 const provider = {
   name: "Synthetic",
@@ -386,25 +333,12 @@ test("private profiles retain providers for native required and inherited select
   }
 });
 
-function inspectHome(home: string) {
-  const child = spawnSync(
-    process.execPath,
-    [
-      "-e",
-      `const fs = require("node:fs");
-       const path = require("node:path");
-       const home = process.argv[1];
-       console.log(JSON.stringify({
-         files: fs.readdirSync(home).sort(),
-         auth: fs.existsSync(path.join(home, "auth.json"))
-           ? fs.readFileSync(path.join(home, "auth.json"), "utf8") : null,
-       }));`,
-      home,
-    ],
-    { encoding: "utf8", windowsHide: true },
-  );
-  expect(child.status, child.stderr).toBe(0);
-  return JSON.parse(child.stdout) as { files: string[]; auth: string | null };
+async function inspectHome(home: string) {
+  const auth = join(home, "auth.json");
+  return {
+    files: (await readdir(home)).sort(),
+    auth: existsSync(auth) ? await readFile(auth, "utf8") : null,
+  };
 }
 
 test.each(["existing", "new"])(
@@ -424,7 +358,7 @@ test.each(["existing", "new"])(
       platform: "win32",
       async secureWindowsHome(path) {
         expect(path).toBe(home);
-        expect(inspectHome(path)).toEqual({
+        expect(await inspectHome(path)).toEqual({
           files: kind === "existing" ? ["auth.json", "config.toml"] : [],
           auth: kind === "existing" ? auth : null,
         });
@@ -437,7 +371,7 @@ test.each(["existing", "new"])(
       expect(parse(await readFile(profile.path, "utf8"))).toEqual({
         model_providers: { "synthetic.gateway": provider },
       });
-      expect(inspectHome(home)).toEqual({
+      expect(await inspectHome(home)).toEqual({
         files: [
           ...(kind === "existing" ? ["auth.json", "config.toml"] : []),
           `${profile.name}.config.toml`,
@@ -469,12 +403,12 @@ test.each(["rejected", "aborted"])(
       createProviderProfile(home, config, {
         platform: "win32",
         async secureWindowsHome(path) {
-          expect(inspectHome(path).files).toEqual([]);
+          expect((await inspectHome(path)).files).toEqual([]);
           throw failure;
         },
       }),
     ).rejects.toMatchObject({ cause: failure });
-    expect(inspectHome(home).files).toEqual([]);
+    expect((await inspectHome(home)).files).toEqual([]);
   },
 );
 
@@ -496,44 +430,68 @@ test.each(["rejected", "aborted"])(
   },
 );
 
-test.each(["synthetic-tools", "synthetic.tools"])(
-  "native overrides disable the inherited MCP server %s",
-  async (name) => {
+test.each([
+  ["synthetic-tools", false],
+  ["synthetic.tools", false],
+  ["synthetic.tools", true],
+] as const)(
+  "native overrides disable inherited MCP server %s (private profile: %j)",
+  async (name, privateProfile) => {
     const home = await temporaryDirectory();
-    await writeFile(
-      join(home, "config.toml"),
-      `[mcp_servers.${JSON.stringify(name)}]\ncommand = "synthetic-never-launched"\nenabled = true\n`,
-    );
+    const sharedConfig = `[mcp_servers.${JSON.stringify(name)}]\ncommand = "synthetic-never-launched"\nenabled = true\n`;
+    await writeFile(join(home, "config.toml"), sharedConfig);
+    const profile = privateProfile
+      ? await createProviderProfile(home, config)
+      : undefined;
     const { profileConfigOverrides } = await import(
       pathToFileURL(
         join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
       ).href
     );
-    const overrides = profileConfigOverrides({
-      features: { plugins: false },
-      mcp_servers: { [name]: { enabled: false } },
-    });
-    const result = await runCodexCommand(
-      resolveCodexCommand({}),
-      [
-        ...overrides.flatMap((value: string) => ["-c", value]),
-        "mcp",
-        "list",
-        "--json",
-      ],
-      {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        CODEX_HOME: home,
-      },
-    );
-    expect(result.success, result.stderr).toBe(true);
-    expect(JSON.parse(result.stdout)).toMatchObject([
-      {
-        name,
-        enabled: false,
-        transport: { command: "synthetic-never-launched" },
-      },
-    ]);
+    const command = resolveCodexCommand({});
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+    };
+    try {
+      const inherited = await runCodexCommand(
+        command,
+        ["mcp", "list", "--json"],
+        environment,
+      );
+      expect(inherited.success, inherited.stderr).toBe(true);
+      expect(JSON.parse(inherited.stdout)).toMatchObject([
+        { name, enabled: true },
+      ]);
+      const overrides = profileConfigOverrides({
+        features: { plugins: false },
+        mcp_servers: { [name]: { enabled: false } },
+      });
+      const result = await runCodexCommand(
+        command,
+        [
+          ...(profile ? ["--profile", profile.name] : []),
+          ...overrides.flatMap((value: string) => ["-c", value]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(result.success, result.stderr).toBe(true);
+      expect(JSON.parse(result.stdout)).toMatchObject([
+        {
+          name,
+          enabled: false,
+          transport: { command: "synthetic-never-launched" },
+        },
+      ]);
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+        sharedConfig,
+      );
+    } finally {
+      await profile?.cleanup();
+    }
   },
 );

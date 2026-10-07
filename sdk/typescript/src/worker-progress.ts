@@ -41,6 +41,7 @@ export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
+/** Preflight is tool-derived; dispatch counts depend on model-emitted markers. */
 export type ScanWorkerStatus =
   | {
       kind: "preflight";

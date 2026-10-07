@@ -204,12 +204,9 @@ function collectPublicationClaims(
   value: unknown,
   claims: PublicationClaim[],
 ): void {
-  const visited = new Set<Record<string, unknown>>();
-  const pending: unknown[] = [value];
+  const pending = isRecord(value) ? [value] : [];
   while (pending.length > 0) {
-    const candidate = pending.pop();
-    if (!isRecord(candidate) || visited.has(candidate)) continue;
-    visited.add(candidate);
+    const candidate = pending.pop()!;
     collectDirectClaims(candidate, claims);
 
     const data = candidate["data"];
@@ -231,8 +228,8 @@ function collectPublicationClaims(
         }
       }
     }
-    for (let index = nested.length - 1; index >= 0; index -= 1) {
-      if (isRecord(nested[index])) pending.push(nested[index]);
+    for (const child of nested.reverse()) {
+      if (isRecord(child)) pending.push(child);
     }
   }
 }

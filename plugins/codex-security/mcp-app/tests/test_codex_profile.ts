@@ -7,9 +7,11 @@ import path from "node:path";
 import { mock, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import { parse as parseToml } from "smol-toml";
 import {
   createCodexProfileClient,
   preflightProviderDefinitions,
+  profileConfigOverrides,
 } from "../../scripts/codex_profile.mjs";
 
 test("native startup provider metadata preserves identity and auth without private configuration", () => {
@@ -34,6 +36,7 @@ test("native startup provider metadata preserves identity and auth without priva
       wire_api: "responses",
     },
     "amazon-bedrock": { aws: { region: "us-east-1" } },
+    "omitted-provider": null,
   };
   const before = structuredClone(providers);
   assert.deepEqual(preflightProviderDefinitions(providers), {
@@ -53,6 +56,34 @@ test("native startup provider metadata preserves identity and auth without priva
     "amazon-bedrock": {},
   });
   assert.deepEqual(providers, before);
+});
+
+test("native overrides preserve literal paths, prototype keys, and TOML control escapes", () => {
+  const profile = {
+    extends: ":read-only",
+    filesystem: Object.fromEntries([
+      ["/synthetic/.env\u007f", { ".": "deny" }],
+      [String.raw`C:\Users\synthetic\credentials`, { ".": "deny" }],
+      ["__proto__", "deny"],
+    ]),
+    network: { enabled: false },
+  };
+  const overrides = profileConfigOverrides({
+    "permissions.synthetic_worker": profile,
+    model_instructions_file: "/synthetic/instructions\u007f.md",
+  }).join("\n");
+  assert.equal(overrides.includes("\u007f"), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(parseToml(overrides))), {
+    permissions: { synthetic_worker: profile },
+    model_instructions_file: "/synthetic/instructions\u007f.md",
+  });
+});
+
+test("native overrides reject null array elements", () => {
+  assert.throws(
+    () => profileConfigOverrides({ values: [null] }),
+    /must contain finite TOML values/,
+  );
 });
 
 async function fixture(mode = "success") {
@@ -155,9 +186,10 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       ...f.options,
       baseUrl: "https://provider.example.test/v1",
       config: {
-        features: { plugins: true },
+        features: { plugins: true, optional: null },
+        service_tier: null,
         empty: {},
-        values: [1, { "dotted.key": "value" }],
+        values: [1, { "dotted.key": "value", optional: null }],
       },
       configOverrides: ["features.plugins=false"],
     });

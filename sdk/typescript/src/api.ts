@@ -80,6 +80,7 @@ import {
   ScanCostTracker,
   type ScanCost,
   type ScanSessionEvent,
+  type ScanWorkerEvent,
 } from "./cost.js";
 import {
   DeepScanProgressTracker,
@@ -320,7 +321,16 @@ export interface ScanOptions extends ScanSettings {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
+  /** Preflight status and best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  /**
+   * Reports each persisted worker session once when discovered during this run.
+   * Worker numbers match onActivity/onSessionEvent. Includes saved workers on
+   * resume; observation ends before postScanPrompt. Persistence and polling can
+   * delay delivery. Does not report failed spawns, phase, or planned counts and
+   * cannot gate dispatch; use maxCostUsd or signal for cancellation.
+   */
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
@@ -411,6 +421,7 @@ type ScanObserverName =
   | "onProgress"
   | "onDeepProgress"
   | "onWorkerStatus"
+  | "onWorkerEvent"
   | "onStage"
   | "onWarning";
 
@@ -1533,6 +1544,16 @@ export class CodexSecurity {
                   options.onActivity,
                   options.onObserverError,
                   activity,
+                ),
+        onWorkerEvent:
+          options.onWorkerEvent === undefined
+            ? undefined
+            : (event) =>
+                notifyObserver(
+                  "onWorkerEvent",
+                  options.onWorkerEvent,
+                  options.onObserverError,
+                  event,
                 ),
         onSessionEvent:
           options.onSessionEvent === undefined
@@ -2967,14 +2988,13 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
+      await runtime.providerProfile?.cleanup();
       if (isRecord(providers) && Object.keys(providers).length > 0) {
-        await runtime.providerProfile?.cleanup();
         runtime.providerProfile = await createProviderProfile(
           runtimeHome,
           effectiveConfig,
         );
       } else {
-        await runtime.providerProfile?.cleanup();
         delete runtime.providerProfile;
       }
       const sessionConfig = scanRuntimeCodexConfig(
@@ -4308,7 +4328,7 @@ function addScanCosts(
 ): ScanCost {
   if (previous === null) return { ...current };
   const { estimatedUsdRange: currentRange, ...currentCost } = current;
-  const previousRange = previous.estimatedUsdRange;
+  const previousRange = previous.estimatedUsdRange!;
   return {
     ...currentCost,
     inputTokens: previous.inputTokens + current.inputTokens,
@@ -4321,18 +4341,14 @@ function addScanCosts(
     current.cacheWriteInputTokensReported === false
       ? { cacheWriteInputTokensReported: false }
       : {}),
-    ...(previousRange === undefined || currentRange === undefined
-      ? {}
-      : {
-          estimatedUsdRange: {
-            context: "unknown" as const,
-            min: previousRange.min + currentRange.min,
-            max:
-              previousRange.max === null || currentRange.max === null
-                ? null
-                : previousRange.max + currentRange.max,
-          },
-        }),
+    estimatedUsdRange: {
+      context: "unknown" as const,
+      min: previousRange.min + currentRange!.min,
+      max:
+        previousRange.max === null || currentRange!.max === null
+          ? null
+          : previousRange.max + currentRange!.max,
+    },
   };
 }
 

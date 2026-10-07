@@ -544,20 +544,29 @@ async function startReadOnlyCodexThread(
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
     options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
+  const threadOptions: ThreadOptions = {
+    threadSource: runtimeOptions.threadSource,
+    ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
+    modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    networkAccessEnabled: false,
+    webSearchMode: "disabled",
+    workingDirectory: options.workingDirectory ?? process.cwd(),
+    skipGitRepoCheck: true,
+  };
+  if (options.codex !== undefined) {
+    return { thread: options.codex.startThread(threadOptions) };
+  }
   const source = options.environment ?? process.env;
-  const homeConfig =
-    options.codex === undefined
-      ? await readCodexHomeConfig(source, options.signal)
-      : {};
+  const homeConfig = await readCodexHomeConfig(source, options.signal);
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
-  const providerConfig =
-    options.codex === undefined
-      ? resolveCommandAuthConfig(
-          deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
-          configuredCodexHome(source),
-        )
-      : {};
+  const providerConfig = resolveCommandAuthConfig(
+    deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
+    configuredCodexHome(source),
+  );
   const suppliedConfig = resolveCodexProfile(
     options.config?.codexOverrides ?? {},
   );
@@ -585,48 +594,29 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const environment =
-    options.codex === undefined
-      ? await comparisonEnvironment(
-          options.environment,
-          accountStatus,
-          options.signal,
-          undefined,
-          providerConfig,
-        )
-      : undefined;
-  const command =
-    environment === undefined ? undefined : resolveCodexCommand(environment);
-  const threadOptions: ThreadOptions = {
-    threadSource: runtimeOptions.threadSource,
-    ...(model === undefined ? {} : { model }),
-    // Native Codex accepts strings before the pinned SDK widens its effort type.
-    modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
-    sandboxMode: "read-only",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-    workingDirectory: options.workingDirectory ?? process.cwd(),
-    skipGitRepoCheck: true,
-  };
-  if (options.codex !== undefined) {
-    return { thread: options.codex.startThread(threadOptions) };
-  }
+  const environment = await comparisonEnvironment(
+    options.environment,
+    accountStatus,
+    options.signal,
+    undefined,
+    providerConfig,
+  );
+  const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
-    codexPathOverride: executablePathForSpawn(command!.command),
+    codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
       undefined,
     config: {
       ...sdkConfig,
       windows,
       mcp_servers: await disabledMcpServers(
-        await providerPreflightCommand(command!, providerSettings),
+        await providerPreflightCommand(command, providerSettings),
         config,
-        environment!,
+        environment,
         options,
       ),
       allow_login_shell: false,
@@ -661,7 +651,7 @@ async function startReadOnlyCodexThread(
     isRecord(providers) &&
     Object.keys(providers).length > 0
       ? await createProviderProfile(
-          configuredCodexHome(environment!),
+          configuredCodexHome(environment),
           providerSettings,
         )
       : undefined;
@@ -925,7 +915,7 @@ function reconcileComparison(
           related: response.related.filter(isSeparateGroup),
         }),
   };
-  validateComparison(input, comparison, allowHistoricalUncertainty, true);
+  validateComparison(input, comparison, allowHistoricalUncertainty);
   return { comparison, complete: matches.length === groups.length };
 }
 
@@ -1261,15 +1251,11 @@ function validateComparison(
   input: ScanComparisonInput,
   response: ScanComparisonResult,
   allowHistoricalUncertainty: boolean,
-  enforceConfirmedIdentities = false,
 ): void {
   const beforeIds = new Set(
     input.before.map(({ occurrenceId }) => occurrenceId),
   );
   const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
-  const findingIds = new Map(
-    [...input.before, ...input.after].flatMap(findingIdEntry),
-  );
   const matchedBefore = new Map<string, number>();
   const matchedAfter = new Map<string, number>();
   const uncertainPairs = new Set<string>();
@@ -1295,55 +1281,11 @@ function validateComparison(
     }
   }
 
-  const confirmedGroups = unionFindingGroups([
-    ...(input.knownFindingGroups ?? []),
-    ...[...new Set(findingIds.values())].map((findingId) => [findingId]),
-  ]);
-  if (enforceConfirmedIdentities) {
-    const occurrencesByFinding = Map.groupBy(
-      findingIds.keys(),
-      (occurrenceId) => findingIds.get(occurrenceId)!,
-    );
-    for (const knownGroup of confirmedGroups) {
-      const knownOccurrences = knownGroup.flatMap(
-        (findingId) => occurrencesByFinding.get(findingId) ?? [],
-      );
-      const matchedGroups = new Set(
-        knownOccurrences.flatMap((occurrenceId) => {
-          const group =
-            matchedBefore.get(occurrenceId) ?? matchedAfter.get(occurrenceId);
-          return group === undefined ? [] : [group];
-        }),
-      );
-      if (
-        matchedGroups.size > 1 ||
-        (matchedGroups.size === 1 &&
-          knownOccurrences.some(
-            (occurrenceId) =>
-              !matchedBefore.has(occurrenceId) &&
-              !matchedAfter.has(occurrenceId),
-          )) ||
-        (knownOccurrences.some((occurrenceId) => beforeIds.has(occurrenceId)) &&
-          knownOccurrences.some((occurrenceId) => afterIds.has(occurrenceId)) &&
-          matchedGroups.size === 0)
-      ) {
-        throw new CodexSecurityError(
-          "Scan comparison contradicts previously confirmed finding groups.",
-        );
-      }
-    }
-  }
-
   for (const candidate of response.uncertain) {
-    const beforeFindingId = findingIds.get(candidate.beforeOccurrenceId);
-    const afterFindingId = findingIds.get(candidate.afterOccurrenceId);
     if (
       !beforeIds.has(candidate.beforeOccurrenceId) ||
       matchedBefore.has(candidate.beforeOccurrenceId) ||
       !afterIds.has(candidate.afterOccurrenceId) ||
-      (enforceConfirmedIdentities &&
-        beforeFindingId !== undefined &&
-        beforeFindingId === afterFindingId) ||
       (!allowHistoricalUncertainty &&
         matchedAfter.has(candidate.afterOccurrenceId))
     ) {
@@ -1363,24 +1305,9 @@ function validateComparison(
     uncertainPairs.add(pair);
   }
 
-  const knownGroupByFindingId = new Map(
-    confirmedGroups.flatMap((group, index) =>
-      group.map((findingId) => [findingId, index] as const),
-    ),
-  );
   const relatedPairs = new Set<string>();
   for (const candidate of response.related ?? []) {
     const beforeGroup = matchedBefore.get(candidate.beforeOccurrenceId);
-    const beforeFindingId = findingIds.get(candidate.beforeOccurrenceId);
-    const afterFindingId = findingIds.get(candidate.afterOccurrenceId);
-    const knownBeforeGroup =
-      beforeFindingId === undefined
-        ? undefined
-        : knownGroupByFindingId.get(beforeFindingId);
-    const knownAfterGroup =
-      afterFindingId === undefined
-        ? undefined
-        : knownGroupByFindingId.get(afterFindingId);
     const pair = JSON.stringify([
       candidate.beforeOccurrenceId,
       candidate.afterOccurrenceId,
@@ -1390,9 +1317,6 @@ function validateComparison(
       !afterIds.has(candidate.afterOccurrenceId) ||
       (beforeGroup !== undefined &&
         beforeGroup === matchedAfter.get(candidate.afterOccurrenceId)) ||
-      (enforceConfirmedIdentities &&
-        knownBeforeGroup !== undefined &&
-        knownBeforeGroup === knownAfterGroup) ||
       uncertainPairs.has(pair) ||
       relatedPairs.has(pair)
     ) {

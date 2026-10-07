@@ -12,37 +12,23 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-async function effectiveProvider(
+async function nativeRequest(
   environment: Record<string, string>,
   cwd: string,
-  overrides: string[],
-  nativeProfile?: string,
+  args: string[],
+  method: string,
+  params: unknown,
 ) {
-  const privateConfig =
-    nativeProfile === undefined
-      ? undefined
-      : parseToml(
-          await readFile(
-            join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
-            "utf8",
-          ),
-        );
   const child = spawn(
     executablePathForSpawn(resolveCodexCommand({}).command),
-    [
-      ...(privateConfig === undefined ? overrides : []).flatMap((value) => [
-        "-c",
-        value,
-      ]),
-      "app-server",
-      "--stdio",
-    ],
+    [...args, "app-server", "--stdio"],
     {
       cwd,
       env: { PATH: process.env["PATH"], ...environment },
@@ -50,43 +36,31 @@ async function effectiveProvider(
     },
   );
   const closed = once(child, "close");
+  const lines = createInterface({ input: child.stdout });
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
   const timer = setTimeout(() => child.kill(), 15_000);
-  const lines = createInterface({ input: child.stdout });
-  const send = (id: number, method: string, params: unknown) =>
-    child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+  const send = (message: unknown) =>
+    child.stdin.write(JSON.stringify(message) + "\n");
   try {
-    send(1, "initialize", {
-      clientInfo: { name: "synthetic_provider_test", version: "1" },
-      capabilities: { experimentalApi: true },
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "synthetic_provider_test", version: "1" },
+        capabilities: { experimentalApi: true },
+      },
     });
     for await (const line of lines) {
       const response = JSON.parse(line);
       if (response.error) throw new Error(JSON.stringify(response.error));
       if (response.id === 1) {
-        if (privateConfig === undefined)
-          send(2, "config/read", { cwd, includeLayers: false });
-        else
-          send(2, "thread/start", {
-            cwd,
-            ephemeral: true,
-            // This no-turn configuration check never executes model commands.
-            sandbox: "danger-full-access",
-            threadSource: "security_scan",
-            config: { ...privateConfig, ...parseToml(overrides.join("\n")) },
-          });
+        send({ method: "initialized", params: {} });
+        send({ id: 2, method, params });
       }
-      if (response.id === 2) {
-        if (privateConfig !== undefined)
-          return (
-            privateConfig["model_providers"] as Record<string, unknown>
-          )?.[response.result.modelProvider];
-        const config = response.result.config;
-        return config.model_providers?.[config.model_provider];
-      }
+      if (response.id === 2) return response.result;
     }
-    throw new Error(`Native configuration read did not finish: ${stderr}`);
+    throw new Error(`Native ${method} probe did not finish: ${stderr}`);
   } finally {
     clearTimeout(timer);
     lines.close();
@@ -95,7 +69,78 @@ async function effectiveProvider(
   }
 }
 
-async function loadWorkerSettings(root: string) {
+async function effectiveProvider(
+  environment: Record<string, string>,
+  cwd: string,
+  overrides: string[],
+  nativeProfile?: string,
+) {
+  if (nativeProfile !== undefined) {
+    const config = parseToml(
+      await readFile(
+        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
+        "utf8",
+      ),
+    );
+    const result = await nativeRequest(environment, cwd, [], "thread/start", {
+      cwd,
+      ephemeral: true,
+      // This no-turn configuration check never executes model commands.
+      sandbox: "danger-full-access",
+      threadSource: "security_scan",
+      config: { ...config, ...parseToml(overrides.join("\n")) },
+    });
+    return (config["model_providers"] as Record<string, unknown>)?.[
+      result.modelProvider
+    ];
+  }
+  const { config } = await nativeRequest(
+    environment,
+    cwd,
+    overrides.flatMap((value) => ["-c", value]),
+    "config/read",
+    { cwd, includeLayers: false },
+  );
+  return config.model_providers?.[config.model_provider];
+}
+
+test("native worker override tables retain inherited features and MCP servers", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "home");
+  await mkdir(home, { mode: 0o700 });
+  const original = stringifyToml({
+    features: { shell_tool: false, view_image: false },
+    mcp_servers: {
+      "inherited.server": { command: "node", args: ["inherited-argument"] },
+      "codex-security": { command: "node", enabled: true },
+    },
+  });
+  await writeFile(join(home, "config.toml"), original);
+  const { config } = await nativeRequest(
+    { CODEX_HOME: home },
+    root,
+    profileConfigOverrides({
+      features: { api_key_model_discovery: false },
+      mcp_servers: { "codex-security": { command: "node", enabled: false } },
+    }).flatMap((value) => ["--config", value]),
+    "config/read",
+    { cwd: root, includeLayers: false },
+  );
+  expect(config.features).toMatchObject({
+    shell_tool: false,
+    view_image: false,
+    api_key_model_discovery: false,
+  });
+  expect(config.mcp_servers["inherited.server"]).toMatchObject({
+    command: "node",
+    args: ["inherited-argument"],
+    enabled: true,
+  });
+  expect(config.mcp_servers["codex-security"].enabled).toBe(false);
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
+});
+
+async function bundleWorkerSettings(root: string) {
   const executor = fileURLToPath(
     new URL(
       "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
@@ -119,14 +164,17 @@ async function loadWorkerSettings(root: string) {
   });
   const bundledPath = join(root, "worker-settings.mjs");
   await writeFile(bundledPath, bundled.outputFiles[0]!.contents);
+  return bundledPath;
+}
+
+async function loadWorkerSettings(root: string) {
   const { workerRuntimeSettings } = (await import(
-    pathToFileURL(bundledPath).href
+    pathToFileURL(await bundleWorkerSettings(root)).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      configOverrides?: string[];
+      config: JsonObject;
       nativeProfile?: string;
       environment?: Record<string, string>;
-      features?: JsonObject;
     }>;
   };
 
@@ -326,14 +374,14 @@ test.each([
                     ).not.toContain("synthetic-key-");
                     const settings = await workerRuntimeSettings(environment);
                     expect(settings.environment).toEqual(providerEnvironment);
-                    expect(settings.features).toMatchObject(featureOverrides);
-                    expect(settings.configOverrides).toContain(
-                      `web_search=${JSON.stringify(webSearch)}`,
+                    expect(settings.config["features"]).toMatchObject(
+                      featureOverrides,
                     );
+                    expect(settings.config["web_search"]).toBe(webSearch);
                     const actual = await effectiveProvider(
                       environment,
                       repository,
-                      settings.configOverrides ?? [],
+                      profileConfigOverrides(settings.config),
                       settings.nativeProfile,
                     );
                     expect(actual).toMatchObject(provider);
@@ -434,16 +482,12 @@ test("workers preserve native provider inheritance without an explicit selection
       }),
     );
     const settings = await workerRuntimeSettings(environment);
-    expect(
-      settings.configOverrides?.some((value) =>
-        value.startsWith("model_provider="),
-      ),
-    ).not.toBe(true);
+    expect(settings.config["model_provider"]).toBeUndefined();
     expect(
       await effectiveProvider(
         environment,
         root,
-        settings.configOverrides ?? [],
+        profileConfigOverrides(settings.config),
         settings.nativeProfile,
       ),
     ).toMatchObject(providers?.["inherited.gateway"] ?? provider);
@@ -510,49 +554,6 @@ const legacyProviders: Array<[string, JsonObject]> = [
     },
   ],
 ];
-test.each(legacyProviders)(
-  "checks older custom worker compatibility before launching %s",
-  async (_name, overrides) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const scan = join(root, "scan");
-    const plugin = join(root, "custom-plugin");
-    await mkdir(repository);
-    await mkdir(scan, { mode: 0o700 });
-    await cp(PLUGIN_ROOT, plugin, { recursive: true });
-    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    manifest.codexSecurity = { workerProviderSnapshot: 3 };
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    let launched = false;
-    const client = new TestClient(
-      { pluginPath: plugin, codexOverrides: overrides },
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
-          OPENROUTER_API_KEY: "synthetic-gateway-key",
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scan,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => {
-          launched = true;
-          throw new Error("unexpected model launch");
-        },
-      },
-    );
-    try {
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "Update the custom plugin or use the bundled plugin",
-      );
-      expect(launched).toBe(false);
-    } finally {
-      await client.close();
-    }
-  },
-);
-
 const legacyScanCases: Array<
   [
     string,
@@ -567,6 +568,14 @@ const legacyScanCases: Array<
     },
   ]
 > = [
+  ...legacyProviders.map(
+    ([name, overrides]): (typeof legacyScanCases)[number] => [
+      `deep with incompatible ${name}`,
+      "deep",
+      overrides,
+      { capability: 3, rejects: true },
+    ],
+  ),
   ["standard", "standard", {}, {}],
   ["deep", "deep", {}, {}],
   ["standard with explicit provider", "standard", legacyProviders[0]![1], {}],
@@ -769,4 +778,204 @@ test.each(legacyScanCases)(
       spawnSpy.mockRestore();
     }
   },
+);
+
+async function createPluginProbe(root: string, report: string) {
+  const plugin = join(root, "plugin");
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  await bundleWorkerSettings(plugin);
+  const probe = join(plugin, "environment-probe.mjs");
+  await writeFile(
+    probe,
+    `import { writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
+import { workerRuntimeSettings } from "./worker-settings.mjs";
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  let result = {};
+  if (request.method === "initialize") {
+    result = { protocolVersion: request.params.protocolVersion,
+      capabilities: { tools: {} }, serverInfo: { name: "synthetic-environment", version: "1" } };
+  } else if (request.method === "tools/list") {
+    const settings = await workerRuntimeSettings(process.env);
+    await writeFile(process.argv[2], JSON.stringify({
+      inherited: Object.fromEntries([
+        "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY",
+      ].map((name) => [name, process.env[name] ?? null])),
+      recovered: settings.environment,
+    }));
+    result = { tools: [{ name: "synthetic_environment",
+      description: "Synthetic provider environment probe",
+      inputSchema: { type: "object", properties: {} } }] };
+  }
+  console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+}
+`,
+  );
+  const manifestPath = join(plugin, ".mcp.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const server = manifest.mcpServers["codex-security"];
+  expect(server.env_vars).not.toContain("SYNTHETIC_CUSTOM_API_KEY");
+  expect(server.env_vars).not.toContain("SYNTHETIC_CUSTOM_HEADER");
+  // Keep the plugin registration and production environment allowlist. Only
+  // replace its MCP implementation with a no-turn observation tool.
+  server.command = process.execPath;
+  server.args = [probe, report];
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return plugin;
+}
+
+test.each([
+  "SYNTHETIC_CUSTOM_API_KEY",
+  "CODEX_API_KEY",
+  "OPENROUTER_API_KEY",
+  "FIREWORKS_API_KEY",
+])(
+  "native plugin workers recover the selected %s and other provider variables",
+  async (providerKey) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    const sourceHome = join(root, "source-home");
+    const report = join(root, "environment.json");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    await mkdir(sourceHome, { mode: 0o700 });
+    const plugin = await createPluginProbe(root, report);
+    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
+      providerKey,
+    );
+    const providerId = external
+      ? providerKey.split("_")[0]!.toLowerCase()
+      : "synthetic.gateway";
+    const headerKey =
+      process.platform === "win32"
+        ? "synthetic_custom_header"
+        : "SYNTHETIC_CUSTOM_HEADER";
+    const providerEnvironment = {
+      [providerKey]: external
+        ? " synthetic-custom-key\n"
+        : " synthetic-custom-key ",
+      [headerKey]: " synthetic-custom-header ",
+      SYNTHETIC_REQUIRED_KEY: "synthetic-required-key",
+    };
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        codexOverrides: {
+          model_provider: providerId,
+          model_providers: {
+            [providerId]: {
+              name: "Synthetic gateway",
+              wire_api: "responses",
+              base_url: "https://provider.example.test/v1",
+              env_key: providerKey,
+              env_http_headers: {
+                "X-Synthetic-Token": headerKey,
+                "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
+              },
+            },
+            "required.gateway": {
+              name: "Managed selection",
+              wire_api: "responses",
+              env_key: "SYNTHETIC_REQUIRED_KEY",
+            },
+          },
+        },
+      },
+      {
+        environment: {
+          CODEX_HOME: sourceHome,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-account-key",
+          ...providerEnvironment,
+          ...(process.platform === "win32"
+            ? { SYNTHETIC_CUSTOM_HEADER: " synthetic-child-header " }
+            : {}),
+          SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(options.apiKey).toBe(
+                external ? undefined : "synthetic-account-key",
+              );
+              const status = await nativeRequest(
+                {
+                  ...options.env!,
+                  ...(options.apiKey === undefined
+                    ? {}
+                    : { CODEX_API_KEY: options.apiKey }),
+                },
+                repository,
+                [],
+                // Tool enumeration starts the real MCP child without a model turn.
+                "mcpServerStatus/list",
+                { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+              );
+              expect(status.data).toHaveLength(1);
+              expect(status.data[0].name).toBe("codex-security");
+              expect(status.data[0].toolsError).toBeNull();
+              expect(status.data[0].tools).toHaveProperty(
+                "synthetic_environment",
+              );
+              expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
+                inherited: {
+                  SYNTHETIC_CUSTOM_API_KEY: null,
+                  SYNTHETIC_CUSTOM_HEADER: null,
+                  SYNTHETIC_REQUIRED_KEY: null,
+                  SYNTHETIC_UNUSED_KEY: null,
+                },
+                recovered: {
+                  ...providerEnvironment,
+                  ...(process.platform === "win32"
+                    ? { [headerKey]: " synthetic-child-header " }
+                    : {}),
+                  ...(external
+                    ? { [providerKey]: "synthetic-custom-key" }
+                    : {}),
+                  ...(providerKey === "CODEX_API_KEY"
+                    ? { CODEX_API_KEY: "synthetic-account-key" }
+                    : {}),
+                },
+              });
+              for (const text of [
+                await readFile(
+                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                  "utf8",
+                ),
+                await readFile(
+                  join(options.env!["CODEX_HOME"]!, "config.toml"),
+                  "utf8",
+                ),
+                JSON.stringify({
+                  config: options.config,
+                  overrides: options.configOverrides,
+                }),
+              ]) {
+                for (const marker of Object.values(providerEnvironment)) {
+                  expect(text).not.toContain(marker);
+                }
+              }
+              throw new Error("synthetic native plugin environment checked");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "synthetic native plugin environment checked",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+  30_000,
 );

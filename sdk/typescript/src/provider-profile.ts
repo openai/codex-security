@@ -41,10 +41,9 @@ export async function providerPreflightCommand(
     const definitions = client.preflightProviderDefinitions(
       providers,
     ) as JsonObject;
-    if (Object.keys(definitions).length > 0)
-      overrides.push(
-        ...modelProviderConfigOverride({ model_providers: definitions }),
-      );
+    overrides.push(
+      ...modelProviderConfigOverride({ model_providers: definitions }),
+    );
   }
   if (resolved["model_provider"] !== undefined)
     overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
