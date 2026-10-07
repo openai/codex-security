@@ -1,4 +1,4 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -85,17 +85,9 @@ async function fixtureWithFindings(count: number) {
   document.findings = Array.from({ length: count }, (_value, index) => {
     const finding = structuredClone(document.findings[0]!);
     finding.identity.instance = `concurrent-${index}`;
-    const fingerprint = findingFingerprint(
-      manifest.scan.target.targetId,
-      finding,
-    );
-    return {
-      ...finding,
-      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${sha256([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
-      fingerprints: { ...finding.fingerprints, primary: fingerprint },
-      title: `Synthetic concurrent finding ${index}`,
-    };
+    setFindingIdentity({ ...manifest.scan, id: document.scanId }, finding);
+    finding.title = `Synthetic concurrent finding ${index}`;
+    return finding;
   });
   const content = JSON.stringify(document);
   await writeFile(join(scanDir, "findings.json"), content);

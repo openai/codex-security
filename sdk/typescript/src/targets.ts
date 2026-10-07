@@ -523,29 +523,20 @@ export async function normalizeTarget(
     }
     await requireGitRepository(root, signal);
     const base = await resolveGitRef(root, target.base, signal);
-    if (target.kind === "refs") {
-      const head = target.head;
-      if (!isNonEmptyString(head)) {
-        throw new InvalidTargetError(
-          "Git diff refs must include a non-empty head ref.",
-        );
-      }
-      return {
-        kind: "refs",
-        paths: [],
-        base,
-        head: await resolveGitRef(root, head, signal),
-        baseRef: target.base,
-        headRef: head,
-      };
+    const kind = target.kind === "refs" ? "refs" : "working_tree";
+    const head = kind === "refs" ? target.head : "HEAD";
+    if (!isNonEmptyString(head)) {
+      throw new InvalidTargetError(
+        "Git diff refs must include a non-empty head ref.",
+      );
     }
     return {
-      kind: "working_tree",
+      kind,
       paths: [],
       base,
-      head: await resolveGitRef(root, "HEAD", signal),
+      head: await resolveGitRef(root, head, signal),
       baseRef: target.base,
-      headRef: "HEAD",
+      headRef: head,
     };
   }
 
@@ -797,18 +788,15 @@ export async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
+    const finish =
+      <U>(settle: (value: U) => void) =>
+      (value: U): void => {
+        signal.removeEventListener("abort", onAbort);
+        settle(value);
+      };
     void Promise.resolve()
       .then(operation)
-      .then(
-        (value) => {
-          signal.removeEventListener("abort", onAbort);
-          resolvePromise(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      );
+      .then(finish(resolvePromise), finish(reject));
   });
 }
 
