@@ -606,7 +606,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         path = target.joinpath(*relative.parts[scope_depth:])
         try:
             # The index can retain descendants of a directory replaced by a link.
-            if _has_linked_parent(scope, path):
+            if _has_linked_parent(target, path):
                 continue
             metadata = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
