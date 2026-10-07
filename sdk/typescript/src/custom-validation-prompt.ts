@@ -13,7 +13,7 @@ const SOURCES = {
   "skills/security-scan/SKILL.md":
     "104e2f93fc965c34e91970f517a89e330d5b29dbb243dcea5d95d83f14d135cf",
   "skills/security-diff-scan/SKILL.md":
-    "926290b5f5cee1a30f4c8bb49682fb883fba6f47b1bc73a9a31b9561d0011c8e",
+    "653df6b1127141fb35bd0d6eea4ce5e2e764f5f5cede91b6fc7f3b3eb3a65874",
 } as const;
 
 const DISABLED_TOOLS = [
