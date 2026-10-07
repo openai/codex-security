@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -40,7 +41,6 @@ interface SessionReasoning {
 interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
-  pendingLineBytes: number;
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -86,7 +86,6 @@ function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
     pendingLine: [],
-    pendingLineBytes: 0,
     unreadable: false,
     threadId: null,
     parentThreadId: null,
@@ -417,7 +416,6 @@ async function readSessionUsage(
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
-        session.pendingLineBytes = 0;
         throw error;
       }
     }
@@ -436,27 +434,22 @@ function readSessionChunk(
     const newline = contents.indexOf(0x0a, lineStart);
     const lineEnd = newline === -1 ? contents.length : newline;
     const fragment = contents.subarray(lineStart, lineEnd);
-    const lineBytes = session.pendingLineBytes + fragment.length;
 
     if (newline === -1) {
-      if (fragment.length > 0) {
-        session.pendingLine.push(Buffer.from(fragment));
-        session.pendingLineBytes = lineBytes;
-      }
+      session.pendingLine.push(Buffer.from(fragment));
       return;
     }
 
-    if (session.pendingLineBytes === 0) {
+    if (session.pendingLine.length === 0) {
       readSessionEvent(fragment.toString("utf8"), session, repository);
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
-        Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
+        Buffer.concat(session.pendingLine).toString("utf8"),
         session,
         repository,
       );
       session.pendingLine = [];
-      session.pendingLineBytes = 0;
     }
     lineStart = newline + 1;
   }
@@ -468,12 +461,7 @@ function readSessionEvent(
   repository?: string,
 ): void {
   if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
+  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {

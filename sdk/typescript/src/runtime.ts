@@ -684,16 +684,12 @@ function windowsAceAllowsAncestorReplacement(
   if (/^0x[\da-f]+$/iu.test(rights)) {
     return (BigInt(rights) & 0x100d0040n) !== 0n;
   }
-  for (let index = 0; index < rights.length; index += 2) {
-    if (
-      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(
-        rights.slice(index, index + 2),
-      )
-    ) {
-      return true;
-    }
-  }
-  return false;
+  // Preserve two-code-unit alignment across line breaks and surrogate pairs.
+  return rights
+    .matchAll(/.{2}/gs)
+    .some((match) =>
+      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(match[0]),
+    );
 }
 
 export async function streamWindowsCredentialAclDescriptors(
