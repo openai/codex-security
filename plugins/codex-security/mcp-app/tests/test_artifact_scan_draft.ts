@@ -1,3 +1,4 @@
+import { workerDraft } from "./scan-draft-fixture.ts";
 import { readJson, snapshotScanDraft, writeJsonLine } from "./support/json.ts";
 import { mock } from "node:test";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -795,12 +796,7 @@ try {
   const acceptedDeepDraft = {
     ...input,
     complete: true,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+    coverage: workerDraft([]).coverage,
   };
   await recordCodexSecurityScanDraft(deepParentContext, acceptedDeepDraft);
   const acceptedDeepFindings = await readJson(deepParentRoot, "findings.json");
@@ -3033,12 +3029,7 @@ try {
   const noFindings = {
     ...input,
     findings: [],
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+    coverage: workerDraft([]).coverage,
   };
   const clean = await recordFreshScanDraft(context, noFindings);
   assert.equal(clean.findingCount, 0);

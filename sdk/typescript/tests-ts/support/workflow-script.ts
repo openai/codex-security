@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { workflowBashCommand } from "./shell.js";
 
 export function runWorkflowScript(
   directory: string,
@@ -8,15 +8,8 @@ export function runWorkflowScript(
   shellOptions: string[] = [],
   argumentsPath = "$ARGUMENTS_PATH",
 ) {
-  const bash =
-    process.platform === "win32"
-      ? join(
-          process.env["ProgramFiles"] ?? "C:/Program Files",
-          "Git/bin/bash.exe",
-        )
-      : "bash";
   const result = spawnSync(
-    bash,
+    workflowBashCommand(),
     [
       "--noprofile",
       "--norc",
