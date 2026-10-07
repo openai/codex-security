@@ -585,8 +585,6 @@ def write_completed_contract(
     scan_id: str,
     target: Path,
     *,
-    artifact_scan_id: str | None = None,
-    exclude_paths: list[str] | None = None,
     identity_anchor: str = "archive-entry-write-without-containment",
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
@@ -595,16 +593,14 @@ def write_completed_contract(
     diff_base_revision: str | None = None,
     diff_head_revision: str | None = None,
     snapshot_digest: str | None = None,
-    target_id: str | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
-    artifact_scan_id = artifact_scan_id or scan_id
-    exclude_paths = exclude_paths or []
+    exclude_paths = []
     include_paths = include_paths or ["."]
     target_contract = {
         "kind": target_kind,
-        "targetId": target_id or stable_target_id(target),
+        "targetId": stable_target_id(target),
         "displayName": target.name,
         "snapshotDigest": snapshot_digest
         or (
@@ -622,7 +618,7 @@ def write_completed_contract(
     findings = {
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "findings": [
             {
                 "ruleId": "path-traversal.archive-extraction",
@@ -686,7 +682,7 @@ def write_completed_contract(
     coverage = {
         "documentType": "codex-security.coverage",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "mode": coverage_mode,
         "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
@@ -707,7 +703,7 @@ def write_completed_contract(
         "documentType": "codex-security.scan-manifest",
         "schemaVersion": "1.0",
         "scan": {
-            "id": artifact_scan_id,
+            "id": scan_id,
             "producer": {
                 "name": "codex-security-plugin",
                 "version": source_plugin_version(),

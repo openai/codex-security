@@ -657,17 +657,14 @@ def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
     original_digest = started["results"]["contract"]["target"]["requiredSnapshotDigest"]
     source.write_text("version = 2\n")
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [DIRECTORY_CHANGED_WARNING]
     assert completed["targetWarnings"] == [DIRECTORY_CHANGED_WARNING]
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == original_digest
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"]
-        == completed["scan"]["warnings"]
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == completed["scan"]["warnings"]
 
 
 def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: Path) -> None:
@@ -679,7 +676,7 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
     target.rename(tmp_path / "moved-target")
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [TARGET_UNAVAILABLE_WARNING]
@@ -716,12 +713,7 @@ def test_workbench_serializes_concurrent_scan_completion(tmp_path: Path) -> None
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda _: run_workbench(
-                    state_dir,
-                    "complete-scan",
-                    "--scan-id",
-                    scan_id,
-                ),
+                lambda _: scan_command(state_dir, "complete-scan", scan_id),
                 range(2),
             )
         )
@@ -974,7 +966,7 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
     document["findings"] = [informational, low, high, critical]
     findings_path.write_text(json.dumps(document))
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert completed["severityCounts"] == {
         "critical": 1,
         "high": 1,
@@ -2906,7 +2898,7 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
         coverage_mode="working_tree",
     )
     (target / "new-file.txt").write_text("changed during scan\n")
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [WORKTREE_CHANGED_WARNING]
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -2947,7 +2939,7 @@ def test_workbench_warns_after_working_tree_head_changes(
     subprocess.run(["git", "add", "new-file.txt"], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Move HEAD"], cwd=target, check=True)
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [HEAD_CHANGED_WARNING]
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -2995,10 +2987,8 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     revision = initialize_git_repository(target)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
+    created = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -3010,16 +3000,11 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         revision,
     )
     diff_target = created["diffTarget"]
-    run_workbench(
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "working_tree",
@@ -3040,7 +3025,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         diff_head_revision=str(diff_target["headRevision"]),
         coverage_mode="repository",
     )
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     coverage = json.loads((scan_dir / "coverage.json").read_text())
@@ -3087,10 +3072,8 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -3101,16 +3084,11 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         "--diff-head-revision",
         revision,
     )
-    saved = run_workbench(
+    saved = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "commit",
@@ -3131,7 +3109,7 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     draft_target = draft_manifest["scan"]["target"]
     draft_target["revision"] = "stale-revision"
     (scan_dir / "scan-manifest.json").write_text(json.dumps(draft_manifest))
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert "revision" not in manifest["scan"]["target"]
@@ -3671,7 +3649,7 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
         target,
         target_kind="git_worktree",
     )
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [GIT_UNAVAILABLE_WARNING]
@@ -3724,10 +3702,10 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     outside.write_text("must not be projected\n")
     (poc / "outside-link.txt").symlink_to(outside)
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     if non_utf8_artifact:
         (poc / os.fsdecode(b"caf\xe9.txt")).write_text("Supplemental fixture.\n")
-        completed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+        completed = get_scan(state_dir, scan_id)
     assert completed["scan"]["findings"][0]["artifactPaths"] == [
         report_path,
         f"findings/{slug}/poc/README.md",
@@ -3769,7 +3747,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         target_kind="git_revision",
         target_revision="wrong-revision",
     )
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads(
         (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
@@ -3784,7 +3762,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     (target / "README.md").write_text("replacement source\n")
     subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Replace source fixture"], cwd=target, check=True)
-    refreshed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    refreshed = get_scan(state_dir, scan_id)
     assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
 
 
@@ -3918,7 +3896,7 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
         connection.execute("ALTER TABLE workspaces DROP COLUMN capability_preflight_json")
 
     run_workbench(state_dir, "database-info")
-    migrated = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    migrated = get_scan(state_dir, scan_id)
     assert migrated["scan"]["contract"]["target"]["allowedKinds"] == allowed_kinds
     write_completed_contract(
         Path(str(started["results"]["scanDir"])),
@@ -3927,7 +3905,7 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
         target_kind="git_revision",
         target_revision=revision,
     )
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
 
 
@@ -3949,19 +3927,10 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_kind="git_revision",
         target_revision=revision,
     )
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-    )
+    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert "scan.target.kind" in str(failed["stderr"])
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -3976,7 +3945,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         snapshot_digest=snapshot_digest,
     )
     (target / "README.md").write_text(f"{dirty_content}changed during scan\n")
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [WORKTREE_CHANGED_WARNING]
     manifest = json.loads(
@@ -3998,7 +3967,7 @@ def test_workbench_generates_reports_during_completion(tmp_path: Path) -> None:
     (scan_dir / "report.html").write_text("<p>Stale HTML report</p>")
     (scan_dir / "report.md").write_text("# Untrusted report\n")
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     assert not (scan_dir / "report.html").exists()
@@ -4016,7 +3985,7 @@ def test_workbench_omits_unsafe_symlink_source_path_without_hiding_finding(tmp_p
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     write_completed_contract(Path(str(started["results"]["scanDir"])), scan_id, target)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     location = completed["scan"]["findings"][0]["locations"][0]
     assert location["path"] == "src/extract.py"
     assert "absolutePath" not in location
@@ -4031,10 +4000,10 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     scan_id = str(started["results"]["scanId"])
     scan_dir = Path(str(started["results"]["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["reportAvailable"] is True
     (scan_dir / "report.md").unlink()
-    reopened = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    reopened = get_scan(state_dir, scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
 
