@@ -28,12 +28,10 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if not normalized:
-        return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
-        part if index % 2 else re.sub(r"([\\`*\[\]<>])", r"\\\1", part)
+        part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
         for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
     )
 
@@ -43,12 +41,7 @@ def _strings(value: Any) -> list[str]:
         value = [value]
     if not isinstance(value, list):
         return []
-    normalized: list[str] = []
-    for item in value:
-        text = _text(item, "")
-        if text:
-            normalized.append(text)
-    return normalized
+    return [text for item in value if (text := _text(item, ""))]
 
 
 def _cell(value: Any) -> str:
@@ -284,8 +277,6 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
             details.append({"summary": detail})
         elif isinstance(detail, dict):
             details.append(detail)
-        elif detail is not None:
-            continue
     if not details:
         return keys[0], None
 
@@ -408,16 +399,16 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
 
 
-def _code_fence(code: str) -> str:
+def _code_fence(code: str, minimum: int = 3) -> str:
     longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", code)), default=0)
-    return "`" * max(3, longest_run + 1)
+    return "`" * max(minimum, longest_run + 1)
 
 
 def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
-        location = _text(_code_evidence_location(item), "")
+        location = " ".join(_code_evidence_location(item).split())
         explanation = _text(item.get("explanation"), "")
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
@@ -425,7 +416,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
         fence = _code_fence(code)
         heading = f"**{label}**"
         if location:
-            heading += f" — `{location}`"
+            marker = _code_fence(location, minimum=1)
+            padding = " " if location.startswith("`") or location.endswith("`") else ""
+            heading += f" — {marker}{padding}{location}{padding}{marker}"
         lines.extend(["", heading])
         if explanation:
             lines.extend(["", explanation])
@@ -580,12 +573,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         dataflow.get("summary"),
         f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
     )
-    reachability_summary = _text(
-        reachability.get("summary"),
-        _text(
-            attack_path.get("summary"),
-            "Reachability was not recorded beyond the canonical finding summary and affected locations.",
-        ),
+    reachability_summary = _text(reachability.get("summary"), "") or _text(
+        attack_path.get("summary"),
+        "Reachability was not recorded beyond the canonical finding summary and affected locations.",
     )
     severity_rationale = _text(
         severity.get("rationale"),

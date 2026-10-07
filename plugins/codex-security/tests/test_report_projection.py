@@ -220,13 +220,16 @@ def test_projection_merges_top_level_and_reachability_preconditions() -> None:
 def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["attackPath"] = {
-        "summary": "An authenticated uploader can trigger archive extraction."
+        "summary": "An authenticated uploader can trigger parse_file to extract an archive."
     }
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
-    assert "An authenticated uploader can trigger archive extraction." in reachability
+    assert (
+        reachability.strip()
+        == r"An authenticated uploader can trigger parse\_file to extract an archive."
+    )
     assert "Reachability was not recorded" not in reachability
 
 
@@ -647,7 +650,7 @@ def test_projection_includes_exact_target_identity() -> None:
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "- Target kind: git_diff" in markdown
+    assert "- Target kind: git\\_diff" in markdown
     assert "- Target ID: repo-1" in markdown
     assert "- Revision range: base-sha...head-sha" in markdown
     assert "- Snapshot digest: codex-security-snapshot/v1:sha256:" in markdown
@@ -874,3 +877,33 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+@pytest.mark.parametrize(
+    ("source_path", "rendered_location"),
+    [
+        ("app/api/[id]/route.ts", "`app/api/[id]/route.ts:7`"),
+        ("app/api/`id`/route.ts", "``app/api/`id`/route.ts:7``"),
+        ("`route`.ts", "`` `route`.ts:7 ``"),
+    ],
+)
+def test_projection_preserves_identifier_text_and_code_path_spelling(
+    source_path: str, rendered_location: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["title"] = "__proto__ pollution"
+    finding["validation"] = {"evidenceRefs": ["source"]}
+    finding["codeEvidence"] = [
+        {
+            "id": "source",
+            "label": "Source control",
+            "path": source_path,
+            "startLine": 7,
+            "code": "handle(request)",
+            "explanation": "A source-backed operation.",
+        }
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "\\_\\_proto\\_\\_ pollution" in markdown
+    assert rendered_location in markdown

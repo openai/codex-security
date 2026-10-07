@@ -315,11 +315,6 @@ class AppServerPreflightClient {
   async close(): Promise<void> {
     this.closed = true;
     this.removeAbortListener();
-    this.pending?.reject(
-      this.terminalError ??
-        codexExecutableStdioError(this.options.codexPath, this.options.context),
-    );
-    this.pending = undefined;
     this.stopChild();
     if (this.childClosed) return;
     await this.childClose;
