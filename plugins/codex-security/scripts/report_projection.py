@@ -28,8 +28,6 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if not normalized:
-        return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
@@ -43,12 +41,7 @@ def _strings(value: Any) -> list[str]:
         value = [value]
     if not isinstance(value, list):
         return []
-    normalized: list[str] = []
-    for item in value:
-        text = _text(item, "")
-        if text:
-            normalized.append(text)
-    return normalized
+    return [text for item in value if (text := _text(item, ""))]
 
 
 def _cell(value: Any) -> str:
@@ -218,8 +211,8 @@ def _hardening_portfolio_path(scan: dict[str, Any]) -> str | None:
     return portfolio_path
 
 
-def _bullets(items: list[str], fallback: str) -> list[str]:
-    return [f"- {item}" for item in (items or [fallback])]
+def _bullet_section(heading: str, items: list[str]) -> list[str]:
+    return ["", heading, *(f"- {item}" for item in items)] if items else []
 
 
 def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -284,8 +277,6 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
             details.append({"summary": detail})
         elif isinstance(detail, dict):
             details.append(detail)
-        elif detail is not None:
-            continue
     if not details:
         return keys[0], None
 
@@ -433,22 +424,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _severity_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["severity"]["level"] for finding in findings)
-    return (
-        ", ".join(f"{level}: {counts[level]}" for level in SEVERITY_ORDER if counts[level])
-        or "none"
-    )
-
-
-def _confidence_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["confidence"]["level"] for finding in findings)
-    return (
-        ", ".join(
-            f"{level}: {counts[level]}" for level in ("high", "medium", "low") if counts[level]
-        )
-        or "none"
-    )
+def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]) -> str:
+    counts = Counter(finding[field]["level"] for finding in findings)
+    return ", ".join(f"{level}: {counts[level]}" for level in order if counts[level]) or "none"
 
 
 def _locations(finding: dict[str, Any]) -> str:
@@ -498,6 +476,25 @@ def _surface_notes(surface: dict[str, Any]) -> str:
     if not evidence:
         return _cell(notes)
     return _cell(f"{notes} Evidence: {evidence}")
+
+
+def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
+    cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
+    title = _text(finding["title"], "Untitled finding")
+    return [
+        f'<a id="finding-{number}"></a>',
+        "",
+        f"### [{number}] {title}",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Severity | {_cell(finding['severity']['level'])} |",
+        f"| Confidence | {_cell(finding['confidence']['level'])} |",
+        f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
+        f"| Category | {_cell(finding['taxonomy']['category'])} |",
+        f"| CWE | {_cell(cwes)} |",
+        f"| Affected lines | {_cell(_locations(finding))} |",
+    ]
 
 
 def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
@@ -562,10 +559,6 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         if validation_outcomes
         else f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
     )
-    validation_evidence = _strings(validation.get("evidence"))
-    validation_assertions = _strings(validation.get("assertions"))
-    validation_counterevidence = _strings(validation.get("counterEvidence"))
-    validation_limitations = _strings(validation.get("limitations"))
     root_cause_summary = _text(
         raw_root_cause if isinstance(raw_root_cause, str) else root_cause.get("summary"),
         "",
@@ -593,24 +586,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
-    remediation_tests = _strings(finding.get("remediationTests"))
-    preventive_controls = _strings(finding.get("preventiveControls"))
-    attack_steps = _strings(attack_path.get("steps"))
-    cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
-    title = _text(finding["title"], "Untitled finding")
     lines = [
-        f'<a id="finding-{number}"></a>',
-        "",
-        f"### [{number}] {title}",
-        "",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Severity | {_cell(severity['level'])} |",
-        f"| Confidence | {_cell(finding['confidence']['level'])} |",
-        f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
-        f"| Category | {_cell(finding['taxonomy']['category'])} |",
-        f"| CWE | {_cell(cwes)} |",
-        f"| Affected lines | {_cell(_locations(finding))} |",
+        *_finding_header(number, finding),
         "",
         "#### Summary",
         "",
@@ -627,29 +604,19 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     if validation_outcomes:
         lines.extend(["", *(f"- **{label}:** {value}" for label, value in validation_outcomes)])
     lines.extend(_code_evidence_lines(validation_code_evidence))
-    if validation_assertions:
-        lines.extend(["", "Assertions:", *_bullets(validation_assertions, "None recorded.")])
-    if validation_evidence:
-        lines.extend(["", "Evidence:", *_bullets(validation_evidence, "No evidence recorded.")])
-    if validation_counterevidence:
-        lines.extend(
-            [
-                "",
-                "Counterevidence and remaining uncertainty:",
-                *_bullets(validation_counterevidence, "None recorded."),
-            ]
-        )
-    if validation_limitations:
-        lines.extend(["", "Limitations:", *_bullets(validation_limitations, "None recorded.")])
+    for label, key in (
+        ("Assertions", "assertions"),
+        ("Evidence", "evidence"),
+        ("Counterevidence and remaining uncertainty", "counterEvidence"),
+        ("Limitations", "limitations"),
+    ):
+        lines.extend(_bullet_section(f"{label}:", _strings(validation.get(key))))
     lines.extend(["", "#### Dataflow", "", dataflow_summary])
-    if attack_steps:
-        lines.extend(["", "Attack steps:", *_bullets(attack_steps, "None recorded.")])
+    lines.extend(_bullet_section("Attack steps:", _strings(attack_path.get("steps"))))
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
             lines.extend(["", f"- **{label}:** {_text(dataflow[key], 'not recorded')}"])
-    transformations = _strings(dataflow.get("transformations"))
-    if transformations:
-        lines.extend(["", "Transformations:", *_bullets(transformations, "None recorded.")])
+    lines.extend(_bullet_section("Transformations:", _strings(dataflow.get("transformations"))))
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
     lines.extend(["", "#### Reachability", "", reachability_summary])
     for label, key in (
@@ -669,17 +636,14 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             ]
         )
     )
-    if preconditions:
-        lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
+    lines.extend(_bullet_section("Preconditions:", preconditions))
     for label, key in (
         ("Assumptions", "assumptions"),
         ("Existing controls", "controls"),
         ("Blind spots", "blindspots"),
         ("Limitations", "limitations"),
     ):
-        values = _strings(attack_path.get(key))
-        if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+        lines.extend(_bullet_section(f"{label}:", _strings(attack_path.get(key))))
     lines.extend(_code_evidence_lines(reachability_code_evidence))
     lines.extend(
         [
@@ -721,31 +685,16 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             _text(finding["remediation"], "No canonical remediation was recorded."),
         ]
     )
-    if remediation_tests:
-        lines.extend(["", "Tests:", *_bullets(remediation_tests, "No tests recorded.")])
-    if preventive_controls:
-        lines.extend(["", "Preventive controls:", *_bullets(preventive_controls, "None recorded.")])
+    lines.extend(_bullet_section("Tests:", _strings(finding.get("remediationTests"))))
+    lines.extend(
+        _bullet_section("Preventive controls:", _strings(finding.get("preventiveControls")))
+    )
     return lines
 
 
 def _linked_finding_section(number: int, finding: dict[str, Any], report_path: str) -> list[str]:
-    cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
-    title = _text(finding["title"], "Untitled finding")
     link = f"[detailed technical write-up]({report_path})"
-    lines = [
-        f'<a id="finding-{number}"></a>',
-        "",
-        f"### [{number}] {title}",
-        "",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Severity | {_cell(finding['severity']['level'])} |",
-        f"| Confidence | {_cell(finding['confidence']['level'])} |",
-        f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
-        f"| Category | {_cell(finding['taxonomy']['category'])} |",
-        f"| CWE | {_cell(cwes)} |",
-        f"| Affected lines | {_cell(_locations(finding))} |",
-    ]
+    lines = _finding_header(number, finding)
     for heading in ("Summary", "Validation", "Dataflow", "Reachability", "Severity", "Remediation"):
         lines.extend(["", f"#### {heading}", "", f"See the {link}."])
     return lines
@@ -812,20 +761,19 @@ def build_report_markdown(
                 f"Excluded {_text(exclusion.get('pattern'), 'unspecified')}: "
                 f"{_text(exclusion.get('reason'), 'reason not recorded')}"
             )
-    if limitations:
-        lines.extend(["", "Limitations and exclusions:", *_bullets(limitations, "None recorded.")])
+    lines.extend(_bullet_section("Limitations and exclusions:", limitations))
     summary_count_lines = (
         [
             f"| Reportable DSS findings | {len(deep_finding_groups)} |",
             f"| Report instances | {len(findings)} |",
-            f"| Report severity mix | {_severity_mix(findings)} |",
-            f"| Report confidence mix | {_confidence_mix(findings)} |",
+            f"| Report severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Report confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
         if deep_presentation
         else [
             f"| Reportable findings | {len(findings)} |",
-            f"| Severity mix | {_severity_mix(findings)} |",
-            f"| Confidence mix | {_confidence_mix(findings)} |",
+            f"| Severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
     )
     lines.extend(
@@ -856,20 +804,16 @@ def build_report_markdown(
                 "No explicit canonical threat-model summary was recorded.",
             )
         )
-        for heading, key, fallback in (
-            ("Assets", "assets", "No assets were recorded."),
-            ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
-            (
-                "Attacker Capabilities",
-                "attackerCapabilities",
-                "No attacker capabilities were recorded.",
-            ),
-            ("Security Objectives", "securityObjectives", "No security objectives were recorded."),
-            ("Assumptions", "assumptions", "No assumptions were recorded."),
+        for heading, key in (
+            ("Assets", "assets"),
+            ("Trust Boundaries", "trustBoundaries"),
+            ("Attacker Capabilities", "attackerCapabilities"),
+            ("Security Objectives", "securityObjectives"),
+            ("Assumptions", "assumptions"),
         ):
             values = _strings(threat_model.get(key))
             if values:
-                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+                lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:

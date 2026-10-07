@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     SCRIPT,
     begin_deep_scan,
     claim_remediation_resend,
@@ -66,14 +67,6 @@ GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {
@@ -918,7 +911,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -2933,7 +2926,6 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     outside = tmp_path / "outside.txt"
     outside.write_text("must not be projected\n")
     (poc / "outside-link.txt").symlink_to(outside)
-
     completed = scan_command(state_dir, "complete-scan", scan_id)
     if non_utf8_artifact:
         (poc / os.fsdecode(b"caf\xe9.txt")).write_text("Supplemental fixture.\n")

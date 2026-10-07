@@ -1,5 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
@@ -35,17 +35,12 @@ const workflow = parse(
 const job = workflow.jobs.scan;
 const scan = job.steps.find((step) => step.id === "scan")!;
 const sarif = job.steps.find((step) => step.id === "sarif")!;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function runStep(step: Step, overrides: Record<string, string> = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "codex actions example "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("codex actions example ");
   // Git Bash accepts forward-slash drive paths on Windows.
   const root = directory.replaceAll("\\", "/");
   const result = runWorkflowScript(

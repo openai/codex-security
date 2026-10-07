@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import Ajv from "ajv";
+import Ajv, { type ValidateFunction } from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { readJson as readJsonFile } from "./support/json.js";
@@ -104,6 +104,29 @@ async function startMcp() {
   return initializeMcpClient(child, "finding-detail-contract-test", false);
 }
 
+function expectScanDraftDetails(validate: ValidateFunction) {
+  expect(validate(scanDraftInput), JSON.stringify(validate.errors)).toBe(true);
+  expect(validate(stringAssessmentInput), JSON.stringify(validate.errors)).toBe(
+    true,
+  );
+  expect(
+    validate({
+      ...scanDraftInput,
+      findings: [{ ...scanDraftFinding, code_evidence: null }],
+    }),
+    JSON.stringify(validate.errors),
+  ).toBe(false);
+  for (const { section, detail } of invalidFindingDetails) {
+    expect(
+      validate({
+        ...scanDraftInput,
+        findings: [{ ...scanDraftFinding, [section]: detail }],
+      }),
+      `${section}: ${JSON.stringify(detail)}`,
+    ).toBe(false);
+  }
+}
+
 describe("bundled plugin finding detail contracts", () => {
   test("rejects malformed known fields in scan drafts", async () => {
     const schemaRoot = join(PLUGIN_ROOT, "schemas");
@@ -116,29 +139,7 @@ describe("bundled plugin finding detail contracts", () => {
     validator.addSchema(commonSchema);
     const validate = validator.compile(scanDraftSchema);
 
-    expect(validate(scanDraftInput), JSON.stringify(validate.errors)).toBe(
-      true,
-    );
-    expect(
-      validate(stringAssessmentInput),
-      JSON.stringify(validate.errors),
-    ).toBe(true);
-    expect(
-      validate({
-        ...scanDraftInput,
-        findings: [{ ...scanDraftFinding, code_evidence: null }],
-      }),
-      JSON.stringify(validate.errors),
-    ).toBe(false);
-    for (const { section, detail } of invalidFindingDetails) {
-      expect(
-        validate({
-          ...scanDraftInput,
-          findings: [{ ...scanDraftFinding, [section]: detail }],
-        }),
-        `${section}: ${JSON.stringify(detail)}`,
-      ).toBe(false);
-    }
+    expectScanDraftDetails(validate);
   });
 
   test("publishes the strict scan-draft contract through MCP", async () => {
@@ -155,29 +156,7 @@ describe("bundled plugin finding detail contracts", () => {
       validator.addFormat("uuid", /^[0-9a-f-]{36}$/iu);
       const validate = validator.compile(tool!["inputSchema"] as JsonObject);
 
-      expect(validate(scanDraftInput), JSON.stringify(validate.errors)).toBe(
-        true,
-      );
-      expect(
-        validate(stringAssessmentInput),
-        JSON.stringify(validate.errors),
-      ).toBe(true);
-      expect(
-        validate({
-          ...scanDraftInput,
-          findings: [{ ...scanDraftFinding, code_evidence: null }],
-        }),
-        JSON.stringify(validate.errors),
-      ).toBe(false);
-      for (const { section, detail } of invalidFindingDetails) {
-        expect(
-          validate({
-            ...scanDraftInput,
-            findings: [{ ...scanDraftFinding, [section]: detail }],
-          }),
-          `${section}: ${JSON.stringify(detail)}`,
-        ).toBe(false);
-      }
+      expectScanDraftDetails(validate);
     } finally {
       await client.close();
     }

@@ -6,12 +6,13 @@ export async function serveFindings(
   environment: NodeJS.ProcessEnv = process.env,
   output: Pick<NodeJS.WriteStream, "write"> = process.stdout,
 ): Promise<void> {
-  const host = environment["HOST"] ?? "127.0.0.1";
-  const port = Number(environment["PORT"] ?? 3000);
+  const host = environment["HOST"]?.trim() || "127.0.0.1";
+  const port = Number(environment["PORT"]?.trim() || 3000);
   const server = await startFindingsServer({
     store: new SqliteFindingsStore(environment),
     embeddings: new OpenAiFindingEmbedder(
-      environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"],
+      environment["OPENAI_API_KEY"]?.trim() ||
+        environment["CODEX_API_KEY"]?.trim(),
       fetch,
       environment["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),

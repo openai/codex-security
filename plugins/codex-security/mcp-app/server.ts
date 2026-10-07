@@ -44,7 +44,8 @@ const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR =
   process.env.CODEX_SECURITY_STATE_DIR?.trim();
-const PLUGIN_ROOT = resolve(__dirname, "..");
+const PLUGIN_ROOT =
+  process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
   "resolve-scan-root",
@@ -1473,6 +1474,32 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "rename_codex_security_scan",
+    {
+      title: "Rename Codex Security Scan",
+      description: "App-only. Change the display name of a saved scan.",
+      inputSchema: { ...scanSchema, name: z.string() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: appMeta,
+    },
+    async ({ scanId, name }) =>
+      scanActionResult(
+        await runWorkbench([
+          "rename-scan",
+          "--scan-id",
+          scanId,
+          `--name=${name}`,
+        ]),
+        "Renamed Codex Security scan.",
+      ),
+  );
+
   const updateRunningScanContext = async (input: {
     claimToken?: string;
     scanId: string;
@@ -2475,6 +2502,7 @@ async function executeWorkbench(
     [workbenchScriptPath(), ...workbenchArgs],
     {
       cwd: PLUGIN_ROOT,
+      windowsHide: true,
       env: stateDir
         ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
         : process.env,
