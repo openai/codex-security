@@ -1493,17 +1493,6 @@ def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
     coverage["openQuestions"] = normalized
 
 
-def _normalize_unsealed_deep_repository_inventory_strategy(
-    coverage: dict[str, Any],
-    *,
-    expected_coverage_mode: str | None,
-) -> None:
-    """Label whole-repository Deep scans as using the repository inventory."""
-
-    if expected_coverage_mode == "deep_repository":
-        coverage["inventoryStrategy"] = "repository"
-
-
 def _validate_completion_binding(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -2089,29 +2078,20 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             continue
         _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
-            if field not in attack_path:
-                continue
             detail = attack_path.get(field)
-            if detail is None:
-                attack_path.pop(field)
-                continue
-            if not isinstance(detail, (str, dict)):
-                attack_path.pop(field)
-                continue
-            if isinstance(detail, str):
-                if detail == "":
-                    attack_path.pop(field)
-                continue
-            detail_scalar_fields = ("summary", "source", "sink", "outcome")
-            if field == "reachability":
-                detail_scalar_fields += ("attacker", "entrypoint")
-            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
-            _normalize_legacy_string_list_fields(
-                detail, ("evidenceRefs", "evidence_refs", "transformations")
-            )
-            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
-            if field == "reachability":
-                _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            if isinstance(detail, dict):
+                detail_scalar_fields = ("summary", "source", "sink", "outcome")
+                if field == "reachability":
+                    detail_scalar_fields += ("attacker", "entrypoint")
+                _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
+                _normalize_legacy_string_list_fields(
+                    detail, ("evidenceRefs", "evidence_refs", "transformations")
+                )
+                _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
+                if field == "reachability":
+                    _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            elif not isinstance(detail, str) or detail == "":
+                attack_path.pop(field, None)
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
@@ -2767,11 +2747,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     )
     writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
-        locations = finding["locations"]
-        location = next(
-            (candidate for candidate in locations if candidate.get("role") == "root_control"),
-            locations[0],
-        )
+        location = _sarif_primary_location(finding)
         writer.writerow(
             (
                 csv_cell(finding["occurrenceId"]),
@@ -2953,10 +2929,9 @@ def _prepare_scan_finalization(
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
-        _normalize_unsealed_deep_repository_inventory_strategy(
-            coverage,
-            expected_coverage_mode=expected_coverage_mode,
-        )
+        # Label whole-repository Deep scans as using the repository inventory.
+        if expected_coverage_mode == "deep_repository":
+            coverage["inventoryStrategy"] = "repository"
         _normalize_unsealed_open_questions(coverage)
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:

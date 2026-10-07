@@ -99,7 +99,7 @@ test("opens a private WAL database at the configured state path", async () => {
     assert.equal(
       database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
         ?.count,
-      41,
+      42,
     );
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
@@ -129,7 +129,7 @@ test("every released schema upgrades to the same current schema and remains idem
   const current = memory(t);
   applyMigrations(current);
   const expected = schema(current);
-  for (let version = 0; version <= 41; version++) {
+  for (let version = 0; version <= 42; version++) {
     const database = memory(t, version);
     applyMigrations(database);
     assert.deepEqual(
@@ -243,7 +243,7 @@ test(
         database
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        41,
+        42,
       );
     } finally {
       database.close();
@@ -721,7 +721,7 @@ test("retries an upgrade when another process holds the write lock beyond the bu
         database
           .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-        41,
+        42,
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()

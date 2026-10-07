@@ -352,5 +352,10 @@
       "CREATE TABLE finding_severity_assessments (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    occurrence_id TEXT,\n    input_sha256 TEXT NOT NULL,\n    rubric_sha256 TEXT,\n    knowledge_base_sha256 TEXT,\n    assessed_at TEXT NOT NULL,\n    source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),\n    decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),\n    level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),\n    rubric_label TEXT,\n    rationale TEXT NOT NULL,\n    confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),\n    review_trigger TEXT,\n    CHECK ((decision = 'assessed' AND level IS NOT NULL)\n        OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))\n);",
       "CREATE TABLE scan_severity_classifications (\n    scan_id TEXT PRIMARY KEY,\n    finding_ids_json TEXT NOT NULL,\n    assessed_at TEXT NOT NULL,\n    rubric_sha256 TEXT,\n    knowledge_base_sha256 TEXT\n);"
     ]
+  },
+  {
+    "version": 42,
+    "name": "editable scan names",
+    "statements": ["ALTER TABLE scans ADD COLUMN name TEXT;"]
   }
 ]

@@ -9,11 +9,10 @@ import sqlite3
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Timer
-from typing import Any
 from unittest import mock
 
 import pytest
@@ -26,6 +25,7 @@ from workbench_test_support import (
     create_workspace,
     get_scan,
     initialize_git_repository,
+    load_script,
     run_workbench,
     save_workspace,
     scan_command,
@@ -36,6 +36,8 @@ from workbench_test_support import (
     workspace_command,
     write_completed_contract,
 )
+
+SCHEMA = load_script("workbench_schema")
 
 EXPECTED_MIGRATIONS = [
     (1, "initial workbench schema"),
@@ -79,7 +81,25 @@ EXPECTED_MIGRATIONS = [
     (39, "store dedupe checkpoint bindings in columns"),
     (40, "index finding identity and comparison history"),
     (41, "checkpoint finding severity assessments"),
+    (42, "editable scan names"),
 ]
+
+
+def create_historical_database(
+    before_version: int,
+    extra_migrations: tuple[tuple[int, str, str], ...] = (),
+) -> tuple[sqlite3.Connection, Callable[[sqlite3.Connection], None]]:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    apply_migrations = namespace["apply_migrations"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    historical_migrations = (
+        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < before_version),
+        *extra_migrations,
+    )
+    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
+        apply_migrations(connection)
+    return connection, apply_migrations
 
 
 def create_migration_history(connection: sqlite3.Connection) -> None:
@@ -96,12 +116,11 @@ def create_migration_history(connection: sqlite3.Connection) -> None:
 
 def apply_historical_migrations(
     connection: sqlite3.Connection,
-    namespace: dict[str, Any],
     migrations: Iterable[tuple[int, str, str]],
     timestamp: str,
 ) -> None:
     for version, name, sql in migrations:
-        for statement in namespace["sql_statements"](sql):
+        for statement in SCHEMA.sql_statements(sql):
             connection.execute(statement)
         connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -598,7 +617,7 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
@@ -744,15 +763,7 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
 
 
 def test_scan_model_migration_preserves_existing_scans() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 25
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
     connection.execute(
         "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
@@ -795,15 +806,7 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
 
 
 def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 27
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(27)
 
     timestamp = "2026-07-01T00:00:00Z"
     for index, stop_after_no_new in enumerate((2, 7), start=1):
@@ -866,15 +869,7 @@ def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> N
 def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
     legacy_name: str, has_owner_columns: bool
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 27
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(27)
     timestamp = "2026-07-01T00:00:00Z"
     for scan_id, stop_after_no_new in (("legacy-scan-a", 2), ("legacy-scan-b", 7)):
         workspace_id = f"workspace-{scan_id}"
@@ -955,15 +950,7 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
 def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     migration_recorded: bool,
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 28
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(28)
 
     timestamp = "2026-07-01T00:00:00Z"
     connection.execute(
@@ -1012,15 +999,7 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 29
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(29)
 
     retained_digest_applied_at = "2026-08-20T10:00:00Z"
     publication_error_applied_at = "2026-08-21T11:00:00Z"
@@ -1190,7 +1169,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1298,8 +1277,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
     automation_id = str(uuid.uuid4())
     thread_id = "thread-deep-scan"
     timestamp = "2026-06-24T18:57:06Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     legacy_migrations = (
         (
             11,
@@ -1368,9 +1346,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         create_migration_history(connection)
-        apply_historical_migrations(
-            connection, namespace, (*migrations[:10], *legacy_migrations), timestamp
-        )
+        apply_historical_migrations(connection, (*migrations[:10], *legacy_migrations), timestamp)
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -1562,8 +1538,7 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
     scan_id = str(uuid.uuid4())
     legacy_target_id = "target_legacy_remote_identity"
     timestamp = "2026-06-30T00:00:00Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     legacy_migration = (
         11,
         "stable scan target identities",
@@ -1575,7 +1550,6 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
         create_migration_history(connection)
         apply_historical_migrations(
             connection,
-            namespace,
             (*migrations[:10], legacy_migration, *migrations[11:15]),
             timestamp,
         )
@@ -1954,14 +1928,13 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
     target = tmp_path / "target"
     target.mkdir()
     timestamp = "2026-07-01T00:00:00Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         create_migration_history(connection)
         current_migrations = (*migrations[: legacy_version - 1], *migrations[legacy_version:24])
-        apply_historical_migrations(connection, namespace, current_migrations, timestamp)
+        apply_historical_migrations(connection, current_migrations, timestamp)
         legacy_model, legacy_effort = add_legacy_profile_columns(connection, dynamic=dynamic)
         connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -2013,8 +1986,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     database = state_dir / "workbench.sqlite3"
     database.parent.mkdir(parents=True)
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     assert [(version, name) for version, name, _ in migrations[:2]] == [
         (1, "initial workbench schema"),
         (2, "persist capability preflight summaries"),
@@ -2022,7 +1994,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         create_migration_history(connection)
-        apply_historical_migrations(connection, namespace, migrations[:2], "2026-06-01T00:00:00Z")
+        apply_historical_migrations(connection, migrations[:2], "2026-06-01T00:00:00Z")
 
     run_workbench(state_dir, "database-info")
 
@@ -2050,8 +2022,7 @@ def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
     state_dir = tmp_path / "state"
     database = state_dir / "workbench.sqlite3"
     database.parent.mkdir(parents=True)
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     phase_migration = next(
         migration for migration in migrations if migration[1] == "phase-specific scan progress"
     )
@@ -2073,9 +2044,7 @@ def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
 
     with sqlite3.connect(database) as connection:
         create_migration_history(connection)
-        apply_historical_migrations(
-            connection, namespace, historical_migrations, "2026-07-01T00:00:00Z"
-        )
+        apply_historical_migrations(connection, historical_migrations, "2026-07-01T00:00:00Z")
 
     run_workbench(state_dir, "database-info")
 
@@ -2159,20 +2128,16 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
 
 @pytest.mark.cross_platform
 def test_workbench_upgrades_public_cli_completion_warning_migration() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    public_migrations = (
-        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < 25),
+    connection, apply_migrations = create_historical_database(
+        25,
         (
-            25,
-            "persist scan completion warnings",
-            ("ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';"),
+            (
+                25,
+                "persist scan completion warnings",
+                "ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';",
+            ),
         ),
     )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": public_migrations}):
-        apply_migrations(connection)
 
     timestamp = "2026-07-01T00:00:00Z"
     connection.execute(
@@ -2252,19 +2217,18 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
     database.parent.mkdir(parents=True)
     target = tmp_path / "target"
     target.mkdir()
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     timestamp = "2026-07-01T00:00:00Z"
 
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         create_migration_history(connection)
-        apply_historical_migrations(connection, namespace, migrations[:10], timestamp)
+        apply_historical_migrations(connection, migrations[:10], timestamp)
         model, reasoning_effort = add_legacy_profile_columns(
             connection, dynamic=has_dynamic_profile_migration
         )
         if migration_history == "canonical-metadata":
-            apply_historical_migrations(connection, namespace, migrations[10:24], timestamp)
+            apply_historical_migrations(connection, migrations[10:24], timestamp)
             connection.execute("ALTER TABLE scans ADD COLUMN model TEXT")
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -2284,7 +2248,7 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
                     migration for migration in migrations if migration[1] == migration_name
                 )
                 assert version in (12, 20)
-                for statement in namespace["sql_statements"](sql):
+                for statement in SCHEMA.sql_statements(sql):
                     connection.execute(statement)
                 legacy_migrations.append((12, migration_name, timestamp))
             connection.executemany(
@@ -2364,12 +2328,12 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     connection.row_factory = sqlite3.Row
     create_migration_history(connection)
     timestamp = "2026-07-01T00:00:00Z"
-    apply_historical_migrations(connection, namespace, namespace["MIGRATIONS"][:10], timestamp)
+    apply_historical_migrations(connection, namespace["MIGRATIONS"][:10], timestamp)
     for table in ("workspaces", "scans"):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model TEXT")
         connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT")
     continuation = next(migration for migration in namespace["MIGRATIONS"] if migration[0] == 12)
-    for statement in namespace["sql_statements"](continuation[2]):
+    for statement in SCHEMA.sql_statements(continuation[2]):
         connection.execute(statement)
     connection.executemany(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -2418,19 +2382,18 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     database = state_dir / "workbench.sqlite3"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
     timestamp = "2026-07-30T00:00:00Z"
     with sqlite3.connect(database) as connection:
         connection.execute(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
             "name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
-        apply_historical_migrations(connection, namespace, namespace["MIGRATIONS"][:10], timestamp)
+        apply_historical_migrations(connection, SCHEMA.MIGRATIONS[:10], timestamp)
         for table in ("workspaces", "scans"):
             connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model TEXT")
             connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT")
-        follow_up = next(item for item in namespace["MIGRATIONS"] if item[1] == follow_up_migration)
-        for statement in namespace["sql_statements"](follow_up[2]):
+        follow_up = next(item for item in SCHEMA.MIGRATIONS if item[1] == follow_up_migration)
+        for statement in SCHEMA.sql_statements(follow_up[2]):
             connection.execute(statement)
         connection.executemany(
             "INSERT INTO schema_migrations VALUES (?, ?, ?)",
