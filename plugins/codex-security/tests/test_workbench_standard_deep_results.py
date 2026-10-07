@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     begin_deep_scan,
     cancel_scan,
     claim_deep_scan_dedup,
@@ -2149,16 +2150,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         "complete-budget-exhausted-scan",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         "--message",
         warning,
     )["scan"]
@@ -2198,16 +2190,7 @@ def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Pa
         "complete-budget-exhausted-scan",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         check=False,
     )
 
