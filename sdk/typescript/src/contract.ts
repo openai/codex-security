@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
+import { regexes } from "zod";
 import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
@@ -1141,35 +1142,13 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw abortReason(signal);
 }
 
+const RFC3339_DATE_TIME = new RegExp(
+  regexes.datetime({ offset: true }).source,
+  "i",
+);
+
 function validRfc3339DateTime(value: string): boolean {
-  const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/i.exec(
-      value,
-    );
-  if (match === null) return false;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const offsetHour = Number(match[7] ?? 0);
-  const offsetMinute = Number(match[8] ?? 0);
-  if (
-    year < 1 ||
-    month < 1 ||
-    month > 12 ||
-    day < 1 ||
-    hour > 23 ||
-    minute > 59 ||
-    second > 59 ||
-    offsetHour > 23 ||
-    offsetMinute > 59
-  ) {
-    return false;
-  }
-  // Date.UTC maps years 1–99 to 1901–1999, which have the same leap days.
-  return day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return !value.startsWith("0000") && RFC3339_DATE_TIME.test(value);
 }
 
 function schemaError(

@@ -102,6 +102,12 @@ try {
     coverage: { ...coverage, ...changes },
   });
 
+  const rejectsDraft = (
+    input: ScanDraftInput,
+    error: RegExp,
+    boundContext: ArtifactContext = context,
+  ) => assert.rejects(recordCodexSecurityScanDraft(boundContext, input), error);
+
   const workerRoot = path.join(root, "worker-output");
   await mkdir(workerRoot);
   const workerContext = {
@@ -647,12 +653,10 @@ try {
       checkpoints,
     );
   }
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      { ...unresolvedContext, mode: "deep" },
-      closingDraft,
-    ),
+  await rejectsDraft(
+    closingDraft,
     /terminal Deep drafts cannot resolve child deferred work/,
+    { ...unresolvedContext, mode: "deep" },
   );
 
   const interruptedParentRoot = path.join(
@@ -2272,10 +2276,7 @@ try {
     path.join(root, "scan-manifest.json"),
     "utf8",
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(context, input),
-    /hardening portfolio.*safe regular file/,
-  );
+  await rejectsDraft(input, /hardening portfolio.*safe regular file/);
   assert.equal(
     await readFile(path.join(root, "scan-manifest.json"), "utf8"),
     beforeUnsafeHardening,
@@ -2805,124 +2806,85 @@ try {
     }
   }
 
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({ severity: { level: "high", score: 8.1 } }),
-    ),
+  await rejectsDraft(
+    findingInput({ severity: { level: "high", score: 8.1 } }),
     /severity\.scoringSystem/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        locations: [{ path: "src/extract.py", startLine: 8, endLine: 2 }],
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      locations: [{ path: "src/extract.py", startLine: 8, endLine: 2 }],
+    }),
     /endLine.*precede startLine/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        code_evidence: [completeCodeEvidence, completeCodeEvidence],
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      code_evidence: [completeCodeEvidence, completeCodeEvidence],
+    }),
     /code_evidence\[1\]\.id duplicates/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        codeEvidence: [completeCodeEvidence],
-        code_evidence: [completeCodeEvidence],
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      codeEvidence: [completeCodeEvidence],
+      code_evidence: [completeCodeEvidence],
+    }),
     /code_evidence\[0\]\.id duplicates/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      coverageInput({
-        deferred: [{ id: "deferred-upload", reason: "Runtime unavailable." }],
-      }),
-    ),
+  await rejectsDraft(
+    coverageInput({
+      deferred: [{ id: "deferred-upload", reason: "Runtime unavailable." }],
+    }),
     /complete coverage cannot contain deferred/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      coverageInput({
-        deferred: [
-          {
-            candidateId: "candidate-deferred-archive",
-            reason: "The upload runtime was unavailable.",
-          },
-        ],
-      }),
-    ),
+  await rejectsDraft(
+    coverageInput({
+      deferred: [
+        {
+          candidateId: "candidate-deferred-archive",
+          reason: "The upload runtime was unavailable.",
+        },
+      ],
+    }),
     /complete coverage cannot contain deferred/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      coverageInput({
-        deferred: [{ reason: "The upload runtime was unavailable." }],
-      }),
-    ),
+  await rejectsDraft(
+    coverageInput({
+      deferred: [{ reason: "The upload runtime was unavailable." }],
+    }),
     /complete coverage cannot contain deferred/,
   );
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      coverageInput({
-        surfaces: [{ label: "Uploads", disposition: "needs_follow_up" }],
-      }),
-    ),
+  await rejectsDraft(
+    coverageInput({
+      surfaces: [{ label: "Uploads", disposition: "needs_follow_up" }],
+    }),
     /complete coverage cannot contain needs_follow_up/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({ validation: { evidenceRefs: ["missing-evidence"] } }),
-    ),
+  await rejectsDraft(
+    findingInput({ validation: { evidenceRefs: ["missing-evidence"] } }),
     /evidenceRefs must refer/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        root_cause: { evidenceRefs: ["missing-root-cause-evidence"] },
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      root_cause: { evidenceRefs: ["missing-root-cause-evidence"] },
+    }),
     /root_cause\.evidenceRefs must refer/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({ root_cause: { summary: ["not a string"] } }),
-    ),
+  await rejectsDraft(
+    findingInput({ root_cause: { summary: ["not a string"] } }),
     /root_cause/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        attackPath: {
-          dataflow: { evidenceRefs: ["missing-dataflow-evidence"] },
-        },
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      attackPath: {
+        dataflow: { evidenceRefs: ["missing-dataflow-evidence"] },
+      },
+    }),
     /attackPath\.dataflow\.evidenceRefs must refer/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      context,
-      findingInput({
-        validation: { evidence_refs: ["missing-validation-evidence"] },
-      }),
-    ),
+  await rejectsDraft(
+    findingInput({
+      validation: { evidence_refs: ["missing-validation-evidence"] },
+    }),
     /validation\.evidence_refs must refer/,
   );
   await assert.rejects(
@@ -2940,29 +2902,20 @@ try {
     recordCodexSecurityScanDraft({ ...context, status: "complete" }, input),
     /running workbench scan/,
   );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      { ...context, scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608" },
-      input,
-    ),
-    /scanId does not match/,
-  );
-  await assert.rejects(
-    recordCodexSecurityScanDraft(
-      {
-        ...context,
-        targetContract: {
-          ...context.targetContract,
-          target: {
-            ...(context.targetContract!.target as Record<string, unknown>),
-            allowedKinds: [],
-          },
-        },
+  await rejectsDraft(input, /scanId does not match/, {
+    ...context,
+    scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608",
+  });
+  await rejectsDraft(input, /no allowed target kind/, {
+    ...context,
+    targetContract: {
+      ...context.targetContract,
+      target: {
+        ...(context.targetContract!.target as Record<string, unknown>),
+        allowedKinds: [],
       },
-      input,
-    ),
-    /no allowed target kind/,
-  );
+    },
+  });
 
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
 
