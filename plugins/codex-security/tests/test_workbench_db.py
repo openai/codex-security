@@ -4176,3 +4176,27 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.cross_platform
+def test_large_patch_preview_preserves_digest_checks(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    patch = b"diff --git a/src.ts b/src.ts\n+" + b"x" * (2 * 1024 * 1024) + b"\n"
+    (tmp_path / "remediation.patch").write_bytes(patch)
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    scan = {"scan_dir": str(tmp_path)}
+    namespace["require_matching_patch_digest"](scan, "remediation.patch", digest)
+    preview, stats = namespace["patch_artifact_preview"](tmp_path, "remediation.patch", digest)
+    assert preview.startswith("diff --git a/src.ts b/src.ts\n+")
+    assert preview.endswith("... patch preview truncated ...")
+    assert stats["additions"] == 1
+    assert stats["fileCount"] == 1
+    assert stats["previewTruncated"] is True
+    with pytest.raises(SystemExit) as mismatch:
+        namespace["require_matching_patch_digest"](scan, "remediation.patch", f"sha256:{'0' * 64}")
+    assert str(mismatch.value) == "Patch digest does not match the scan-local patch file."
+    captured = capfd.readouterr()
+    assert captured.out.removeprefix("\ufeff").strip(" \t\r\n") == ""
+    assert captured.err.removeprefix("\ufeff") == ""
