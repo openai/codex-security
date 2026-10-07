@@ -788,18 +788,15 @@ export async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
+    const finish =
+      <U>(settle: (value: U) => void) =>
+      (value: U): void => {
+        signal.removeEventListener("abort", onAbort);
+        settle(value);
+      };
     void Promise.resolve()
       .then(operation)
-      .then(
-        (value) => {
-          signal.removeEventListener("abort", onAbort);
-          resolvePromise(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      );
+      .then(finish(resolvePromise), finish(reject));
   });
 }
 

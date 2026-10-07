@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString } from "./value.js";
 
 import {
@@ -1881,28 +1882,9 @@ export async function main(
     selection: MatchingCliOptions,
   ): Promise<JsonObject> => {
     const controller = new AbortController();
-    let firstSignalAt = 0;
-    const cancel = (signal: SignalName): void => {
-      if (controller.signal.aborted) {
-        if (
-          signal === controller.signal.reason &&
-          dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
-        ) {
-          return;
-        }
-        removeListeners();
-        dependencies.forceExit(signal);
-      } else {
-        firstSignalAt = dependencies.now();
-        controller.abort(signal);
-      }
-    };
-    const onInterrupt = (): void => cancel("SIGINT");
-    const onTerminate = (): void => cancel("SIGTERM");
-    const removeListeners = (): void => {
-      signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
-    };
-    signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+    const removeListeners = listenForAbort(dependencies, controller, (signal) =>
+      dependencies.forceExit(signal),
+    );
     let previousProgress = "";
     try {
       const result = await operation({
@@ -9695,23 +9677,6 @@ if (invokedAsMain()) {
       process.exitCode = 2;
     },
   );
-}
-
-function listenForAbort(
-  dependencies: Pick<
-    CliDependencies,
-    "addSignalListener" | "removeSignalListener"
-  >,
-  controller: AbortController,
-): () => void {
-  const onInterrupt = () => controller.abort("SIGINT");
-  const onTerminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
-  return () => {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
-  };
 }
 
 function withoutLinearCredentials(

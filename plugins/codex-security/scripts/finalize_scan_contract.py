@@ -94,6 +94,10 @@ class RecoverableContractError(ContractError):
     """Raised when report projection can safely be retried before publication."""
 
 
+class SealedArtifactError(ContractError):
+    """Raised when an export would overwrite a sealed scan artifact."""
+
+
 def _reject_non_finite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value!r} is not supported")
 
@@ -2867,7 +2871,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         raise ContractError(f"{relative_output}: unable to inspect export output") from exc
     for artifact_path in artifact_paths:
         if artifact_path == relative_output:
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
         if output_metadata is None:
@@ -2880,7 +2884,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         finally:
             os.close(descriptor)
         if os.path.samestat(output_metadata, artifact_metadata):
-            raise ContractError(
+            raise SealedArtifactError(
                 f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
             )
     write_scan_local_bytes(

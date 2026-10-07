@@ -55,7 +55,6 @@ const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
 ]);
 
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
 const workbenchStateSelectionLock = new AsyncLock();
 
@@ -2231,9 +2230,17 @@ function buildUserInputElicitation(
   const isSingleQuestion = questions.length === 1;
   return {
     mode: "form" as const,
-    message: isSingleQuestion
-      ? questions[0]!.question
-      : "Codex Security needs your input before it can continue.",
+    message: questions
+      .map((question) =>
+        [
+          ...(isSingleQuestion ? [] : [question.header]),
+          question.question,
+          ...question.options.map(
+            (option) => `- ${option.label}: ${option.description}`,
+          ),
+        ].join("\n"),
+      )
+      .join("\n\n"),
     requestedSchema: {
       type: "object" as const,
       properties: Object.fromEntries(
@@ -2242,6 +2249,7 @@ function buildUserInputElicitation(
           {
             type: "string" as const,
             title: question.header,
+            description: question.question,
             oneOf: question.options.map((option) => ({
               const: option.label,
               title: option.label,
@@ -2431,7 +2439,13 @@ async function executeWorkbenchWithStateSelection(
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      logWorkbenchStateFallback();
+      console.error(
+        JSON.stringify({
+          component: "codex_security_workbench",
+          event: "state_fallback_pinned",
+          reason: "persistent_sqlite_unwritable",
+        }),
+      );
       return await executeWorkbench(
         pythonCommand,
         args,
@@ -2518,18 +2532,6 @@ async function pinFallbackWorkbenchStateDir(): Promise<string> {
     return stateDir;
   })();
   return await fallbackWorkbenchStateDir;
-}
-
-function logWorkbenchStateFallback(): void {
-  if (fallbackWorkbenchStateLogged) return;
-  fallbackWorkbenchStateLogged = true;
-  console.error(
-    JSON.stringify({
-      component: "codex_security_workbench",
-      event: "state_fallback_pinned",
-      reason: "persistent_sqlite_unwritable",
-    }),
-  );
 }
 
 function workbenchScriptPath(): string {
