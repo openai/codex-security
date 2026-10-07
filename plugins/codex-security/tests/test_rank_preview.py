@@ -8,7 +8,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
-from rank_preview import DEFAULT_PREVIEW_BYTES, mask_c_style_source, preview_for, preview_for_bytes
+from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for, preview_for_bytes
 
 
 @pytest.fixture(
@@ -150,7 +150,7 @@ def test_preview_for_rejects_nonpositive_read_limit(max_read_bytes: int) -> None
 @pytest.mark.parametrize(
     ("filename", "prefix", "suffix", "expected"),
     [
-        ("source.py", b"def visible():\n    value = (", b"1)\n", "function visible"),
+        ("source.py", b"def visible():\n    value = (", b"1)\n", "def visible():\n    value = ("),
         ("source.css", b"body { color: red; }\n\xf0\x9f", b"\x98\x80", "body { color: red; }"),
         ("source.css", b"body { color: red; }\n", b"\0binary", "body { color: red; }"),
     ],
@@ -179,480 +179,65 @@ def generate_preview(
     return preview
 
 
-def test_python_preview_lists_top_level_symbols_and_direct_methods(tmp_path: Path) -> None:
-    imports = "\n".join(f"import package_{index}" for index in range(30))
-    source = f"""{imports}
-
-@router.post("/login")
-async def login(request, token=None):
-    def nested_helper():
-        return None
-    return nested_helper()
-
-class UserService(BaseService):
-    @classmethod
-    def create(cls, config):
-        return cls(config)
-
-    async def refresh(self):
-        return None
-"""
-
-    preview = generate_preview(tmp_path, "service.py", source)
-
-    assert "@router.post('/login') async function login(request, token)" in preview
-    assert "class UserService(BaseService)" in preview
-    assert "@classmethod method UserService.create" in preview
-    assert "async method UserService.refresh" in preview
-    assert "package_" not in preview
-    assert "nested_helper" not in preview
-
-
 @pytest.mark.parametrize(
-    ("filename", "source", "expected"),
-    [
-        (
-            "controller.js",
-            """if (enabled) {
-  function conditionalOnly() {}
-}
-export class UserController {
-  async login(request) {
-    function nestedHelper() {}
-    return request;
-  }
-}
-export const verifyToken = (token) => token;
-""",
-            ("class UserController", "method UserController.login", "function verifyToken"),
-        ),
-        (
-            "store.ts",
-            """export interface TokenStore {
-  get(id: string): Token;
-}
-export function loadStore(): TokenStore { throw new Error(); }
-""",
-            ("interface TokenStore", "method TokenStore.get", "function loadStore"),
-        ),
-        (
-            "UserService.java",
-            """public class UserService {
-  @PostMapping("/login") public User login(String name) { return null; }
-}
-""",
-            ("class UserService", "method UserService.login"),
-        ),
-        (
-            "UserController.cs",
-            """public class UserController {
-  [HttpPost("login")] public T Login<T>(User user) { return default(T); }
-}
-""",
-            ("class UserController", "method UserController.Login"),
-        ),
-        (
-            "user_service.rb",
-            """class FirstService
-  def call(user)
-    true
-  end
-end
-class SecondService
-  def call(user)
-    true
-  end
-end
-""",
-            (
-                "class FirstService",
-                "method FirstService.call",
-                "class SecondService",
-                "method SecondService.call",
-            ),
-        ),
-        (
-            "UserService.php",
-            """<?php
-final class UserService {
-  # A comment brace must not change declaration depth: {
-  public function authenticate($user) { return true; }
-}
-""",
-            ("class UserService", "method UserService.authenticate"),
-        ),
-        (
-            "user_service.go",
-            """package service
-type UserService struct {}
-func (service *UserService) Authenticate(user User) bool { return true }
-""",
-            ("struct UserService", "method UserService.Authenticate"),
-        ),
-        (
-            "user_service.cpp",
-            """Widget widget(options);
-class UserService {
-public:
-  bool authenticate(const User& user) { return true; }
-};
-bool verify_token(const Token& token) { return true; }
-""",
-            ("class UserService", "method UserService.authenticate", "function verify_token"),
-        ),
-        (
-            "UserService.kt",
-            """class UserService {
-  fun authenticate(user: User): Boolean { return true }
-}
-""",
-            ("class UserService", "method UserService.authenticate"),
-        ),
-        (
-            "UserService.scala",
-            """class UserService {
-  def authenticate(user: User): Boolean = { true }
-}
-""",
-            ("class UserService", "method UserService.authenticate"),
-        ),
-        (
-            "user_service.rs",
-            """pub fn borrow<'a>() {}
-struct UserService {}
-impl UserService {
-  pub fn authenticate(&self, user: User) -> bool { true }
-}
-""",
-            (
-                "function borrow",
-                "struct UserService",
-                "impl UserService",
-                "method UserService.authenticate",
-            ),
-        ),
-        (
-            "UserService.swift",
-            """final class UserService {
-  func authenticate(user: User) -> Bool { return true }
-}
-""",
-            ("class UserService", "method UserService.authenticate"),
-        ),
-        (
-            "user_service.ex",
-            """defmodule UserService do
-  def authenticate(user), do: true
-end
-""",
-            ("module UserService", "function authenticate"),
-        ),
-        (
-            "service.clj",
-            """(defprotocol UserService
-  (authenticate [service user]))
-(defn verify-token [token] true)
-""",
-            ("defprotocol UserService", "defn verify-token"),
-        ),
-        (
-            "service.proto",
-            """service UserService {
-  rpc Authenticate (User) returns (Result);
-}
-message User {}
-""",
-            ("service UserService", "rpc Authenticate", "message User"),
-        ),
-        (
-            "schema.graphql",
-            """type User { id: ID! }
-type Query { user(id: ID!): User }
-query CurrentUser { user(id: "me") { id } }
-""",
-            ("type User", "type Query", "query CurrentUser"),
-        ),
-        (
-            "schema.sql",
-            """CREATE TABLE users (id BIGINT PRIMARY KEY);
-CREATE PROCEDURE rotate_tokens() BEGIN SELECT 1; END;
-""",
-            ("table users", "procedure rotate_tokens"),
-        ),
-        (
-            "service.json",
-            '{"service":{"host":"localhost","port":443},"enabled":true}',
-            ("key service [host, port]", "key enabled"),
-        ),
-    ],
+    "filename", ["source.py", "source.cs", "source.json", "source.unlisted", "entrypoint"]
 )
-def test_enterprise_language_previews_list_declarations(
-    tmp_path: Path, filename: str, source: str, expected: tuple[str, ...]
-) -> None:
-    preview = generate_preview(tmp_path, filename, source, preview_bytes=4096)
+def test_small_source_is_complete_regardless_of_extension(tmp_path: Path, filename: str) -> None:
+    source = (
+        "\n\n# Source context\n"
+        + "\n".join(f"setting_{index} = {index}" for index in range(24))
+        + '\n\ndef handle(request):\n    text = "two  spaces"\n'
+        + '    return subprocess.run(request.args["cmd"], shell=True)\n\n'
+    )
+    assert len(source.strip().encode("utf-8")) < DEFAULT_PREVIEW_BYTES
 
-    for declaration in expected:
-        assert declaration in preview
-    assert "nestedHelper" not in preview
-    assert "conditionalOnly" not in preview
-    assert "function widget" not in preview
+    preview = generate_preview(tmp_path, filename, source)
 
-
-@pytest.mark.parametrize("suffix", [".h", ".hpp", ".hh", ".hxx", ".HH", ".HXX"])
-def test_cpp_headers_use_structural_previews(tmp_path: Path, suffix: str) -> None:
-    source = """typedef void Callback();
-Widget widget(options);
-template <typename T>
-class Box {
-public:
-  Box() {}
-  T get() const { return value; }
-};
-inline int answer() { return 42; }
-"""
-    path = tmp_path / f"box{suffix}"
-    preview = generate_preview(tmp_path, path.name, source)
-
-    assert "class Box" in preview
-    assert "method Box.Box" in preview
-    assert "method Box.get" in preview
-    assert "function answer" in preview
-    assert "function Callback" not in preview
-    assert "function widget" not in preview
-    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
+    assert preview == source.strip()
+    assert preview_for_bytes(Path(filename), source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
         preview,
         False,
     )
 
 
 @pytest.mark.parametrize(
-    "suffix", [".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".mm", ".CPP"]
-)
-def test_cpp_raw_string_does_not_hide_following_declarations(tmp_path: Path, suffix: str) -> None:
-    source = """void before() {}
-const char* text = R"tag("{)tag";
-class Service {
-public:
-  const char* value() { return R"("{)"; }
-  void visible() {}
-};
-void after() {}
-"""
-
-    preview = generate_preview(tmp_path, f"sample{suffix}", source)
-
-    assert preview.splitlines() == [
-        "function before",
-        "class Service",
-        "method Service.value",
-        "method Service.visible",
-        "function after",
-    ]
-
-
-@pytest.mark.parametrize("prefix", ["", "u8", "u", "U", "L"])
-@pytest.mark.parametrize("delimiter", ["", "tag", "abcdefghijklmnop"])
-def test_cpp_raw_string_body_is_not_code(tmp_path: Path, prefix: str, delimiter: str) -> None:
-    source = f'''void before() {{}}
-const auto text = {prefix}R"{delimiter}(
-void fake() {{}}
-" {{ /*
-){delimiter}";
-void after() {{}}
-'''
-
-    preview = generate_preview(tmp_path, "sample.cpp", source)
-
-    assert preview.splitlines() == ["function before", "function after"]
-
-
-@pytest.mark.parametrize("macro", ["ERROR", "FORMAT_u8R", "x\u0301R"])
-def test_cpp_macro_before_string_is_not_a_raw_string(tmp_path: Path, macro: str) -> None:
-    source = f"""#define {macro} "error: "
-void before() {{}}
-const char* text = {macro}"(connection failed";
-void after() {{}}
-"""
-
-    preview = generate_preview(tmp_path, "sample.cpp", source)
-
-    assert preview.splitlines() == ["function before", "function after"]
-
-
-def test_expression_bodied_function_does_not_consume_next_type_body(tmp_path: Path) -> None:
-    source = """fun answer(): Int = 42
-class Service {
-  fun run() {}
-}
-"""
-
-    preview = generate_preview(tmp_path, "Service.kt", source)
-
-    assert "function answer" in preview
-    assert "class Service" in preview
-    assert "method Service.run" in preview
-
-
-def test_protocol_requirement_does_not_consume_following_function(tmp_path: Path) -> None:
-    source = """protocol Required {
-  func run()
-}
-func visible() {}
-"""
-
-    preview = generate_preview(tmp_path, "Required.swift", source)
-
-    assert "method Required.run" in preview
-    assert "function visible" in preview
-
-
-def test_multiline_string_and_commented_annotation_do_not_change_depth(tmp_path: Path) -> None:
-    source = '''public class Visible {
-  String template = """
-    { notABlock }
-  """;
-  /*
-   * @Route("/not-a-route")
-   */
-  public void run() {}
-}
-'''
-
-    preview = generate_preview(tmp_path, "Visible.java", source)
-
-    assert "class Visible" in preview
-    assert "method Visible.run" in preview
-    assert "Route" not in preview
-
-
-@pytest.mark.parametrize(
-    ("filename", "source", "expected"),
+    ("filename", "source"),
     [
         (
-            "api.rs",
-            """mod api {
-  pub fn handle() {}
-}
-""",
-            "function handle",
+            "security.yaml",
+            "security:\n  authentication_required: false\n  allowed_origins: ['*']\n",
         ),
         (
-            "api.ts",
-            """declare module "api" {
-  export function handle(): void;
-}
-""",
-            "function handle",
-        ),
-        (
-            "api.cpp",
-            """extern "C" {
-  void handle() {}
-}
-""",
-            "function handle",
+            "security.json",
+            '{"security": {"authentication_required": false, "allowed_origins": ["*"]}}\n',
         ),
     ],
 )
-def test_namespace_like_containers_expose_declarations(
-    tmp_path: Path, filename: str, source: str, expected: str
-) -> None:
-    preview = generate_preview(tmp_path, filename, source)
-
-    assert expected in preview
+def test_small_configuration_preserves_values(tmp_path: Path, filename: str, source: str) -> None:
+    assert generate_preview(tmp_path, filename, source) == source.strip()
 
 
-def test_kotlin_companion_object_lists_factory_method(tmp_path: Path) -> None:
-    source = """class Service {
-  companion object {
-    fun create() {}
-  }
-  fun visible() {}
-}
-"""
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+def test_source_preview_normalizes_newlines(tmp_path: Path, newline: str) -> None:
+    expected = 'def handle():\n    text = "two  spaces"\n\n    return text'
+    data = (expected.replace("\n", newline) + newline).encode("utf-8")
+    path = tmp_path / "source.py"
+    path.write_bytes(data)
 
-    preview = generate_preview(tmp_path, "Service.kt", source)
-
-    assert "object Service.Companion" in preview
-    assert "method Service.Companion.create" in preview
-    assert "method Service.visible" in preview
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == (expected, False)
+    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (expected, False)
 
 
-@pytest.mark.parametrize(
-    "statement",
-    [
-        "yield /if(enabled)/;",
-        "yield /foo|if(enabled)/;",
-        "yield /foo:if(enabled)/;",
-        "yield /* pattern */ /else/.test(input) ? { ratio: count / total } : null;",
-        "yield /while(enabled)/;",
-        "const matcher = () => /if(enabled)/;",
-        "if (enabled) /{/.test(input);",
-        "if (enabled) {} else /{/.test(input);",
-        "return object.if(enabled) / { valueOf() { return count / total; } };",
-        "return value /* units */ / { valueOf() { return count / total; } };",
-    ],
-)
-def test_javascript_ambiguous_syntax_preserves_source(tmp_path: Path, statement: str) -> None:
-    source = f"function* patterns() {{ {statement} }} // note\nfunction authorize() {{}}"
-
-    assert generate_preview(tmp_path, "example.js", source) == source
+@pytest.mark.parametrize("preview_bytes", [0, -1])
+def test_nonpositive_preview_budget_returns_no_source(preview_bytes: int) -> None:
+    assert preview_for_bytes(Path("source.py"), b"value = 1\n", preview_bytes) == ("", False)
 
 
-def test_javascript_yield_identifier_preserves_division_source(tmp_path: Path) -> None:
-    source = (
-        "function ratio() { var yield = 12; return yield / divisor; } // note\n"
-        "function authorize() {}"
-    )
-
-    assert generate_preview(tmp_path, "example.js", source) == source
+def test_empty_source_preview(tmp_path: Path) -> None:
+    assert generate_preview(tmp_path, "empty.py", "\n \t\n") == ""
 
 
-@pytest.mark.parametrize("operator", ["++", "--"])
-def test_typescript_postfix_assertion_preserves_division_source(
-    tmp_path: Path, operator: str
-) -> None:
-    source = (
-        "class Service {\n"
-        f"calculate() {{ return count{operator}! /* known value */ / "
-        "(() => { return count / total; })(); }\n"
-        "authorize() {}\n}"
-    )
-
-    assert generate_preview(tmp_path, "example.ts", source) == source
-
-
-@pytest.mark.parametrize(
-    "suffix", [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"]
-)
-def test_javascript_family_uses_source_for_slash_expressions(tmp_path: Path, suffix: str) -> None:
-    source = "function ratio() { return count / total; }\nfunction authorize() {}"
-
-    assert generate_preview(tmp_path, f"example{suffix}", source) == source
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "return 1;",
-        'return "a/b";',
-        "return 'a/b';",
-        "return `a/b`;",
-        "/* /if(enabled)/ */ return 1;",
-        "// /if(enabled)/\nreturn 1;",
-    ],
-)
-def test_javascript_simple_and_quoted_sources_keep_outlines(tmp_path: Path, body: str) -> None:
-    source = f"class Service {{\ncheck() {{ {body} }}\nauthorize() {{}}\n}}"
-
-    assert generate_preview(tmp_path, "example.js", source).splitlines() == [
-        "class Service",
-        "method Service.check",
-        "method Service.authorize",
-    ]
-
-
-def test_javascript_source_sample_respects_preview_budget(tmp_path: Path) -> None:
+def test_large_source_preview_preserves_head_and_tail(tmp_path: Path) -> None:
     source = (
         "function first() { return count / total; }\n"
         + ("// " + "é" * 128 + "\n") * 100
@@ -670,166 +255,20 @@ def test_javascript_source_sample_respects_preview_budget(tmp_path: Path) -> Non
     assert "..." in preview
 
 
-def test_javascript_slash_fallback_does_not_scan_regex_suffixes() -> None:
-    class CountedSource(str):
-        reads = 0
-
-        def __getitem__(self, key):
-            self.reads += 1
-            return super().__getitem__(key)
-
-    reads = []
-    for repetitions in (1000, 2000):
-        source = CountedSource(",/[" * repetitions)
-        assert mask_c_style_source(source, ".js") is None
-        reads.append(source.reads)
-
-    assert reads[1] < 3 * reads[0]
-
-
-def test_python_preview_ignores_utf8_bom(tmp_path: Path) -> None:
+def test_source_preview_ignores_utf8_bom(tmp_path: Path) -> None:
     source = b"def first():\n    pass\n\ndef second():\n    pass\n"
     path = tmp_path / "example.py"
     path.write_bytes(b"\xef\xbb\xbf" + source)
 
     expected = preview_for_bytes(path, source, DEFAULT_PREVIEW_BYTES)
-    assert expected[0].splitlines() == ["function first()", "function second()"]
+    assert expected == (source.decode("utf-8").strip(), False)
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
 
 
-def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> None:
-    source = """export class Controller {
-  login = async (request: Request) => request;
-  public refresh: Handler = (request) => request;
-  protected validate = value => Boolean(value);
-}
-"""
-
-    preview = generate_preview(tmp_path, "controller.ts", source)
-
-    assert "method Controller.login" in preview
-    assert "method Controller.refresh" in preview
-    assert "method Controller.validate" in preview
-
-
-@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
-@pytest.mark.parametrize("indent", ["", "  "])
-def test_php_heredoc_terminator_can_continue_expression(
-    tmp_path: Path, opener: str, indent: str
-) -> None:
-    source = f"""<?php
-function before() {{}}
-
-$values = [<<<{opener}
-{indent}hello
-{indent}TXT,
-];
-
-function after() {{}}
-"""
-
-    preview = generate_preview(tmp_path, "sample.php", source)
-
-    assert "function before" in preview
-    assert "function after" in preview
-
-
-@pytest.mark.parametrize("opener", ["TXT", '"TXT"', "'TXT'"])
-def test_php_heredoc_terminator_preserves_following_brace(tmp_path: Path, opener: str) -> None:
-    source = f"""<?php
-class Service {{
-  public function template() {{
-    return <<<{opener}
-hello
-TXT; }}
-  public function visible() {{}}
-}}
-"""
-
-    preview = generate_preview(tmp_path, "Service.php", source)
-
-    assert "method Service.template" in preview
-    assert "method Service.visible" in preview
-
-
-@pytest.mark.parametrize("opener", ["TXT", "'TXT'"])
-@pytest.mark.parametrize("suffix", ["_more", "2", "😀", "\u0301"])
-def test_php_heredoc_label_prefix_stays_in_body(tmp_path: Path, opener: str, suffix: str) -> None:
-    source = f"""<?php
-function before() {{}}
-$value = <<<{opener}
-TXT{suffix} {{
-TXT;
-function after() {{}}
-"""
-
-    preview = generate_preview(tmp_path, "sample.php", source)
-
-    assert "function before" in preview
-    assert "function after" in preview
-
-
-def test_php_heredoc_does_not_hide_following_method(tmp_path: Path) -> None:
-    source = """<?php
-class Service {
-  public function template() {
-    $value = <<<TXT
-{
-TXT;
-  }
-  public function visible() {}
-}
-"""
-
-    preview = generate_preview(tmp_path, "Service.php", source)
-
-    assert "method Service.template" in preview
-    assert "method Service.visible" in preview
-
-
-def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
-    source = """import package
-broken = (
-first_runtime_line()
-second_runtime_line()
-"""
-
-    preview = generate_preview(tmp_path, "broken.py", source)
-
-    assert preview.splitlines() == [
-        "import package",
-        "broken = (",
-        "first_runtime_line()",
-        "second_runtime_line()",
-    ]
-
-
-@pytest.mark.parametrize(
-    "prefix", ["", "def visible():\n    pass\n"], ids=["sampled-source", "simple-outline"]
-)
-def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str) -> None:
-    source = prefix + "value = 1\n"
-    path = tmp_path / "generated.py"
-    data = source.encode("utf-8")
-    path.write_bytes(data)
-
-    with patch("rank_preview.ast.parse", side_effect=RecursionError):
-        preview, is_binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
-        assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (preview, False)
-
-    assert not is_binary
-    assert preview
-    assert len(preview.encode("utf-8")) <= DEFAULT_PREVIEW_BYTES
-    if prefix:
-        assert preview == "function visible"
-    else:
-        assert source.startswith(preview)
-
-
-def test_fallback_preview_uses_head_and_evenly_sampled_nonblank_lines(tmp_path: Path) -> None:
+def test_large_source_preview_samples_nonblank_lines(tmp_path: Path) -> None:
     source = "\n\n".join(f"line_{index:02d} {{ color: red; }}" for index in range(40))
 
-    preview = generate_preview(tmp_path, "styles.css", source)
+    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=700)
 
     assert preview.splitlines() == [
         *(f"line_{index:02d} {{ color: red; }}" for index in range(12)),
@@ -839,15 +278,6 @@ def test_fallback_preview_uses_head_and_evenly_sampled_nonblank_lines(tmp_path: 
             for index in (12, 15, 18, 21, 24, 27, 30, 33, 36, 39)
         ),
     ]
-
-
-def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path) -> None:
-    source = "\n".join(f"line_{index:02d}" for index in range(22))
-
-    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=4096)
-
-    assert preview.splitlines() == [f"line_{index:02d}" for index in range(22)]
-    assert "..." not in preview
 
 
 def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:

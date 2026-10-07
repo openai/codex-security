@@ -10,7 +10,7 @@ This script stays deliberately model-free:
   local working-tree patches.
 
 Candidate selection uses the existing path exclusions and binary detection,
-not a language-extension allowlist. Unknown formats use sampled text previews.
+not a language-extension allowlist. All formats use bounded source previews.
 """
 
 from __future__ import annotations

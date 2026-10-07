@@ -13,8 +13,6 @@ class SourceCase(NamedTuple):
     path: str
     before: str
     after: str
-    # Sampled previews preserve the changed text; structural previews override it.
-    preview: str | None = None
 
 
 SOURCE_CASES = (
@@ -24,13 +22,11 @@ SOURCE_CASES = (
         "src/raw.cpp",
         "void before() {}",
         'void before() {}\nconst char* text = R"tag("{)tag";\nvoid after() {}',
-        "function before\nfunction after",
     ),
     SourceCase(
         "src/raw.go",
         "package sample\n\nfunc Before() {}",
         "package sample\n\nfunc Before() {}\n\nconst Root = `C:\\`\n\nfunc After() {}",
-        "function Before\nfunction After",
     ),
     *(
         SourceCase(
@@ -38,7 +34,6 @@ SOURCE_CASES = (
             "class Before {}",
             f"class Before {{}}\nclass Service {{\n  string Text = {literal};\n"
             "  void Visible() {}\n}\nclass After {}",
-            "class Before\nclass Service\nmethod Service.Visible\nclass After",
         )
         for name, literal in (
             ("three_quotes", '"""\n    { "a": "b" }\n    """'),
@@ -71,7 +66,6 @@ SOURCE_CASES = (
             f"include/{name}",
             "inline int before() { return 1; }",
             "inline int after() { return 2; }",
-            "function after",
         )
         for name in ("base.h", "base.hpp", "lower.hh", "lower.hxx", "upper.HH", "upper.HXX")
     ),
