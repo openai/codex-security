@@ -961,8 +961,15 @@ async function testOpenAiCredentialsReachWorker() {
       requiresOpenaiAuth: boolean;
     };
     nativeProvider?: string;
+    configuration?: string;
   }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
+    {
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+      // Optional null auth is omitted from the SDK's private TOML snapshot.
+      configuration: 'model_provider = "openai"\n[model_providers.openai]\n',
+    },
     {
       openai: "  synthetic-openai-key  ",
       codex: " ",
@@ -1030,6 +1037,7 @@ async function testOpenAiCredentialsReachWorker() {
       "CODEX_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
+      "CODEX_SECURITY_CONFIG_PATH",
       ...Object.keys(runtimeEnvironment),
     ].map((name) => [name, process.env[name]] as const);
     const originalSpawn = childProcess.spawn;
@@ -1038,6 +1046,9 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      const configPath = path.join(fixture.root, "scan-settings.toml");
+      await writeFile(configPath, entry.configuration ?? "");
+      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
         await writeFile(
@@ -1391,7 +1402,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   auth: {
                     type: "command",
                     command: "synthetic-auth",
-                    cwd: path.join(codexHome, `helpers ${index}`),
+                    cwd: path.join(
+                      fixture.root,
+                      `selected helper home ${index}`,
+                    ),
                     args: [String(index)],
                     env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                   },
@@ -1554,7 +1568,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 workerConfigurations[index].path;
               process.env.XDG_CACHE_HOME = path.join(
                 fixture.root,
-                `cache-${index}`,
+                `cache-${index} `,
               );
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
@@ -1648,7 +1662,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               invocation.cacheDirectory,
-              path.join(fixture.root, `cache-${index}`),
+              path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>
@@ -1789,7 +1803,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.cacheDirectory,
               path.join(
                 fixture.root,
-                `cache-${workerConfigurations.indexOf(selectedProvider)}`,
+                `cache-${workerConfigurations.indexOf(selectedProvider)} `,
               ),
             );
             assert.deepEqual(

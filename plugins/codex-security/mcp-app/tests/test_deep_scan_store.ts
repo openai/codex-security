@@ -12,17 +12,9 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
   new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
 );
 
-const canonical = {
-  inScopeFilesPath:
-    "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-  candidateLedgerPath:
-    "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-};
-
 await testBeginProtocolAndParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
-testCanonicalNullAndPartialParsing();
 testRunErrorParsing();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
@@ -374,17 +366,14 @@ async function testCanonicalCommitProtocol() {
   const reducerId = randomUUID();
   const resultManifestPath =
     "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
-  const runWorkbench = mock.fn(async (args: string[]) => {
-    return stateResult(scanId, { deepScan: { canonicalArtifacts: canonical } });
-  });
+  const runWorkbench = mock.fn(async (args: string[]) => stateResult(scanId));
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  const state = await store.commitDedup({
+  await store.commitDedup({
     id: reducerId,
     scanId,
     newFindings: 1,
     resultManifestPath,
   });
-  assert.deepEqual(state.canonicalArtifacts, canonical);
   assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
     "commit-deep-scan-dedup",
     "--scan-id",
@@ -798,9 +787,7 @@ function idempotentPersistenceScenarios() {
     },
     {
       operation: "commit-deep-scan-dedup",
-      result: stateResult(scanId, {
-        deepScan: { canonicalArtifacts: canonical },
-      }),
+      result: stateResult(scanId),
       invoke: (store: Store) =>
         store.commitDedup({
           id: reducerId,
@@ -921,45 +908,6 @@ function testRunErrorParsing() {
   );
   assert.equal(state.createdAt, createdAt);
   assert.equal(state.error, "discovery retries exhausted");
-}
-
-function testCanonicalNullAndPartialParsing() {
-  assert.equal(
-    parseDeepScan(
-      stateResult(randomUUID(), {
-        deepScan: { canonicalArtifacts: null },
-      }),
-    ).canonicalArtifacts,
-    undefined,
-  );
-  assert.throws(
-    () =>
-      parseDeepScan(
-        stateResult(randomUUID(), {
-          deepScan: {
-            canonicalArtifacts: {
-              inScopeFilesPath:
-                "/fixture/scans/run/artifacts/02_discovery/in_scope_files.txt",
-            },
-          },
-        }),
-      ),
-    /invalid deepScan\.canonicalArtifacts\.candidateLedgerPath/,
-  );
-  assert.throws(
-    () =>
-      parseDeepScan(
-        stateResult(randomUUID(), {
-          deepScan: {
-            canonicalArtifacts: {
-              candidateLedgerPath:
-                "/fixture/scans/run/artifacts/02_discovery/candidate_ledger.jsonl",
-            },
-          },
-        }),
-      ),
-    /invalid deepScan\.canonicalArtifacts\.inScopeFilesPath/,
-  );
 }
 
 function stateResult(

@@ -30,10 +30,13 @@ describe("CodexSecurity orchestration", () => {
     "profile-inherited-cwd",
     "profile-overridden-cwd",
     "profile-strict",
+    "null optional args",
+    "null optional cwd",
   ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
-      const profile = selection !== "direct";
+      const profile =
+        selection === "profile" || selection.startsWith("profile-");
       const profileProviders = profile && selection !== "profile";
       const inheritedCwd = selection === "profile-inherited-cwd";
       const overriddenCwd = selection === "profile-overridden-cwd";
@@ -51,9 +54,13 @@ describe("CodexSecurity orchestration", () => {
       await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
       const auth = {
         command: "./synthetic-auth",
-        args: ["token"],
+        args: selection === "null optional args" ? null : ["token"],
         refresh_interval_ms: 1000,
-        ...(profile ? { cwd: "helpers" } : {}),
+        ...(profile
+          ? { cwd: "helpers" }
+          : selection === "null optional cwd"
+            ? { cwd: null }
+            : {}),
       };
       const definition = {
         name: "Synthetic",
@@ -180,7 +187,9 @@ describe("CodexSecurity orchestration", () => {
         const provider = {
           ...definition,
           auth: {
-            ...auth,
+            command: auth.command,
+            refresh_interval_ms: auth.refresh_interval_ms,
+            ...(auth.args === null ? {} : { args: auth.args }),
             ...(inheritedCwd || overriddenCwd
               ? { command: "./selected-auth" }
               : {}),
@@ -603,7 +612,20 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
     const runs: Array<{ home: string; apiKey?: string }> = [];
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          model_provider: "synthetic.account",
+          model_providers: {
+            "synthetic.account": {
+              name: "Synthetic account provider",
+              wire_api: "responses",
+              requires_openai_auth: true,
+              auth: null,
+            },
+          },
+        },
+      },
       {
         environment: {
           CODEX_HOME: ambientHome,

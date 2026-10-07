@@ -181,7 +181,13 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test.each(["root", "profile override", "profile only"] as const)(
+test.each([
+  "root",
+  "selected profile",
+  "null profile",
+  "profile override",
+  "profile only",
+] as const)(
   "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
     const root = await temporaryDirectory();
@@ -247,12 +253,12 @@ test.each(["root", "profile override", "profile only"] as const)(
                   : {
                       model_providers: {
                         openrouter:
-                          selection === "root"
-                            ? provider
-                            : {
+                          selection === "profile override"
+                            ? {
                                 ...provider,
                                 env_key: "SYNTHETIC_UNUSED_KEY",
-                              },
+                              }
+                            : provider,
                         "required.gateway": {
                           name: "Managed selection",
                           wire_api: "responses",
@@ -268,15 +274,25 @@ test.each(["root", "profile override", "profile only"] as const)(
                         selected: {
                           features: featureOverrides,
                           web_search: webSearch,
-                          model_provider: "openrouter",
-                          model_providers: {
-                            openrouter: provider,
-                            "required.gateway": {
-                              name: "Managed selection",
-                              wire_api: "responses",
-                              env_key: "SYNTHETIC_REQUIRED_KEY",
-                            },
-                          },
+                          ...(selection === "null profile"
+                            ? {
+                                model_provider: null,
+                                model: null,
+                                model_reasoning_effort: null,
+                              }
+                            : selection === "selected profile"
+                              ? {}
+                              : {
+                                  model_provider: "openrouter",
+                                  model_providers: {
+                                    openrouter: provider,
+                                    "required.gateway": {
+                                      name: "Managed selection",
+                                      wire_api: "responses",
+                                      env_key: "SYNTHETIC_REQUIRED_KEY",
+                                    },
+                                  },
+                                }),
                         },
                       },
                     }),
@@ -820,7 +836,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   return plugin;
 }
 
-test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
+test.each([
+  "SYNTHETIC_CUSTOM_API_KEY",
+  "CODEX_API_KEY",
+  "OPENROUTER_API_KEY",
+  "FIREWORKS_API_KEY",
+])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
     const root = await temporaryDirectory();
@@ -832,24 +853,36 @@ test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
+    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
+      providerKey,
+    );
+    const providerId = external
+      ? providerKey.split("_")[0]!.toLowerCase()
+      : "synthetic.gateway";
+    const headerKey =
+      process.platform === "win32"
+        ? "synthetic_custom_header"
+        : "SYNTHETIC_CUSTOM_HEADER";
     const providerEnvironment = {
-      [providerKey]: " synthetic-custom-key ",
-      SYNTHETIC_CUSTOM_HEADER: " synthetic-custom-header ",
+      [providerKey]: external
+        ? " synthetic-custom-key\n"
+        : " synthetic-custom-key ",
+      [headerKey]: " synthetic-custom-header ",
       SYNTHETIC_REQUIRED_KEY: "synthetic-required-key",
     };
     const client = new TestClient(
       {
         pluginPath: plugin,
         codexOverrides: {
-          model_provider: "synthetic.gateway",
+          model_provider: providerId,
           model_providers: {
-            "synthetic.gateway": {
+            [providerId]: {
               name: "Synthetic gateway",
               wire_api: "responses",
               base_url: "https://provider.example.test/v1",
               env_key: providerKey,
               env_http_headers: {
-                "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+                "X-Synthetic-Token": headerKey,
                 "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
               },
             },
@@ -867,6 +900,9 @@ test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-account-key",
           ...providerEnvironment,
+          ...(process.platform === "win32"
+            ? { SYNTHETIC_CUSTOM_HEADER: " synthetic-child-header " }
+            : {}),
           SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
         },
         resolvePluginPython: async () => "/managed/python",
@@ -876,7 +912,9 @@ test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
           startThread: () => ({
             id: null,
             async runStreamed() {
-              expect(options.apiKey).toBe("synthetic-account-key");
+              expect(options.apiKey).toBe(
+                external ? undefined : "synthetic-account-key",
+              );
               const status = await nativeRequest(
                 {
                   ...options.env!,
@@ -905,6 +943,12 @@ test.each(["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"])(
                 },
                 recovered: {
                   ...providerEnvironment,
+                  ...(process.platform === "win32"
+                    ? { [headerKey]: " synthetic-child-header " }
+                    : {}),
+                  ...(external
+                    ? { [providerKey]: "synthetic-custom-key" }
+                    : {}),
                   ...(providerKey === "CODEX_API_KEY"
                     ? { CODEX_API_KEY: "synthetic-account-key" }
                     : {}),
