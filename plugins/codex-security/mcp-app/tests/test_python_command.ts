@@ -26,6 +26,7 @@ for (const [candidateIndex, expectedCandidate] of windowsCandidates.entries()) {
   const checkedCandidates: string[] = [];
   assert.equal(
     await resolvePythonCommand({
+      cacheDirectory: "",
       configuredPython: "",
       homeDirectory: windowsHome,
       isUsableExecutable: async (candidate: string) => {
@@ -43,6 +44,7 @@ for (const [candidateIndex, expectedCandidate] of windowsCandidates.entries()) {
 }
 assert.equal(
   await resolvePythonCommand({
+    cacheDirectory: "",
     configuredPython: "",
     homeDirectory: windowsHome,
     isUsableExecutable: async () => false,
@@ -69,6 +71,7 @@ assert.equal(
   await resolvePythonCommand({
     configuredPython: "",
     homeDirectory: unixHome,
+    cacheDirectory: "",
     isUsableExecutable: async (candidate: string) => {
       checkedUnixCandidates.push(candidate);
       return false;
@@ -78,6 +81,39 @@ assert.equal(
   "python3",
 );
 assert.deepEqual(checkedUnixCandidates, unixCandidates);
+
+for (const platform of ["darwin", "linux", "win32"] as const) {
+  const pathImplementation = platform === "win32" ? path.win32 : path.posix;
+  const cacheDirectory =
+    platform === "win32" ? "D:\\Custom Cache" : "/custom/cache";
+  const managedPython = pathImplementation.join(
+    cacheDirectory,
+    "codex-runtimes",
+    "codex-primary-runtime",
+    "dependencies",
+    "python",
+    ...(platform === "win32" ? ["python.exe"] : ["bin", "python3"]),
+  );
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = cacheDirectory;
+  try {
+    for (const configuredCache of [cacheDirectory, undefined]) {
+      assert.equal(
+        await resolvePythonCommand({
+          configuredPython: "",
+          homeDirectory: platform === "win32" ? windowsHome : unixHome,
+          cacheDirectory: configuredCache,
+          platform,
+          isUsableExecutable: async (candidate) => candidate === managedPython,
+        }),
+        managedPython,
+      );
+    }
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
+}
 
 let overrideProbeCount = 0;
 assert.equal(
