@@ -229,6 +229,35 @@ describe("TypeScript package skeleton", () => {
   test("covers the Python runtime floor and native platform paths", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const job = jobs["plugin-source"]!;
+    const crossPlatformContracts = [
+      "plugins/codex-security/tests/test_workbench_timestamps.py",
+      "plugins/codex-security/tests/test_workbench_setup_and_migrations.py::test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs",
+      "plugins/codex-security/tests/test_workbench_setup_and_migrations.py::test_workbench_upgrades_public_cli_completion_warning_migration",
+      "plugins/codex-security/tests/test_workbench_setup_and_migrations.py::test_workbench_reconciles_profile_and_public_warning_histories",
+      "plugins/codex-security/tests/test_workbench_db.py::test_large_patch_preview_preserves_digest_checks",
+      "plugins/codex-security/tests/test_report_projection.py",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_report_projection_preserves_data_flow_aliases_and_scalar_reachability",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_report_projection_prefers_populated_data_flow_alias",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_finalize_rejects_unknown_nested_code_evidence_reference",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_finalize_accepts_nested_reference_to_legacy_code_evidence",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_finalize_rejects_duplicate_ids_across_code_evidence_aliases",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_accepts_legacy_unknown_evidence_references",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_ignores_non_string_legacy_validation_scalars",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_accepts_legacy_scalar_finding_details",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_ignores_blank_legacy_attack_path_details",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_accepts_formerly_free_form_finding_details",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_rejects_malformed_canonical_root_cause",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_recovery_ranks_legacy_and_canonical_code_evidence_equally",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_recovery_ranks_embedded_root_cause_evidence",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_ignores_malformed_legacy_evidence_references",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_accepts_legacy_sequence_attack_path_details",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_rejects_nullable_canonical_evidence_catalog",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_accepts_nullable_legacy_evidence_catalog",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sealed_rerun_ignores_malformed_legacy_evidence_rows",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sarif_includes_legacy_code_evidence_locations",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sarif_normalizes_invalid_legacy_code_evidence_bounds",
+      "plugins/codex-security/tests/test_finalize_scan_contract.py::FinalizeScanContractTest::test_sarif_omits_invalid_legacy_code_evidence_locations",
+    ];
     expect(job.strategy?.matrix["include"]).toEqual([
       ...["3.10", "3.12", "3.14"].map((python) => ({
         os: "ubuntu-latest",
@@ -239,18 +268,25 @@ describe("TypeScript package skeleton", () => {
         os: "macos-latest",
         python: "3.12",
         tests: "plugins/codex-security/tests/test_workbench_scan_usage.py",
+        "cross-platform-tests": crossPlatformContracts.join(" "),
       },
       {
         os: "windows-latest",
         python: "3.12",
         tests: "plugins/codex-security/tests/test_windows_scan_local_files.py",
+        "cross-platform-tests": crossPlatformContracts.join(" "),
       },
     ]);
     const testStep = job.steps!.find(
       ({ name }) => name === "Test Python source contracts",
     )!;
-    expect(testStep.env?.["PYTHON_TEST_PATH"]).toBe("${{ matrix.tests }}");
-    expect(testStep.run).toContain('python -m pytest "$PYTHON_TEST_PATH"');
+    expect(testStep.env?.["PYTHON_TEST_PATH"]).toBe(
+      "${{ matrix.tests }} ${{ matrix.cross-platform-tests }}",
+    );
+    expect(testStep.run).toContain(
+      'read -r -a python_tests <<< "$PYTHON_TEST_PATH"',
+    );
+    expect(testStep.run).toContain('python -m pytest "${python_tests[@]}"');
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
     for (const name of [
