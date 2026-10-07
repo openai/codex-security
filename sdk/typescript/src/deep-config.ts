@@ -120,6 +120,7 @@ export async function resolveDeepScanConfig(
 export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
+  workerRuntime?: JsonObject,
 ): Promise<void> {
   const [source, target] = await Promise.all([
     canonicalConfigPath(resolved.source),
@@ -139,6 +140,7 @@ export async function writeDeepScanConfig(
     DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
   await writeCodexConfig(destination, {
     ...document,
+    ...(workerRuntime === undefined ? {} : { worker_runtime: workerRuntime }),
     deep_scan: {
       ...(retainAmbientSettings
         ? (document["deep_scan"] as TomlTable | undefined)

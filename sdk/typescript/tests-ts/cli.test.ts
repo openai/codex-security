@@ -68,6 +68,38 @@ import {
   runCapturedCli,
 } from "./support/cli-run.js";
 
+const profileScenarios = [
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-sol"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="high"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "high",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="medium"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+  },
+] as const;
+
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 
@@ -90,14 +122,15 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    const result = await runCommand("git", args, { timeout: 10_000 });
+    const result = await runCommand("git", args);
     expect(result.status, result.stderr).toBe(0);
   }
-  const { status, stdout, stderr } = await runCommand(
-    "git",
-    ["-C", repository, "rev-parse", "HEAD"],
-    { timeout: 10_000 },
-  );
+  const { status, stdout, stderr } = await runCommand("git", [
+    "-C",
+    repository,
+    "rev-parse",
+    "HEAD",
+  ]);
   expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
@@ -476,7 +509,7 @@ describe("CLI", () => {
         ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
       ]) {
-        const result = await runCommand("git", args, { timeout: 10_000 });
+        const result = await runCommand("git", args);
         expect(result.status, result.stderr).toBe(0);
       }
       let started = false;
@@ -567,11 +600,13 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      const staged = await runCommand(
-        "git",
-        ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
-        { timeout: 10_000 },
-      );
+      const staged = await runCommand("git", [
+        "-C",
+        root,
+        "add",
+        "-f",
+        "node_modules/.bin/codex-security",
+      ]);
       expect(staged.status, staged.stderr).toBe(0);
       const commit = await runCommand(
         "git",
@@ -598,7 +633,6 @@ describe("CLI", () => {
             OPENAI_API_KEY: "",
             PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
           },
-          timeout: 10_000,
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
@@ -2294,7 +2328,12 @@ describe("CLI", () => {
           await runCapturedCli(
             main,
             ["scan", ".", ...options],
-            dependencies({ onConfig: (value) => (config = value) }),
+            dependencies({
+              environment: {
+                [providerConfig.env_key]: "synthetic-provider-key",
+              },
+              onConfig: (value) => (config = value),
+            }),
           ),
         ).toBe(0);
         expect(config?.codexOverrides).toEqual({
@@ -2939,39 +2978,7 @@ describe("CLI", () => {
   });
 
   test("reports effective model and reasoning settings from the selected Codex profile", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
+    for (const scenario of profileScenarios) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
@@ -3117,91 +3124,69 @@ describe("CLI", () => {
     },
   );
 
-  test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
+  test.each([
+    [
+      "enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL",
+      ["scan", ".", "--json"],
+      { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.started",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "  ",
+        LOG_LEVEL: "  DEBUG  ",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "info",
+        LOG_LEVEL: "debug",
+      },
+      [],
+      ["codex-security: debug:"],
+    ],
+    [
+      "lets --verbose override non-debug environment log levels",
+      ["scan", ".", "--verbose", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "error",
+        LOG_LEVEL: "warn",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "does not emit verbose diagnostics unless explicitly requested",
+      ["scan", ".", "--json"],
+      {},
+      [],
+      ["codex-security: debug:"],
+    ],
+  ] as const)("%s", async (_name, args, environment, present, absent) => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
-        }),
-      ),
-    ).toBe(0);
+    expect(await runCli(args, dependencies({ environment }))).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.started");
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "  ",
-            LOG_LEVEL: "  DEBUG  ",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "info",
-            LOG_LEVEL: "debug",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
-  });
-
-  test("lets --verbose override non-debug environment log levels", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--verbose", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "error",
-            LOG_LEVEL: "warn",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("does not emit verbose diagnostics unless explicitly requested", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(await runCli(["scan", ".", "--json"], dependencies())).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
+    for (const diagnostic of present)
+      expect(stderr.text()).toContain(diagnostic);
+    for (const diagnostic of absent)
+      expect(stderr.text()).not.toContain(diagnostic);
   });
 
   test("keeps verbose dry-run authentication unverified without starting a scan", async () => {
@@ -3239,39 +3224,7 @@ describe("CLI", () => {
   });
 
   test("reports selected profile configuration consistently in verbose dry runs", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
+    for (const scenario of profileScenarios) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(

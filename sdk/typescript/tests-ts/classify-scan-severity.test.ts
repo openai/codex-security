@@ -1,4 +1,5 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { codexWithRun, jsonCodex } from "./support/codex.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
 import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -41,16 +42,13 @@ async function fixture(scanId?: string) {
   ) as FindingsDocument;
   const other = structuredClone(document.findings[0]!);
   other.identity.instance = "second-instance";
-  const fingerprint = findingFingerprint(manifest.scan.target.targetId, other);
-  other.fingerprints.primary = fingerprint;
-  other.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  other.occurrenceId = `occ_${sha256([manifest.scan.id, fingerprint].join("\0")).slice(0, 24)}`;
+  setFindingIdentity(manifest.scan, other);
   document.findings.push(other);
   if (scanId) {
     manifest.scan.id = scanId;
     document.scanId = scanId;
     for (const finding of document.findings)
-      finding.occurrenceId = `occ_${sha256([scanId, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      setFindingIdentity(manifest.scan, finding);
     const coveragePath = join(scanDirectory, "coverage.json");
     const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
     coverage.scanId = scanId;
@@ -90,23 +88,17 @@ function classifier(
   finding: Finding,
   excluded = false,
 ): NonNullable<ClassifySeverityOptions["codex"]> {
-  return {
-    startThread: () => ({
-      run: async () => ({
-        finalResponse: JSON.stringify({
-          findingId: finding.findingId,
-          decision: excluded ? "excluded" : "assessed",
-          level: excluded ? null : "medium",
-          rubricLabel: excluded ? null : "MEDIUM",
-          rationale: excluded
-            ? "Administrative record"
-            : "Only bounded impact is established.",
-          confidence: "high",
-          reviewTrigger: null,
-        }),
-      }),
-    }),
-  };
+  return jsonCodex(() => ({
+    findingId: finding.findingId,
+    decision: excluded ? "excluded" : "assessed",
+    level: excluded ? null : "medium",
+    rubricLabel: excluded ? null : "MEDIUM",
+    rationale: excluded
+      ? "Administrative record"
+      : "Only bounded impact is established.",
+    confidence: "high",
+    reviewTrigger: null,
+  }));
 }
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
@@ -316,7 +308,7 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     { environment },
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 42");
+  await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -329,7 +321,7 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
@@ -349,9 +341,9 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 43",
     ),
-  ).toEqual([{ version: 42 }]);
+  ).toEqual([{ version: 43 }]);
 });
 
 test("changed rubric, context, or evidence invalidates matching checkpoints", async () => {
@@ -542,14 +534,12 @@ test("failed or canceled reassessment leaves the last successful assessment inta
   ).rejects.toThrow("invalid assessment");
   expect(await readFile(path)).toEqual(before);
   const controller = new AbortController();
-  const codex: NonNullable<ClassifySeverityOptions["codex"]> = {
-    startThread: () => ({
-      run: async () => {
-        controller.abort(new Error("stop"));
-        return { finalResponse: "{}" };
-      },
-    }),
-  };
+  const codex: NonNullable<ClassifySeverityOptions["codex"]> = codexWithRun(
+    async () => {
+      controller.abort(new Error("stop"));
+      return { finalResponse: "{}" };
+    },
+  );
   await expect(
     classifyScanDirectorySeverity(scanDirectory, {
       environment,
@@ -651,7 +641,10 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DROP TABLE finding_severity_assessments");
   await query(environment, "DROP TABLE scan_severity_classifications");
-  await query(environment, "DELETE FROM schema_migrations WHERE version >= 41");
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (41, 43)",
+  );
   expect(
     (
       await prepareScanPublication(scanDirectory, {

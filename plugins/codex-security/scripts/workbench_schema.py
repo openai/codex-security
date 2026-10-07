@@ -869,6 +869,13 @@ MIGRATIONS = (
     ),
     (
         42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
+        43,
         "preserve severity assessments per scan",
         """
         CREATE TABLE scan_severity_assessments (
