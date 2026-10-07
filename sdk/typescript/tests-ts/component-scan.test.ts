@@ -1,3 +1,4 @@
+import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
@@ -202,11 +203,9 @@ async function cli(
 function fakeCodex(
   response: () => unknown,
 ): NonNullable<ComponentPlanningOptions["codex"]> {
-  return {
-    startThread: () => ({
-      run: async () => ({ finalResponse: JSON.stringify(await response()) }),
-    }),
-  };
+  return codexWithRun(async () => ({
+    finalResponse: JSON.stringify(await response()),
+  }));
 }
 
 async function scopedInventory(paths: Fixture, scope: string) {
@@ -1092,11 +1091,7 @@ test("does not start another automatic planning call after cancellation", async 
   await expect(
     planComponents(paths.repository, {
       signal: controller.signal,
-      codex: {
-        startThread: () => ({
-          run,
-        }),
-      },
+      codex: codexWithRun(run),
     }),
   ).rejects.toThrow("planning canceled");
   expect(run).toHaveBeenCalledTimes(1);

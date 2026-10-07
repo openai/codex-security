@@ -11,6 +11,15 @@ export function bashCommand(): string {
   return existsSync(gitBash) ? gitBash : "bash";
 }
 
+export function workflowBashCommand(): string {
+  return process.platform === "win32"
+    ? join(
+        process.env["ProgramFiles"] ?? "C:/Program Files",
+        "Git/bin/bash.exe",
+      )
+    : "bash";
+}
+
 export function runCommand(
   command: string,
   args: string[],

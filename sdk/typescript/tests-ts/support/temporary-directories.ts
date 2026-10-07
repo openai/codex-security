@@ -1,3 +1,6 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import {
   createTemporaryDirectories,
@@ -39,4 +42,21 @@ export function temporaryDirectory(
   canonicalize = true,
 ): Promise<string> {
   return createPluginTemporaryDirectory(prefix, canonicalize);
+}
+
+export function createTemporaryDirectoriesSync(canonicalize = false) {
+  const roots: string[] = [];
+  return {
+    create(prefix: string): string {
+      const directory = mkdtempSync(join(tmpdir(), prefix));
+      const root = canonicalize ? realpathSync(directory) : directory;
+      roots.push(root);
+      return root;
+    },
+    cleanup(): void {
+      for (const root of roots.splice(0)) {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  };
 }
