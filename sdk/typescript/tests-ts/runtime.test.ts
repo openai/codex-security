@@ -3554,6 +3554,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "GXGW",
       "FAGX",
       "FWGX",
+      "😀FA",
       "SD",
       "WD",
       "WO",
@@ -3577,6 +3578,7 @@ describe("runtime directories and plugin Python boundary", () => {
       ["", "FR"],
       ["", "FRGX"],
       ["", "GRGX"],
+      ["", "AFAX"],
       ["", "0x1200a9"],
       ["IO", "FA"],
     ] as const) {
