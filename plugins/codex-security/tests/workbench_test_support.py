@@ -263,6 +263,82 @@ def workspace_command(
     return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
 
 
+def request_remediation(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "request-finding-remediation",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
+        check=check,
+    )
+
+
+def set_remediation(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    expected_version: str,
+    state: str,
+    *extra: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "set-finding-remediation",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
+        "--expected-version",
+        expected_version,
+        "--state",
+        state,
+        *extra,
+        check=check,
+    )
+
+
+def request_remediation_action(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    expected_version: str,
+    action: str,
+    action_token: str,
+    *,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "request-finding-remediation-action",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--expected-version",
+        expected_version,
+        "--action",
+        action,
+        "--action-token",
+        action_token,
+        check=check,
+    )
+
+
 def save_workspace(
     state_dir: Path,
     workspace_id: str,
@@ -309,6 +385,63 @@ def update_progress(
 ) -> dict[str, object]:
     return scan_command(
         state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
+    )
+
+
+def claim_remediation_resend(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "claim-finding-remediation-resend",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
+        check=check,
+    )
+
+
+def cancel_remediation_request(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "cancel-finding-remediation-request",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
+    )
+
+
+def mark_remediation_delivered(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "mark-finding-remediation-delivered",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
     )
 
 
