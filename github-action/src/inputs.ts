@@ -5,30 +5,9 @@ export const INPUT_NAMES = [
   'upload-artifacts', 'artifact-name', 'retention-days',
 ] as const;
 
-export type Scope = 'repository' | 'diff';
-export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational' | 'unknown';
-export type Threshold = 'none' | 'critical' | 'high' | 'medium' | 'low';
-export interface Inputs {
-  repository: string;
-  scope: Scope;
-  paths: string[];
-  diffBase?: string;
-  mode: 'standard' | 'deep';
-  model: string;
-  effort: string;
-  maxCost?: number;
-  maxTimeHours?: number;
-  failOnSeverity: Threshold;
-  verbose: boolean;
-  dryRun: boolean;
-  summary: boolean;
-  annotations: boolean;
-  uploadArtifacts: boolean;
-  artifactName: string;
-  retentionDays: number;
-}
+export type Inputs = ReturnType<typeof parseInputs>;
 
-export function parseInputs(read: (name: string) => string, workspace: string): Inputs {
+export function parseInputs(read: (name: string) => string, workspace: string) {
   const str = (name: string, fallback = '') => read(name).trim() || fallback;
   const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
     const value = str(name, fallback);
