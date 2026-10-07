@@ -6,7 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from workbench_test_support import create_saved_workspace, run_workbench
+from workbench_test_support import (
+    attach_continuation,
+    create_saved_workspace,
+    mark_handoff_delivered,
+    run_workbench,
+    scan_claim_command,
+    start_scan_command,
+)
 
 
 @pytest.mark.parametrize("mode", ("standard", "deep"))
@@ -399,72 +406,29 @@ def test_workbench_attaches_one_continuation_thread_to_claimed_scan(
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
 
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
-    )
+    attached = attach_continuation(state_dir, scan_id, claim_token, "continuation-thread")
     assert attached["results"]["continuationThreadId"] == "continuation-thread"
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
+    delivered = mark_handoff_delivered(
+        state_dir, scan_id, claim_token, "--thread-id", "continuation-thread"
     )
     assert delivered["results"]["handoffStatus"] == "delivered"
 
-    replayed = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
-    )
+    replayed = attach_continuation(state_dir, scan_id, claim_token, "continuation-thread")
     assert replayed["results"]["continuationThreadId"] == "continuation-thread"
 
-    wrong_token = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        str(uuid.uuid4()),
-        "--thread-id",
-        "continuation-thread",
-        check=False,
+    wrong_token = attach_continuation(
+        state_dir, scan_id, str(uuid.uuid4()), "continuation-thread", check=False
     )
     assert "claim token" in str(wrong_token["stderr"])
 
-    different_thread = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "different-thread",
-        check=False,
+    different_thread = attach_continuation(
+        state_dir, scan_id, claim_token, "different-thread", check=False
     )
     assert "another continuation" in str(different_thread["stderr"])
 
