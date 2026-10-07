@@ -486,9 +486,10 @@ async function workerRuntimeSettings(
       : undefined;
   const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
   const inherited = Object.fromEntries(
-    ["openai_base_url", "model_reasoning_summary", "service_tier"].map(
-      (key) => [key, selected[key]],
-    ),
+    ["model_reasoning_summary", "service_tier"].map((key) => [
+      key,
+      selected[key],
+    ]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
   const workerConfigPath = environmentVariable(

@@ -563,35 +563,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test.each([
-    [undefined, undefined],
-    ["https://root.example.test/v1", undefined],
-    [undefined, "https://selected.example.test/v1"],
-    ["https://root.example.test/v1", "https://selected.example.test/v1"],
-  ])(
-    "projects effective endpoint with root %p and selected profile %p",
-    (rootEndpoint, profileEndpoint) => {
-      const projected = scanPreflightCodexConfig({
-        ...(rootEndpoint === undefined
-          ? {}
-          : { openai_base_url: rootEndpoint }),
-        profile: "selected",
-        profiles: {
-          selected:
-            profileEndpoint === undefined
-              ? {}
-              : { openai_base_url: profileEndpoint },
-          unselected: { openai_base_url: "https://unused.example.test/v1" },
-        },
-      });
-      const expected = profileEndpoint ?? rootEndpoint;
-      if (expected === undefined)
-        expect(projected).not.toHaveProperty("openai_base_url");
-      else expect(projected["openai_base_url"]).toBe(expected);
-    },
-  );
-
-  test("projects capability, endpoint and trust settings into the readable preflight config", async () => {
+  test("projects only capability and trust metadata into the readable preflight config", async () => {
     const root = await temporaryDirectory();
     const configPath = join(root, "config-preflight.toml");
     const repository = join(root, "repository");
@@ -603,7 +575,8 @@ describe("CodexSecurity preflight configuration", () => {
     const sanitized = scanPreflightCodexConfig({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
-      openai_base_url: "https://gateway.example.test/v1",
+      openai_base_url:
+        "https://synthetic-user:synthetic-password@gateway.example.test/v1?token=synthetic-root-token",
       features: {
         plugins: true,
         goals: true,
@@ -615,6 +588,8 @@ describe("CodexSecurity preflight configuration", () => {
       profiles: {
         review: {
           model: "profile-model",
+          openai_base_url:
+            "https://synthetic-user:synthetic-password@profile.example.test/v1?token=synthetic-profile-token",
           features: { goals: true, secret: "PROFILE_SECRET" },
           agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
           shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
@@ -650,7 +625,6 @@ describe("CodexSecurity preflight configuration", () => {
     expect(sanitized).toEqual({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
-      openai_base_url: "https://gateway.example.test/v1",
       features: { goals: true, multi_agent_v2: { enabled: false } },
       agents: { max_threads: 12, max_depth: 2 },
       profile: "review",

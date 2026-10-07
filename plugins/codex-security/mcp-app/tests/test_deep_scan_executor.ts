@@ -1334,17 +1334,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             string,
             Record<string, unknown>
           >;
-          const rootEndpoint =
-            index === 0 || index === 3
+          const endpoint =
+            index === 1
               ? undefined
-              : `https://root-${index}.example.test/v1`;
-          const profileEndpoint =
-            index === 2 || index === 3
-              ? `https://profile-${index}.example.test/v1`
-              : undefined;
-          const snapshotEndpoint =
-            index === 4 ? "https://snapshot.example.test/v1" : undefined;
-          const endpoint = snapshotEndpoint ?? profileEndpoint ?? rootEndpoint;
+              : `https://synthetic-user:synthetic-password@worker-${index}.example.test/v1?token=synthetic-${index}-token`;
           const serviceTier =
             index === 0 ? undefined : index === 3 ? "flex" : "fast";
           const instructionsFile =
@@ -1432,7 +1425,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                   },
             endpoint,
-            snapshotEndpoint,
             serviceTier,
             instructionsFile,
             verbosity,
@@ -1441,9 +1433,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             features,
             configuration: {
               ...parsedConfiguration,
-              ...(rootEndpoint === undefined
-                ? {}
-                : { openai_base_url: rootEndpoint }),
               ...(index === 0
                 ? {}
                 : { service_tier: index === 2 ? "flex" : serviceTier }),
@@ -1454,7 +1443,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       ...profiles,
                       selected: {
                         ...profiles.selected,
-                        openai_base_url: profileEndpoint,
                         ...(index === 2 ? { service_tier: serviceTier } : {}),
                       },
                       unselected: { service_tier: "fast" },
@@ -1473,13 +1461,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             writeFile(
               entry.deepPath,
               stringifyToml({
-                worker_runtime:
-                  entry.provider === undefined
+                worker_runtime: {
+                  ...(entry.endpoint === undefined
+                    ? {}
+                    : { openai_base_url: entry.endpoint }),
+                  ...(entry.provider === undefined
                     ? {}
                     : {
-                        ...(entry.snapshotEndpoint === undefined
-                          ? {}
-                          : { openai_base_url: entry.snapshotEndpoint }),
                         model_instructions_file: entry.instructionsFile,
                         model_verbosity: entry.verbosity,
                         web_search: entry.webSearch,
@@ -1488,7 +1476,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
                         features: entry.features,
-                      },
+                      }),
+                },
               }),
             ),
             ...(entry.profilePath === undefined
@@ -1880,7 +1869,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               Promise.all([
                 writeFile(
                   entry.path,
-                  'openai_base_url = "https://changed.example.test/v1"\nmodel_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n',
+                  'model_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n',
                 ),
                 writeFile(
                   entry.deepPath,

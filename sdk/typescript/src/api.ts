@@ -4755,11 +4755,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const result = executionConfig(config);
   // Keep effective execution settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
-  for (const key of [
-    "openai_base_url",
-    "model_reasoning_summary",
-    "service_tier",
-  ]) {
+  for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
   }
