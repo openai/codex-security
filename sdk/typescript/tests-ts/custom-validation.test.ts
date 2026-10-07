@@ -783,7 +783,7 @@ describe("custom validation", () => {
 
   test("rejects Deep and empty prompts before starting Codex", async () => {
     const root = await temporaryDirectory();
-    const client = new TestClient({}, {});
+    const client = TestClient.withDependencies({});
     await expect(
       client.run(root, { mode: "deep", validationPrompt: "Validate." }),
     ).rejects.toThrow("not supported for Deep");
