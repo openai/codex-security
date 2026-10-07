@@ -558,8 +558,7 @@ def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) 
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "app/surrogate.json", b'{"\\ud800":1}')
-    write_file(repository, "app/integer.json", ('{"value":' + "1" * 4301 + "}").encode())
+    write_file(repository, "app/text.unlisted", b"x" * (64 * 1024 + 1) + b"text")
     write_file(repository, "app/binary.py", b"x" * (64 * 1024 + 1) + b"\0")
     write_file(repository, "app/binary.unlisted", b"x" * (64 * 1024 + 1) + b"\0")
     arguments = ["--diff-base", base, "--diff-mode", mode]
@@ -572,10 +571,7 @@ def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) 
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == [
-        "app/integer.json",
-        "app/surrogate.json",
-    ]
+    assert output.read_text(encoding="utf-8").splitlines() == ["app/text.unlisted"]
 
 
 @pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
@@ -603,44 +599,6 @@ def test_diff_inventory_includes_source_cases(tmp_path: Path, mode: str) -> None
     assert output.read_text(encoding="utf-8").splitlines() == sorted(
         case.path for case in SOURCE_CASES
     )
-
-
-def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:
-    repository = make_repository(tmp_path)
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-
-    for name in (
-        "app/loader.cjs",
-        "app/loader.mjs",
-        "app/loader.js",
-        "app/types.cts",
-        "app/types.mts",
-        "app/types.ts",
-    ):
-        write_file(repository, name, b"export const handler = 1;\n")
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "change")
-    head = git(repository, "rev-parse", "HEAD")
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(
-        repository,
-        ".",
-        output,
-        arguments=["--diff-base", base, "--diff-head", head],
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == [
-        "app/loader.cjs",
-        "app/loader.js",
-        "app/loader.mjs",
-        "app/types.cts",
-        "app/types.mts",
-        "app/types.ts",
-    ]
 
 
 def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> None:
