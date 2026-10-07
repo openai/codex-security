@@ -1,3 +1,4 @@
+import { modelResponseText } from "./support/model-response-text.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -71,10 +72,7 @@ function fakeCodex(decide: (context: OwnerContext) => unknown = chooseAlex) {
           ) as OwnerContext;
           calls.push({ context, thread, turn });
           const result = decide(context);
-          return {
-            finalResponse:
-              typeof result === "string" ? result : JSON.stringify(result),
-          };
+          return { finalResponse: modelResponseText(result) };
         },
       };
     },

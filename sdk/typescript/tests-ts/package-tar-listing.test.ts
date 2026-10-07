@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-const { regularTarListingLines } = (await import(
-  new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
-)) as { regularTarListingLines: (listing: string) => string[] };
+import { regularTarListingLines } from "../scripts/package-tar-listing.mjs";
 
 describe("npm package tar listings", () => {
   test("accepts regular entries with Unix or Windows line endings", () => {

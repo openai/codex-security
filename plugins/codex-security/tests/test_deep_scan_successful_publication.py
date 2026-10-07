@@ -8,7 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    saved_coverage,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.fixture
@@ -223,17 +228,7 @@ def test_deep_publication_ignores_empty_canceled_checkpoint(
     result = add_worker(workbench_db, scan, status="canceled")
     checkpoint = write_checkpoint(
         result.parent / "checkpoints",
-        {
-            "scanId": scan.scan_id,
-            "complete": False,
-            "findings": [],
-            "coverage": {
-                "completeness": "partial",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
-        },
+        saved_draft(scan.scan_id, completeness="partial"),
     )
     source_bytes = checkpoint.read_bytes()
 
@@ -330,12 +325,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         "findings": [later_finding],
     }
     if source == "standard-worker-checkpoint":
-        saved["coverage"] = {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
+        saved["coverage"] = saved_coverage(completeness="partial")
     if source == "deep-reducer-result":
         checkpoint = None
         result.write_text(json.dumps(saved))
@@ -349,7 +339,8 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         result.write_text("{interrupted worker output")
     result_bytes = result.read_bytes()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -369,8 +360,8 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
 
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == len(expected_summaries)
     assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
@@ -412,7 +403,8 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     source_bytes = source_path.read_bytes()
     source_relative = source_path.relative_to(scan.scan_dir).as_posix()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -434,8 +426,8 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
 
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
 
     assert recovered["findingCount"] == 1
