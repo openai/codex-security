@@ -2053,7 +2053,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
           runWorkbench: async (
-            _options: WorkbenchCommandOptions,
+            _options: Parameters<typeof runWorkbench>[0],
             args: readonly string[],
             input?: string,
           ): Promise<JsonObject> => {
