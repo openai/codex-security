@@ -6,6 +6,7 @@ import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Event
 from unittest import mock
@@ -249,12 +250,9 @@ def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
             start_globals,
             {"scan_target_identity": record_target_identity},
         ),
+        closing(start_globals["connect"]()) as connection,
     ):
-        connection = start_globals["connect"]()
-        try:
-            started = start(connection, args)
-        finally:
-            connection.close()
+        started = start(connection, args)
 
     assert len(observed_metadata) == 1
     metadata = observed_metadata[0]
@@ -265,7 +263,8 @@ def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
             "SELECT target_device, target_inode FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
-    serialize_identity = start_globals["serialize_filesystem_identity"]
+    identity_helpers = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
+    serialize_identity = identity_helpers["serialize_filesystem_identity"]
     assert identity == (
         serialize_identity(metadata.st_dev),
         serialize_identity(metadata.st_ino),
@@ -338,8 +337,7 @@ def test_prompt_registration_keeps_existing_scans_readable(
         return real_identity(*args, **kwargs)
 
     def register():
-        connection = namespace["connect"]()
-        try:
+        with closing(namespace["connect"]()) as connection:
             return start(
                 connection,
                 argparse.Namespace(
@@ -360,8 +358,6 @@ def test_prompt_registration_keeps_existing_scans_readable(
                 ),
                 headless_standard=False,
             )
-        finally:
-            connection.close()
 
     def read_scans():
         read = get_scan(state_dir, str(scan_id))

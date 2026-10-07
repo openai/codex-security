@@ -1312,7 +1312,7 @@ def test_completed_finding_triage_and_remediation_persist(
 
 
 def test_filesystem_identity_serialization_supports_windows_stat_values() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
     serialize_identity = namespace["serialize_filesystem_identity"]
     identity_matches = namespace["stored_filesystem_identity_matches"]
     windows_device_id = (1 << 64) - 1
@@ -2371,10 +2371,8 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     revision = initialize_git_repository(target)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
+    created = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2386,16 +2384,11 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         revision,
     )
     diff_target = created["diffTarget"]
-    run_workbench(
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "working_tree",
@@ -2463,10 +2456,8 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2477,16 +2468,11 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         "--diff-head-revision",
         revision,
     )
-    saved = run_workbench(
+    saved = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "commit",

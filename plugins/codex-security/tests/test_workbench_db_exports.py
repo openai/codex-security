@@ -18,12 +18,14 @@ import pytest
 from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
+    create_workspace,
     empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     request_remediation,
     request_remediation_action,
     run_workbench,
+    save_workspace,
     scan_command,
     set_remediation,
     start_delivered_scan,
@@ -881,28 +883,10 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--thread-id",
-        "thread-deep-export",
-        "--target-path",
-        str(target),
+    create_workspace(
+        state_dir, workspace_id, "--thread-id", "thread-deep-export", "--target-path", str(target)
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     run_workbench(
         state_dir,
@@ -1258,6 +1242,53 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     with Path(exported["path"]).open(newline="") as source:
         row = next(csv.DictReader(source))
     assert row["path"] == "root.py"
+
+
+def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(
+        state_dir,
+        "--workspace-id",
+        str(saved["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = workbench_api["require_scan"](connection, scan_id)
+        binding = workbench_api["workbench_completion_binding"](scan, workbench_api["now"]())
+    manifest, _, _ = workbench_api["finalize_scan"](scan_dir, completion_binding=binding)
+    csv_path = scan_dir / "exports" / "findings.csv"
+    sealed_csv = b"original,sealed,export\n"
+    csv_path.write_bytes(sealed_csv)
+    manifest["scan"]["artifacts"].append(
+        {
+            "path": "exports/findings.csv",
+            "sha256": hashlib.sha256(sealed_csv).hexdigest(),
+            "mediaType": "text/csv",
+        }
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n")
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    sealed_manifest = manifest_path.read_bytes()
+
+    rejected = run_workbench(
+        state_dir, "export-findings", "--scan-id", scan_id, "--format", "csv", check=False
+    )
+
+    assert rejected["returncode"] != 0
+    assert "CSV output path cannot overwrite a sealed scan artifact" in rejected["stderr"]
+    assert csv_path.read_bytes() == sealed_csv
+    assert manifest_path.read_bytes() == sealed_manifest
+    exported = run_workbench(state_dir, "export-findings", "--scan-id", scan_id, "--format", "json")
+    assert exported["export"]["path"] == str(scan_dir / "findings.json")
 
 
 def test_csv_export_rejects_symlinked_exports_directory(tmp_path: Path) -> None:
