@@ -167,7 +167,8 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
-      - name: Prepare native runtime
+      - &download-native
+        name: Prepare native runtime
         uses: ./.github/actions/download-native
       - *set-up-typescript-tools
       - *install-dependencies
@@ -200,8 +201,7 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - *checkout-repository
-      - name: Prepare native runtime
-        uses: ./.github/actions/download-native
+      - *download-native
       - *set-up-typescript-tools
       - &set-up-bun
         name: Set up Bun
@@ -470,8 +470,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Prepare native runtime
-        uses: ./.github/actions/download-native
+      - *download-native
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
