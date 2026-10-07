@@ -14,6 +14,13 @@ import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
 import { windowsBinding } from "../native";
 import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
 
+export function requireSqliteText(
+  values: readonly (string | null | undefined)[],
+): void {
+  if (values.some((value) => value != null && !value.isWellFormed()))
+    throw new TypeError("SQLite text keys must contain valid Unicode.");
+}
+
 function createStateDirectory(path: string): void {
   if (process.platform !== "win32") path = path.replace(/\/+$/u, "") || "/";
   const nativePath =
@@ -69,9 +76,7 @@ export async function openWorkbenchDatabase(
   }
 }
 
-export async function databaseInfo(
-  state: string,
-): Promise<{ databasePath: string }> {
+export function workbenchDatabasePath(state: string): string {
   if (
     typeof state !== "string" ||
     !isAbsolute(state) ||
@@ -81,11 +86,16 @@ export async function databaseInfo(
       "database-info requires an absolute Unicode state-directory string.",
     );
   }
+  return `${state}${sep}workbench.sqlite3`;
+}
+
+export async function databaseInfo(
+  state: string,
+): Promise<{ databasePath: string }> {
   // Keep an ASCII alias usable even when its destination has raw POSIX bytes.
-  const database = await openWorkbenchDatabase(
-    `${state}${sep}workbench.sqlite3`,
-    { deferred: true },
-  );
+  const database = await openWorkbenchDatabase(workbenchDatabasePath(state), {
+    deferred: true,
+  });
   database.close();
   const canonicalState =
     process.platform === "win32"

@@ -6633,6 +6633,20 @@ describe("runtime directories and plugin Python boundary", () => {
         }),
       ).rejects.toThrow(PluginPythonUnavailableError);
       expect(existsSync(marker)).toBe(false);
+
+      await expect(
+        runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: { PATH: trustedBin, PYTHON: unsafePython },
+            protectedRoot: repository,
+          },
+          ["list-scans"],
+        ),
+      ).rejects.toMatchObject({
+        cause: expect.any(PluginPythonUnavailableError),
+      });
+      expect(existsSync(marker)).toBe(false);
     },
   );
 

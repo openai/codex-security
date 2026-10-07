@@ -1582,7 +1582,15 @@ export async function runWorkbench(
     input?: string,
     archiveHandshake = false,
   ): Promise<string> => {
-    const native = arguments_[0] === "database-info";
+    const native = [
+      "database-info",
+      "store-findings",
+      "list-stored-findings",
+      "find-potential-duplicates",
+      "store-dedupe-groups",
+      "list-dedupe-groups",
+      "dashboard",
+    ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
         ? await resolveTrustedExecutable(
@@ -1601,6 +1609,10 @@ export async function runWorkbench(
           protectedRoot: options.protectedRoot,
           signal: options.signal,
         }));
+    const stateDirectory = native
+      ? (options.stateDirectory ??
+        codexSecurityStateDirectory(options.environment))
+      : undefined;
     const result = await runCodexCommand(
       { command },
       native
@@ -1618,8 +1630,12 @@ export async function runWorkbench(
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
         ? JSON.stringify(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
+            arguments_[0] === "database-info"
+              ? stateDirectory
+              : {
+                  stateDirectory,
+                  payload: input === undefined ? undefined : JSON.parse(input),
+                },
           )
         : input,
       signal,
@@ -3560,12 +3576,8 @@ function nullIfMissingFileError(error: unknown): null {
 
 /** @internal */
 export function workbenchEnvironment(environment: ProcessEnvironment) {
-  const python = environmentValue(environment, "PYTHON");
   return {
     ...environment,
-    ...(python && isPythonPathCandidate(python)
-      ? { PYTHON: resolve(expandHome(python, environment)) }
-      : {}),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
   };
 }
