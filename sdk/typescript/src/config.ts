@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
-import { stringify } from "smol-toml";
+import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -85,10 +85,8 @@ export function scanModelConfiguration(
     );
   }
   const reasoningEffort =
-    selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model_reasoning_effort")
-      ? selectedProfile["model_reasoning_effort"]
-      : config["model_reasoning_effort"];
+    selectedProfile?.["model_reasoning_effort"] ??
+    config["model_reasoning_effort"];
   if (
     typeof reasoningEffort !== "string" ||
     reasoningEffort.trim().length === 0
@@ -102,18 +100,12 @@ export function scanModelConfiguration(
 
 export function scanModel(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
-  return selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model")
-    ? selectedProfile["model"]
-    : config["model"];
+  return selectedProfile?.["model"] ?? config["model"];
 }
 
 export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   const selectedProfile = selectedScanProfile(config);
-  return selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "model_provider")
-    ? selectedProfile["model_provider"]
-    : config["model_provider"];
+  return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
@@ -124,7 +116,7 @@ export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
     typeof selected === "string" && isObject(providers)
       ? providers[selected]
       : undefined;
-  return isObject(provider) && provider["auth"] !== undefined;
+  return isObject(provider) && provider["auth"] != null;
 }
 
 /** @internal Keep host-side helpers independent of the source checkout. */
@@ -141,7 +133,7 @@ export function resolveCommandAuthConfig(
       const auth = provider["auth"];
       const cwd = auth["cwd"];
       if (
-        cwd === undefined ||
+        cwd == null ||
         (typeof cwd === "string" && !/^~(?:[/\\]|$)/u.test(cwd))
       ) {
         auth["cwd"] = resolve(home, cwd ?? ".");
@@ -153,7 +145,7 @@ export function resolveCommandAuthConfig(
 
 /** @internal CLI dotted keys cannot represent provider IDs containing dots. */
 export function modelProviderConfigOverride(config: JsonObject): string[] {
-  return config["model_providers"] === undefined
+  return config["model_providers"] == null
     ? []
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
@@ -176,6 +168,7 @@ export function inlineToml(value: JsonValue): string {
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
+      .filter(([, item]) => item !== null)
       .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
       .join(",")}}`;
   }
@@ -206,10 +199,8 @@ function selectedScanProfile(
 }
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const resolved = deepMerge(
-    structuredClone(config),
-    selectedScanProfile(config) ?? {},
-  );
+  const normalized = parse(stringify(config)) as JsonObject;
+  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;

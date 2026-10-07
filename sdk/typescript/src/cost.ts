@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -481,12 +482,7 @@ function readSessionEvent(
   repository?: string,
 ): void {
   if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
+  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
