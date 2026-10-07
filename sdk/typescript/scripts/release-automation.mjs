@@ -4,6 +4,14 @@ import { basename } from "node:path";
 import { isMain } from "./is-main.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 
+/**
+ * @typedef {Record<string, unknown>} ReleaseMetadata
+ * @typedef {{ version: string, gitHead: string }} PublishedRelease
+ * @typedef {PublishedRelease & { repository: string }} RepositoryRelease
+ * @typedef {RepositoryRelease & { runId: string }} WorkflowRelease
+ * @typedef {WorkflowRelease & { sha512: string }} ReleaseProvenance
+ */
+
 const packageName = "@openai/codex-security";
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const provenancePredicate = "https://slsa.dev/provenance/v1";
@@ -13,6 +21,7 @@ const fulcioExtensionPrefix = Buffer.from("2b0601040183bf3001", "hex");
 const releaseSummaryStart = "<!-- codex-security-release-summary:start -->";
 const releaseSummaryEnd = "<!-- codex-security-release-summary:end -->";
 
+/** @param {unknown} tag */
 function stableReleaseTagVersion(tag) {
   if (typeof tag !== "string" || !tag.startsWith("npm-v")) {
     throw new Error("Release tags must identify a stable npm-vX.Y.Z version.");
@@ -25,6 +34,7 @@ function stableReleaseTagVersion(tag) {
   return version;
 }
 
+/** @param {unknown} version */
 export function assertStableVersion(version) {
   if (typeof version !== "string" || !stableVersion.test(version)) {
     throw new Error("Release package must have a stable X.Y.Z version.");
@@ -32,6 +42,7 @@ export function assertStableVersion(version) {
   return version;
 }
 
+/** @param {ReleaseMetadata} packageJson */
 export function releaseVersion(packageJson) {
   if (packageJson?.name !== packageName) {
     throw new Error("Release package must be @openai/codex-security.");
@@ -65,6 +76,7 @@ export function parseReviewedReleaseNotes(version, notes) {
   return summary;
 }
 
+/** @param {string} notes */
 export function extractHistoricalReleaseSummary(notes) {
   if (typeof notes !== "string") {
     throw new Error("Existing release notes must be a string.");
@@ -99,6 +111,11 @@ export function extractHistoricalReleaseSummary(notes) {
   return summary;
 }
 
+/**
+ * @param {string} version
+ * @param {string | undefined} taggedNotes
+ * @param {string | undefined} existingNotes
+ */
 export function resolveReleaseSummary(version, taggedNotes, existingNotes) {
   if (taggedNotes !== undefined) {
     return parseReviewedReleaseNotes(version, taggedNotes);
@@ -144,6 +161,12 @@ function releaseNoteFileArguments(args) {
   return files;
 }
 
+/**
+ * @param {string} refType
+ * @param {string} ref
+ * @param {string} refName
+ * @param {ReleaseMetadata} packageJson
+ */
 export function releaseTagVersion(refType, ref, refName, packageJson) {
   if (refType !== "tag" || ref !== `refs/tags/${refName}`) {
     throw new Error("npm releases must be dispatched from a real Git tag.");
@@ -158,6 +181,10 @@ export function releaseTagVersion(refType, ref, refName, packageJson) {
   return packageVersion;
 }
 
+/**
+ * @param {string} left
+ * @param {string} right
+ */
 export function compareReleaseVersions(left, right) {
   if (!stableVersion.test(left) || !stableVersion.test(right)) {
     throw new Error("Release versions must use stable X.Y.Z versions.");
@@ -172,6 +199,10 @@ export function compareReleaseVersions(left, right) {
   return 0;
 }
 
+/**
+ * @param {string} version
+ * @param {string} previousVersion
+ */
 export function requireReleaseIncrease(version, previousVersion) {
   if (compareReleaseVersions(version, previousVersion) <= 0) {
     throw new Error(
@@ -181,6 +212,11 @@ export function requireReleaseIncrease(version, previousVersion) {
   return version;
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} registryError
+ * @returns {string[]}
+ */
 export function initialPublishedVersions(version, registryError) {
   releaseVersion({ name: packageName, version });
   if (version !== "0.1.0" || registryError?.error?.code !== "E404") {
@@ -189,6 +225,11 @@ export function initialPublishedVersions(version, registryError) {
   return [];
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} publishedVersions
+ * @returns {"publish" | "recover"}
+ */
 export function publishedReleaseMode(version, publishedVersions) {
   releaseVersion({ name: packageName, version });
   if (!Array.isArray(publishedVersions)) {
@@ -214,6 +255,10 @@ export function publishedReleaseMode(version, publishedVersions) {
   return mode;
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} publishedVersions
+ */
 export function requirePublishedReleaseIncrease(version, publishedVersions) {
   if (publishedReleaseMode(version, publishedVersions) !== "publish") {
     throw new Error(
@@ -439,6 +484,10 @@ function verifySigningCertificate(bundle, expected) {
   }
 }
 
+/**
+ * @param {string} tag
+ * @param {{ registryVersions: string[], githubReleaseTags: string[], reachableTags: string[] }} history
+ */
 export function releaseHistory(tag, history) {
   const version = stableReleaseTagVersion(tag);
   if (
@@ -486,6 +535,11 @@ export function releaseHistory(tag, history) {
   };
 }
 
+/**
+ * @param {ReleaseMetadata} metadata
+ * @param {Uint8Array} archive
+ * @param {PublishedRelease} expected
+ */
 export function verifyPublishedRelease(metadata, archive, expected) {
   const version = releaseVersion(metadata);
   if (version !== expected.version) {
@@ -516,6 +570,12 @@ export function verifyPublishedRelease(metadata, archive, expected) {
   };
 }
 
+/**
+ * @param {ReleaseMetadata} metadata
+ * @param {Uint8Array} archive
+ * @param {WorkflowRelease} expected
+ * @param {ReleaseProvenance} provenance
+ */
 export function verifyGitHubPublishedRelease(
   metadata,
   archive,
@@ -568,6 +628,11 @@ function readProvenance(verified) {
   return { provenance, statement };
 }
 
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {WorkflowRelease} expected
+ */
 export function verifySignatureAudit(report, archive, expected) {
   if (
     !Array.isArray(report?.invalid) ||
@@ -712,6 +777,11 @@ export function verifySignatureAudit(report, archive, expected) {
   };
 }
 
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ */
 export function verifyRecoveredSignatureAudit(report, archive, expected) {
   const version = releaseVersion({
     name: packageName,
@@ -761,6 +831,13 @@ export function verifyRecoveredSignatureAudit(report, archive, expected) {
   });
 }
 
+/**
+ * @param {ReleaseMetadata} release
+ * @param {Uint8Array} archive
+ * @param {string} expectedTag
+ * @param {string} assetName
+ * @param {Uint8Array} [downloadedArchive]
+ */
 export function verifyGitHubRelease(
   release,
   archive,
