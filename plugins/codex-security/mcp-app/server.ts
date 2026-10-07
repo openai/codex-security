@@ -55,7 +55,6 @@ const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
 ]);
 
 let fallbackWorkbenchStateDir: Promise<string> | undefined;
-let fallbackWorkbenchStateLogged = false;
 let persistentWorkbenchStateSucceeded = false;
 const workbenchStateSelectionLock = new AsyncLock();
 
@@ -2431,7 +2430,13 @@ async function executeWorkbenchWithStateSelection(
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
       const fallbackStateDir = await pinFallbackWorkbenchStateDir();
-      logWorkbenchStateFallback();
+      console.error(
+        JSON.stringify({
+          component: "codex_security_workbench",
+          event: "state_fallback_pinned",
+          reason: "persistent_sqlite_unwritable",
+        }),
+      );
       return await executeWorkbench(
         pythonCommand,
         args,
@@ -2518,18 +2523,6 @@ async function pinFallbackWorkbenchStateDir(): Promise<string> {
     return stateDir;
   })();
   return await fallbackWorkbenchStateDir;
-}
-
-function logWorkbenchStateFallback(): void {
-  if (fallbackWorkbenchStateLogged) return;
-  fallbackWorkbenchStateLogged = true;
-  console.error(
-    JSON.stringify({
-      component: "codex_security_workbench",
-      event: "state_fallback_pinned",
-      reason: "persistent_sqlite_unwritable",
-    }),
-  );
 }
 
 function workbenchScriptPath(): string {
