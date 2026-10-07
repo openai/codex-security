@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     SCRIPT,
+    begin_deep_scan,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -24,9 +25,11 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_handoff_delivered,
+    resume_deep_scan,
     run_workbench,
     save_workspace,
     scan_claim_command,
+    scan_command,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -139,10 +142,8 @@ def budget_scan_fixture(
     scan_id = str(registered["scanId"])
     if mode != "deep":
         return state_dir, target, scan_dir, scan_id, scan_dir / "candidate_ledger.jsonl"
-    run_workbench(
+    begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "sdk-thread",
         "--scan-id",
         scan_id,
@@ -184,10 +185,9 @@ def budget_scan_fixture(
 
 
 def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
-    return run_workbench(
+    return scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
         json.dumps(BUDGET_COST),
@@ -201,27 +201,14 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
     tmp_path: Path,
 ) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
-    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    original = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     for limit in (0.0055, 0.006):
-        run_workbench(
-            state_dir,
-            "set-scan-cost-limit",
-            "--scan-id",
-            scan_id,
-            "--max-cost-usd",
-            str(limit),
-        )
-    saved = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+        scan_command(state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", str(limit))
+    saved = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     assert saved == {**original, "maxCostUsd": 0.006}
     assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
-    stopped = run_workbench(
-        state_dir,
-        "set-scan-cost-limit",
-        "--scan-id",
-        scan_id,
-        "--max-cost-usd",
-        "1",
-        check=False,
+    stopped = scan_command(
+        state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", "1", check=False
     )
     assert stopped["returncode"] != 0
 
@@ -229,20 +216,11 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
 @pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
 def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limit: str) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
-    result = run_workbench(
-        state_dir,
-        "set-scan-cost-limit",
-        "--scan-id",
-        scan_id,
-        "--max-cost-usd",
-        limit,
-        check=False,
+    result = scan_command(
+        state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", limit, check=False
     )
     assert result["returncode"] != 0
-    assert (
-        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]["maxCostUsd"]
-        == 0.005
-    )
+    assert scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]["maxCostUsd"] == 0.005
 
 
 def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
@@ -461,10 +439,9 @@ def test_budget_exhaustion_rejects_scan_below_configured_limit(tmp_path: Path) -
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
     cost = {**BUDGET_COST, "estimatedUsd": 0.005}
 
-    rejected = run_workbench(
+    rejected = scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
         json.dumps(cost),
@@ -482,10 +459,7 @@ def test_budget_exhaustion_rejects_incomplete_discovery(tmp_path: Path) -> None:
 
     assert rejected["returncode"] != 0
     assert "requires successfully completed Deep Scan discovery" in str(rejected["stderr"])
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
 
 def test_budget_exhaustion_rejects_standard_scan(tmp_path: Path) -> None:
@@ -629,38 +603,12 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     target = tmp_path / "target"
     (target / "src").mkdir(parents=True)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--thread-id",
-        "thread-i",
-        "--target-path",
-        str(target),
+    create_workspace(
+        state_dir, workspace_id, "--thread-id", "thread-i", "--target-path", str(target)
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-i",
-        environment={"CODEX_HOME": str(codex_home)},
-    )
+    resume_deep_scan(state_dir, scan_id, "thread-i", environment={"CODEX_HOME": str(codex_home)})
     manifest_path = scan_dir / "coordinator-manifest.json"
     manifest_path.write_text("{}\n")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -681,7 +629,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         inventory_strategy="deep_repository_repeated_discovery",
     )
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     coverage = json.loads((scan_dir / "coverage.json").read_text())
