@@ -573,12 +573,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         dataflow.get("summary"),
         f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
     )
-    reachability_summary = _text(
-        reachability.get("summary"),
-        _text(
-            attack_path.get("summary"),
-            "Reachability was not recorded beyond the canonical finding summary and affected locations.",
-        ),
+    reachability_summary = _text(reachability.get("summary"), "") or _text(
+        attack_path.get("summary"),
+        "Reachability was not recorded beyond the canonical finding summary and affected locations.",
     )
     severity_rationale = _text(
         severity.get("rationale"),

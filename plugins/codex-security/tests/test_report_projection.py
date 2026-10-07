@@ -220,13 +220,16 @@ def test_projection_merges_top_level_and_reachability_preconditions() -> None:
 def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["attackPath"] = {
-        "summary": "An authenticated uploader can trigger archive extraction."
+        "summary": "An authenticated uploader can trigger parse_file to extract an archive."
     }
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
-    assert "An authenticated uploader can trigger archive extraction." in reachability
+    assert (
+        reachability.strip()
+        == r"An authenticated uploader can trigger parse\_file to extract an archive."
+    )
     assert "Reachability was not recorded" not in reachability
 
 
