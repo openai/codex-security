@@ -376,7 +376,8 @@ result=$?
 if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
 printf '%s\n' "$result"`;
   });
-  const result = await runCommand(bash, ["-c", expressions.join("\n")], {
+  const result = await runCommand(bash, [], {
+    input: expressions.join("\n"),
     timeout: 30_000,
   });
   if (result.status !== 0) {
