@@ -685,11 +685,11 @@ function windowsAceAllowsAncestorReplacement(
     return (BigInt(rights) & 0x100d0040n) !== 0n;
   }
   // Rights tokens stay aligned to pairs of UTF-16 code units.
-  return rights
-    .matchAll(/[\s\S]{2}/g)
-    .some(([right]) =>
-      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(right),
-    );
+  for (const [right] of rights.matchAll(/[\s\S]{2}/g)) {
+    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(right))
+      return true;
+  }
+  return false;
 }
 
 export async function streamWindowsCredentialAclDescriptors(
