@@ -1,11 +1,26 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { build } from "esbuild";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
-import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
+import {
+  resolvePluginPython,
+  runCodexCommand,
+  runWorkbench,
+} from "../src/runtime.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
@@ -78,6 +93,388 @@ async function fixture() {
   };
   return { environment, store: new SqliteFindingsStore(environment) };
 }
+
+test("initializes the shared database concurrently without Python", async () => {
+  const { environment } = await fixture();
+  const nativeEnvironment = {
+    ...environment,
+    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
+  };
+  await Promise.all([
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+  ]);
+  const result = await runWorkbench(
+    { pluginRoot: PLUGIN_ROOT, environment: nativeEnvironment },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(environment.CODEX_SECURITY_STATE_DIR),
+      "workbench.sqlite3",
+    ),
+  });
+});
+
+test("missing explicit Python fails only when a Python operation runs", async () => {
+  const { environment } = await fixture();
+  const store = new SqliteFindingsStore({
+    ...environment,
+    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
+  });
+  await store.initialize();
+  await expect(store.list({ limit: 50, offset: 0 })).rejects.toThrow(
+    "The PYTHON interpreter is unavailable or unusable",
+  );
+});
+
+test.skipIf(process.platform === "win32")(
+  "database initialization under Bun ignores repository-local Node shims",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
+    directories.push(directory);
+    const repository = join(directory, "repository");
+    const other = join(directory, "other", "nested");
+    await mkdir(other, { recursive: true });
+    const bin = join(repository, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(bin, "node"),
+      `#!/bin/sh
+: > "$SYNTHETIC_NODE_SHIM_MARKER"
+printf '%s\n' '{"databasePath":"shim"}'
+`,
+      { mode: 0o755 },
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const tools = join(directory, "tools");
+    const replacementTools = join(directory, "other", "tools");
+    await Promise.all([mkdir(tools), mkdir(replacementTools)]);
+    await symlink(node!, join(tools, "node"));
+    await writeFile(
+      join(replacementTools, "node"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_NODE_SHIM_MARKER"\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const state = join(directory, "state");
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(other)});
+await store.initialize();`,
+      ],
+      {
+        cwd: repository,
+        env: {
+          ...process.env,
+          PATH: [bin, "../tools"].join(delimiter),
+          CODEX_SECURITY_STATE_DIR: state,
+          SYNTHETIC_NODE_SHIM_MARKER: join(bin, "invoked"),
+        },
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(await readdir(bin)).toEqual(["node"]);
+    expect(
+      (await readFile(join(state, "workbench.sqlite3")))
+        .subarray(0, 16)
+        .toString(),
+    ).toBe("SQLite format 3\0");
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "database initialization and Python operations share the configured state directory",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-location-"));
+    directories.push(directory);
+    const store = new SqliteFindingsStore({
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(directory, "state ") + "/",
+    });
+    await store.insert([embedded(1)], "repository-a");
+    await store.initialize();
+    expect(await readdir(directory)).toEqual(["state "]);
+    expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
+      finding(1),
+    ]);
+  },
+);
+
+test("initialized stores keep relative state in the original directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-relative-state-"));
+  directories.push(directory);
+  const first = join(directory, "first");
+  const second = join(directory, "second");
+  await Promise.all([mkdir(first), mkdir(second)]);
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      "--eval",
+      `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(second)});
+await store.insert(${JSON.stringify([embedded(1)])});
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
+    ],
+    {
+      cwd: first,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: "state",
+      },
+    },
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
+  expect(await readdir(first)).toEqual(["state"]);
+  expect(await readdir(second)).toEqual([]);
+});
+
+test("initialized stores retain their environment across findings operations", async () => {
+  const { environment } = await fixture();
+  const store = new SqliteFindingsStore(environment);
+  await store.initialize();
+  const directory = dirname(environment.CODEX_SECURITY_STATE_DIR);
+  environment.CODEX_SECURITY_STATE_DIR = join(directory, "other state");
+  const entries = [embedded(1), embedded(2)];
+  await store.insert(entries);
+  const groups = await store.storeDedupeGroups([
+    entries.map(({ finding }) => finding.findingId),
+  ]);
+  expect(await store.listDedupeGroups(entries[0]!.finding.findingId)).toEqual(
+    groups,
+  );
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    entries.map(({ finding }) => finding),
+  );
+  expect(await readdir(directory)).toEqual(["state with spaces"]);
+});
+
+test.each(["explicit", "PATH", "Path", "XDG_CACHE_HOME", "xdg_cache_home"])(
+  "findings stores retain relative Python paths before and after first use (%s)",
+  async (configuration) => {
+    const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
+    directories.push(directory);
+    const first = join(directory, "first");
+    const second = join(directory, "second", "nested");
+    await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
+    const python = await resolvePluginPython();
+    const managedCache = configuration.toUpperCase() === "XDG_CACHE_HOME";
+    const cacheDirectory = join(directory, "managed cache");
+    if (managedCache) {
+      const managedPython = join(
+        cacheDirectory,
+        "codex-runtimes/codex-primary-runtime/dependencies/python",
+      );
+      await mkdir(dirname(managedPython), { recursive: true });
+      if (process.platform === "win32") {
+        await symlink(dirname(python), managedPython, "junction");
+      } else {
+        await mkdir(join(managedPython, "bin"), { recursive: true });
+        await symlink(python, join(managedPython, "bin", "python3"));
+      }
+    }
+    let pythonDirectory = relative(first, dirname(python));
+    if (
+      process.platform !== "win32" &&
+      ["PATH", "Path"].includes(configuration)
+    ) {
+      const link = join(directory, "python-link");
+      await symlink(dirname(python), link, "dir");
+      pythonDirectory = `${configuration === "PATH" ? link : relative(first, link)}/../${basename(dirname(python))}`;
+    }
+    const searchPath = [
+      process.platform === "win32" ? `"${pythonDirectory}"` : pythonDirectory,
+      "",
+      dirname(Bun.which("node")!),
+    ].join(delimiter);
+    const storeModule = join(directory, "sqlite-store.cjs");
+    await build({
+      entryPoints: [
+        fileURLToPath(
+          new URL("../src/server/sqlite-store.ts", import.meta.url),
+        ),
+      ],
+      outfile: storeModule,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      define: {
+        "import.meta.url": JSON.stringify(
+          new URL("../src/runtime.ts", import.meta.url).href,
+        ),
+      },
+    });
+    const result = Bun.spawnSync(
+      [
+        Bun.which("node")!,
+        "--input-type=module",
+        "--eval",
+        `const assert = await import("node:assert/strict");
+const { SqliteFindingsStore } = await import(${JSON.stringify(pathToFileURL(storeModule).href)});
+const environment = { ...process.env };
+if (${managedCache}) {
+  for (const key of Object.keys(environment)) if (["PATH", "PYTHON", "XDG_CACHE_HOME"].includes(key.toUpperCase())) delete environment[key];
+  environment.PATH = "";
+  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(relative(first, cacheDirectory))};
+} else if (${JSON.stringify(configuration)} !== "explicit") {
+  for (const key of Object.keys(environment)) if (key.toUpperCase() === "PATH") delete environment[key];
+  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(searchPath)};
+}
+const original = ["PATH", "Path", "PYTHON", "XDG_CACHE_HOME", "xdg_cache_home", "CODEX_SECURITY_STATE_DIR"].map((key) => [key, environment[key], process.env[key]]);
+const store = new SqliteFindingsStore(environment);
+await store.initialize();
+process.chdir(${JSON.stringify(second)});
+await store.insert(${JSON.stringify([embedded(1)])});
+process.chdir(${JSON.stringify(first)});
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));
+for (const [key, supplied, inherited] of original) {
+  assert.equal(environment[key], supplied);
+  assert.equal(process.env[key], inherited);
+}`,
+      ],
+      {
+        cwd: first,
+        env: {
+          ...process.env,
+          PYTHON:
+            configuration === "explicit"
+              ? relative(first, python)
+              : basename(python),
+          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "changing directories does not trust the original repository's Python shim",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "findings-python-shim-"));
+    directories.push(directory);
+    const repository = join(directory, "repository");
+    const other = join(directory, "other");
+    await Promise.all([mkdir(repository), mkdir(other)]);
+    await writeFile(
+      join(repository, "python"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_PYTHON_MARKER"\nprintf "codex-security-python-ok\\n"\n',
+      { mode: 0o755 },
+    );
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const assert = await import("node:assert/strict");
+const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(other)});
+await assert.rejects(store.list({ limit: 50, offset: 0 }), /The PYTHON interpreter is unavailable or unusable/);`,
+      ],
+      {
+        cwd: repository,
+        env: {
+          ...process.env,
+          PYTHON: "./python",
+          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          SYNTHETIC_PYTHON_MARKER: join(repository, "invoked"),
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(await readdir(repository)).toEqual(["python"]);
+  },
+);
+
+test("escapes terminal controls in database helper diagnostics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-"));
+  directories.push(directory);
+  const blocked = join(directory, "blocked\u202e");
+  await writeFile(blocked, "existing file");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    process.env,
+    JSON.stringify(join(blocked, "state")),
+  );
+  expect(result.success).toBe(false);
+  expect(result.stderr).toContain("\\u202e");
+  expect(result.stderr).not.toContain("\u202e");
+});
+
+test("successful database helper JSON escapes terminal controls without changing the path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-controls-"));
+  directories.push(directory);
+  const state = join(directory, "state\u009b\u202e\u{e0001}");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    process.env,
+    JSON.stringify(state),
+  );
+  expect(result.success).toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    databasePath: join(await realpath(state), "workbench.sqlite3"),
+  });
+  expect(result.stdout.trimEnd()).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+  expect(result.stdout).toContain("\\udb40\\udc01");
+});
+
+test("database initialization uses the SDK's existing CODEX_HOME configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-home-"));
+  directories.push(directory);
+  const result = await runWorkbench(
+    {
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        CODEX_HOME: directory,
+        PYTHON: join(directory, "missing-python"),
+      },
+    },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(directory),
+      "state/plugins/codex-security/workbench.sqlite3",
+    ),
+  });
+});
+
+test("database helper rejects invalid state-directory input before writing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-input-"));
+  directories.push(directory);
+  const ignoredEnvironmentPath = join(directory, "must-not-be-created");
+  for (const input of [
+    undefined,
+    JSON.stringify(null),
+    JSON.stringify("~synthetic-user"),
+    JSON.stringify("C:"),
+    JSON.stringify(directory + "/raw\udcff"),
+  ]) {
+    const result = await runCodexCommand(
+      { command: "node" },
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+      { ...process.env, CODEX_SECURITY_STATE_DIR: ignoredEnvironmentPath },
+      input,
+    );
+    expect(result.success).toBe(false);
+    expect(result.stderr).not.toBe("");
+  }
+  expect(await readdir(directory)).toEqual([]);
+});
 
 async function start(
   store: SqliteFindingsStore,

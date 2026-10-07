@@ -561,7 +561,8 @@ Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
 command shims such as `codex.cmd` fall back to the bundled executable.
 
-Python lookup: `--python` (scan, bulk scan, export) or SDK `pythonPath`, then
+Python lookup: `--python` on commands that expose interpreter selection or SDK
+`pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
 
