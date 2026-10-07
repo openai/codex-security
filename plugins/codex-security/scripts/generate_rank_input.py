@@ -8,6 +8,9 @@ This script stays deliberately model-free:
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
+
+Candidate selection uses the existing path exclusions and binary detection,
+not a language-extension allowlist. Unknown formats use sampled text previews.
 """
 
 from __future__ import annotations
@@ -24,13 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_in_scope_files import windows_stream_component
 from rank_preview import (
     DEFAULT_PREVIEW_BYTES,
-    DEFAULT_PREVIEW_READ_BYTES,
-    TEXT_CODE_EXTENSIONS,
-    is_binary_sample,
+    is_binary_file,
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_command, git_directory_snapshot_paths
+from workbench_target import git_blob_samples, git_command, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -290,21 +291,14 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
                 if explicit_scopes
                 else rel
             )
-            if not directly_requested and (
-                path_is_excluded(excluded_path) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS
-            ):
+            if not directly_requested and path_is_excluded(excluded_path):
                 continue
 
-            if (
-                directly_requested
-                and path.suffix.lower() not in TEXT_CODE_EXTENSIONS
-                and path.name not in EXCLUDED_FILENAMES
-            ):
-                preview = ""
-            else:
-                preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary and not directly_requested:
+            preview, is_binary = preview_for(path, args.preview_bytes)
+            if is_binary or is_binary_file(path):
+                if not directly_requested:
                     continue
+                preview = ""
             rows_by_path.setdefault(
                 rel.as_posix(),
                 {"path": rel.as_posix(), "area": area, "preview": preview},
@@ -398,6 +392,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     result = git_command(
         repo,
         "diff",
+        "--ignore-submodules=all",
         "--name-status",
         "-z",
         "--diff-filter=ACMRD",
@@ -442,7 +437,7 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         combined.update(
             (repo / os.fsdecode(relative), "A")
             for relative in untracked.stdout.split(b"\0")
-            if relative
+            if relative and not relative.endswith(b"/")
         )
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
@@ -457,21 +452,16 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         (path, status)
         for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
         if not path_is_diff_excluded(path.relative_to(repo))
-        and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
-    revision_paths = [
-        path.relative_to(repo)
-        for path, status in changed
-        if args.mode == "revisions" and status != "D"
-    ]
-    revision_blobs = dict(
-        zip(
-            revision_paths,
-            git_blob_bytes(
-                repo,
-                [f"{args.head}:{path.as_posix()}" for path in revision_paths],
-            ),
+    revision_refs = {
+        path.relative_to(repo): (
+            f"{args.base if status == 'D' else args.head}:{path.relative_to(repo).as_posix()}"
         )
+        for path, status in changed
+        if args.mode == "revisions" or status == "D"
+    }
+    revision_samples = dict(
+        zip(revision_refs, git_blob_samples(repo, list(revision_refs.values())))
     )
 
     rows: list[JsonRow] = []
@@ -479,25 +469,24 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         rel = path.relative_to(repo)
 
         preview = ""
-        if status != "D" and args.mode == "revisions":
-            content = revision_blobs[rel]
-            if content is None:
-                raise SystemExit(
-                    f"Unable to read committed diff blob: {args.head}:{rel.as_posix()}"
-                )
-            if is_binary_sample(content):
+        if args.mode == "revisions" or status == "D":
+            sample = revision_samples[rel]
+            if sample is None:
+                revision = args.base if status == "D" else args.head
+                raise SystemExit(f"Unable to read committed diff blob: {revision}:{rel.as_posix()}")
+            content, is_binary = sample
+            if is_binary:
                 continue
-            preview, _ = preview_for_bytes(
-                rel, content[:DEFAULT_PREVIEW_READ_BYTES], args.preview_bytes
-            )
-        elif status != "D" and not path.is_symlink() and path.is_file():
+            if status != "D":
+                preview, _ = preview_for_bytes(rel, content, args.preview_bytes)
+        elif not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
                 preview = ""
             else:
                 preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
+                if is_binary or is_binary_file(path):
                     continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
