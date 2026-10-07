@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.cross_platform
+
 
 class Python310DateTime(datetime):
     @classmethod

@@ -857,6 +857,7 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
         }
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("migration_recorded", (False, True))
 def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     migration_recorded: bool,
@@ -2303,6 +2304,7 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.cross_platform
 def test_workbench_upgrades_public_cli_completion_warning_migration() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     apply_migrations = namespace["apply_migrations"]
@@ -2700,6 +2702,7 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     assert "legacy_execution_model" not in scan_columns
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize(
     ("profile_migration", "follow_up_migration", "supported"),
     (
