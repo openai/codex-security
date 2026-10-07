@@ -931,35 +931,28 @@ describe("canonical scan contract", () => {
     expect(stderr).toContain("duplicate artifact path");
   });
 
-  test("rejects calendar-invalid RFC 3339 timestamps", async () => {
+  test.each([
+    ["2026-02-30T18:00:00Z", false],
+    ["0000-01-01T00:00:00Z", false],
+    ["1900-02-29T00:00:00Z", false],
+    ["2026-01-01T24:00:00Z", false],
+    ["2026-01-01T00:00:60Z", false],
+    ["2026-01-01T00:00:00+24:00", false],
+    ["2026-01-01T00:00Z", false],
+    ["2026-05-31t18:09:00z", true],
+    ["0001-01-01T00:00:00Z", true],
+    ["2000-02-29T23:59:59.123456+23:59", true],
+    ["2026-01-01T00:00:00Z\n", false],
+  ] as const)("validates RFC 3339 timestamp %j", async (value, valid) => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-02-30T18:00:00Z";
-    manifest["scan"]["sealedAt"] = "2026-02-30T18:00:00Z";
+    manifest["scan"]["completedAt"] = value;
+    manifest["scan"]["sealedAt"] = value;
     await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-
-    manifest["scan"]["completedAt"] = "0000-01-01T00:00:00Z";
-    manifest["scan"]["sealedAt"] = "0000-01-01T00:00:00Z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-  });
-
-  test("accepts lowercase RFC 3339 separators", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-05-31t18:09:00z";
-    manifest["scan"]["sealedAt"] = "2026-05-31t18:09:00z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toBeDefined();
+    const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (valid) await expect(loaded).resolves.toBeDefined();
+    else await expect(loaded).rejects.toThrow("date-time");
   });
 
   test("requires completed and sealed timestamps to match exactly", async () => {

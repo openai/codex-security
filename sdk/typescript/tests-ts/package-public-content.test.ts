@@ -1,14 +1,7 @@
 import { brotliCompressSync, brotliDecompressSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 
-const { assertPublicPackageContents } = (await import(
-  new URL("../scripts/package-public-content.mjs", import.meta.url).href
-)) as {
-  assertPublicPackageContents: (
-    files: Map<string, Buffer>,
-    archiveMetadata?: Buffer,
-  ) => void;
-};
+import { assertPublicPackageContents } from "../scripts/package-public-content.mjs";
 
 // Synthetic alphanumeric text whose compressed bytes happen to contain " Go/w".
 const cleanCompressedPayload = Buffer.from(

@@ -1,16 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-type PackageSmokeTimeouts = {
-  packageSmokeTimeouts: (platform?: NodeJS.Platform) => {
-    commandTimeoutMs: number;
-    installTimeoutMs: number;
-    processTimeoutMs: number;
-  };
-};
-
-const { packageSmokeTimeouts } = (await import(
-  new URL("../scripts/package-smoke-timeouts.mjs", import.meta.url).href
-)) as PackageSmokeTimeouts;
+import { packageSmokeTimeouts } from "../scripts/package-smoke-timeouts.mjs";
 
 describe("npm package smoke timeouts", () => {
   test("preserves the command timeout on Linux and macOS", () => {

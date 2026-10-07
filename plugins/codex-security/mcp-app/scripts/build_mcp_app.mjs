@@ -63,6 +63,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     await copyFile(join(nativeRoot, path), destination);
   }
   await writeRuntime("helpers", "helpers-main.ts");
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "permission-profile-preflight.mjs"),
+    platform: "node",
+    target: "node20",
+  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");

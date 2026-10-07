@@ -43,6 +43,10 @@ function hasReviewedText(value) {
   return !value.includes("\0") && /\S/u.test(value);
 }
 
+/**
+ * @param {string} version
+ * @param {string} notes
+ */
 export function parseReviewedReleaseNotes(version, notes) {
   const expectedHeader = `<!-- release-version: ${version} -->`;
   const normalized =
@@ -105,6 +109,10 @@ export function resolveReleaseSummary(version, taggedNotes, existingNotes) {
   return extractHistoricalReleaseSummary(existingNotes);
 }
 
+/**
+ * @param {string} generatedNotes
+ * @param {string | null} releaseSummary
+ */
 export function composeReleaseNotes(generatedNotes, releaseSummary) {
   if (releaseSummary === null || releaseSummary === "") {
     return generatedNotes;
@@ -444,60 +452,38 @@ export function releaseHistory(tag, history) {
   }
 
   const publishedVersions = new Set(
-    history.registryVersions.filter(
+    [
+      ...history.registryVersions,
+      ...history.githubReleaseTags
+        .filter((tag) => typeof tag === "string" && tag.startsWith("npm-v"))
+        .map((tag) => tag.slice("npm-v".length)),
+    ].filter(
       (candidate) =>
         typeof candidate === "string" && stableVersion.test(candidate),
     ),
   );
-  const publishedGitHubTags = new Set(
-    history.githubReleaseTags.filter(
-      (candidate) =>
-        typeof candidate === "string" &&
-        candidate.startsWith("npm-v") &&
-        stableVersion.test(candidate.slice("npm-v".length)),
-    ),
-  );
 
-  let previousTag = null;
-  for (const candidate of history.reachableTags) {
+  let previousVersion = null;
+  for (const tag of history.reachableTags) {
+    if (typeof tag !== "string" || !tag.startsWith("npm-v")) continue;
+    const candidate = tag.slice("npm-v".length);
     if (
-      typeof candidate !== "string" ||
-      !candidate.startsWith("npm-v") ||
-      !stableVersion.test(candidate.slice("npm-v".length))
+      stableVersion.test(candidate) &&
+      publishedVersions.has(candidate) &&
+      compareReleaseVersions(candidate, version) < 0 &&
+      (previousVersion === null ||
+        compareReleaseVersions(candidate, previousVersion) > 0)
     ) {
-      continue;
-    }
-
-    const candidateVersion = candidate.slice("npm-v".length);
-    if (
-      compareReleaseVersions(candidateVersion, version) >= 0 ||
-      (!publishedVersions.has(candidateVersion) &&
-        !publishedGitHubTags.has(candidate))
-    ) {
-      continue;
-    }
-
-    if (
-      previousTag === null ||
-      compareReleaseVersions(
-        candidateVersion,
-        previousTag.slice("npm-v".length),
-      ) > 0
-    ) {
-      previousTag = candidate;
+      previousVersion = candidate;
     }
   }
 
-  const makeLatest =
-    Array.from(publishedVersions).every(
+  return {
+    previousTag: previousVersion === null ? null : "npm-v" + previousVersion,
+    makeLatest: Array.from(publishedVersions).every(
       (candidate) => compareReleaseVersions(version, candidate) >= 0,
-    ) &&
-    Array.from(publishedGitHubTags).every(
-      (candidate) =>
-        compareReleaseVersions(version, candidate.slice("npm-v".length)) >= 0,
-    );
-
-  return { previousTag, makeLatest };
+    ),
+  };
 }
 
 export function verifyPublishedRelease(metadata, archive, expected) {
