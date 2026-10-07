@@ -202,9 +202,7 @@ export async function importScan(
     };
     signal?.throwIfAborted();
     const registration = await workbench(
-      options.archiveExisting
-        ? { ...workbenchOptions, signal: undefined }
-        : workbenchOptions,
+      workbenchOptions,
       [
         "register-cli-scan",
         "--repository",

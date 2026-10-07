@@ -91,6 +91,7 @@ import {
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
+import { importScan } from "../src/import-scan.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { createProviderProfile } from "../src/provider-profile.js";
@@ -2064,7 +2065,7 @@ describe("CodexSecurity orchestration", () => {
             const result = await runWorkbench(
               {
                 ..._options,
-                python: Bun.which("python3")!,
+                python: pythonExecutable()!,
                 pluginRoot: PLUGIN_ROOT,
               },
               args,
@@ -2116,13 +2117,16 @@ describe("CodexSecurity orchestration", () => {
   test.each(
     (["preparation", "empty", "legacy", "commit", "rollback"] as const).flatMap(
       (boundary) =>
-        (["signal", "close"] as const).flatMap((cancel) =>
-          [false, true].map((mock) => ({ boundary, cancel, mock })),
+        (["real", "mock", "import"] as const).flatMap((mode) =>
+          (mode === "import"
+            ? (["signal"] as const)
+            : (["signal", "close"] as const)
+          ).map((cancel) => ({ boundary, cancel, mode })),
         ),
     ),
   )(
-    "cancels archived registration at $boundary via $cancel, mock=$mock",
-    async ({ boundary, cancel, mock }) => {
+    "cancels archived registration at $boundary via $cancel, mode=$mode",
+    async ({ boundary, cancel, mode }) => {
       const { root, repository, codexHome } = await runtimeDirectories();
       const output = join(root, "scan");
       await mkdir(output, { mode: 0o700 });
@@ -2209,6 +2213,17 @@ describe("CodexSecurity orchestration", () => {
         ].join("\n"),
       );
       let submitted: string | undefined;
+      const registration: typeof runWorkbench = async (
+        options,
+        args,
+        input,
+      ) => {
+        if (args[0] === "register-cli-scan") {
+          submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
+          input = submitted;
+        }
+        return runWorkbench(options, args, input);
+      };
       const controller = new AbortController();
       const client = new TestClient(
         { pluginPath: pluginRoot },
@@ -2221,13 +2236,7 @@ describe("CodexSecurity orchestration", () => {
           },
           resolvePluginPython: async () => python,
           repositoryRevision: async () => null,
-          runWorkbench: async (options, args, input) => {
-            if (args[0] === "register-cli-scan") {
-              submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
-              input = submitted;
-            }
-            return runWorkbench(options, args, input);
-          },
+          runWorkbench: registration,
           createCodex: codexFactory(scanDidNotStart),
         },
       );
@@ -2238,15 +2247,32 @@ describe("CodexSecurity orchestration", () => {
       const guardTimer = setTimeout(() => guard.abort(), 10_000);
       const deadline = guard.signal;
       const connected = once(server, "connection", { signal: deadline });
-      const operation = client
-        .run(repository, {
-          mock,
-          scanPrompt: "Review café boundaries.\nPreserve the second line.",
-          outputDir: output,
-          archiveExisting: true,
-          signal: controller.signal,
-        })
-        .catch((error: unknown) => error);
+      const options = {
+        outputDir: output,
+        archiveExisting: true,
+        signal: controller.signal,
+      };
+      const operation = (
+        mode === "import"
+          ? importScan(
+              {
+                ...options,
+                sourcePath: join(EXAMPLE, "findings.json"),
+                format: "json",
+                config: { pluginPath: pluginRoot },
+              },
+              {
+                environment,
+                resolvePluginPython: async () => python,
+                runWorkbench: registration,
+              },
+            )
+          : client.run(repository, {
+              ...options,
+              mock: mode === "mock",
+              scanPrompt: "Review café boundaries.\nPreserve the second line.",
+            })
+      ).catch((error: unknown) => error);
       let socket: Socket | undefined;
       let closing: Promise<void> | undefined;
       try {
