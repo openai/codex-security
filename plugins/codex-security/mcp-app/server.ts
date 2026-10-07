@@ -1474,6 +1474,32 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "rename_codex_security_scan",
+    {
+      title: "Rename Codex Security Scan",
+      description: "App-only. Change the display name of a saved scan.",
+      inputSchema: { ...scanSchema, name: z.string() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: appMeta,
+    },
+    async ({ scanId, name }) =>
+      scanActionResult(
+        await runWorkbench([
+          "rename-scan",
+          "--scan-id",
+          scanId,
+          `--name=${name}`,
+        ]),
+        "Renamed Codex Security scan.",
+      ),
+  );
+
   const updateRunningScanContext = async (input: {
     claimToken?: string;
     scanId: string;
