@@ -202,6 +202,13 @@ The extraction root is not enforced.
             raise AssertionError(f"missing sealed artifact: {relative_path}")
         self.write_json("scan-manifest.json", manifest)
 
+    def sarif_finding(self, fingerprint: str = "fingerprint") -> dict[str, object]:
+        finding = copy.deepcopy(self.finding)
+        finding["findingId"] = "csf_example"
+        finding["occurrenceId"] = "occ_example"
+        finding["fingerprints"] = {"primary": fingerprint}
+        return finding
+
     def test_finalize_seals_manifest_deterministically(self) -> None:
         self.write_scan()
 
@@ -2682,10 +2689,7 @@ The extraction root is not enforced.
 
     def test_sarif_encodes_location_as_relative_uri(self) -> None:
         self.finding["locations"][0]["path"] = "src/archive handlers/extract.py"
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding()
         result = FINALIZER._sarif_result(sarif_finding, 0)
         location = result["locations"][0]["physicalLocation"]["artifactLocation"]
         uri = location["uri"]
@@ -2698,10 +2702,7 @@ The extraction root is not enforced.
         self.assertNotIn("originalUriBaseIds", sarif["runs"][0])
 
     def test_sarif_keeps_root_first_and_preserves_sink_and_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding()
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 10, "role": "entrypoint/wrapper"},
             {"path": "src/control.py", "startLine": 20, "role": "root_control"},
@@ -2765,10 +2766,7 @@ The extraction root is not enforced.
         self.assertNotIn("relatedLocations", result)
 
     def test_sarif_includes_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding()
         sarif_finding["codeEvidence"] = [
             {
                 "id": "canonical-source",
@@ -2807,10 +2805,7 @@ The extraction root is not enforced.
         )
 
     def test_sarif_normalizes_invalid_legacy_code_evidence_bounds(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding()
         sarif_finding["code_evidence"] = [
             {
                 "id": "legacy-null-end",
@@ -2848,10 +2843,7 @@ The extraction root is not enforced.
         self.assertEqual(regions["src/text_end.py"], {"startLine": 59, "endLine": 59})
 
     def test_sarif_omits_invalid_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "fingerprint"}
+        sarif_finding = self.sarif_finding()
         sarif_finding["code_evidence"] = [
             {
                 "id": "legacy-zero-start",
@@ -2901,10 +2893,7 @@ The extraction root is not enforced.
         source_path.write_text(
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
@@ -2917,14 +2906,8 @@ The extraction root is not enforced.
         source_path.write_text(
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
-        backend = mock.Mock()
-        backend.open_read_fd.side_effect = lambda root, relative_path, _context: os.open(
-            root / relative_path, os.O_RDONLY
-        )
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
+        backend = windows_file_backend()
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
@@ -2948,10 +2931,7 @@ The extraction root is not enforced.
         entrypoint_path.parent.mkdir(parents=True)
         entrypoint_path.write_text("entrypoint\n", encoding="utf-8")
         control_path.write_text("root control\n", encoding="utf-8")
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
             {"path": "src/control.py", "startLine": 1, "role": "root_control"},
@@ -2972,10 +2952,7 @@ The extraction root is not enforced.
         source_path = source_root / "src" / "extract.py"
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
@@ -2989,10 +2966,7 @@ The extraction root is not enforced.
                 "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
             )
             source_path.symlink_to(external_path)
-            sarif_finding = copy.deepcopy(self.finding)
-            sarif_finding["findingId"] = "csf_example"
-            sarif_finding["occurrenceId"] = "occ_example"
-            sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+            sarif_finding = self.sarif_finding("semantic-fingerprint")
             result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
@@ -3057,10 +3031,7 @@ The extraction root is not enforced.
         source_path.write_text(
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
-        sarif_finding = copy.deepcopy(self.finding)
-        sarif_finding["findingId"] = "csf_example"
-        sarif_finding["occurrenceId"] = "occ_example"
-        sarif_finding["fingerprints"] = {"primary": "semantic-fingerprint"}
+        sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
             result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
