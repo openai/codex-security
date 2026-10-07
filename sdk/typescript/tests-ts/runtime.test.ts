@@ -109,6 +109,58 @@ const restoreSpawn = (spawn: typeof childProcess.spawn) =>
 
 afterEach(cleanup);
 
+async function credentialHome(managed: boolean) {
+  const root = await temporaryDirectory();
+  const home = managed
+    ? await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      })
+    : join(root, "home");
+  if (!managed) await mkdir(home);
+  return { root, home };
+}
+
+function credentialAncestors(home: string, directory: string): string[] {
+  const ancestors: string[] = [];
+  for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+    ancestors.push(directory);
+    if (ancestor === dirname(ancestor)) break;
+  }
+  return ancestors;
+}
+
+function windowsTestCommand(
+  tool: string,
+  args: readonly string[],
+  environment?: NodeJS.ProcessEnv,
+) {
+  return spawnSync(
+    join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", tool),
+    args,
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      ...(environment === undefined ? {} : { env: environment }),
+    },
+  );
+}
+function inspectWindowsTestAcl(
+  statements: string[],
+  environment: NodeJS.ProcessEnv,
+) {
+  return windowsTestCommand(
+    join("WindowsPowerShell", "v1.0", "powershell.exe"),
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      statements.join("; "),
+    ],
+    environment,
+  );
+}
+
 function windowsCredentialAclOutput(descriptors: readonly string[]): string {
   return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
 }
@@ -2460,10 +2512,7 @@ describe("runtime directories and plugin Python boundary", () => {
   testPosix(
     "rejects a credential home that is no longer private to the current user",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { home } = await credentialHome(true);
       await chmod(home, 0o755);
       await expect(requireSecureCredentialHome(home)).rejects.toThrow(
         "must not be accessible to other users",
@@ -2477,10 +2526,7 @@ describe("runtime directories and plugin Python boundary", () => {
   testPosix(
     "pins credential-home identity for the duration of a lock session",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { root, home } = await credentialHome(true);
       const release = await acquireCodexSecurityCredentialHomeLock(home);
       const stolen = join(root, "stolen-home");
       await rename(home, stolen);
@@ -2496,10 +2542,7 @@ describe("runtime directories and plugin Python boundary", () => {
   testPosix(
     "rejects stale credential-home metadata after canonical target replacement",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { root, home } = await credentialHome(true);
       const stale = await lstat(home, { bigint: true });
       await rename(home, join(root, "original-home"));
       await mkdir(home, { mode: 0o700 });
@@ -2513,10 +2556,7 @@ describe("runtime directories and plugin Python boundary", () => {
   testPosix(
     "rejects world-writable or symlink stored authentication files",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { home } = await credentialHome(true);
       const authPath = join(home, "auth.json");
       await writeFile(authPath, '{"token":"test"}\n', { mode: 0o600 });
       expect(await codexSecurityHasStoredFileCredentials(home)).toBe(true);
@@ -2558,10 +2598,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("serializes and releases persistent credential-home locks", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const releaseFirst = await acquireCodexSecurityCredentialHomeLock(home);
     const database = join(home, ".codex-security-scan.sqlite3");
     const original = await stat(database);
@@ -2594,10 +2631,7 @@ describe("runtime directories and plugin Python boundary", () => {
       ) {
         return;
       }
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { home } = await credentialHome(true);
       const database = join(home, ".codex-security-scan.sqlite3");
       const originalLstat = fsPromises.lstat;
       const originalWriteFile = fsPromises.writeFile;
@@ -2658,10 +2692,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test("keeps a fresh live credential-home lock and cancels the waiter", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const release = await acquireCodexSecurityCredentialHomeLock(home);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 100);
@@ -2683,10 +2714,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("releases the native credential lock when legacy-lock inspection fails", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const lock = join(home, ".codex-security-scan.lock");
     await writeFile(lock, "not a directory", { mode: 0o600 });
     await expect(acquireCodexSecurityCredentialHomeLock(home)).rejects.toThrow(
@@ -2750,10 +2778,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("recovers credential-home locks left by exited processes", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const exited = spawnSync(process.execPath, ["--eval", ""], {
       encoding: "utf8",
       windowsHide: true,
@@ -2775,10 +2800,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("preserves a legacy live owner beyond the stale-heartbeat grace period", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const stale = new Date(Date.now() - 10 * 60_000);
     const lock = await plantCredentialHomeLock(home, process.pid, stale);
     const owner = await readFile(join(lock, "owner.json"), "utf8");
@@ -2803,10 +2825,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("preserves a legacy owner when PID inspection is denied", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const stale = new Date(Date.now() - 10 * 60_000);
     const lock = await plantCredentialHomeLock(home, process.pid, stale);
     const controller = new AbortController();
@@ -2833,10 +2852,7 @@ describe("runtime directories and plugin Python boundary", () => {
   testPosix(
     "rejects linked and repairs non-private credential-lock database files",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { home } = await credentialHome(true);
       const database = join(home, ".codex-security-scan.sqlite3");
       const target = join(home, "target");
       await writeFile(target, "unchanged", { mode: 0o600 });
@@ -2859,10 +2875,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test("recovers credential-home locks whose owner names no process", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
     const lock = join(home, ".codex-security-scan.lock");
     for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
       await mkdir(lock, { mode: 0o700 });
@@ -2882,10 +2895,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("prevents ambient credential imports after an explicit logout", async () => {
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
+    const { home } = await credentialHome(true);
 
     expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(true);
     await setCodexSecurityCredentialLogout(home, true);
@@ -2900,9 +2910,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("requires a real private-ACL operation for Windows private directories", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const metadata = await lstat(home);
     const secured = mock(async (_path: string) => {});
 
@@ -2945,11 +2953,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const sid = "S-1-5-21-111-222-333-1001";
       const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
       const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-      const ancestors: string[] = [];
-      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-        ancestors.push(directory);
-        if (ancestor === dirname(ancestor)) break;
-      }
+      const ancestors = credentialAncestors(home, directory);
       const script = [
         'const fs = require("node:fs")',
         `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
@@ -2977,16 +2981,10 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test("inspects Windows credential ancestry and the home even without descendants", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const sid = "S-1-5-21-111-222-333-1001";
     const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const ancestors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      ancestors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
+    const ancestors = credentialAncestors(home, directory);
     const descriptors = [...ancestors, directory];
 
     await expect(
@@ -3023,9 +3021,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ) {
       return;
     }
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
@@ -3115,11 +3111,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const sid = "S-1-5-21-111-222-333-1001";
     const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const descriptors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      descriptors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
+    const descriptors = credentialAncestors(home, directory);
     descriptors.push(directory, file);
     const script = [
       'const fs = require("node:fs")',
@@ -3185,11 +3177,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const home = join(await temporaryDirectory(), "home");
       const sid = "S-1-5-21-111-222-333-1001";
       const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-      const descriptors: string[] = [];
-      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-        descriptors.push(directory);
-        if (ancestor === dirname(ancestor)) break;
-      }
+      const descriptors = credentialAncestors(home, directory);
       descriptors.push(directory);
       const firstDescriptors = [...descriptors];
       if (kind === "unsafe") {
@@ -3290,9 +3278,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const sid = "S-1-5-21-111-222-333-1001";
     const unsafe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;WD)`;
 
@@ -3310,9 +3296,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("rejects incomplete combined Windows credential ACL inspections", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const sid = "S-1-5-21-111-222-333-1001";
     const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
 
@@ -3328,17 +3312,11 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("rejects incomplete or failed Windows credential descendant streams", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const sid = "S-1-5-21-111-222-333-1001";
     const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const descriptors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      descriptors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
+    const descriptors = credentialAncestors(home, directory);
     descriptors.push(directory, file);
     const complete = windowsCredentialAclOutput(descriptors);
     for (const { output, exitCode, error } of [
@@ -3376,18 +3354,12 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     await writeFile(join(home, "auth.json"), "credential\n");
     const sid = "S-1-5-21-111-222-333-1001";
     const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const unsafeFile = `O:${sid}G:SYD:P(A;;FA;;;${sid})(A;;FR;;;WD)`;
-    const ancestors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      ancestors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
+    const ancestors = credentialAncestors(home, directory);
     const descriptors = [...ancestors, directory, unsafeFile];
 
     await expect(
@@ -3554,6 +3526,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "GXGW",
       "FAGX",
       "FWGX",
+      "😀FA",
       "SD",
       "WD",
       "WO",
@@ -3577,6 +3550,7 @@ describe("runtime directories and plugin Python boundary", () => {
       ["", "FR"],
       ["", "FRGX"],
       ["", "GRGX"],
+      ["", "AFAX"],
       ["", "0x1200a9"],
       ["IO", "FA"],
     ] as const) {
@@ -3925,9 +3899,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("preserves Windows ACL subprocess failures", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const metadata = await lstat(home);
     const underlying = Object.assign(new Error("PowerShell failed"), {
       stderr:
@@ -3952,9 +3924,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("rejects replacement credential homes when numeric identities collide", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const canonicalHome = await realpath(home);
     const originalLstat = fsPromises.lstat;
     const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
@@ -3993,9 +3963,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("revalidates the Windows credential ACL every time the home is used", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
+    const { home } = await credentialHome(false);
     const validations = mock(async (_path: string) => {});
 
     await requireSecureCredentialHome(home, {
@@ -4022,53 +3990,43 @@ describe("runtime directories and plugin Python boundary", () => {
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
       );
-      const user = spawnSync(
-        join(systemDirectory, "whoami.exe"),
-        ["/user", "/fo", "csv", "/nh"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const user = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
       const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
       expect(sid).toBeDefined();
-      const grant = spawnSync(
-        join(systemDirectory, "icacls.exe"),
-        [output, "/grant", "*S-1-1-0:(OI)(CI)R"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const grant = windowsTestCommand("icacls.exe", [
+        output,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)R",
+      ]);
       expect(grant.status, grant.stderr).toBe(0);
       await requirePrivatePolicyOutputDirectory(output);
       const draft = join(output, "THREAT_MODEL.md");
       await writeFile(draft, "Synthetic private draft\n");
-      const descriptor = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const descriptor = inspectWindowsTestAcl(
         [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "$ErrorActionPreference = 'Stop'",
-            "$sddl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-            "$localAdministrator = Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
-            "Microsoft.PowerShell.Utility\\ConvertTo-Json -InputObject @($sddl, $localAdministrator) -Compress",
-          ].join("; "),
+          "$ErrorActionPreference = 'Stop'",
+          "$sddl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+          "$localAdministrator = Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+          "Microsoft.PowerShell.Utility\\ConvertTo-Json -InputObject @($sddl, $localAdministrator) -Compress",
         ],
         {
-          encoding: "utf8",
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(
-                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
-              ),
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) => name.toUpperCase() !== "PSMODULEPATH",
             ),
-            CODEX_SECURITY_TEST_ACL_PATH: draft,
-            PSModulePath: join(
-              systemDirectory,
-              "WindowsPowerShell",
-              "v1.0",
-              "Modules",
-            ),
-          },
-          windowsHide: true,
+          ),
+          CODEX_SECURITY_TEST_ACL_PATH: draft,
+          PSModulePath: join(
+            systemDirectory,
+            "WindowsPowerShell",
+            "v1.0",
+            "Modules",
+          ),
         },
       );
       expect(descriptor.status, descriptor.stderr).toBe(0);
@@ -4091,10 +4049,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "rejects Windows credential-home junctions even if their targets disappear",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { root, home } = await credentialHome(true);
       const outside = join(root, "outside");
       await mkdir(outside);
       const credential = join(outside, "auth.json");
@@ -4117,10 +4072,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "creates credential homes with a verified managed-compatible Windows ACL",
     async () => {
-      const root = await temporaryDirectory();
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      });
+      const { home } = await credentialHome(true);
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
@@ -4158,61 +4110,43 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const systemDirectory = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-      );
-      const user = spawnSync(
-        join(systemDirectory, "whoami.exe"),
-        ["/user", "/fo", "csv", "/nh"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const user = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
       expect(user.status).toBe(0);
       const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
       expect(sid).toBeDefined();
-      const configured = spawnSync(
-        join(systemDirectory, "icacls.exe"),
-        [
-          state,
-          "/inheritance:r",
-          "/grant:r",
-          `*${sid}:(OI)(CI)F`,
-          "*S-1-5-18:(OI)(CI)F",
-          "*S-1-5-32-544:(OI)(CI)F",
-        ],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const configured = windowsTestCommand("icacls.exe", [
+        state,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+      ]);
       expect(configured.status).toBe(0);
 
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: state,
       });
-      const descriptor = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const descriptor = inspectWindowsTestAcl(
         [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-            "$allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })",
-            "$denied = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })",
-            "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
-            "$principals = @($allowed | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
-            "$deniedPrincipals = @($denied | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
-            "$fullControl = @($allowed | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $env:CODEX_SECURITY_TEST_USER_SID -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0 -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0 -and $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None })",
-            "[pscustomobject]@{ owner = $owner; protected = $acl.AreAccessRulesProtected; principals = $principals; deniedPrincipals = $deniedPrincipals; grantsCurrentUserAccess = ($fullControl.Count -gt 0 -and $denied.Count -eq 0) } | ConvertTo-Json -Compress",
-          ].join("; "),
+          "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+          "$allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })",
+          "$denied = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })",
+          "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+          "$principals = @($allowed | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+          "$deniedPrincipals = @($denied | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+          "$fullControl = @($allowed | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $env:CODEX_SECURITY_TEST_USER_SID -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0 -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0 -and $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None })",
+          "[pscustomobject]@{ owner = $owner; protected = $acl.AreAccessRulesProtected; principals = $principals; deniedPrincipals = $deniedPrincipals; grantsCurrentUserAccess = ($fullControl.Count -gt 0 -and $denied.Count -eq 0) } | ConvertTo-Json -Compress",
         ],
         {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_TEST_ACL_PATH: home,
-            CODEX_SECURITY_TEST_USER_SID: sid!,
-          },
-          windowsHide: true,
+          ...process.env,
+          CODEX_SECURITY_TEST_ACL_PATH: home,
+          CODEX_SECURITY_TEST_USER_SID: sid!,
         },
       );
       expect(descriptor.status).toBe(0);
@@ -4244,38 +4178,23 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const systemDirectory = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-      );
-      const shared = spawnSync(
-        join(systemDirectory, "icacls.exe"),
-        [state, "/grant", "*S-1-1-0:(OI)(CI)R"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const shared = windowsTestCommand("icacls.exe", [
+        state,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)R",
+      ]);
       expect(shared.status).toBe(0);
 
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: state,
       });
-      const result = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const result = inspectWindowsTestAcl(
         [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-            "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
-            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
-          ].join("; "),
+          "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+          "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+          "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
         ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          windowsHide: true,
-        },
+        { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
       );
       expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
@@ -4292,15 +4211,11 @@ describe("runtime directories and plugin Python boundary", () => {
       const state = join(root, "state");
       const home = join(state, "codex-home");
       await mkdir(home, { recursive: true });
-      const systemDirectory = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-      );
-      const configured = spawnSync(
-        join(systemDirectory, "icacls.exe"),
-        [home, "/grant", "*S-1-1-0:(OI)(CI)R"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const configured = windowsTestCommand("icacls.exe", [
+        home,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)R",
+      ]);
       expect(configured.status).toBe(0);
 
       expect(
@@ -4308,24 +4223,13 @@ describe("runtime directories and plugin Python boundary", () => {
           CODEX_SECURITY_STATE_DIR: state,
         }),
       ).toBe(await realpath(home));
-      const result = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const result = inspectWindowsTestAcl(
         [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-            "$everyone = @($acl.Access | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
-            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
-          ].join("; "),
+          "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+          "$everyone = @($acl.Access | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+          "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
         ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          windowsHide: true,
-        },
+        { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
       );
       expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
@@ -4341,30 +4245,27 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const systemDirectory = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-      );
-      const identity = spawnSync(
-        join(systemDirectory, "whoami.exe"),
-        ["/user", "/fo", "csv", "/nh"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
       expect(identity.status).toBe(0);
       const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
       expect(sid).toBeDefined();
       for (const ancestor of [root, state]) {
-        const owned = spawnSync(
-          join(systemDirectory, "icacls.exe"),
-          [ancestor, "/setowner", `*${sid}`],
-          { encoding: "utf8", windowsHide: true },
-        );
+        const owned = windowsTestCommand("icacls.exe", [
+          ancestor,
+          "/setowner",
+          `*${sid}`,
+        ]);
         expect(owned.status).toBe(0);
-        const writable = spawnSync(
-          join(systemDirectory, "icacls.exe"),
-          [ancestor, "/grant", "*S-1-1-0:(OI)(CI)M"],
-          { encoding: "utf8", windowsHide: true },
-        );
+        const writable = windowsTestCommand("icacls.exe", [
+          ancestor,
+          "/grant",
+          "*S-1-1-0:(OI)(CI)M",
+        ]);
         expect(writable.status).toBe(0);
       }
 
@@ -4377,24 +4278,13 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       for (const ancestor of [root, state]) {
-        const inspection = spawnSync(
-          join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        const inspection = inspectWindowsTestAcl(
           [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            [
-              "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-              "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
-              "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
-            ].join("; "),
+            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+            "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
           ],
-          {
-            encoding: "utf8",
-            env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: ancestor },
-            windowsHide: true,
-          },
+          { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: ancestor },
         );
         expect(inspection.status).toBe(0);
         expect(JSON.parse(inspection.stdout).everyone).toBeGreaterThan(0);
@@ -4415,25 +4305,24 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(auth, '{"token":"synthetic-root"}\n');
       await writeFile(nestedAuth, '{"token":"synthetic-nested"}\n');
 
-      const systemDirectory = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-      );
-      const identity = spawnSync(
-        join(systemDirectory, "whoami.exe"),
-        ["/user", "/fo", "csv", "/nh"],
-        { encoding: "utf8", windowsHide: true },
-      );
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
       expect(identity.status).toBe(0);
       const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
       expect(sid).toBeDefined();
 
       for (const credential of [auth, nestedAuth]) {
-        const unsafe = spawnSync(
-          join(systemDirectory, "icacls.exe"),
-          [credential, "/inheritance:r", "/grant:r", `*${sid}:F`, "*S-1-1-0:R"],
-          { encoding: "utf8", windowsHide: true },
-        );
+        const unsafe = windowsTestCommand("icacls.exe", [
+          credential,
+          "/inheritance:r",
+          "/grant:r",
+          `*${sid}:F`,
+          "*S-1-1-0:R",
+        ]);
         expect(unsafe.status).toBe(0);
       }
 
@@ -4443,27 +4332,16 @@ describe("runtime directories and plugin Python boundary", () => {
         }),
       ).toBe(await realpath(home));
 
-      const inspection = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      const inspection = inspectWindowsTestAcl(
         [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "$paths = @($env:CODEX_SECURITY_TEST_AUTH_PATH, $env:CODEX_SECURITY_TEST_NESTED_AUTH_PATH)",
-            "$unexpected = @($paths | ForEach-Object { $acl = Get-Acl -LiteralPath $_; $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' } })",
-            "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
-          ].join("; "),
+          "$paths = @($env:CODEX_SECURITY_TEST_AUTH_PATH, $env:CODEX_SECURITY_TEST_NESTED_AUTH_PATH)",
+          "$unexpected = @($paths | ForEach-Object { $acl = Get-Acl -LiteralPath $_; $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' } })",
+          "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
         ],
         {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_TEST_AUTH_PATH: auth,
-            CODEX_SECURITY_TEST_NESTED_AUTH_PATH: nestedAuth,
-          },
-          windowsHide: true,
+          ...process.env,
+          CODEX_SECURITY_TEST_AUTH_PATH: auth,
+          CODEX_SECURITY_TEST_NESTED_AUTH_PATH: nestedAuth,
         },
       );
       expect(inspection.status).toBe(0);
@@ -5165,249 +5043,6 @@ describe("runtime directories and plugin Python boundary", () => {
         reasoning_effort: "high",
       },
       deepScanTables: true,
-    });
-  });
-
-  test.each([
-    [
-      "released continuation v12",
-      "scan execution profiles",
-      "scan continuation threads",
-      true,
-    ],
-    [
-      "historical phase-progress v12",
-      "scan execution profiles",
-      "phase-specific scan progress",
-      true,
-    ],
-    [
-      "unknown v11 plus released continuation v12",
-      "unknown execution profile migration",
-      "scan continuation threads",
-      false,
-    ],
-  ] as const)(
-    "reconciles %s without corrupting migration history",
-    async (_history, profileMigration, followUpMigration, supportedHistory) => {
-      const root = await temporaryDirectory(
-        "codex-security-migration-history-",
-      );
-      const stateDirectory = join(root, "state");
-      await mkdir(stateDirectory);
-      const database = join(stateDirectory, "workbench.sqlite3");
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-
-      const fixture = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          "-c",
-          [
-            "import sqlite3, sys",
-            "sys.path.insert(0, sys.argv[1])",
-            "from workbench_schema import MIGRATIONS, sql_statements",
-            "connection = sqlite3.connect(sys.argv[2])",
-            "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
-            "timestamp = '2026-07-30T00:00:00Z'",
-            "for version, name, migration in MIGRATIONS:",
-            "    if version > 10: break",
-            "    for statement in sql_statements(migration): connection.execute(statement)",
-            "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
-            "for table in ('workspaces', 'scans'):",
-            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT')",
-            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT')",
-            "follow_up = next(item for item in MIGRATIONS if item[1] == sys.argv[4])",
-            "for statement in sql_statements(follow_up[2]): connection.execute(statement)",
-            "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, sys.argv[3], timestamp), (12, sys.argv[4], timestamp)])",
-            "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
-            "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
-            "connection.commit()",
-            "connection.close()",
-          ].join("\n"),
-          join(PLUGIN_ROOT, "scripts"),
-          database,
-          profileMigration,
-          followUpMigration,
-        ],
-        { encoding: "utf8" },
-      );
-      expect(fixture.status).toBe(0);
-      expect(fixture.stderr).toBe("");
-
-      const upgrade = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
-          "database-info",
-        ],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: stateDirectory,
-          },
-        },
-      );
-      expect(upgrade.status).toBe(supportedHistory ? 0 : 1);
-      if (!supportedHistory) {
-        expect(upgrade.stderr).toContain(
-          "unsupported execution-profile migration history",
-        );
-      }
-
-      const inspected = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          "-c",
-          [
-            "import json, sqlite3, sys",
-            "connection = sqlite3.connect(sys.argv[1])",
-            "connection.row_factory = sqlite3.Row",
-            "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 20, 25, 26)')}",
-            "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
-            "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
-            "print(json.dumps({'migrations': migrations, 'legacyColumnsRenamed': 'legacy_execution_model' in columns, 'deepScanTables': deep_scan_tables is not None}))",
-          ].join("\n"),
-          database,
-        ],
-        { encoding: "utf8" },
-      );
-      expect(inspected.status).toBe(0);
-      expect(inspected.stderr).toBe("");
-      if (!supportedHistory) {
-        expect(JSON.parse(inspected.stdout)).toEqual({
-          migrations: {
-            "11": "unknown execution profile migration",
-            "12": "scan continuation threads",
-            "25": "persist scan completion warnings",
-          },
-          legacyColumnsRenamed: false,
-          deepScanTables: false,
-        });
-        return;
-      }
-
-      expect(JSON.parse(inspected.stdout)).toEqual({
-        migrations: {
-          "11": "deep scan orchestration state",
-          "12": "scan continuation threads",
-          "20": "phase-specific scan progress",
-          "25": "persist scan model settings",
-          "26": "persist scan completion warnings",
-        },
-        legacyColumnsRenamed: true,
-        deepScanTables: true,
-      });
-    },
-  );
-
-  test("aligns an existing public CLI database with the maintained plugin schema", async () => {
-    const root = await temporaryDirectory("codex-security-public-migrations-");
-    const repository = join(root, "repository");
-    const stateDirectory = join(root, "state");
-    const scanDirectory = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(stateDirectory);
-    await mkdir(scanDirectory, { mode: 0o700 });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const fixture = spawnSync(
-      python!,
-      [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import sqlite3, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "from workbench_schema import MIGRATIONS, sql_statements",
-          "repository = Path(sys.argv[2])",
-          "connection = sqlite3.connect(Path(sys.argv[3]) / 'workbench.sqlite3')",
-          "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
-          "timestamp = '2026-07-30T00:00:00Z'",
-          "for version, name, migration in MIGRATIONS:",
-          "    if version > 24: break",
-          "    for statement in sql_statements(migration): connection.execute(statement)",
-          "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
-          "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
-          "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
-          "connection.execute('INSERT INTO workspaces (id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?)', ('legacy-workspace', str(repository), timestamp, timestamp))",
-          "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, completion_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-scan', 'legacy-workspace', str(repository), 'legacy-revision', '.', 'standard', str(repository / 'legacy-scan'), 'complete', 'reporting', timestamp, timestamp, timestamp, '[\"existing warning\"]'))",
-          "connection.commit()",
-          "connection.close()",
-        ].join("\n"),
-        join(PLUGIN_ROOT, "scripts"),
-        repository,
-        stateDirectory,
-      ],
-      { encoding: "utf8" },
-    );
-    expect(fixture.status).toBe(0);
-    expect(fixture.stderr).toBe("");
-
-    const registration = await runWorkbench(
-      {
-        python: python!,
-        pluginRoot: PLUGIN_ROOT,
-        environment: {
-          PATH: process.env["PATH"],
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-      },
-      [
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDirectory,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ],
-    );
-    expect(registration["scanId"]).toBeString();
-
-    const upgraded = spawnSync(
-      python!,
-      [
-        "-I",
-        "-B",
-        "-c",
-        [
-          "import json, sqlite3, sys",
-          "connection = sqlite3.connect(sys.argv[1])",
-          "connection.row_factory = sqlite3.Row",
-          "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
-          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (25, 26)')}",
-          "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
-          "print(json.dumps({'columns': sorted(columns & {'model', 'reasoning_effort', 'completion_warnings_json'}), 'migrations': migrations, 'warnings': json.loads(warnings)}))",
-        ].join("\n"),
-        join(stateDirectory, "workbench.sqlite3"),
-      ],
-      { encoding: "utf8" },
-    );
-    expect(upgraded.status).toBe(0);
-    expect(upgraded.stderr).toBe("");
-    expect(JSON.parse(upgraded.stdout)).toEqual({
-      columns: ["completion_warnings_json", "model", "reasoning_effort"],
-      migrations: {
-        "25": "persist scan model settings",
-        "26": "persist scan completion warnings",
-      },
-      warnings: ["existing warning"],
     });
   });
 

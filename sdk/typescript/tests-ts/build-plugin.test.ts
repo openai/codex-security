@@ -17,6 +17,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const temporaryDirectories = createTemporaryDirectories(false);
@@ -62,6 +63,25 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("copies Python contracts and completed examples unchanged from source", async () => {
+    const source = fileURLToPath(
+      new URL("../../../plugins/codex-security/", import.meta.url),
+    );
+    const contract = JSON.parse(
+      await readFile(join(source, "plugin-files.json"), "utf8"),
+    ) as { shippedExact: string[] };
+    for (const path of contract.shippedExact.filter(
+      (path) =>
+        (path.startsWith("scripts/") && path.endsWith(".py")) ||
+        path.startsWith("schemas/") ||
+        path.startsWith("examples/completed-scan/"),
+    )) {
+      expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
+        await readFile(join(source, path)),
+      );
+    }
+  });
+
   test.each(["missing", "stale"])(
     "builds the MCP runtime from source with %s native wrappers and no npm launcher",
     async (emitted) => {
@@ -308,13 +328,6 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
     await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
     await chmod(join(source, "scripts", "launch"), 0o755);
     await writeFixture(source, "schemas/scan.json", "{}\n");
-    await writeFixture(
-      source,
-      "mcp-app/package.json",
-      `${JSON.stringify({
-        scripts: { build: "node scripts/build_mcp_app.mjs" },
-      })}\n`,
-    );
     await writeFixture(
       source,
       "mcp-app/scripts/build_mcp_app.mjs",

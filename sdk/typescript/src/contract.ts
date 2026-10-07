@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
+import { regexes } from "zod";
 import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
@@ -1160,49 +1161,13 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw abortReason(signal);
 }
 
+const RFC3339_DATE_TIME = new RegExp(
+  regexes.datetime({ offset: true }).source,
+  "i",
+);
+
 function validRfc3339DateTime(value: string): boolean {
-  const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/i.exec(
-      value,
-    );
-  if (match === null) return false;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const offsetHour = Number(match[7] ?? 0);
-  const offsetMinute = Number(match[8] ?? 0);
-  if (
-    year < 1 ||
-    month < 1 ||
-    month > 12 ||
-    day < 1 ||
-    hour > 23 ||
-    minute > 59 ||
-    second > 59 ||
-    offsetHour > 23 ||
-    offsetMinute > 59
-  ) {
-    return false;
-  }
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysInMonth = [
-    31,
-    leapYear ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ][month - 1]!;
-  return day <= daysInMonth;
+  return !value.startsWith("0000") && RFC3339_DATE_TIME.test(value);
 }
 
 function schemaError(

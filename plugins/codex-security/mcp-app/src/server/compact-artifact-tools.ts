@@ -67,6 +67,15 @@ const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
 };
 
+function signalFromRequestContext(
+  requestContext: unknown,
+): AbortSignal | undefined {
+  if (typeof requestContext !== "object" || requestContext === null)
+    return undefined;
+  const signal = Reflect.get(requestContext, "signal");
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
 export function registerCompactArtifactTools(
   server: McpServer,
   options: CompactArtifactToolOptions,
@@ -193,7 +202,6 @@ export function registerCompactArtifactTools(
       );
     },
   });
-
   registerCompactTool(server, {
     name: "save_codex_security_artifact",
     title: "Save Codex Security Artifact",
@@ -224,15 +232,6 @@ export function registerCompactArtifactTools(
       );
     },
   });
-}
-
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
 }
 
 async function supplementalContext(
