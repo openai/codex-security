@@ -25,14 +25,15 @@ export function runCommand(
   args: string[],
   {
     input,
+    timeout = 10_000,
     ...options
   }: {
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     input?: string;
-    timeout: number;
+    timeout?: number;
     windowsHide?: boolean;
-  },
+  } = {},
 ): Promise<{
   status: number | null;
   stdout: string;
@@ -45,7 +46,7 @@ export function runCommand(
     const child = execFile(
       command,
       args,
-      { ...options, encoding: "utf8" },
+      { ...options, timeout, encoding: "utf8" },
       (error, stdout, stderr) => {
         resolve({
           status: child.exitCode,
