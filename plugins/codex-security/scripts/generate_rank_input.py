@@ -475,9 +475,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             if is_binary:
                 continue
             if status != "D":
-                preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
-                if is_binary:
-                    continue
+                preview, _ = preview_for_bytes(rel, content, args.preview_bytes)
         elif not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
