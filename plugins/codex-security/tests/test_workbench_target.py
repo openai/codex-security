@@ -52,6 +52,88 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
+)
+def test_git_blob_samples_bound_reads_and_classify_full_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    # The UTF-16 surrogate pair crosses the first 64 KiB sample boundary.
+    text = bom + ("a" * 32766 + "😀" + "b" * 32768).encode(encoding)
+    contents = {
+        "text.bin": text + (b"\0" if bom else b""),
+        "binary-tail.bin": text + "\0".encode(encoding),
+        "binary-head.bin": b"\0" + text,
+        "empty.bin": b"",
+        "after.txt": b"after\n",
+    }
+    for name, content in contents.items():
+        (target / name).write_bytes(content)
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
+
+    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+    function_globals = git_blob_samples.__globals__
+    git_command = function_globals["git_command"]
+    reads: list[int] = []
+
+    def require_bounded_output(repository: Path, *args: str, **kwargs: Any):
+        output = kwargs["stdout_file"]
+        result = git_command(repository, *args, **kwargs)
+        read = output.read
+
+        def bounded_read(size: int = -1) -> bytes:
+            assert 0 <= size <= 64 * 1024
+            reads.append(size)
+            return read(size)
+
+        output.read = bounded_read
+        return result
+
+    monkeypatch.setitem(function_globals, "git_command", require_bounded_output)
+    samples = git_blob_samples(
+        target,
+        ["HEAD:missing", *(f"HEAD:{name}" for name in contents)],
+    )
+
+    assert samples == [
+        None,
+        (text[: 64 * 1024], False),
+        (b"", True),
+        (b"", True),
+        (b"", False),
+        (b"after\n", False),
+    ]
+    assert max(reads) == 64 * 1024
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"missing terminator",
+        b"object blob invalid\0",
+        b"object blob -1\0",
+        b"object blob 4\0abc",
+        b"object blob 4\0abcd!",
+    ],
+)
+def test_git_blob_samples_reject_incomplete_framing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
+) -> None:
+    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+
+    def git_command(*args: Any, **kwargs: Any):
+        kwargs["stdout_file"].write(output)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
+
+    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
+
+
+@pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [
         ("UTF-8", "docs: \u65e5\u672c\u8a9e \ud55c\uad6d\uc5b4 \U0001f527"),
