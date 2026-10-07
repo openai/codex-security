@@ -851,18 +851,10 @@ async function ensureManifest(
     {
       version: 1,
       tasks,
-      ...(options.scanPrompt === undefined
-        ? {}
-        : { scanPrompt: options.scanPrompt }),
-      ...(options.validationPrompt === undefined
-        ? {}
-        : { validationPrompt: options.validationPrompt }),
-      ...(options.postScanPrompt === undefined
-        ? {}
-        : { postScanPrompt: options.postScanPrompt }),
-      ...(options.maxCostUsd === undefined
-        ? {}
-        : { maxCostUsd: options.maxCostUsd }),
+      scanPrompt: options.scanPrompt,
+      validationPrompt: options.validationPrompt,
+      postScanPrompt: options.postScanPrompt,
+      maxCostUsd: options.maxCostUsd,
       ...(options.scanOptionsByMode === undefined
         ? {}
         : {

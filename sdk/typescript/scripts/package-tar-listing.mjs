@@ -1,3 +1,4 @@
+/** @param {string} listing */
 export function regularTarListingLines(listing) {
   const lines = listing.split(/\r?\n/u).filter(Boolean);
   if (lines.some((line) => !line.startsWith("d") && !line.startsWith("-"))) {

@@ -139,6 +139,7 @@ if (new Set(pluginPaths).size !== pluginPaths.length) {
 
 const allowedFiles = new Set([
   ...required,
+  ...pluginPaths.map((file) => `package/_bundled_plugin/${file}`),
   "package/dist/server/dashboard/index.html",
   "package/dist/server/dashboard/app.js",
   "package/dist/server/dashboard/app.css",
@@ -151,6 +152,7 @@ const allowedFiles = new Set([
     "cli",
     "cli-help",
     "cli-scan-logs-json",
+    "cli-signals",
     "classify-severity",
     "classify-scan-severity",
     "severity-store",
@@ -247,14 +249,6 @@ const allowedFiles = new Set([
     ),
   ),
 ]);
-for (const file of pluginPaths) {
-  const archivePath = `package/_bundled_plugin/${file}`;
-  allowedFiles.add(archivePath);
-  if (!files.has(archivePath)) {
-    throw new Error(`npm tarball is missing ${archivePath}.`);
-  }
-}
-
 for (const file of [...allowedFiles]) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
   const parts = file.split("/");
