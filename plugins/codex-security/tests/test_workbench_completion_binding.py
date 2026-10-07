@@ -14,10 +14,12 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    create_workspace,
     empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    save_workspace,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
@@ -514,28 +516,15 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         target = tmp_path / f"target-{index}"
         (target / "src").mkdir(parents=True)
         workspace_id = str(uuid.uuid4())
-        run_workbench(
+        create_workspace(
             state_dir,
-            "create-workspace",
-            "--workspace-id",
             workspace_id,
             "--thread-id",
             "thread-completion-binding",
             "--target-path",
             str(target),
         )
-        run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            workspace_id,
-            "--target-path",
-            str(target),
-            "--scope",
-            scope,
-            "--mode",
-            mode,
-        )
+        save_workspace(state_dir, workspace_id, str(target), scope, mode)
         scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
         if mode == "deep":
             run_workbench(
