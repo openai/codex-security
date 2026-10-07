@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import re
+from bisect import bisect_right
 from pathlib import Path
 
 DEFAULT_PREVIEW_BYTES = 1024
@@ -15,6 +16,8 @@ PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 TEXT_CODE_EXTENSIONS = {
+    ".ascx",
+    ".aspx",
     ".c",
     ".cc",
     ".cfg",
@@ -22,6 +25,7 @@ TEXT_CODE_EXTENSIONS = {
     ".clj",
     ".cpp",
     ".cs",
+    ".cshtml",
     ".css",
     ".cts",
     ".cue",
@@ -42,6 +46,8 @@ TEXT_CODE_EXTENSIONS = {
     ".java",
     ".js",
     ".json",
+    ".jsp",
+    ".jspx",
     ".jsx",
     ".kt",
     ".kts",
@@ -57,6 +63,7 @@ TEXT_CODE_EXTENSIONS = {
     ".psd1",
     ".psm1",
     ".py",
+    ".razor",
     ".rb",
     ".rs",
     ".scala",
@@ -104,6 +111,7 @@ BRACE_LANGUAGE_EXTENSIONS = {
 }
 NESTED_BLOCK_COMMENT_EXTENSIONS = {".kt", ".kts", ".rs", ".scala", ".swift"}
 CPP_RAW_STRING_RE = re.compile(r'(?<![\w\x80-\U0010ffff])(?:u8|u|U|L)?R"([^\s()\\]{0,16})\(')
+CSHARP_RAW_STRING_RE = re.compile(r'"{3,}')
 RUST_RAW_STRING_RE = re.compile(r'(?:br|r)(#{0,16})"')
 RUST_LIFETIME_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
 PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
@@ -172,17 +180,9 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
     content_lines = [line for line in lines if line != "..."]
     if not content_lines:
         return truncate_utf8(full_preview, max_bytes)
-    low = 0
     high = max(len(line.encode("utf-8")) for line in content_lines)
-    best = ""
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
+    length = bisect_right(range(high + 1), max_bytes, key=lambda n: len(render(n).encode("utf-8")))
+    best = render(length - 1) if length else ""
     if best:
         return best
     return truncate_utf8(full_preview, max_bytes)
@@ -364,6 +364,14 @@ def mask_c_style_source(text: str, suffix: str) -> str | None:
             quote = '@"'
             index += 2
             continue
+        if suffix == ".cs":
+            raw_match = CSHARP_RAW_STRING_RE.match(text, index)
+            if raw_match:
+                token = raw_match.group(0)
+                masked.extend(" " * len(token))
+                raw_terminator = token
+                index += len(token)
+                continue
         if suffix == ".go" and char == "`":
             masked.append(" ")
             raw_terminator = "`"

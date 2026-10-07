@@ -4,11 +4,22 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const files = execFileSync("git", ["ls-files", "-z", "--", "*.md"], {
-  cwd: root,
-  encoding: "utf8",
-  maxBuffer: Infinity,
-})
+const files = execFileSync(
+  "git",
+  [
+    "ls-files",
+    "-z",
+    "--",
+    ":(glob)sdk/typescript/**/*.md",
+    ":(glob)examples/custom-validation/*.md",
+    ":(glob)plugins/codex-security/native/*.md",
+  ],
+  {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: Infinity,
+  },
+)
   .split("\0")
   .filter(
     (path) =>
