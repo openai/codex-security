@@ -8,8 +8,12 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     run_workbench,
+    save_workspace,
+    scan_command,
+    set_triage,
     stable_target_id,
     start_delivered_scan,
+    update_progress,
     write_completed_contract,
 )
 
@@ -26,17 +30,8 @@ def complete_scan(
 ) -> dict[str, object]:
     workspace = create_saved_workspace(state_dir, target)
     if include_paths is not None:
-        workspace = run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            str(workspace["id"]),
-            "--target-path",
-            str(target),
-            "--scope",
-            include_paths[0],
-            "--mode",
-            "standard",
+        workspace = save_workspace(
+            state_dir, str(workspace["id"]), str(target), include_paths[0], "standard"
         )
     started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -65,7 +60,7 @@ def complete_scan(
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
         ]
         coverage_path.write_text(json.dumps(coverage))
-    return run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    return scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
 
 @pytest.mark.parametrize(
@@ -147,12 +142,9 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
-    run_workbench(
+    set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(older_first["findings"][0]["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -183,12 +175,9 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
             """,
             (latest_first_occurrence, "src/control.py", 10, 12, "root_control", 1),
         )
-    run_workbench(
+    set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         distinct_first_occurrence,
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -246,12 +235,9 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="first-finding")
-    run_workbench(
+    set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(older_first["findings"][0]["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -269,14 +255,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         relative_path="docs/extract.py",
     )
     latest_second = complete_scan(state_dir, second_target, identity_anchor="second-finding")
-    run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        str(older_running["results"]["scanId"]),
-        "--phase",
-        "discovery",
-    )
+    update_progress(state_dir, str(older_running["results"]["scanId"]), "--phase", "discovery")
     second_target.rename(tmp_path / "moved-second-repo")
 
     repositories = run_workbench(state_dir, "list-repositories")["repositories"]

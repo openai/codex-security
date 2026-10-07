@@ -84,15 +84,6 @@ def _valid_legacy_scan_cost(cost: object) -> bool:
     )
 
 
-def _valid_scan_token_counts(usage: object) -> bool:
-    return (
-        isinstance(usage, dict)
-        and set(usage) == set(SCAN_USAGE_TOKEN_KEYS)
-        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
-        and usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] <= usage["inputTokens"]
-    )
-
-
 def _valid_measured_scan_usage(usage: object) -> bool:
     if not isinstance(usage, dict):
         return False
@@ -131,8 +122,10 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
-    counts = {key: usage.get(key) for key in SCAN_USAGE_TOKEN_KEYS}
-    if not _valid_scan_token_counts(counts):
+    if (
+        not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+        or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
+    ):
         return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
