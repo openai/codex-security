@@ -7,7 +7,6 @@ import {
   copyFile,
   chmod,
   mkdir,
-  rm,
   readFile,
   readdir,
   realpath,
@@ -43,29 +42,17 @@ import {
   type ScanComparisonOptions,
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
-import { temporaryDirectory as createTemporaryDirectory } from "./support/temporary-directories.js";
+import {
+  temporaryDirectory as createTemporaryDirectory,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map(async (path) => {
-      // Bun 1.3.13 ignores fs.rm's retry options.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await rm(path, { recursive: true, force: true });
-          return;
-        } catch (error) {
-          if (
-            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
-            attempt === 10
-          )
-            throw error;
-          await Bun.sleep(100 * (attempt + 1));
-        }
-      }
-    }),
+    temporaryDirectories.splice(0).map(removeTemporaryDirectory),
   );
 });
 
@@ -103,6 +90,19 @@ function fakeCodex(response: unknown) {
     },
   };
   return { codex, calls };
+}
+
+function observeCodexOptions(
+  codex: NonNullable<ScanComparisonOptions["codex"]>,
+  observe: (options: CodexOptions) => void,
+) {
+  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
+    this: Codex,
+    options,
+  ) {
+    observe((this as unknown as { options: CodexOptions }).options);
+    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+  });
 }
 
 function captureProfileClient() {
@@ -189,12 +189,8 @@ describe("semantic scan comparison", () => {
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
       let captured: CodexOptions | undefined;
       let saved = false;
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
       });
       try {
         await matchCompletedScan({
@@ -450,12 +446,8 @@ describe("semantic scan comparison", () => {
       const profileClient = captureProfileClient();
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
       let captured: CodexOptions | undefined;
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
       });
       try {
         const matching = matchScanFindings(
@@ -789,12 +781,8 @@ describe("semantic scan comparison", () => {
       const home = await temporaryDirectory("codex-security-matcher-auth-");
       let captured: CodexOptions | undefined;
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
       });
       try {
         await matchScanFindings(
@@ -855,14 +843,8 @@ describe("semantic scan comparison", () => {
       };
       let captured: CodexOptions | undefined;
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, threadOptions) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        return codex.startThread(threadOptions!) as ReturnType<
-          Codex["startThread"]
-        >;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
       });
       try {
         for (const helper of ["matching", "planning"]) {
@@ -1333,16 +1315,10 @@ describe("semantic scan comparison", () => {
       let config: CodexOptions["config"];
       let codexPath: string | undefined;
       let codexEnvironment: CodexOptions["env"];
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        config = (this as unknown as { options: CodexOptions }).options.config;
-        codexPath = (this as unknown as { options: CodexOptions }).options
-          .codexPathOverride;
-        codexEnvironment = (this as unknown as { options: CodexOptions })
-          .options.env;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      const startThread = observeCodexOptions(codex, (options) => {
+        config = options.config;
+        codexPath = options.codexPathOverride;
+        codexEnvironment = options.env;
       });
       try {
         await matchScanFindings(

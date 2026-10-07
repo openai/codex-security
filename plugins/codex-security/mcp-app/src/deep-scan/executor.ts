@@ -537,18 +537,15 @@ async function workerRuntimeSettings(
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     process.platform,
   );
-  const workerConfig = workerConfigPath
+  const snapshot = workerConfigPath
     ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
     : undefined;
-  const workerEnvironment = isRecord(workerConfig)
-    ? workerConfig.environment
-    : undefined;
+  const workerConfig = isRecord(snapshot) ? snapshot : {};
+  const workerEnvironment = workerConfig.environment;
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }
-  const nativeProfile = isRecord(workerConfig)
-    ? workerConfig.native_profile
-    : undefined;
+  const nativeProfile = workerConfig.native_profile;
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.
     if (nativeProfile.length === 0 || /[^A-Za-z0-9_-]/.test(nativeProfile)) {
@@ -577,9 +574,7 @@ async function workerRuntimeSettings(
       }
     }
   }
-  const legacyProviders = isRecord(workerConfig)
-    ? workerConfig.model_providers
-    : undefined;
+  const legacyProviders = workerConfig.model_providers;
   if (
     settings.nativeProfile === undefined &&
     isRecord(legacyProviders) &&
@@ -589,20 +584,18 @@ async function workerRuntimeSettings(
       "This Deep Scan provider snapshot needs private native profile support. Update the SDK and bundled plugin together.",
     );
   }
-  const provider = isRecord(workerConfig)
-    ? workerConfig.model_provider
-    : undefined;
+  const provider = workerConfig.model_provider;
   for (const key of [
     "model_instructions_file",
     "model_verbosity",
     "web_search",
   ]) {
-    const value = isRecord(workerConfig) ? workerConfig[key] : undefined;
+    const value = workerConfig[key];
     if (typeof value === "string") {
       (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
     }
   }
-  const windows = isRecord(workerConfig) ? workerConfig.windows : undefined;
+  const windows = workerConfig.windows;
   if (isRecord(windows) && typeof windows.sandbox === "string") {
     (settings.configOverrides ??= []).push(
       `windows.sandbox=${JSON.stringify(windows.sandbox)}`,
@@ -630,7 +623,7 @@ async function workerRuntimeSettings(
       }
     }
   }
-  if (isRecord(workerConfig) && isRecord(workerConfig.features)) {
+  if (isRecord(workerConfig.features)) {
     settings.features = {
       ...settings.features,
       ...(workerConfig.features as NonNullable<CodexOptions["config"]>),

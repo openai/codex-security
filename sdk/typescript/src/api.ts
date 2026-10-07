@@ -2967,14 +2967,13 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
+      await runtime.providerProfile?.cleanup();
       if (isRecord(providers) && Object.keys(providers).length > 0) {
-        await runtime.providerProfile?.cleanup();
         runtime.providerProfile = await createProviderProfile(
           runtimeHome,
           effectiveConfig,
         );
       } else {
-        await runtime.providerProfile?.cleanup();
         delete runtime.providerProfile;
       }
       const sessionConfig = scanRuntimeCodexConfig(

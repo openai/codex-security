@@ -55,10 +55,7 @@ type RuntimeConfigReadOptions = Pick<
 export async function readDeepScanRuntimeConfig(
   options: RuntimeConfigReadOptions,
 ): Promise<JsonRecord> {
-  if (options.signal.aborted) throw abortError(options.signal.reason);
-  const client = new AppServerPreflightClient(options);
-  try {
-    await client.initialize();
+  return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
       cwd: options.cwd,
       includeLayers: false,
@@ -66,20 +63,7 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
-  } catch (error) {
-    await client.close();
-    const stderr = client.stderrText;
-    if (error instanceof Error && stderr)
-      Object.defineProperty(error, "message", {
-        value: error.message + "\n" + stderr,
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-    throw error;
-  } finally {
-    await client.close();
-  }
+  });
 }
 
 /**
@@ -99,11 +83,7 @@ export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
 ): Promise<{ useOpenAiApiKey: boolean }> {
   validateOptions(options);
-  if (options.signal.aborted) throw abortError(options.signal.reason);
-
-  const client = new AppServerPreflightClient(options);
-  try {
-    await client.initialize();
+  return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
       includeLayers: false,
@@ -140,6 +120,18 @@ export async function preflightDeepScanWorkerPermissionProfile(
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
+  });
+}
+
+async function withPreflightClient<T>(
+  options: RuntimeConfigReadOptions,
+  operation: (client: AppServerPreflightClient) => Promise<T>,
+): Promise<T> {
+  if (options.signal.aborted) throw abortError(options.signal.reason);
+  const client = new AppServerPreflightClient(options);
+  try {
+    await client.initialize();
+    return await operation(client);
   } catch (error) {
     await client.close();
     const stderr = client.stderrText;

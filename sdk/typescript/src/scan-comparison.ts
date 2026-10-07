@@ -545,20 +545,29 @@ async function startReadOnlyCodexThread(
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
     options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
+  const threadOptions: ThreadOptions = {
+    threadSource: runtimeOptions.threadSource,
+    ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
+    modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    networkAccessEnabled: false,
+    webSearchMode: "disabled",
+    workingDirectory: options.workingDirectory ?? process.cwd(),
+    skipGitRepoCheck: true,
+  };
+  if (options.codex !== undefined) {
+    return { thread: options.codex.startThread(threadOptions) };
+  }
   const source = options.environment ?? process.env;
-  const homeConfig =
-    options.codex === undefined
-      ? await readCodexHomeConfig(source, options.signal)
-      : {};
+  const homeConfig = await readCodexHomeConfig(source, options.signal);
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
-  const providerConfig =
-    options.codex === undefined
-      ? resolveCommandAuthConfig(
-          deepMerge(homeConfig, config ?? {}),
-          configuredCodexHome(source),
-        )
-      : {};
+  const providerConfig = resolveCommandAuthConfig(
+    deepMerge(homeConfig, config ?? {}),
+    configuredCodexHome(source),
+  );
   const suppliedConfig = resolveCodexProfile(
     options.config?.codexOverrides ?? {},
   );
@@ -586,48 +595,29 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const environment =
-    options.codex === undefined
-      ? await comparisonEnvironment(
-          options.environment,
-          accountStatus,
-          options.signal,
-          undefined,
-          providerConfig,
-        )
-      : undefined;
-  const command =
-    environment === undefined ? undefined : resolveCodexCommand(environment);
-  const threadOptions: ThreadOptions = {
-    threadSource: runtimeOptions.threadSource,
-    ...(model === undefined ? {} : { model }),
-    // Native Codex accepts strings before the pinned SDK widens its effort type.
-    modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
-    sandboxMode: "read-only",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-    workingDirectory: options.workingDirectory ?? process.cwd(),
-    skipGitRepoCheck: true,
-  };
-  if (options.codex !== undefined) {
-    return { thread: options.codex.startThread(threadOptions) };
-  }
+  const environment = await comparisonEnvironment(
+    options.environment,
+    accountStatus,
+    options.signal,
+    undefined,
+    providerConfig,
+  );
+  const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
-    codexPathOverride: executablePathForSpawn(command!.command),
+    codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
       undefined,
     config: {
       ...sdkConfig,
       windows,
       mcp_servers: await disabledMcpServers(
-        await providerPreflightCommand(command!, providerSettings),
+        await providerPreflightCommand(command, providerSettings),
         config,
-        environment!,
+        environment,
         options,
       ),
       allow_login_shell: false,
@@ -662,7 +652,7 @@ async function startReadOnlyCodexThread(
     isRecord(providers) &&
     Object.keys(providers).length > 0
       ? await createProviderProfile(
-          configuredCodexHome(environment!),
+          configuredCodexHome(environment),
           providerSettings,
         )
       : undefined;
