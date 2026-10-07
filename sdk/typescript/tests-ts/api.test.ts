@@ -661,6 +661,13 @@ describe("CodexSecurity orchestration", () => {
           ? join(codexHome, "state_5.sqlite")
           : "",
       };
+      const expectedHome = join(
+        environment.CODEX_SECURITY_STATE_DIR,
+        "codex-home",
+      );
+      const expectedDatabase = overrideDatabase
+        ? environment.CODEX_STATE_DB
+        : join(expectedHome, "state_5.sqlite");
       let measured: JsonObject | undefined;
       const client = new TestClient(
         {
@@ -674,12 +681,15 @@ describe("CodexSecurity orchestration", () => {
           environment,
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
-              expect(options.environment?.["CODEX_HOME"]).toBe(
-                join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
-              );
+              expect(options.environment?.["CODEX_HOME"]).toBe(expectedHome);
               expect(options.environment?.["CODEX_HOME"]).not.toBe(ambientHome);
+              if (overrideDatabase) {
+                expect(options.environment?.["CODEX_STATE_DB"]).toBe(
+                  environment.CODEX_STATE_DB,
+                );
+              }
               const script = [
-                "import json, os, sqlite3, sys",
+                "import json, sqlite3, sys",
                 "from pathlib import Path",
                 "sys.path.insert(0, sys.argv[1])",
                 "from workbench_scan_usage import collect_scan_usage",
@@ -691,7 +701,7 @@ describe("CodexSecurity orchestration", () => {
                 "  {'type': 'event_msg', 'timestamp': '2026-07-26T12:00:02Z', 'payload': {'type': 'token_count', 'info': {'total_token_usage': {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}}}},",
                 "]",
                 "rollout.write_text(''.join(json.dumps(event) + chr(10) for event in events))",
-                "with sqlite3.connect(os.environ.get('CODEX_STATE_DB') or home / 'state_5.sqlite') as db:",
+                "with sqlite3.connect(sys.argv[3]) as db:",
                 "  db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)')",
                 "  db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)')",
                 "  db.execute('INSERT INTO threads VALUES (?, ?)', ('thread-1', str(rollout)))",
@@ -711,7 +721,8 @@ describe("CodexSecurity orchestration", () => {
                     "-c",
                     script,
                     join(PLUGIN_ROOT, "scripts"),
-                    options.environment?.["CODEX_HOME"]!,
+                    expectedHome,
+                    expectedDatabase,
                   ],
                   {
                     env: { ...process.env, ...options.environment },
