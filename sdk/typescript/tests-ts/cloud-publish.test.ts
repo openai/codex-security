@@ -1,4 +1,5 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { responding } from "./support/responses.js";
 import { once } from "node:events";
 import { rejecting } from "./support/errors.js";
@@ -101,32 +102,16 @@ async function fixture() {
 async function addSecondFinding(scan: string): Promise<void> {
   const findingsPath = join(scan, "findings.json");
   const manifestPath = join(scan, "scan-manifest.json");
-  const findings = JSON.parse(await readFile(findingsPath, "utf8")) as {
-    findings: Array<{
-      findingId: string;
-      occurrenceId: string;
-      ruleId: string;
-      identity: { anchor: string; instance?: string };
-      fingerprints: { primary: string };
-      title: string;
-    }>;
-  };
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-    scan: {
-      id: string;
-      target: { targetId: string };
-      artifacts: Array<{ path: string; sha256: string }>;
-    };
-  };
+  const findings = JSON.parse(
+    await readFile(findingsPath, "utf8"),
+  ) as FindingsDocument;
+  const manifest = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  ) as ScanManifest;
   const second = structuredClone(findings.findings[0]!);
   second.identity.instance = "second-instance";
   second.title = "A second synthetic finding";
-  const fingerprint = findingFingerprint(manifest.scan.target.targetId, second);
-  second.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  second.occurrenceId = `occ_${sha256(
-    [manifest.scan.id, fingerprint].join("\0"),
-  ).slice(0, 24)}`;
-  second.fingerprints.primary = fingerprint;
+  setFindingIdentity(manifest.scan, second);
   findings.findings.push(second);
   await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
   const artifact = manifest.scan.artifacts.find(

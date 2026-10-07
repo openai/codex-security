@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { FindingsDocument } from "../src/models.js";
 import {
@@ -16,15 +16,23 @@ import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { createCliTest } from "./support/cli-run.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
 
-for (const [name, args, port, customEmbeddings] of [
+for (const [name, args, port, customEmbeddings, blankEnvironment] of [
   ["CLI", [cli, "serve"], "0"],
   ["CLI --port overrides PORT", [cli, "serve", "--port", "0"], "invalid"],
   ["CLI --port=0 overrides PORT", [cli, "serve", "--port=0"], "invalid"],
   ["CLI with custom embeddings URL", [cli, "serve"], "0", true],
+  [
+    "standalone blank host and primary key",
+    [join(packageRoot, "src", "server", "index.ts")],
+    "0",
+    true,
+    true,
+  ],
   [
     "standalone entrypoint",
     [join(packageRoot, "src", "server", "index.ts")],
@@ -81,10 +89,14 @@ for (const [name, args, port, customEmbeddings] of [
       env: {
         ...process.env,
         CODEX_SECURITY_STATE_DIR: state,
-        HOST: "127.0.0.1",
+        HOST: blankEnvironment ? "  " : "127.0.0.1",
         PORT: port,
-        OPENAI_API_KEY: customEmbeddings ? "synthetic-key" : "",
-        CODEX_API_KEY: "",
+        OPENAI_API_KEY: blankEnvironment
+          ? "  "
+          : customEmbeddings
+            ? "synthetic-key"
+            : "",
+        CODEX_API_KEY: blankEnvironment ? "synthetic-key" : "",
         CODEX_SECURITY_EMBEDDINGS_URL: embeddingsUrl,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -219,5 +231,40 @@ test("serve rejects missing or invalid ports", async () => {
     expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("port");
+  }
+});
+
+test("blank standalone settings use documented defaults", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "blank standalone settings use documented defaults",
+    )
+  )
+    return;
+  const selected: Array<{ host: string; port: number }> = [];
+  mock.module("../src/server/server.js", () => ({
+    startFindingsServer: async (options: { host: string; port: number }) => {
+      selected.push({ host: options.host, port: options.port });
+      return { address: () => null };
+    },
+  }));
+  const { serveFindings } = await import("../src/server/serve.js");
+  const before = {
+    SIGINT: process.listeners("SIGINT"),
+    SIGTERM: process.listeners("SIGTERM"),
+  };
+  try {
+    for (const value of [undefined, "", "  "])
+      await serveFindings({ HOST: value, PORT: value }, { write: () => true });
+    expect(selected).toEqual(
+      Array.from({ length: 3 }, () => ({ host: "127.0.0.1", port: 3000 })),
+    );
+  } finally {
+    for (const signal of ["SIGINT", "SIGTERM"] as const)
+      for (const listener of process.listeners(signal)) {
+        if (!before[signal].includes(listener))
+          process.removeListener(signal, listener);
+      }
   }
 });

@@ -8,6 +8,7 @@ import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { checkpointWorkbench } from "./support/workbench-fakes.js";
@@ -87,18 +88,28 @@ const transportCases: {
   extraEnvironment?: Record<string, string>;
   windowsOnly?: boolean;
   commandAuth?: "direct" | "ambient";
+  windowsConfig?: JsonObject;
+  expectedWindowsSandbox?: string;
 }[] = [
   {
     scenario: "correction",
     name: "command auth without an API key",
     commandAuth: "direct",
+    windowsConfig: { features: { elevated_windows_sandbox: false } },
+    expectedWindowsSandbox: "unelevated",
   },
   {
     scenario: "correction",
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
+    windowsConfig: { windows: { sandbox: "unelevated" } },
+    expectedWindowsSandbox: "unelevated",
   },
-  { scenario: "retry-correction" },
+  {
+    scenario: "retry-correction",
+    windowsConfig: { features: { elevated_windows_sandbox: true } },
+    expectedWindowsSandbox: "elevated",
+  },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
   { scenario: "accepted-no-replay" },
@@ -145,6 +156,8 @@ for (const {
   extraEnvironment,
   windowsOnly = false,
   commandAuth,
+  windowsConfig,
+  expectedWindowsSandbox,
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
@@ -169,6 +182,7 @@ for (const {
       };
       const configuration = stringify({
         mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...windowsConfig,
         ...(commandAuth
           ? {
               model_provider: "synthetic.provider",
@@ -422,6 +436,13 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
+      expect(
+        parse(args.find((value) => value.startsWith("windows="))!)["windows"],
+      ).toEqual({
+        sandbox:
+          expectedWindowsSandbox ??
+          (DEFAULT_CODEX_CONFIG["windows"] as { sandbox: string }).sandbox,
+      });
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );

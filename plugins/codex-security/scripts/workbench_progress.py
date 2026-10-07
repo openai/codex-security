@@ -5,7 +5,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import require_current_coordinator
@@ -71,22 +71,18 @@ def reportable_count(
 
 
 def update_context(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     context = user_context_argument(args)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        scan = require_scan(connection, scan_id)
+        scan = wb.require_scan(connection, scan_id)
         if scan["status"] != "running" or scan["canceled_at"] is not None:
             raise SystemExit("Only a running scan can update context.")
-        workspace = require_workspace(connection, scan["workspace_id"])
+        workspace = wb.require_workspace(connection, scan["workspace_id"])
         if args.workspace_id is not None:
             if args.claim_token is not None:
                 raise SystemExit("claim-token is only valid with thread-id.")
@@ -102,7 +98,7 @@ def update_context(
                 args.claim_token,
                 error_message="Scan context updates are owned by another continuation.",
             )
-        timestamp = now()
+        timestamp = wb.now()
         connection.execute(
             "UPDATE scans SET user_context = ?, updated_at = ? WHERE id = ?",
             (context, timestamp, scan["id"]),
@@ -117,42 +113,13 @@ def update_context(
                 "UPDATE workspaces SET updated_at = ? WHERE id = ?",
                 (timestamp, workspace["id"]),
             )
-    return scan_context(connection, scan_id)
-
-
-def update(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
-) -> dict[str, Any]:
-    if args.command == "update-scan-context":
-        return update_context(
-            connection,
-            args,
-            now=now,
-            require_scan=require_scan,
-            require_workspace=require_workspace,
-            scan_context=scan_context,
-        )
-    return update_progress(
-        connection,
-        args,
-        now=now,
-        require_scan=require_scan,
-        scan_context=scan_context,
-    )
+    return wb.scan_context(connection, scan_id)
 
 
 def update_progress(
+    wb: Any,
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    now: Callable[[], str],
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
-    scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     model = optional_text(args.model, maximum=200)
@@ -163,8 +130,8 @@ def update_progress(
     serialized_preflight_issues = preflight_issues_json(preflight_issues)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        timestamp = now()
-        scan = require_scan(connection, scan_id)
+        timestamp = wb.now()
+        scan = wb.require_scan(connection, scan_id)
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
         if scan["mode"] == "deep":
@@ -274,7 +241,7 @@ def update_progress(
             completed = progress["review_items_completed"]
         if completed > total:
             raise SystemExit("Completed review items cannot exceed total review items.")
-        updated = connection.execute(
+        connection.execute(
             """
             UPDATE scans
             SET phase = COALESCE(?, phase), model = COALESCE(?, model),
@@ -283,13 +250,11 @@ def update_progress(
             """,
             (args.phase, model, reasoning_effort, timestamp, scan["id"]),
         )
-        if updated.rowcount != 1:
-            raise SystemExit("Only a running scan can update progress.")
         connection.execute(
             f"UPDATE scan_progress SET {', '.join(updates)}, updated_at = ? WHERE scan_id = ?",
             (*values, timestamp, scan["id"]),
         )
-    return scan_context(connection, scan["id"])
+    return wb.scan_context(connection, scan["id"])
 
 
 if __name__ == "__main__":

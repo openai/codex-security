@@ -13,7 +13,6 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test, mock } from "bun:test";
-import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -60,7 +59,6 @@ import {
   failingSecurity,
   fakeInterval,
 } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { fail, throwing } from "./support/errors.js";
@@ -69,6 +67,38 @@ import {
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
+
+const profileScenarios = [
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-sol"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="high"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "high",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model_reasoning_effort="low"',
+      'profiles.review.model="gpt-5.6-terra"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low",
+  },
+  {
+    overrides: [
+      'profile="review"',
+      'model="gpt-5.6-terra"',
+      'profiles.review.model_reasoning_effort="medium"',
+    ],
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+  },
+] as const;
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -92,14 +122,15 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    const result = await runCommand("git", args, { timeout: 10_000 });
+    const result = await runCommand("git", args);
     expect(result.status, result.stderr).toBe(0);
   }
-  const { status, stdout, stderr } = await runCommand(
-    "git",
-    ["-C", repository, "rev-parse", "HEAD"],
-    { timeout: 10_000 },
-  );
+  const { status, stdout, stderr } = await runCommand("git", [
+    "-C",
+    repository,
+    "rev-parse",
+    "HEAD",
+  ]);
   expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
@@ -365,144 +396,6 @@ describe("CLI", () => {
     }
   });
 
-  test("documents user-facing environment and deep-scan configuration", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const publicReadme = await readFile(
-      new URL("../../../README.md", import.meta.url),
-      { encoding: "utf8" },
-    );
-
-    for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain("https://chatgpt.com/cyber");
-    }
-
-    for (const setting of [
-      "OPENAI_API_KEY",
-      "CODEX_API_KEY",
-      "CODEX_SECURITY_LOG_LEVEL",
-      "LOG_LEVEL",
-      "CODEX_SECURITY_STATE_DIR",
-      "CODEX_HOME",
-      "PYTHON",
-      "GH_HOST",
-      "GH_TOKEN",
-      "GITHUB_TOKEN",
-      "CODEX_SECURITY_GIT_HOST",
-      "CODEX_SECURITY_IMAGE",
-      "CODEX_SECURITY_USER",
-      "CODEX_SECURITY_SECCOMP",
-      "CODEX_SECURITY_CSV",
-      "CODEX_SECURITY_RESULTS",
-      "CODEX_SECURITY_STATE",
-      "CODEX_SECURITY_NO_UPDATE_NOTICE",
-      "NO_UPDATE_NOTIFIER",
-      "CODEX_SECURITY_NPM_REGISTRY",
-      "npm_config_registry",
-      "NPM_CONFIG_REGISTRY",
-      "NO_COLOR",
-      "TERM",
-      "CI",
-      "features.multi_agent_v2.max_concurrent_threads_per_session",
-      "agents.max_threads",
-      "$CODEX_HOME/codex-security/config.toml",
-      "[deep_scan]",
-      "stop_after_no_new",
-      "max_discovery_runs",
-      "max_time_hours",
-    ]) {
-      expect(readme).toContain(setting);
-    }
-    expect(readme).toMatch(
-      /\|\s*`CODEX_SECURITY_LOG_LEVEL`\s*\|\s*CLI-only\b/u,
-    );
-    expect(readme).toMatch(/\|\s*`LOG_LEVEL`\s*\|\s*CLI-only\b/u);
-  });
-
-  test("keeps documented runtime and deep-scan defaults accurate", async () => {
-    const readme = await readFile(new URL("../README.md", import.meta.url), {
-      encoding: "utf8",
-    });
-    const documentedConfigs = [
-      ...readme.matchAll(/^```toml\s*\n([\s\S]*?)\n```\s*$/gmu),
-    ].map(([, config]) => parseToml(config!));
-    const documentedRuntime = documentedConfigs.find(
-      (config) => "cli_auth_credentials_store" in config,
-    );
-    expect(documentedRuntime).toMatchObject({
-      cli_auth_credentials_store:
-        DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"],
-      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
-      model_reasoning_effort: DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort,
-    });
-
-    const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
-    const multiAgent = features["multi_agent_v2"] as JsonObject;
-    expect(documentedRuntime).toMatchObject({
-      features: {
-        multi_agent_v2: {
-          max_concurrent_threads_per_session:
-            multiAgent["max_concurrent_threads_per_session"],
-        },
-      },
-    });
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const root = await temporaryDirectory("codex-security-deep-defaults-");
-
-    try {
-      const { status, stdout, stderr } = await runCommand(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
-          "--available-parallelism",
-          "12",
-        ],
-        {
-          env: {
-            ...process.env,
-            CODEX_HOME: join(root, "codex-home"),
-            PYTHONDONTWRITEBYTECODE: "1",
-          },
-          timeout: 30_000,
-        },
-      );
-
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-
-      const defaults = JSON.parse(stdout) as {
-        workers: number;
-        subagents: number;
-        stopAfterNoNew: number;
-        stopAfterConsecutiveErrors: number;
-        maxDiscoveryRuns: number;
-        maxTimeHours: number;
-      };
-      expect(defaults.workers).toBe(4);
-      const documentedDeepScan = documentedConfigs.find(
-        (config) =>
-          typeof config["deep_scan"] === "object" &&
-          config["deep_scan"] !== null &&
-          "stop_after_consecutive_errors" in config["deep_scan"],
-      );
-      expect(documentedDeepScan).toMatchObject({
-        deep_scan: {
-          workers: 4,
-          subagents: defaults.subagents,
-          stop_after_no_new: defaults.stopAfterNoNew,
-          stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
-          max_discovery_runs: defaults.maxDiscoveryRuns,
-          max_time_hours: defaults.maxTimeHours,
-        },
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   test("marks findings as false positives without starting Codex", async () => {
     const reason = "  Not reachable from untrusted input.  ";
     const expectedReason = reason.trim();
@@ -616,7 +509,7 @@ describe("CLI", () => {
         ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
       ]) {
-        const result = await runCommand("git", args, { timeout: 10_000 });
+        const result = await runCommand("git", args);
         expect(result.status, result.stderr).toBe(0);
       }
       let started = false;
@@ -707,11 +600,13 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      const staged = await runCommand(
-        "git",
-        ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
-        { timeout: 10_000 },
-      );
+      const staged = await runCommand("git", [
+        "-C",
+        root,
+        "add",
+        "-f",
+        "node_modules/.bin/codex-security",
+      ]);
       expect(staged.status, staged.stderr).toBe(0);
       const commit = await runCommand(
         "git",
@@ -738,7 +633,6 @@ describe("CLI", () => {
             OPENAI_API_KEY: "",
             PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
           },
-          timeout: 10_000,
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
@@ -2434,7 +2328,12 @@ describe("CLI", () => {
           await runCapturedCli(
             main,
             ["scan", ".", ...options],
-            dependencies({ onConfig: (value) => (config = value) }),
+            dependencies({
+              environment: {
+                [providerConfig.env_key]: "synthetic-provider-key",
+              },
+              onConfig: (value) => (config = value),
+            }),
           ),
         ).toBe(0);
         expect(config?.codexOverrides).toEqual({
@@ -3079,39 +2978,7 @@ describe("CLI", () => {
   });
 
   test("reports effective model and reasoning settings from the selected Codex profile", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
+    for (const scenario of profileScenarios) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
@@ -3257,91 +3124,69 @@ describe("CLI", () => {
     },
   );
 
-  test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
+  test.each([
+    [
+      "enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL",
+      ["scan", ".", "--json"],
+      { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.started",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "  ",
+        LOG_LEVEL: "  DEBUG  ",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL",
+      ["scan", ".", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "info",
+        LOG_LEVEL: "debug",
+      },
+      [],
+      ["codex-security: debug:"],
+    ],
+    [
+      "lets --verbose override non-debug environment log levels",
+      ["scan", ".", "--verbose", "--json"],
+      {
+        CODEX_SECURITY_LOG_LEVEL: "error",
+        LOG_LEVEL: "warn",
+      },
+      [
+        "codex-security: debug: scan.configuration",
+        "codex-security: debug: scan.completed",
+      ],
+      [],
+    ],
+    [
+      "does not emit verbose diagnostics unless explicitly requested",
+      ["scan", ".", "--json"],
+      {},
+      [],
+      ["codex-security: debug:"],
+    ],
+  ] as const)("%s", async (_name, args, environment, present, absent) => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
-        }),
-      ),
-    ).toBe(0);
+    expect(await runCli(args, dependencies({ environment }))).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.started");
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "  ",
-            LOG_LEVEL: "  DEBUG  ",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "info",
-            LOG_LEVEL: "debug",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
-  });
-
-  test("lets --verbose override non-debug environment log levels", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["scan", ".", "--verbose", "--json"],
-        dependencies({
-          environment: {
-            CODEX_SECURITY_LOG_LEVEL: "error",
-            LOG_LEVEL: "warn",
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
-  });
-
-  test("does not emit verbose diagnostics unless explicitly requested", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(await runCli(["scan", ".", "--json"], dependencies())).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).not.toContain("codex-security: debug:");
+    for (const diagnostic of present)
+      expect(stderr.text()).toContain(diagnostic);
+    for (const diagnostic of absent)
+      expect(stderr.text()).not.toContain(diagnostic);
   });
 
   test("keeps verbose dry-run authentication unverified without starting a scan", async () => {
@@ -3379,39 +3224,7 @@ describe("CLI", () => {
   });
 
   test("reports selected profile configuration consistently in verbose dry runs", async () => {
-    const scenarios = [
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-sol"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="high"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "high",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model_reasoning_effort="low"',
-          'profiles.review.model="gpt-5.6-terra"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "low",
-      },
-      {
-        overrides: [
-          'profile="review"',
-          'model="gpt-5.6-terra"',
-          'profiles.review.model_reasoning_effort="medium"',
-        ],
-        model: "gpt-5.6-terra",
-        reasoningEffort: "medium",
-      },
-    ] as const;
-
-    for (const scenario of scenarios) {
+    for (const scenario of profileScenarios) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(

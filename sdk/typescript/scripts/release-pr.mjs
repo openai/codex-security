@@ -96,7 +96,7 @@ export function generateNoteSections(changes) {
 }
 
 function sectionBlock(id, content) {
-  return `<!-- release-section: ${id}:start -->\n${content}\n<!-- release-section: ${id}:end -->`;
+  return `<!-- release-section: ${id}:start -->\n\n${content}\n\n<!-- release-section: ${id}:end -->`;
 }
 
 function findSection(notes, id) {
@@ -124,28 +124,18 @@ export function updateReleaseNotes(
 ) {
   const header = `<!-- release-version: ${version} -->`;
   const sections = {};
-  if (previousSections === undefined) {
-    const blocks = sectionIds.map((id) => {
-      const block = sectionBlock(id, generated[id]);
-      sections[id] = {
-        generatedHash: hash("sha256", block),
-        humanOwned: false,
-      };
-      return block;
-    });
-    return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
-  }
-
-  let notes = previousNotes;
+  const initial = previousSections === undefined;
+  let notes = initial ? null : previousNotes;
   if (notes !== null) {
     notes = /^<!-- release-version: [^\r\n]* -->/u.test(notes)
       ? notes.replace(/^<!-- release-version: [^\r\n]* -->/u, header)
       : `${header}\n\n${notes}`;
   }
   for (const id of sectionIds) {
-    const previous = previousSections[id];
-    const block = notes === null ? null : findSection(notes, id);
+    const previous = initial ? null : previousSections[id];
+    const block = initial || notes === null ? null : findSection(notes, id);
     const humanOwned =
+      !initial &&
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||

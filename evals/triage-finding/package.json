@@ -14,7 +14,7 @@
     "test:calibration-generate": "node --experimental-strip-types scripts/test-generate-calibration-tests.mts",
     "test:calibration-hydrate": "node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts",
     "test:dataset": "node --experimental-strip-types scripts/test-calibration-dataset.mts",
-    "test:deterministic": "node --experimental-strip-types scripts/test-app-surface-instructions.mts && node --experimental-strip-types scripts/test-triage-io.mts && node --experimental-strip-types scripts/test-calibration-dataset.mts && node --experimental-strip-types scripts/test-generate-calibration-tests.mts && node --experimental-strip-types scripts/test-calibration-evidence.mts && node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts",
+    "test:deterministic": "node --experimental-strip-types scripts/test-app-surface-instructions.mts && node --experimental-strip-types scripts/test-triage-io.mts && node --experimental-strip-types scripts/test-intake-assertions.mts && node --experimental-strip-types scripts/test-calibration-dataset.mts && node --experimental-strip-types scripts/test-generate-calibration-tests.mts && node --experimental-strip-types scripts/test-calibration-evidence.mts && node --experimental-strip-types scripts/test-hydrate-calibration-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts",
     "test:instructions": "node --experimental-strip-types scripts/test-app-surface-instructions.mts",
     "test:sastbench": "node --experimental-strip-types sastbench/scripts/test-sastbench-lib.mts && node --experimental-strip-types sastbench/scripts/test-install-sastbench.mts && node --experimental-strip-types sastbench/scripts/test-hydrate-sastbench-repos.mts && node --experimental-strip-types sastbench/scripts/test-sastbench-result.mts && node --experimental-strip-types sastbench/scripts/test-promptfoo-native-harness.mts",
     "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.yaml",
@@ -30,7 +30,7 @@
     "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.162.0-alpha.15",
+    "@openai/codex-sdk": "0.162.0-alpha.16",
     "@opencode-ai/sdk": "1.18.33",
     "promptfoo": "0.123.1"
   }

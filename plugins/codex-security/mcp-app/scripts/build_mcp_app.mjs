@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const maxChunkBytes = 140_000;
@@ -13,6 +14,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
     throw new Error("Native packaging must be universal or host.");
   }
+  await buildNativeWrappers();
   const mcpDir = resolve(output);
   const nativeRoot = join(
     root,
@@ -61,6 +63,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     await copyFile(join(nativeRoot, path), destination);
   }
   await writeRuntime("helpers", "helpers-main.ts");
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "permission-profile-preflight.mjs"),
+    platform: "node",
+    target: "node20",
+  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
