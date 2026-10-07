@@ -10,7 +10,7 @@ This script stays deliberately model-free:
   local working-tree patches.
 
 Candidate selection uses the existing path exclusions and binary detection,
-not a language-extension allowlist. Unknown formats use sampled text previews.
+not a language-extension allowlist. All formats use bounded source previews.
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def parse_args() -> argparse.Namespace:
 
     diff = subparsers.add_parser(
         "make-diff-rank-input",
-        help="Create rank_input.jsonl from Git changed source-like files.",
+        help="Create rank_input.jsonl from Git changed text files.",
     )
     diff.add_argument("--repo", required=True, help="Repository root.")
     diff.add_argument("--base", required=True, help="Git diff base revision.")
@@ -388,12 +388,13 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} scoped paths to {output}")
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str, bytes]]:
+    """Return changed paths, statuses, and modes from the selected side of each change."""
     result = git_command(
         repo,
         "diff",
         "--ignore-submodules=all",
-        "--name-status",
+        "--raw",
         "-z",
         "--diff-filter=ACMRD",
         *diff_args,
@@ -404,22 +405,26 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[tuple[Path, str, bytes]] = []
     index = 0
     while index < len(fields):
-        status = chr(fields[index][0])
+        metadata = fields[index].split()
+        status = chr(metadata[-1][0])
         index += 1
         if status in {"C", "R"}:
             index += 1
         path = repo / os.fsdecode(fields[index])
         index += 1
-        changed.append((path, status))
+        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
+        changed.append((path, status, selected_mode))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return [
+            (path, status) for path, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
+        ]
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -432,8 +437,8 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             text=False,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
+        combined = {path: status for path, status, _ in staged}
+        combined.update((path, status) for path, status, _ in unstaged)
         combined.update(
             (repo / os.fsdecode(relative), "A")
             for relative in untracked.stdout.split(b"\0")
@@ -478,7 +483,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             if is_binary:
                 continue
             if status != "D":
-                preview, _ = preview_for_bytes(rel, content, args.preview_bytes)
+                preview, _ = preview_for_bytes(content, args.preview_bytes)
         elif not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
