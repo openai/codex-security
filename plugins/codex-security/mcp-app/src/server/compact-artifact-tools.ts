@@ -109,14 +109,11 @@ export function registerCompactArtifactTools(
   });
 
   /** Record diff candidates and read existing diff or Deep candidates. */
-  const writerSchema = workbenchDiscoveryCandidatesInputSchema;
-  const readerSchema = workbenchListCodexSecurityCandidatesInputSchema;
-
   registerCompactTool(server, {
     name: "record_codex_security_discovery_candidates",
     title: "Record Codex Security Discovery Candidates",
     description: "Normalize and replace the selected diff scan's candidates.",
-    inputSchema: writerSchema,
+    inputSchema: workbenchDiscoveryCandidatesInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
@@ -130,7 +127,7 @@ export function registerCompactArtifactTools(
     name: "list_codex_security_candidates",
     title: "List Codex Security Candidates",
     description: "Read one page of diff or Deep scan discovery candidates.",
-    inputSchema: readerSchema,
+    inputSchema: workbenchListCodexSecurityCandidatesInputSchema,
     readOnly: true,
     handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
