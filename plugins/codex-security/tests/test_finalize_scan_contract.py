@@ -2833,10 +2833,7 @@ The extraction root is not enforced.
     def test_sarif_emits_github_line_hash_through_windows_backend(self) -> None:
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        backend = mock.Mock()
-        backend.open_read_fd.side_effect = lambda root, relative_path, _context: os.open(
-            root / relative_path, os.O_RDONLY
-        )
+        backend = windows_file_backend()
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
