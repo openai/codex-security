@@ -68,9 +68,9 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
       max_concurrent_threads_per_session: 9,
     }),
   }),
-  // Named filesystem profiles need an active Windows sandbox backend.
+  // Credential read denials require the elevated Windows sandbox backend.
   windows: Object.freeze({
-    sandbox: "unelevated",
+    sandbox: "elevated",
   }),
 });
 
@@ -119,7 +119,7 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
   const selected = scanModelProvider(config);
-  const providers = config["model_providers"];
+  const providers = resolveCodexProfile(config)["model_providers"];
   const provider =
     typeof selected === "string" && isObject(providers)
       ? providers[selected]
@@ -133,8 +133,9 @@ export function resolveCommandAuthConfig(
   home: string,
 ): JsonObject {
   const resolved = structuredClone(config);
-  const providers = resolved["model_providers"];
+  const providers = resolveCodexProfile(resolved)["model_providers"];
   if (isObject(providers)) {
+    (selectedScanProfile(resolved) ?? resolved)["model_providers"] = providers;
     for (const provider of Object.values(providers)) {
       if (!isObject(provider) || !isObject(provider["auth"])) continue;
       const auth = provider["auth"];
@@ -157,8 +158,21 @@ export function modelProviderConfigOverride(config: JsonObject): string[] {
     : [`model_providers=${inlineToml(config["model_providers"])}`];
 }
 
+/** @internal Resolve settings; literal-key tables use native file layers. */
+export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
+  const structured = resolveCodexProfile(config);
+  delete structured["projects"];
+  delete structured["permissions"];
+  delete structured["model_providers"];
+  return structured;
+}
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
+  if (value === null)
+    throw new ConfigurationError(
+      "Codex TOML overrides cannot contain null values.",
+    );
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
@@ -248,7 +262,10 @@ export async function mergedCodexConfig(
   return deepMerge(defaults, overrides);
 }
 
-function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
+/** @internal Preserve existing native Windows backend selections. */
+export function normalizeLegacyWindowsSandboxOverride(
+  overrides: JsonObject,
+): void {
   const features = overrides["features"];
   if (!isObject(features)) {
     return;

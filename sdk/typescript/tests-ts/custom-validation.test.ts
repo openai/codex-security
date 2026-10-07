@@ -502,6 +502,12 @@ describe("custom validation", () => {
       const commands: string[] = [];
       const activities: ScanActivity[] = [];
       const validationActivity = "Synthetic validation activity.";
+      const profileDisabledTools =
+        scenario === "standard"
+          ? []
+          : diff
+            ? ["profile_disabled_tool"]
+            : undefined;
       const workbench = (args: readonly string[], input?: string) =>
         runWorkbench(
           {
@@ -516,7 +522,22 @@ describe("custom validation", () => {
           input,
         );
       const client = new TestClient(
-        {},
+        profileDisabledTools === undefined
+          ? {}
+          : {
+              codexOverrides: {
+                profile: "synthetic.validation",
+                profiles: {
+                  "synthetic.validation": {
+                    mcp_servers: {
+                      "codex-security": {
+                        disabled_tools: profileDisabledTools,
+                      },
+                    },
+                  },
+                },
+              },
+            },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
           prepareRuntime: async () => {
@@ -534,7 +555,13 @@ describe("custom validation", () => {
             expect(options.config?.["mcp_servers"]).toMatchObject({
               "codex-security": {
                 disabled_tools: expect.arrayContaining([
+                  "start_codex_security_standard_scan",
+                  "start_codex_security_prompt_only_scan",
+                  "start_codex_security_deep_scan",
                   "complete_codex_security_scan",
+                  "record_codex_security_candidate_validations",
+                  "record_candidate_attack_paths",
+                  ...(profileDisabledTools ?? []),
                 ]),
               },
             });

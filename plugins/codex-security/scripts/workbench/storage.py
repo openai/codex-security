@@ -10,7 +10,9 @@ def state_dir() -> Path:
     state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    codex_home = Path(
+        os.environ["CODEX_HOME"] if os.environ.get("CODEX_HOME", "").strip() else "~/.codex"
+    ).expanduser()
     return (codex_home / "state" / "plugins" / "codex-security").resolve()
 
 

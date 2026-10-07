@@ -1,13 +1,7 @@
+import { workflowBashCommand } from "./support/shell.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
@@ -39,17 +33,12 @@ const metrics = steps.find(
   (step) => step.name === "Summarize and measure the scan",
 )!;
 const sourceSha = "a".repeat(40);
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "invoice workflow "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("invoice workflow ");
   const bin = join(directory, "codex-security-cli/node_modules/.bin");
   mkdirSync(bin, { recursive: true });
   mkdirSync(join(directory, "invoice-desk"));
@@ -72,15 +61,8 @@ function runStep(
   python?: string,
 ) {
   const root = directory.replaceAll("\\", "/");
-  const bash =
-    process.platform === "win32"
-      ? join(
-          process.env["ProgramFiles"] ?? "C:/Program Files",
-          "Git/bin/bash.exe",
-        )
-      : "bash";
   const result = spawnSync(
-    bash,
+    workflowBashCommand(),
     [
       "--noprofile",
       "--norc",

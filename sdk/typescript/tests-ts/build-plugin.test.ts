@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -98,14 +98,17 @@ describe("bundled plugin build", () => {
       await cp(join(plugin, "schemas"), join(source, "schemas"), {
         recursive: true,
       });
-      await writeFixture(
-        source,
-        "scripts/reserved_artifact_paths.json",
-        await readFile(
-          join(plugin, "scripts", "reserved_artifact_paths.json"),
-          "utf8",
-        ),
-      );
+      for (const file of [
+        "reserved_artifact_paths.json",
+        "codex_profile.mjs",
+        "codex_profile.d.mts",
+      ]) {
+        await writeFixture(
+          source,
+          `scripts/${file}`,
+          await readFile(join(plugin, "scripts", file), "utf8"),
+        );
+      }
       await symlink(
         join(plugin, "mcp-app", "node_modules"),
         join(source, "mcp-app", "node_modules"),
@@ -205,6 +208,26 @@ describe("bundled plugin build", () => {
       ]);
       expect(helper.stdout).toBe("[]\n");
       expect(helper.stderr).toBe("");
+      const preflight = await execFileAsync(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `const runtime = await import(process.argv[1]);
+         console.log(JSON.stringify({
+           preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
+           profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+         }));`,
+          pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
+            .href,
+        ],
+        { cwd: root },
+      );
+      expect(JSON.parse(preflight.stdout)).toEqual({
+        preflight: "function",
+        profileId: "codex_security_deep_scan_worker",
+      });
+      expect(preflight.stderr).toBe("");
     },
   );
 

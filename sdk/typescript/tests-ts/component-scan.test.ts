@@ -1,3 +1,4 @@
+import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
@@ -202,11 +203,9 @@ async function cli(
 function fakeCodex(
   response: () => unknown,
 ): NonNullable<ComponentPlanningOptions["codex"]> {
-  return {
-    startThread: () => ({
-      run: async () => ({ finalResponse: JSON.stringify(await response()) }),
-    }),
-  };
+  return codexWithRun(async () => ({
+    finalResponse: JSON.stringify(await response()),
+  }));
 }
 
 async function scopedInventory(paths: Fixture, scope: string) {
@@ -1092,11 +1091,7 @@ test("does not start another automatic planning call after cancellation", async 
   await expect(
     planComponents(paths.repository, {
       signal: controller.signal,
-      codex: {
-        startThread: () => ({
-          run,
-        }),
-      },
+      codex: codexWithRun(run),
     }),
   ).rejects.toThrow("planning canceled");
   expect(run).toHaveBeenCalledTimes(1);
@@ -1439,6 +1434,37 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
     expect(result.code).toBe(0);
     expect([planned, matched]).toEqual([true, true]);
     expect(environment.OPENAI_API_KEY).toBe("synthetic-openai-key");
+  },
+);
+
+test.each([
+  ["openrouter", "api-key"],
+  ["openrouter", "chatgpt"],
+  ["fireworks", "api-key"],
+  ["fireworks", "chatgpt"],
+] as const)(
+  "component planning honors command authentication for %s with %s selection",
+  async (provider, auth) => {
+    const paths = await fixture();
+    const plan = mock(async () => ({ components }));
+    const result = await scan(paths, {
+      components: undefined,
+      auto: true,
+      planOnly: true,
+      environment: {},
+      config: {
+        codexOverrides: {
+          model_provider: provider,
+          model_providers: {
+            [provider]: { auth: { command: "synthetic-auth-helper" } },
+          },
+        },
+      },
+      scanOptions: { auth },
+      planComponents: plan,
+    });
+    expect(result.total).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
   },
 );
 

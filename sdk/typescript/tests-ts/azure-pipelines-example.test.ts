@@ -1,13 +1,11 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
@@ -46,21 +44,16 @@ const steps = job.steps.flatMap((step) =>
 ) as Step[];
 const scan = steps.find((step) => step.name === "runScan")!;
 const sarif = steps.find((step) => step.name === "exportSarif")!;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function runStep(
   step: Step,
   overrides: Record<string, string> = {},
   scanFiles: string[] = [],
 ) {
-  const directory = mkdtempSync(join(tmpdir(), "codex azure example "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("codex azure example ");
   for (const child of ["repository with spaces", "scan", "reports"]) {
     mkdirSync(join(directory, child));
   }
