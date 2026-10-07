@@ -23,6 +23,7 @@ import {
 import {
   collectObserverErrors,
   completedEvents,
+  completedTurn,
   runEvents,
   type ScanObserverName,
 } from "./support/api-events.js";
@@ -713,16 +714,7 @@ describe("one-shot scan events", () => {
             text: "scan complete",
           },
         };
-        yield {
-          type: "turn.completed",
-          usage: {
-            input_tokens: 10,
-            cached_input_tokens: 2,
-            cache_write_input_tokens: 0,
-            output_tokens: 3,
-            reasoning_output_tokens: 1,
-          },
-        };
+        yield completedTurn();
       } finally {
         closed = true;
       }
@@ -1178,16 +1170,7 @@ describe("one-shot scan events", () => {
           status: "completed",
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
+      yield completedTurn();
     }
 
     await expect(

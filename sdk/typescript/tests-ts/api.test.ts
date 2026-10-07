@@ -102,6 +102,17 @@ const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
+function localClient(
+  config: ConstructorParameters<typeof TestClient>[0] = {},
+  environment: ConstructorParameters<typeof TestClient>[1]["environment"] = {},
+) {
+  const prepareRuntime = mock(rejecting("runtime should not initialize"));
+  return {
+    client: new TestClient(config, { environment, prepareRuntime }),
+    prepareRuntime,
+  };
+}
+
 async function runtimeDirectories() {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -842,15 +853,11 @@ describe("CodexSecurity orchestration", () => {
     const output = join(root, "scan");
     await mkdir(repository, { mode: 0o700 });
     await mkdir(source, { mode: 0o700 });
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = new TestClient(
+    const { client, prepareRuntime } = localClient(
       { pythonPath: "/definitely/missing/python" },
       {
-        environment: {
-          OPENAI_API_KEY: "must-not-be-used",
-          CODEX_HOME: join(root, "ambient"),
-        },
-        prepareRuntime,
+        OPENAI_API_KEY: "must-not-be-used",
+        CODEX_HOME: join(root, "ambient"),
       },
     );
 
@@ -912,18 +919,14 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = new TestClient(
+    const { client, prepareRuntime } = localClient(
       {
         codexOverrides: {
           model: "configured-model",
           model_reasoning_effort: "high",
         },
       },
-      {
-        environment: { OPENAI_API_KEY: "must-not-be-used" },
-        prepareRuntime,
-      },
+      { OPENAI_API_KEY: "must-not-be-used" },
     );
 
     await expect(client.preflight(repository)).resolves.toMatchObject({
@@ -938,25 +941,19 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = new TestClient(
-      {
-        codexOverrides: {
-          profile: "review",
-          model: "gpt-5.6-sol",
-          model_reasoning_effort: "low",
-          profiles: {
-            review: {
-              model: "gpt-5.6-terra",
-              model_reasoning_effort: "high",
-            },
+    const { client, prepareRuntime } = localClient({
+      codexOverrides: {
+        profile: "review",
+        model: "gpt-5.6-sol",
+        model_reasoning_effort: "low",
+        profiles: {
+          review: {
+            model: "gpt-5.6-terra",
+            model_reasoning_effort: "high",
           },
         },
       },
-      {
-        prepareRuntime,
-      },
-    );
+    });
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
@@ -973,10 +970,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
@@ -1021,10 +1015,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     await expect(
       client.preflight(repository, {
@@ -1090,11 +1081,10 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(knowledgeBase, '{"scope":"Public API"}');
     await writeFile(invalidDocument, "not a PDF");
     await writeFile(unsupportedDocument, new Uint8Array([0, 1, 2]));
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      environment: { OPENAI_API_KEY: "must-not-be-used" },
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient(
+      {},
+      { OPENAI_API_KEY: "must-not-be-used" },
+    );
 
     await expect(
       client.preflight(repository, { knowledgeBasePaths: [knowledgeBase] }),
@@ -1169,11 +1159,7 @@ describe("CodexSecurity orchestration", () => {
       ],
       [{}, { method: "stored_credentials", verified: false }],
     ] as const) {
-      const prepareRuntime = mock(rejecting("runtime should not initialize"));
-      const client = TestClient.withDependencies({
-        environment,
-        prepareRuntime,
-      });
+      const { client, prepareRuntime } = localClient({}, environment);
 
       const preflight = await client.preflight(repository);
       const authentication: ScanAuthentication = preflight.authentication;
@@ -1189,14 +1175,13 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      environment: {
+    const { client, prepareRuntime } = localClient(
+      {},
+      {
         OPENAI_API_KEY: "synthetic-openai-key",
         CODEX_API_KEY: "synthetic-codex-key",
       },
-      prepareRuntime,
-    });
+    );
 
     await expect(
       client.preflight(repository, { auth: "chatgpt" }),
@@ -1238,12 +1223,10 @@ describe("CodexSecurity orchestration", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       await mkdir(repository);
-      const prepareRuntime = mock(rejecting("runtime should not initialize"));
-      const client = TestClient.withDependencies({
-        environment:
-          field === "auth" ? { OPENAI_API_KEY: "synthetic-openai-key" } : {},
-        prepareRuntime,
-      });
+      const { client, prepareRuntime } = localClient(
+        {},
+        field === "auth" ? { OPENAI_API_KEY: "synthetic-openai-key" } : {},
+      );
       const options = { [field]: value } as unknown as ScanOptions;
 
       await expect(client.preflight(repository, options)).rejects.toThrow(
@@ -1259,11 +1242,10 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      environment: { OPENAI_API_KEY: "   " },
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient(
+      {},
+      { OPENAI_API_KEY: "   " },
+    );
 
     await expect(
       client.preflight(repository, { auth: "api-key" }),
@@ -1969,10 +1951,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(repository);
     await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, "previous.txt"), "previous scan\n");
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     const preflight = await client.preflight(repository, {
       outputDir: output,
@@ -2108,10 +2087,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     await mkdir(repository);
     await writeFile(join(repository, "preserved.txt"), "preserved\n");
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     await expect(
       client.run(repository, { outputDir: join(repository, "scan") }),
@@ -2149,10 +2125,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     for (const separator of ["\n", "\u0085", "\u2028", "\u2029"]) {
       await expect(
@@ -2200,10 +2173,7 @@ describe("CodexSecurity orchestration", () => {
       const repository = join(worktree, "packages", "service");
       const output = join(worktree, "scan");
       await mkdir(repository, { recursive: true });
-      const prepareRuntime = mock(rejecting("runtime should not initialize"));
-      const client = TestClient.withDependencies({
-        prepareRuntime,
-      });
+      const { client, prepareRuntime } = localClient();
 
       await expect(
         client.run(repository, { outputDir: output }),
@@ -2227,10 +2197,7 @@ describe("CodexSecurity orchestration", () => {
     const temporaryVariable = process.platform === "win32" ? "TEMP" : "TMPDIR";
     const previous = process.env[temporaryVariable];
     process.env[temporaryVariable] = temporaryRoot;
-    const prepareRuntime = mock(rejecting("runtime should not initialize"));
-    const client = TestClient.withDependencies({
-      prepareRuntime,
-    });
+    const { client, prepareRuntime } = localClient();
 
     try {
       await expect(client.run(repository)).rejects.toMatchObject({
@@ -2260,11 +2227,10 @@ describe("CodexSecurity orchestration", () => {
       "GIT_COMMON_DIR",
       "GIT_REPLACE_REF_BASE",
     ]) {
-      const prepareRuntime = mock(rejecting("runtime should not initialize"));
-      const client = TestClient.withDependencies({
-        environment: { [name.toLowerCase()]: join(root, "override") },
-        prepareRuntime,
-      });
+      const { client, prepareRuntime } = localClient(
+        {},
+        { [name.toLowerCase()]: join(root, "override") },
+      );
 
       await expect(client.preflight(repository)).rejects.toThrow(
         `${name.toLowerCase()} is not supported`,
