@@ -196,6 +196,7 @@ test.each(["root", "profile override", "profile only"] as const)(
     await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
 
     const workerRuntimeSettings = await loadWorkerSettings(root);
+    let nativeProbe = Promise.resolve();
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -362,12 +363,20 @@ test.each(["root", "profile override", "profile only"] as const)(
                       featureOverrides,
                     );
                     expect(settings.config["web_search"]).toBe(webSearch);
-                    const actual = await effectiveProvider(
-                      environment,
-                      repository,
-                      profileConfigOverrides(settings.config),
-                      settings.nativeProfile,
+                    // Native SQLite probes share a home; keep the scans concurrent.
+                    const probe = nativeProbe.then(() =>
+                      effectiveProvider(
+                        environment,
+                        repository,
+                        profileConfigOverrides(settings.config),
+                        settings.nativeProfile,
+                      ),
                     );
+                    nativeProbe = probe.then(
+                      () => undefined,
+                      () => undefined,
+                    );
+                    const actual = await probe;
                     expect(actual).toMatchObject(provider);
                     expect(actual.http_headers ?? {}).toEqual(
                       provider.http_headers ?? {},
