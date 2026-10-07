@@ -5,6 +5,7 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import type { Server } from "node:http";
@@ -145,8 +146,8 @@ test.skipIf(process.platform === "win32")(
     const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
     directories.push(directory);
     const repository = join(directory, "repository");
-    const other = join(directory, "other");
-    await mkdir(other);
+    const other = join(directory, "other", "nested");
+    await mkdir(other, { recursive: true });
     const bin = join(repository, "node_modules", ".bin");
     await mkdir(bin, { recursive: true });
     await writeFile(
@@ -159,6 +160,15 @@ printf '%s\n' '{"databasePath":"shim"}'
     );
     const node = Bun.which("node");
     expect(node).not.toBeNull();
+    const tools = join(directory, "tools");
+    const replacementTools = join(directory, "other", "tools");
+    await Promise.all([mkdir(tools), mkdir(replacementTools)]);
+    await symlink(node!, join(tools, "node"));
+    await writeFile(
+      join(replacementTools, "node"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_NODE_SHIM_MARKER"\nexit 1\n',
+      { mode: 0o755 },
+    );
     const state = join(directory, "state");
     const result = Bun.spawnSync(
       [
@@ -175,7 +185,7 @@ await store.list({ limit: 1, offset: 0 });`,
         cwd: repository,
         env: {
           ...process.env,
-          PATH: [bin, dirname(node!)].join(delimiter),
+          PATH: [bin, "../tools"].join(delimiter),
           CODEX_SECURITY_STATE_DIR: state,
           SYNTHETIC_NODE_SHIM_MARKER: join(bin, "invoked"),
         },

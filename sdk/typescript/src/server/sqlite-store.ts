@@ -1,3 +1,4 @@
+import { delimiter, resolve } from "node:path";
 import {
   bundledPluginRoot,
   workbenchEnvironment,
@@ -92,12 +93,27 @@ export class SqliteFindingsStore implements FindingsStore {
   private async resolveOptions(): Promise<
     Omit<WorkbenchCommandOptions, "python">
   > {
-    const environment = workbenchEnvironment(this.environment);
+    const environment: NodeJS.ProcessEnv = workbenchEnvironment(
+      this.environment,
+    );
+    for (const [name, value] of Object.entries(environment)) {
+      if (name.toUpperCase() !== "PATH" || value === undefined) continue;
+      environment[name] = value
+        .split(delimiter)
+        .map((entry) => {
+          const directory =
+            process.platform === "win32"
+              ? entry.replace(/^"(.*)"$/u, "$1")
+              : entry;
+          return directory ? resolve(directory) : directory;
+        })
+        .join(delimiter);
+    }
     return {
       protectedRoot: process.cwd(),
       pluginRoot: await bundledPluginRoot(),
       environment,
-      stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
+      stateDirectory: environment["CODEX_SECURITY_STATE_DIR"],
       failureMessage: "Could not access the findings database",
     };
   }

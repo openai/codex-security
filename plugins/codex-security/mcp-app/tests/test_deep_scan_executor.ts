@@ -1286,7 +1286,11 @@ async function testWorkerRuntimeSettings() {
       );
       process.env.PYTHON = python;
       const gitEnvironment = {
-        PATH: path.join(fixture.root, "selected tools"),
+        PATH: [
+          path.join(fixture.root, "selected tools"),
+          "../selected tools",
+          "",
+        ].join(path.delimiter),
         CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
         GIT_SSH_COMMAND: "synthetic-ssh --fixture",
         GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
