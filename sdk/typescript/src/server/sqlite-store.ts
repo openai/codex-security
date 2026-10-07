@@ -24,94 +24,70 @@ export class SqliteFindingsStore implements FindingsStore {
   constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
 
   async initialize(): Promise<void> {
-    await this.run(["database-info"]);
+    await this.run("database-info");
   }
 
-  async dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
-    return (await this.run(
-      ["dashboard"],
-      JSON.stringify(query),
-    )) as unknown as DashboardSnapshot;
+  dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
+    return this.run("dashboard", query);
   }
 
   async insert(
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,
   ): Promise<string[]> {
-    const result = await this.run(
-      ["store-findings"],
-      JSON.stringify({ entries, repositoryId }),
-    );
-    if (result["error"] === "finding_conflict") {
-      throw new FindingsError(
-        "finding_conflict",
-        "A finding identity conflicts with stored data.",
-      );
-    }
-    return result["findingIds"] as string[];
+    const result = await this.run<{ findingIds: string[] }>("store-findings", {
+      entries,
+      repositoryId,
+    });
+    return result.findingIds;
   }
 
-  async list(page: { limit: number; offset: number }): Promise<FindingsPage> {
-    return (await this.run([
-      "list-stored-findings",
-      "--limit",
-      String(page.limit),
-      "--offset",
-      String(page.offset),
-    ])) as unknown as FindingsPage;
+  list(page: { limit: number; offset: number }): Promise<FindingsPage> {
+    return this.run("list-stored-findings", page);
   }
 
-  async findPotentialDuplicates(
+  findPotentialDuplicates(
     findingId: string,
     scope: FindingSearchScope,
   ): Promise<FindingNeighborhood> {
-    const result = await this.run([
-      "find-potential-duplicates",
-      `--finding-id=${findingId}`,
-      ...(scope.allRepositories === true
-        ? ["--all-repositories"]
-        : [`--repository-id=${scope.repositoryId}`]),
-    ]);
-    if (result["error"] === "finding_not_indexed") {
-      throw new FindingsError(
-        "finding_not_indexed",
-        "The finding has no current embedding in the requested scope. Import it with the matching repositoryId through POST /v1/bulk/findings before requesting potential duplicates.",
-      );
-    }
-    if (result["error"] === "embedding_failed") {
-      throw new FindingsError(
-        "embedding_failed",
-        "A stored embedding cannot be compared. Reimport the finding.",
-      );
-    }
-    return result as unknown as FindingNeighborhood;
+    return this.run("find-potential-duplicates", { findingId, scope });
   }
 
   async storeDedupeGroups(
     groups: readonly string[][],
   ): Promise<FindingDedupeGroup[]> {
-    const result = await this.run(
-      ["store-dedupe-groups"],
-      JSON.stringify({ groups }),
+    const result = await this.run<{ groups: FindingDedupeGroup[] }>(
+      "store-dedupe-groups",
+      { groups },
     );
-    if (result["error"] === "finding_conflict") {
-      throw new FindingsError(
-        "finding_conflict",
-        "Every dedupe group member must already exist in the findings database.",
-      );
-    }
-    return result["groups"] as unknown as FindingDedupeGroup[];
+    return result.groups;
   }
 
   async listDedupeGroups(findingId: string): Promise<FindingDedupeGroup[]> {
-    return (
-      await this.run(["list-dedupe-groups", `--finding-id=${findingId}`])
-    )["groups"] as unknown as FindingDedupeGroup[];
+    const result = await this.run<{ groups: FindingDedupeGroup[] }>(
+      "list-dedupe-groups",
+      { findingId },
+    );
+    return result.groups;
   }
 
-  private async run(args: string[], input?: string) {
+  private async run<T>(command: string, payload?: unknown): Promise<T> {
+    const input = JSON.stringify(payload);
     const options = await (this.options ??= this.resolveOptions());
-    return await runWorkbench(options, args, input);
+    const result = await runWorkbench(options, [command], input);
+    const messages = {
+      finding_conflict:
+        command === "store-findings"
+          ? "A finding identity conflicts with stored data."
+          : "Every dedupe group member must already exist in the findings database.",
+      finding_not_indexed:
+        "The finding has no current embedding in the requested scope. Import it with the matching repositoryId through POST /v1/bulk/findings before requesting potential duplicates.",
+      embedding_failed:
+        "A stored embedding cannot be compared. Reimport the finding.",
+    };
+    const error = result["error"] as keyof typeof messages | undefined;
+    if (error) throw new FindingsError(error, messages[error]);
+    return result as T;
   }
 
   private async resolveOptions(): Promise<
@@ -122,10 +98,7 @@ export class SqliteFindingsStore implements FindingsStore {
       this.environment,
     );
     for (const [name, value] of Object.entries(environment)) {
-      if (value === undefined) continue;
-      if (name.toUpperCase() === "XDG_CACHE_HOME" && value.trim())
-        environment[name] = resolve(value);
-      if (name.toUpperCase() !== "PATH") continue;
+      if (name.toUpperCase() !== "PATH" || value === undefined) continue;
       environment[name] = value
         .split(delimiter)
         .map((entry) => {

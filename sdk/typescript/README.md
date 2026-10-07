@@ -30,7 +30,8 @@ Supported runtimes:
 
 - Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, on macOS, Linux, or Windows.
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
-  findings. Python 3.10 also needs `tomli`.
+  findings. Python 3.10 also needs `tomli`. The findings server (`serve`) uses
+  Node’s built-in SQLite and does not require Python.
 
 ## Authentication
 

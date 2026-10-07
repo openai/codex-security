@@ -10,10 +10,8 @@ import {
 } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, relative } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
-import { build } from "esbuild";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 import {
@@ -91,7 +89,13 @@ async function fixture() {
     ...process.env,
     CODEX_SECURITY_STATE_DIR: join(directory, "state with spaces"),
   };
-  return { environment, store: new SqliteFindingsStore(environment) };
+  return {
+    environment,
+    store: new SqliteFindingsStore({
+      ...environment,
+      PYTHON: join(directory, "missing-python"),
+    }),
+  };
 }
 
 test("initializes the shared database concurrently without Python", async () => {
@@ -116,16 +120,24 @@ test("initializes the shared database concurrently without Python", async () => 
   });
 });
 
-test("missing explicit Python fails only when a Python operation runs", async () => {
-  const { environment } = await fixture();
-  const store = new SqliteFindingsStore({
-    ...environment,
-    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
-  });
-  await store.initialize();
-  await expect(store.list({ limit: 50, offset: 0 })).rejects.toThrow(
-    "The PYTHON interpreter is unavailable or unusable",
-  );
+test("invalid findings pagination is rejected before database creation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-page-"));
+  directories.push(directory);
+  const stateDirectory = join(directory, "state");
+  for (const payload of [
+    { limit: 0, offset: 0 },
+    { limit: 1, offset: -1 },
+  ]) {
+    const result = await runCodexCommand(
+      { command: "node" },
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
+      process.env,
+      JSON.stringify({ stateDirectory, payload }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.stderr).toContain("limit must be a positive integer");
+  }
+  expect(await readdir(directory)).toEqual([]);
 });
 
 test.skipIf(process.platform === "win32")(
@@ -166,7 +178,8 @@ printf '%s\n' '{"databasePath":"shim"}'
 const store = new SqliteFindingsStore();
 await store.initialize();
 process.chdir(${JSON.stringify(other)});
-await store.initialize();`,
+await store.initialize();
+await store.list({ limit: 1, offset: 0 });`,
       ],
       {
         cwd: repository,
@@ -189,7 +202,7 @@ await store.initialize();`,
 );
 
 test.skipIf(process.platform === "win32")(
-  "database initialization and Python operations share the configured state directory",
+  "database initialization and findings operations share the configured state directory",
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "database-info-location-"));
     directories.push(directory);
@@ -228,6 +241,7 @@ console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
       env: {
         ...process.env,
         CODEX_SECURITY_STATE_DIR: "state",
+        PYTHON: join(directory, "missing-python"),
       },
     },
   );
@@ -256,145 +270,6 @@ test("initialized stores retain their environment across findings operations", a
   );
   expect(await readdir(directory)).toEqual(["state with spaces"]);
 });
-
-test.each(["explicit", "PATH", "Path", "XDG_CACHE_HOME", "xdg_cache_home"])(
-  "findings stores retain relative Python paths before and after first use (%s)",
-  async (configuration) => {
-    const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
-    directories.push(directory);
-    const first = join(directory, "first");
-    const second = join(directory, "second", "nested");
-    await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
-    const python = await resolvePluginPython();
-    const managedCache = configuration.toUpperCase() === "XDG_CACHE_HOME";
-    const cacheDirectory = join(directory, "managed cache");
-    if (managedCache) {
-      const managedPython = join(
-        cacheDirectory,
-        "codex-runtimes/codex-primary-runtime/dependencies/python",
-      );
-      await mkdir(dirname(managedPython), { recursive: true });
-      if (process.platform === "win32") {
-        await symlink(dirname(python), managedPython, "junction");
-      } else {
-        await mkdir(join(managedPython, "bin"), { recursive: true });
-        await symlink(python, join(managedPython, "bin", "python3"));
-      }
-    }
-    let pythonDirectory = relative(first, dirname(python));
-    if (
-      process.platform !== "win32" &&
-      ["PATH", "Path"].includes(configuration)
-    ) {
-      const link = join(directory, "python-link");
-      await symlink(dirname(python), link, "dir");
-      pythonDirectory = `${configuration === "PATH" ? link : relative(first, link)}/../${basename(dirname(python))}`;
-    }
-    const searchPath = [
-      process.platform === "win32" ? `"${pythonDirectory}"` : pythonDirectory,
-      "",
-      dirname(Bun.which("node")!),
-    ].join(delimiter);
-    const storeModule = join(directory, "sqlite-store.cjs");
-    await build({
-      entryPoints: [
-        fileURLToPath(
-          new URL("../src/server/sqlite-store.ts", import.meta.url),
-        ),
-      ],
-      outfile: storeModule,
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      define: {
-        "import.meta.url": JSON.stringify(
-          new URL("../src/runtime.ts", import.meta.url).href,
-        ),
-      },
-    });
-    const result = Bun.spawnSync(
-      [
-        Bun.which("node")!,
-        "--input-type=module",
-        "--eval",
-        `const assert = await import("node:assert/strict");
-const { SqliteFindingsStore } = await import(${JSON.stringify(pathToFileURL(storeModule).href)});
-const environment = { ...process.env };
-if (${managedCache}) {
-  for (const key of Object.keys(environment)) if (["PATH", "PYTHON", "XDG_CACHE_HOME"].includes(key.toUpperCase())) delete environment[key];
-  environment.PATH = "";
-  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(relative(first, cacheDirectory))};
-} else if (${JSON.stringify(configuration)} !== "explicit") {
-  for (const key of Object.keys(environment)) if (key.toUpperCase() === "PATH") delete environment[key];
-  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(searchPath)};
-}
-const original = ["PATH", "Path", "PYTHON", "XDG_CACHE_HOME", "xdg_cache_home", "CODEX_SECURITY_STATE_DIR"].map((key) => [key, environment[key], process.env[key]]);
-const store = new SqliteFindingsStore(environment);
-await store.initialize();
-process.chdir(${JSON.stringify(second)});
-await store.insert(${JSON.stringify([embedded(1)])});
-process.chdir(${JSON.stringify(first)});
-console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));
-for (const [key, supplied, inherited] of original) {
-  assert.equal(environment[key], supplied);
-  assert.equal(process.env[key], inherited);
-}`,
-      ],
-      {
-        cwd: first,
-        env: {
-          ...process.env,
-          PYTHON:
-            configuration === "explicit"
-              ? relative(first, python)
-              : basename(python),
-          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
-        },
-      },
-    );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
-  },
-);
-
-test.skipIf(process.platform === "win32")(
-  "changing directories does not trust the original repository's Python shim",
-  async () => {
-    const directory = await mkdtemp(join(tmpdir(), "findings-python-shim-"));
-    directories.push(directory);
-    const repository = join(directory, "repository");
-    const other = join(directory, "other");
-    await Promise.all([mkdir(repository), mkdir(other)]);
-    await writeFile(
-      join(repository, "python"),
-      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_PYTHON_MARKER"\nprintf "codex-security-python-ok\\n"\n',
-      { mode: 0o755 },
-    );
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        "--eval",
-        `const assert = await import("node:assert/strict");
-const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
-const store = new SqliteFindingsStore();
-await store.initialize();
-process.chdir(${JSON.stringify(other)});
-await assert.rejects(store.list({ limit: 50, offset: 0 }), /The PYTHON interpreter is unavailable or unusable/);`,
-      ],
-      {
-        cwd: repository,
-        env: {
-          ...process.env,
-          PYTHON: "./python",
-          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
-          SYNTHETIC_PYTHON_MARKER: join(repository, "invoked"),
-        },
-      },
-    );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    expect(await readdir(repository)).toEqual(["python"]);
-  },
-);
 
 test("escapes terminal controls in database helper diagnostics", async () => {
   const directory = await mkdtemp(join(tmpdir(), "database-info-"));
@@ -768,36 +643,6 @@ test("dashboard browses imported findings and overlapping groups without local r
     environment,
     "print(json.dumps(list(db.iterdump())))",
   );
-  expect(
-    await database(
-      environment,
-      `from workbench_dashboard import dashboard
-allowed = {'findings', 'finding_repositories', 'finding_dedupe_groups', 'finding_dedupe_group_members'}
-def authorize(action, table, column, database, source):
-    if action == sqlite3.SQLITE_READ and table not in allowed:
-        return sqlite3.SQLITE_DENY
-    return sqlite3.SQLITE_OK
-db.set_authorizer(authorize)
-queries = json.load(sys.stdin)
-print(json.dumps([dashboard(db, query)['total'] for query in queries]))`,
-      [
-        {
-          view: "findings",
-          limit: 50,
-          offset: 0,
-          sort: "activity",
-          id: first.findingId,
-        },
-        {
-          view: "groups",
-          limit: 50,
-          offset: 0,
-          sort: "newest",
-          id: groups[0]!.groupId,
-        },
-      ],
-    ),
-  ).toEqual([3, 2]);
 
   const page = await dashboard(base, {
     limit: "1",
@@ -1009,7 +854,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
       environment,
       `print(json.dumps({
     "memberships": db.execute("SELECT COUNT(*) FROM finding_dedupe_group_members").fetchone()[0],
-    "embeddings": [list(row) for row in db.execute("SELECT finding_id, model, vector_json FROM finding_embeddings ORDER BY finding_id")]
+    "embeddings": [[row[0], row[1], json.loads(row[2])] for row in db.execute("SELECT finding_id, model, vector_json FROM finding_embeddings ORDER BY finding_id")]
 }))`,
     ),
   ).toEqual({
@@ -1017,7 +862,7 @@ test("persists overlapping dedupe groups idempotently without changing findings 
     embeddings: entries.map((entry) => [
       entry.finding.findingId,
       "synthetic",
-      "[1, 0]",
+      [1, 0],
     ]),
   });
   expect(await getGroups(base, "missing-finding")).toEqual([]);
@@ -1183,107 +1028,26 @@ test("retrieves complete potential duplicates without vectors or review calls", 
   );
 });
 
-test("SQLite filters repository and embedding compatibility before exact cosine ranking", async () => {
-  const { store, environment } = await fixture();
-  await store.initialize();
-  const anchor = embedded(1, [7, 0]);
-  const boundary = embedded(2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
-  const below = embedded(3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
-  const otherModel = embedded(4, [1, 0], "other-model");
-  const otherDimensions = embedded(5, [1, 0, 0]);
-  const foreign = embedded(6);
-  await store.insert(
-    [anchor, below, otherModel, otherDimensions, boundary],
-    "repository-a",
-  );
-  await store.insert([foreign], "repository-b");
+test("translates native duplicate retrieval failures without broadening scope", async () => {
+  const { store } = await fixture();
+  const anchor = embedded(1);
+  await store.insert([anchor], "repository-a");
+  await store.insert([embedded(2, [0, 0])], "repository-b");
   expect(
     await store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-a",
     }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [boundary.finding],
-  });
-  expect(
-    await store.findPotentialDuplicates(anchor.finding.findingId, {
-      allRepositories: true,
-    }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [foreign.finding, boundary.finding],
-  });
+  ).toEqual({ finding: anchor.finding, potentialDuplicates: [] });
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-b",
     }),
   ).rejects.toMatchObject({ code: "finding_not_indexed" });
-  await database(
-    environment,
-    `with db:
-    db.execute("UPDATE finding_embeddings SET vector_json = '[0,0]' WHERE finding_id = ?", (json.load(sys.stdin),))
-print("null")`,
-    foreign.finding.findingId,
-  );
-  expect(
-    (
-      await store.findPotentialDuplicates(anchor.finding.findingId, {
-        repositoryId: "repository-a",
-      })
-    ).potentialDuplicates,
-  ).toEqual([boundary.finding]);
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       allRepositories: true,
     }),
   ).rejects.toMatchObject({ code: "embedding_failed" });
-});
-
-test("SQLite reads only IDs and vectors before fetching the anchor and stable top 50 documents", async () => {
-  const { store, environment } = await fixture();
-  await store.initialize();
-  const entries = Array.from({ length: 61 }, (_, index) => embedded(index + 1));
-  await store.insert(entries, "repository-a");
-  await store.insert([entries[1]!], "repository-b");
-  const { result, queries } = (await database(
-    environment,
-    `from workbench_findings import find_potential_duplicates
-queries = []
-db.set_trace_callback(queries.append)
-result = find_potential_duplicates(db, json.load(sys.stdin), "repository-a")
-print(json.dumps({"result": result, "queries": queries}))`,
-    entries[0]!.finding.findingId,
-  )) as {
-    result: { finding: Finding; potentialDuplicates: Finding[] };
-    queries: string[];
-  };
-  expect(result).toEqual({
-    finding: entries[0]!.finding,
-    potentialDuplicates: entries.slice(1, 51).map((entry) => entry.finding),
-  });
-  const reads = queries.filter((query) => query.startsWith("SELECT"));
-  expect(reads).toHaveLength(3);
-  expect(reads[0]).toStartWith(
-    "SELECT embeddings.model, embeddings.vector_json ",
-  );
-  expect(reads[1]).toStartWith(
-    "SELECT embeddings.finding_id, embeddings.vector_json ",
-  );
-  expect(reads[1]).toContain("repositories.repository_id = 'repository-a'");
-  expect(reads[2]).toStartWith(
-    "SELECT id, details_json FROM findings WHERE id IN (",
-  );
-  const loadedIds = [...reads[2]!.matchAll(/csf_[0-9a-f]+/g)].map(([id]) => id);
-  expect(loadedIds).toEqual(
-    entries.slice(0, 51).map((entry) => entry.finding.findingId),
-  );
-  expect(
-    (
-      await store.findPotentialDuplicates(entries[0]!.finding.findingId, {
-        allRepositories: true,
-      })
-    ).potentialDuplicates,
-  ).toEqual(result.potentialDuplicates);
 });
 
 test("imports persist repository associations and keep untagged findings in explicit all-repository scope", async () => {

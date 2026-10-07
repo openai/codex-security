@@ -76,17 +76,9 @@ from workbench_constants import (
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_dashboard import dashboard
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
-from workbench_findings import (
-    find_potential_duplicates,
-    list_dedupe_groups,
-    list_stored_findings,
-    store_dedupe_groups,
-    store_findings,
-)
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
@@ -3443,21 +3435,6 @@ def main() -> None:
             result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
-        elif args.command == "dashboard":
-            result = dashboard(connection, json.load(sys.stdin))
-        elif args.command == "store-findings":
-            payload = json.load(sys.stdin)
-            result = store_findings(
-                connection, payload["entries"], now(), payload.get("repositoryId")
-            )
-        elif args.command == "find-potential-duplicates":
-            result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
-        elif args.command == "store-dedupe-groups":
-            result = store_dedupe_groups(connection, json.load(sys.stdin)["groups"], now())
-        elif args.command == "list-dedupe-groups":
-            result = list_dedupe_groups(connection, args.finding_id)
-        elif args.command == "list-stored-findings":
-            result = list_stored_findings(connection, limit=args.limit, offset=args.offset)
         else:
             raise SystemExit(f"Unknown command: {args.command}")
     print(json.dumps(result, allow_nan=False, sort_keys=True))

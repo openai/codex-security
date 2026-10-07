@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import history from "../../../shared/workbench-migrations.json";
 import { parseJson, stringifyJson } from "../helpers/json";
+import { transaction } from "./transaction";
 
 export interface Migration {
   version: number;
@@ -397,8 +398,7 @@ export function applyMigrations(
   selected: readonly Migration[] = migrations,
   immediate = false,
 ): void {
-  database.exec(immediate ? "BEGIN IMMEDIATE" : "BEGIN");
-  try {
+  transaction(database, immediate ? "BEGIN IMMEDIATE" : "BEGIN", () => {
     database.exec(
       "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
     );
@@ -449,13 +449,5 @@ export function applyMigrations(
       addColumn(database, count);
     }
     if (backfill) backfillTargets(database);
-    database.exec("COMMIT");
-  } catch (error) {
-    try {
-      database.exec("ROLLBACK");
-    } catch {
-      // SQLite may have rolled back automatically after a storage failure.
-    }
-    throw error;
-  }
+  });
 }
