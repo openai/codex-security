@@ -16,7 +16,7 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
   const root = await mkdtemp(join(tmpdir(), "markdown checks "));
   const sdk = join(root, "sdk", "typescript");
   const script = join(sdk, "scripts", "check-markdown.mjs");
-  const guide = join(root, "guide with # spaces.md");
+  const guide = join(sdk, "guide with # spaces.md");
   const invalid = "# Title\n\n\n";
   try {
     await mkdir(join(sdk, "scripts"), { recursive: true });
@@ -30,23 +30,36 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
       "junction",
     );
     await writeFile(join(root, ".gitignore"), "node_modules/\n");
-    await writeFile(join(root, "README.md"), "# Readme\n");
-    await writeFile(join(root, "--plugin=fixture.md"), "# Markdown fixture\n");
+    await writeFile(join(sdk, "README.md"), "# Readme\n");
+    // The previous format command checks these folders, not all repository Markdown.
+    await mkdir(join(root, "github-action"));
+    await writeFile(join(root, "github-action", "README.md"), invalid);
+    const outsideGuides = [
+      join(root, "examples", "custom-validation", "guide.md"),
+      join(root, "plugins", "codex-security", "native", "guide.md"),
+    ];
+    for (const path of outsideGuides) {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, invalid);
+      await mkdir(join(path, "..", "nested"));
+      await writeFile(join(path, "..", "nested", "outside.md"), invalid);
+    }
+    await writeFile(join(sdk, "--plugin=fixture.md"), "# Markdown fixture\n");
     // The combined paths exceed the Windows process command-line limit.
     for (let index = 0; index < 400; index++) {
       await writeFile(
-        join(root, `guide-${index}-${"x".repeat(80)}.md`),
+        join(sdk, `guide-${index}-${"x".repeat(80)}.md`),
         "# Guide\n",
       );
     }
     await writeFile(guide, invalid);
-    await writeFile(join(root, "deleted.md"), invalid);
+    await writeFile(join(sdk, "deleted.md"), invalid);
     if (process.platform !== "win32")
-      await symlink("untracked.md", join(root, "linked.md"));
+      await symlink("untracked.md", join(sdk, "linked.md"));
     gitText(["init", "--quiet"], { cwd: root });
     gitText(["add", "--", "."], { cwd: root });
-    await rm(join(root, "deleted.md"));
-    await writeFile(join(root, "untracked.md"), invalid);
+    await rm(join(sdk, "deleted.md"));
+    await writeFile(join(sdk, "untracked.md"), invalid);
 
     const failing = await runCommand("node", [script], {
       cwd: sdk,
@@ -54,8 +67,13 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
     });
     expect(failing.status).toBe(1);
     expect(failing.stdout + failing.stderr).toContain("guide with # spaces.md");
+    for (const path of outsideGuides)
+      expect(failing.stdout + failing.stderr).toContain(
+        path.replaceAll("\\", "/").slice(root.length + 1),
+      );
 
     await writeFile(guide, "# Title\n");
+    for (const path of outsideGuides) await writeFile(path, "# Guide\n");
     const passing = await runCommand("node", [script], {
       cwd: sdk,
       timeout: 30_000,
