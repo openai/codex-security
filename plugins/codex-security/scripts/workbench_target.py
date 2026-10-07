@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import os
 import shutil
@@ -11,12 +12,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, BinaryIO
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
@@ -69,58 +72,74 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
-def git_blob_bytes(
+def git_blob_samples(
     target: Path,
     object_names: list[str],
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> list[bytes | None]:
-    """Read ordered raw blobs with one NUL-framed ``git cat-file --batch`` call."""
+) -> list[tuple[bytes, bool] | None]:
+    """Sample ordered blobs and classify all their bytes without buffering the batch."""
     if not object_names:
         return []
 
     request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
-    completed = git_command(
-        target,
-        "cat-file",
-        "--batch",
-        "-Z",
-        text=False,
-        input_data=request,
-        git_dir=git_dir,
-        work_tree=work_tree,
-    )
-    if completed.returncode != 0:
-        return [None] * len(object_names)
+    read_fd, write_fd = os.pipe()
+    with (
+        ThreadPoolExecutor(max_workers=1) as reader,
+        os.fdopen(read_fd, "rb") as output,
+        os.fdopen(write_fd, "wb") as sink,
+    ):
 
-    try:
-        return _decode_git_batch_blobs(completed.stdout, len(object_names))
-    except ValueError:
-        return [None] * len(object_names)
+        def read_samples() -> list[tuple[bytes, bool] | None]:
+            # Closing the reader also unblocks Git if framing is invalid.
+            with output:
+                return _read_git_batch_samples(output, len(object_names))
+
+        samples = reader.submit(read_samples)
+        try:
+            completed = git_command(
+                target,
+                "cat-file",
+                "--batch",
+                "-Z",
+                text=False,
+                input_data=request,
+                git_dir=git_dir,
+                work_tree=work_tree,
+                stdout_file=sink,
+            )
+        finally:
+            # Git may fail before producing all requested records.
+            sink.close()
+        if completed.returncode != 0:
+            return [None] * len(object_names)
+        try:
+            return samples.result()
+        except ValueError:
+            return [None] * len(object_names)
 
 
-def _decode_git_batch_blobs(output: bytes, count: int) -> list[bytes | None]:
-    """Decode ordered ``cat-file --batch -Z`` records without scanning blob bytes."""
-    blobs: list[bytes | None] = []
-    offset = 0
+def _read_git_batch_samples(output: BinaryIO, count: int) -> list[tuple[bytes, bool] | None]:
+    """Read NUL-framed headers, then sample each length-delimited blob."""
+    samples: list[tuple[bytes, bool] | None] = []
     for _ in range(count):
-        header, offset = _read_nul_field(output, offset)
-        size = _git_batch_blob_size(header)
+        size = _git_batch_blob_size(_read_nul_field(output))
         if size is None:
-            blobs.append(None)
+            samples.append(None)
             continue
-        blob, offset = _read_sized_nul_field(output, offset, size)
-        blobs.append(blob)
-    return blobs
+        samples.append(_read_git_blob_sample(output, size))
+    return samples
 
 
-def _read_nul_field(output: bytes, offset: int) -> tuple[bytes, int]:
-    """Read one NUL-terminated protocol field and return the next offset."""
-    end = output.find(b"\0", offset)
-    if end < 0:
-        raise ValueError("missing NUL terminator")
-    return output[offset:end], end + 1
+def _read_nul_field(output: BinaryIO) -> bytes:
+    """Read one NUL-terminated protocol field."""
+    field = bytearray()
+    while char := output.read(1):
+        if char == b"\0":
+            return bytes(field)
+        field.extend(char)
+    raise ValueError("missing NUL terminator")
 
 
 def _git_batch_blob_size(header: bytes) -> int | None:
@@ -137,16 +156,26 @@ def _git_batch_blob_size(header: bytes) -> int | None:
     return size
 
 
-def _read_sized_nul_field(
-    output: bytes,
-    offset: int,
-    size: int,
-) -> tuple[bytes, int]:
-    """Read exactly ``size`` blob bytes followed by one NUL record terminator."""
-    end = offset + size
-    if output[end : end + 1] != b"\0":
+def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
+    sample_size = min(size, DEFAULT_PREVIEW_READ_BYTES)
+    sample = output.read(sample_size)
+    if len(sample) != sample_size:
+        raise ValueError("truncated blob")
+    binary = is_binary_sample(sample)
+    bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
+    remaining = size - sample_size
+    while remaining:
+        chunk_size = min(remaining, DEFAULT_PREVIEW_READ_BYTES)
+        chunk = output.read(chunk_size)
+        if len(chunk) != chunk_size:
+            raise ValueError("truncated blob")
+        # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
+        if not binary:
+            binary = is_binary_sample(bom + chunk) if bom else b"\0" in chunk
+        remaining -= chunk_size
+    if output.read(1) != b"\0":
         raise ValueError("missing blob terminator")
-    return output[offset:end], end + 1
+    return (b"", True) if binary else (sample, False)
 
 
 def _protected_repository_root(target: Path) -> Path:
