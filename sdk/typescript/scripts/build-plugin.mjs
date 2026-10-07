@@ -48,6 +48,7 @@ async function destinationFiles(root, prefix = "") {
   return files.sort();
 }
 
+/** @returns {Promise<string[]>} */
 export async function buildBundledPlugin({
   contractPath = join(
     repositoryRoot,

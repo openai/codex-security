@@ -330,13 +330,6 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
     await writeFixture(source, "schemas/scan.json", "{}\n");
     await writeFixture(
       source,
-      "mcp-app/package.json",
-      `${JSON.stringify({
-        scripts: { build: "node scripts/build_mcp_app.mjs" },
-      })}\n`,
-    );
-    await writeFixture(
-      source,
       "mcp-app/scripts/build_mcp_app.mjs",
       `import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
