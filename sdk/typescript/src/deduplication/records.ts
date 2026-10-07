@@ -140,8 +140,8 @@ export async function deduplicateRecords(
     groups: [],
     unresolved: [],
   };
-  const sourceFindings = [...relationships.keys()].map((id) =>
-    observations.get(id)!,
+  const sourceFindingIds = [...relationships.keys()].map(
+    (id) => observations.get(id)!.findingId,
   );
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>({
@@ -206,9 +206,7 @@ export async function deduplicateRecords(
   );
   let groups: string[][];
   try {
-    const decisions = await algorithm.run(
-      sourceFindings.map((finding) => finding.findingId),
-    );
+    const decisions = await algorithm.run(sourceFindingIds);
     options.signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
@@ -224,9 +222,7 @@ export async function deduplicateRecords(
   }
   const grouped = new Set(groups.flat());
   groups.push(
-    ...sourceFindings
-      .filter((finding) => !grouped.has(finding.findingId))
-      .map((finding) => [finding.findingId]),
+    ...sourceFindingIds.filter((id) => !grouped.has(id)).map((id) => [id]),
   );
   for (const group of groups) {
     const observationIds = group.map((id) => references.get(id)!);
