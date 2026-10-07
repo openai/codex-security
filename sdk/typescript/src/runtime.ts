@@ -1588,6 +1588,7 @@ export async function runWorkbench(
       ? (node?.executable ?? process.execPath)
       : (options.python ??= await resolvePluginPython({
           environment: options.environment,
+          protectedRoot: options.protectedRoot,
           signal: options.signal,
         }));
     const stateDirectory = native
