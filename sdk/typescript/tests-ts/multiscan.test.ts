@@ -686,7 +686,10 @@ describe("multiscan", () => {
     async (failure, layout) => {
       const { paths } = await repositoryFixture("retained");
       await runMultiscan(
-        options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),
+        options(paths, client(rejecting("Stopped")), {
+          maxAttempts: 1,
+          config: { pythonPath: PYTHON },
+        }),
       );
       const dir = join(paths.output, "artifacts", "retained", "attempt-1");
       await mkdir(dir, { recursive: true });
@@ -2748,6 +2751,137 @@ describe("multiscan", () => {
     await expect(
       runMultiscan(options(paths, security, { knowledgeBasePaths: [renamed] })),
     ).rejects.toThrow("manifest does not match");
+  });
+
+  test.each([
+    ["pluginPath", false],
+    ["pluginPath", true],
+    ["pythonPath", false],
+    ["pythonPath", true],
+  ] as const)(
+    "campaign binds explicit %s before client creation and recovery=%p",
+    async (field, recovery) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "runtime-selection");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ndone,${source.path},${source.revision}\npending,${source.path},${source.revision}\n`,
+      );
+      const pending = join(paths.output, "artifacts", "pending", "attempt-1");
+      const run = mock(
+        async (
+          _repository: string,
+          scan: Parameters<SecurityClient["run"]>[1] = {},
+        ) => {
+          if (scan.outputDir === pending) {
+            await mkdir(pending, { recursive: true });
+            await writeFile(
+              join(pending, "checkpoint"),
+              "Preserve this attempt.",
+            );
+            throw new Error("Synthetic interruption before completion.");
+          }
+          return completedScan(scan.outputDir!);
+        },
+      );
+      const security = client(run);
+      const createSecurity = mock(
+        (_config: MultiscanOptions["config"]) => security,
+      );
+      const recoverScan = mock(async (scanDir: string) =>
+        completedScan(scanDir),
+      );
+      const config: MultiscanOptions["config"] = {
+        [field]: join(paths.root, "selected-runtime"),
+      };
+      const configured = options(paths, security, {
+        config,
+        createSecurity,
+        maxAttempts: 1,
+      });
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 1,
+      });
+      const manifest = await readFile(
+        join(paths.output, "manifest.json"),
+        "utf8",
+      );
+      const receipts = await readFile(
+        join(paths.output, "results.jsonl"),
+        "utf8",
+      );
+      const continuation = {
+        ...configured,
+        workers: 3,
+        maxAttempts: 4,
+        ...(recovery ? { recoverScan } : {}),
+      };
+      for (const changed of [
+        { [field]: join(paths.root, "other-runtime") },
+        {},
+      ]) {
+        await expect(
+          runMultiscan({ ...continuation, config: changed }),
+        ).rejects.toThrow("manifest does not match");
+        expect(createSecurity).toHaveBeenCalledTimes(1);
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(recoverScan).not.toHaveBeenCalled();
+        expect(
+          await readFile(join(paths.output, "manifest.json"), "utf8"),
+        ).toBe(manifest);
+        expect(
+          await readFile(join(paths.output, "results.jsonl"), "utf8"),
+        ).toBe(receipts);
+      }
+      expect(await runMultiscan(continuation)).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(createSecurity).toHaveBeenLastCalledWith(config);
+      expect(recoverScan).toHaveBeenCalledTimes(recovery ? 1 : 0);
+      expect(run).toHaveBeenCalledTimes(recovery ? 2 : 3);
+      expect(await readFile(join(pending, "checkpoint"), "utf8")).toBe(
+        "Preserve this attempt.",
+      );
+      expect(await readFile(join(paths.output, "manifest.json"), "utf8")).toBe(
+        manifest,
+      );
+    },
+  );
+
+  test("campaign preserves absent runtime selections and rejects adding one", async () => {
+    const { paths } = await repositoryFixture("default-runtime");
+    const security = client(completeRun);
+    const createSecurity = mock(() => security);
+    const configured = options(paths, security, { createSecurity });
+    await runMultiscan(configured);
+    const manifest = await readFile(
+      join(paths.output, "manifest.json"),
+      "utf8",
+    );
+    expect(JSON.parse(manifest).configurationDigest).toBeUndefined();
+    for (const field of ["pluginPath", "pythonPath"] as const) {
+      await expect(
+        runMultiscan({
+          ...configured,
+          config: { [field]: join(paths.root, "selected-runtime") },
+        }),
+      ).rejects.toThrow("manifest does not match");
+    }
+    expect(
+      await runMultiscan({
+        ...configured,
+        workers: 3,
+        maxAttempts: 4,
+        config: { pluginPath: undefined, pythonPath: undefined },
+      }),
+    ).toMatchObject({ skipped: 1 });
+    expect(createSecurity).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(paths.output, "manifest.json"), "utf8")).toBe(
+      manifest,
+    );
   });
 
   test.each([false, true])(

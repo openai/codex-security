@@ -938,12 +938,16 @@ async function ensureManifest(
       ? { knowledgeBaseDigests: knowledgeDigests }
       : {}),
     ...(options.scanOptionsByMode === undefined &&
-    Object.keys(options.config.codexOverrides ?? {}).length === 0
+    Object.keys(options.config.codexOverrides ?? {}).length === 0 &&
+    options.config.pluginPath === undefined &&
+    options.config.pythonPath === undefined
       ? {}
       : {
           configurationDigest: workflowDigest({
             scanOptions: options.scanOptionsByMode,
             codex: options.config.codexOverrides,
+            pluginPath: options.config.pluginPath,
+            pythonPath: options.config.pythonPath,
           }),
         }),
   };
