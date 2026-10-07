@@ -2170,7 +2170,13 @@ describe("CodexSecurity orchestration", () => {
         ]);
         await writeFile(join(output, "previous.txt"), "previous scan\n");
       }
-      const server = createServer();
+      const connections = new Set<Socket>();
+      let cleaningUp = false;
+      const server = createServer((connection) => {
+        connections.add(connection);
+        connection.once("close", () => connections.delete(connection));
+        if (cleaningUp) connection.destroy();
+      });
       server.listen(0, "127.0.0.1");
       await once(server, "listening");
       const address = server.address();
@@ -2331,11 +2337,12 @@ describe("CodexSecurity orchestration", () => {
           ),
         ).toHaveLength(boundary === "commit" ? 1 : 0);
       } finally {
+        cleaningUp = true;
         clearTimeout(guardTimer);
-        socket?.end("r");
+        controller.abort();
+        for (const connection of connections) connection.destroy();
         await operation;
         await client.close();
-        socket?.destroy();
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         );
