@@ -5,6 +5,8 @@ import copy
 import pytest
 from workbench_test_support import load_script
 
+pytestmark = pytest.mark.cross_platform
+
 PROJECTION = load_script("report_projection")
 
 
