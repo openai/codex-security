@@ -83,8 +83,6 @@ Before creating, refresh duplicate results to catch an issue created while await
 
 Process findings serially in the approved order. Immediately before each create, update, or reuse, run the source validator with that exact finding id and stop if it fails. Use the exact approved payload and record each provider receipt outside the sealed bundle. Stop the batch on a failed or uncertain mutation or unresolved duplicate.
 
-Immediately before each GitHub CLI mutation, recheck the authenticated account on the pinned hostname against the approved account. Stop and return to preview if it changed.
-
 A successful provider response establishes an accepted write. Read the returned object through the same transport when possible to check identity and changed fields, allowing provider formatting that preserves meaning and links. Report a failed follow-up read separately, retaining the returned identity. An unreadable issue does not authorize another create.
 
 For CLI issue writes, put the approved body in a mode-`0600` temporary file outside the repository and scan bundle, arrange cleanup on every exit, and pass it to one `gh issue create` or `gh issue edit`. Never print the file. Capture the issue identity and read it with `gh issue view --json`. Use the advisory reference for JSON file creation and required readback.
