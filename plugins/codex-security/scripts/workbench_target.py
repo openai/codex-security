@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -83,24 +84,38 @@ def git_blob_samples(
         return []
 
     request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
-    with tempfile.TemporaryFile() as output:
-        completed = git_command(
-            target,
-            "cat-file",
-            "--batch",
-            "-Z",
-            text=False,
-            input_data=request,
-            git_dir=git_dir,
-            work_tree=work_tree,
-            stdout_file=output,
-        )
+    read_fd, write_fd = os.pipe()
+    with (
+        ThreadPoolExecutor(max_workers=1) as reader,
+        os.fdopen(read_fd, "rb") as output,
+        os.fdopen(write_fd, "wb") as sink,
+    ):
+
+        def read_samples() -> list[tuple[bytes, bool] | None]:
+            # Closing the reader also unblocks Git if framing is invalid.
+            with output:
+                return _read_git_batch_samples(output, len(object_names))
+
+        samples = reader.submit(read_samples)
+        try:
+            completed = git_command(
+                target,
+                "cat-file",
+                "--batch",
+                "-Z",
+                text=False,
+                input_data=request,
+                git_dir=git_dir,
+                work_tree=work_tree,
+                stdout_file=sink,
+            )
+        finally:
+            # Git may fail before producing all requested records.
+            sink.close()
         if completed.returncode != 0:
             return [None] * len(object_names)
-
-        output.seek(0)
         try:
-            return _read_git_batch_samples(output, len(object_names))
+            return samples.result()
         except ValueError:
             return [None] * len(object_names)
 
@@ -149,15 +164,15 @@ def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
     binary = is_binary_sample(sample)
     bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
     remaining = size - sample_size
-    while remaining and not binary:
+    while remaining:
         chunk_size = min(remaining, DEFAULT_PREVIEW_READ_BYTES)
         chunk = output.read(chunk_size)
         if len(chunk) != chunk_size:
             raise ValueError("truncated blob")
         # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
-        binary = is_binary_sample(bom + chunk) if bom else b"\0" in chunk
+        if not binary:
+            binary = is_binary_sample(bom + chunk) if bom else b"\0" in chunk
         remaining -= chunk_size
-    output.seek(remaining, os.SEEK_CUR)
     if output.read(1) != b"\0":
         raise ValueError("missing blob terminator")
     return (b"", True) if binary else (sample, False)

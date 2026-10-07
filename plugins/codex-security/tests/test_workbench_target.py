@@ -65,7 +65,7 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     contents = {
         "text.bin": text + (b"\0" if bom else b""),
         "binary-tail.bin": text + "\0".encode(encoding),
-        "binary-head.bin": b"\0" + text,
+        "binary-head.bin": b"\0" + text * 32,
         "empty.bin": b"",
         "after.txt": b"after\n",
     }
@@ -76,12 +76,11 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
 
     git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
     function_globals = git_blob_samples.__globals__
-    git_command = function_globals["git_command"]
+    read_batch_samples = function_globals["_read_git_batch_samples"]
     reads: list[int] = []
 
-    def require_bounded_output(repository: Path, *args: str, **kwargs: Any):
-        output = kwargs["stdout_file"]
-        result = git_command(repository, *args, **kwargs)
+    def require_bounded_output(output: Any, count: int):
+        assert not output.seekable()
         read = output.read
 
         def bounded_read(size: int = -1) -> bytes:
@@ -90,16 +89,15 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
             return read(size)
 
         output.read = bounded_read
-        return result
+        return read_batch_samples(output, count)
 
-    monkeypatch.setitem(function_globals, "git_command", require_bounded_output)
-    samples = git_blob_samples(
-        target,
-        ["HEAD:missing", *(f"HEAD:{name}" for name in contents)],
-    )
+    monkeypatch.setitem(function_globals, "_read_git_batch_samples", require_bounded_output)
+    # Both request and response exceed pipe buffers, before the multi-megabyte binary.
+    missing = ["HEAD:missing"] * 10_000
+    samples = git_blob_samples(target, [*missing, *(f"HEAD:{name}" for name in contents)])
 
     assert samples == [
-        None,
+        *([None] * len(missing)),
         (text[: 64 * 1024], False),
         (b"", True),
         (b"", True),
@@ -121,6 +119,8 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
         b"object blob -1\0",
         b"object blob 4\0abc",
         b"object blob 4\0abcd!",
+        b"object blob invalid\0" + b"x" * (4 * 1024 * 1024),
+        b"object blob 131072\0" + b"x" * (64 * 1024 + 1),
     ],
 )
 def test_git_blob_samples_reject_incomplete_framing(
@@ -129,8 +129,29 @@ def test_git_blob_samples_reject_incomplete_framing(
     git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
 
     def git_command(*args: Any, **kwargs: Any):
-        kwargs["stdout_file"].write(output)
+        remaining = memoryview(output)
+        try:
+            while remaining:
+                written = os.write(kwargs["stdout_file"].fileno(), remaining)
+                remaining = remaining[written:]
+        except BrokenPipeError:
+            return subprocess.CompletedProcess(args, 1)
         return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
+
+    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
+
+
+@pytest.mark.parametrize("output", [b"", b"object blob 4\0text\0"])
+def test_git_blob_samples_reject_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
+) -> None:
+    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+
+    def git_command(*args: Any, **kwargs: Any):
+        kwargs["stdout_file"].write(output)
+        return subprocess.CompletedProcess(args, 1)
 
     monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
 
