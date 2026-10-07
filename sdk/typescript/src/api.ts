@@ -1630,8 +1630,6 @@ export class CodexSecurity {
         failureMessage: "Could not save the Codex Security scan",
       };
       checkOpen();
-      // Archival moves files and commits their new location in one helper call.
-      // Let it settle before honoring cancellation so those changes stay together.
       const registration =
         options.resumeScanId !== undefined
           ? await workbench(workbenchOptions, [
@@ -1640,9 +1638,7 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : await workbench(
-              options.archiveExisting
-                ? { ...workbenchOptions, signal: undefined }
-                : workbenchOptions,
+              workbenchOptions,
               [
                 "register-cli-scan",
                 "--repository",
@@ -3230,9 +3226,7 @@ export class CodexSecurity {
       };
       throwIfAborted(signal, scanDir);
       const registration = await workbench(
-        options.archiveExisting
-          ? { ...workbenchOptions, signal: undefined }
-          : workbenchOptions,
+        workbenchOptions,
         [
           "register-cli-scan",
           "--repository",

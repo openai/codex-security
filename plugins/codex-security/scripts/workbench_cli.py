@@ -164,7 +164,7 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument(
         "--archive-existing",
         action="store_true",
-        help="Archive output in the registration transaction.",
+        help="Archive output in the registration transaction. Supports cancellable archival preparation.",
     )
     register_cli_scan.add_argument("--archived-scan-dir")
 

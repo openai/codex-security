@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -1628,7 +1629,12 @@ def complete_scan_locked(
     return context
 
 
-def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+def register_cli_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
@@ -1692,7 +1698,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     connection.execute("BEGIN IMMEDIATE")
     try:
         with archive_scan(
-            connection, args, scan_dir, timestamp, require_canonical_scan_directory
+            connection,
+            args,
+            scan_dir,
+            timestamp,
+            require_canonical_scan_directory,
+            before_archive=before_archive,
         ) as archived_scan_dir:
             target_id = ensure_security_target(connection, str(repository))
             if parent_scan_id is not None:
@@ -3274,7 +3285,7 @@ def read_json_object(path: Path) -> dict[str, Any]:
 _WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
-def main() -> None:
+def main(*, before_archive: Callable[[], None] | None = None) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
@@ -3369,7 +3380,7 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command == "register-cli-scan":
-            result = register_cli_scan(connection, args)
+            result = register_cli_scan(connection, args, before_archive=before_archive)
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
         elif args.command == "set-scan-cost-limit":

@@ -1547,6 +1547,22 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const ARCHIVE_READY = "codex-security-archive-ready\n";
+const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
+import io, json, runpy, sys
+control = sys.stdin
+payload = json.loads(control.readline())
+sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="utf-8")
+sys.argv = sys.argv[1:]
+workbench = runpy.run_path(sys.argv[0])
+def before_archive():
+    sys.stdout.buffer.write(b"codex-security-archive-ready\n")
+    sys.stdout.buffer.flush()
+    if control.readline() != "\n":
+        raise SystemExit("Scan registration canceled before archival.")
+workbench["main"](before_archive=before_archive)
+`;
+
 const workbenchComparisonSupport = new Map<
   string,
   { stdin: boolean; related: boolean }
@@ -1558,16 +1574,27 @@ export async function runWorkbench(
   input?: string,
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
+  let signal = options.signal;
   const run = async (
     arguments_: readonly string[],
     input?: string,
+    archiveHandshake = false,
   ): Promise<string> => {
     const result = await runCodexCommand(
       { command: options.python },
-      ["-I", "-X", "utf8", "-B", script, ...arguments_],
+      [
+        "-I",
+        "-X",
+        "utf8",
+        "-B",
+        ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+        script,
+        ...arguments_,
+      ],
       pluginHelperEnvironment(options.environment),
       input,
-      options.signal,
+      signal,
+      archiveHandshake,
     );
     if (!result.success) {
       throw new Error(
@@ -1609,21 +1636,31 @@ export async function runWorkbench(
     { scanDir: string; archiveDir: string; savedScans: string } | undefined;
   try {
     const arguments_ = [...args];
+    let archiveHandshake = false;
     if (
       arguments_[0] === "register-cli-scan" &&
       arguments_.includes("--archive-existing") &&
       !arguments_.includes("--archived-scan-dir")
     ) {
-      const help = await run(["register-cli-scan", "--help"]);
-      if (
-        !help
-          .replace(/\s+/gu, " ")
-          .includes("Archive output in the registration transaction.")
+      const help = (await run(["register-cli-scan", "--help"])).replace(
+        /\s+/gu,
+        " ",
+      );
+      if (help.includes("Supports cancellable archival preparation.")) {
+        archiveHandshake = signal !== undefined;
+      } else if (
+        help.includes("Archive output in the registration transaction.")
       ) {
+        // Earlier transactional helpers cannot acknowledge the safe cancellation
+        // boundary. Keep their move and database commit together.
+        signal?.throwIfAborted();
+        signal = undefined;
+      } else {
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
           const savedScans = await savedScanIdentities(scanDir);
+          signal?.throwIfAborted();
           await rename(scanDir, archiveDir);
           legacyArchive = { scanDir, archiveDir, savedScans };
           await mkdir(scanDir, { mode: 0o700 });
@@ -1661,9 +1698,11 @@ export async function runWorkbench(
         input = undefined;
       }
     }
-    stdout = await run(arguments_, input);
+    stdout = await run(arguments_, input, archiveHandshake);
   } catch (error) {
     if (legacyArchive !== undefined) {
+      // Cancellation can stop legacy registration; recovery must still settle.
+      signal = undefined;
       try {
         // A helper can commit registration and lose its response. Restore only
         // when saved identities prove that registration did not change them.
@@ -3125,7 +3164,11 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  archiveHandshake = false,
 ): Promise<CodexCommandResult> {
+  const cancellation = archiveHandshake ? new AbortController() : undefined;
+  const abort = () => cancellation?.abort(signal?.reason);
+  let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
@@ -3133,7 +3176,7 @@ export async function runCodexCommand(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      signal,
+      signal: cancellation?.signal ?? signal,
     },
   );
   let stdout = "";
@@ -3143,6 +3186,15 @@ export async function runCodexCommand(
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout += chunk;
+    if (awaitingArchive && stdout.startsWith(ARCHIVE_READY)) {
+      awaitingArchive = false;
+      stdout = stdout.slice(ARCHIVE_READY.length);
+      signal?.removeEventListener("abort", abort);
+      // The helper cannot rename until this acknowledgement. Detach and check
+      // cancellation before allowing the filesystem/database transaction.
+      if (signal?.aborted) abort();
+      else child.stdin.end("\n");
+    }
   });
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
@@ -3165,8 +3217,17 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
-  child.stdin.end(input);
-  return await completion;
+  if (archiveHandshake) {
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  }
+  try {
+    if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
+    else child.stdin.end(input);
+    return await completion;
+  } finally {
+    if (archiveHandshake) signal?.removeEventListener("abort", abort);
+  }
 }
 
 export async function probeCodexSandbox(

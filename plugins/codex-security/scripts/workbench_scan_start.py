@@ -93,6 +93,8 @@ def archive_scan(
     scan_dir: Path,
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
+    *,
+    before_archive: Callable[[], None] | None = None,
 ) -> Iterator[Path | None]:
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
@@ -147,6 +149,8 @@ def archive_scan(
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
                 )
+            if before_archive is not None:
+                before_archive()
             archived_scan_dir = Path(
                 tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
             ).resolve()
