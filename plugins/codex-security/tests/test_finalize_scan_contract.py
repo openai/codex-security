@@ -11,6 +11,8 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -121,6 +123,12 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
         self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
 
+    def compatible_finding(self, findings: dict) -> dict:
+        original = copy.deepcopy(findings)
+        compatible = FINALIZER._legacy_sealed_findings_for_validation(findings)
+        self.assertEqual(findings, original)
+        return compatible["findings"][0]
+
     def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -202,6 +210,15 @@ The extraction root is not enforced.
         else:
             raise AssertionError(f"missing sealed artifact: {relative_path}")
         self.write_json("scan-manifest.json", manifest)
+
+    @contextmanager
+    def preserving_sealed_findings(self, findings: dict) -> Iterator[None]:
+        self.rewrite_sealed_artifact("findings.json", findings)
+        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
+        yield
+        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
+        self.assertEqual(accepted, findings)
+        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
 
     def test_finalize_seals_manifest_deterministically(self) -> None:
         self.write_scan()
@@ -425,20 +442,31 @@ The extraction root is not enforced.
             }
         ]
         findings["findings"][0]["code_evidence"] = [
-            {"id": "shared-source", "code": "legacy_source()"}
+            {"id": "shared-source", "code": "legacy_source()"},
+            {"id": "legacy-duplicate", "code": "first_legacy_source()"},
+            {"id": "legacy-duplicate", "code": "second_legacy_source()"},
         ]
+        findings["findings"][0]["rootCause"] = {
+            "summary": "Canonical root cause.",
+            "code": "canonical_root()",
+            "language": "python",
+        }
         findings["findings"][0]["validation"] = {"evidence_refs": ["legacy-validation-evidence"]}
         findings["findings"][0]["attackPath"] = {
             "evidence_refs": ["legacy-attack-evidence"],
             "dataFlow": {"evidenceRefs": ["legacy-missing-evidence"]},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(compatible["rootCause"], findings["findings"][0]["rootCause"])
+            self.assertEqual(
+                compatible["code_evidence"],
+                [{"id": "legacy-duplicate", "code": "first_legacy_source()"}],
+            )
+            self.assertEqual(compatible["validation"], {"evidence_refs": []})
+            self.assertEqual(
+                compatible["attackPath"], {"evidence_refs": [], "dataFlow": {"evidenceRefs": []}}
+            )
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_references(self) -> None:
@@ -447,19 +475,26 @@ The extraction root is not enforced.
         findings["findings"][0]["code_evidence"] = [
             {"id": "legacy-source", "code": "legacy_source()"}
         ]
+        findings["findings"][0]["rootCause"] = {
+            "summary": "Canonical root cause.",
+            "evidenceRefs": ["legacy-source", "missing-source"],
+        }
         findings["findings"][0]["validation"] = {
             "evidenceRefs": [None, "", 42, "legacy-source", "missing-source"]
         }
         findings["findings"][0]["attackPath"] = {
             "dataflow": {"evidence_refs": [None, "", 42, "legacy-source", "missing-source"]}
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["rootCause"],
+                {"summary": "Canonical root cause.", "evidenceRefs": ["legacy-source"]},
+            )
+            self.assertEqual(compatible["validation"], {"evidenceRefs": ["legacy-source"]})
+            self.assertEqual(
+                compatible["attackPath"], {"dataflow": {"evidence_refs": ["legacy-source"]}}
+            )
 
     def test_unsealed_scan_rejects_malformed_legacy_evidence_references(self) -> None:
         self.findings["findings"][0]["validation"] = {"evidenceRefs": [None]}
@@ -478,13 +513,8 @@ The extraction root is not enforced.
             {"id": "legacy-duplicate", "code": "first_legacy_source()"},
             {"id": "legacy-duplicate", "code": "second_legacy_source()"},
         ]
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            pass
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_non_string_legacy_validation_scalars(self) -> None:
@@ -494,13 +524,8 @@ The extraction root is not enforced.
             "method": [],
             "summary": {"legacy": True},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["validation"], {})
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_formerly_free_form_finding_details(self) -> None:
@@ -508,17 +533,17 @@ The extraction root is not enforced.
         findings = self.read_json("findings.json")
         findings["findings"][0]["validation"] = {
             "evidence": {"kind": "trace"},
+            "counterEvidence": [None, "The mitigation was checked."],
         }
         findings["findings"][0]["attackPath"] = {
             "steps": {"first": "upload"},
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["validation"], {"counterEvidence": ["The mitigation was checked."]}
+            )
+            self.assertEqual(compatible["attackPath"], {})
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_blank_legacy_attack_path_details(self) -> None:
@@ -535,13 +560,8 @@ The extraction root is not enforced.
                 "likelihood",
             )
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_findings = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_findings)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["attackPath"], {})
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_rejects_nullable_canonical_evidence_catalog(self) -> None:
@@ -550,6 +570,7 @@ The extraction root is not enforced.
         findings["findings"][0]["codeEvidence"] = None
         self.rewrite_sealed_artifact("findings.json", findings)
 
+        self.assertIsNone(self.compatible_finding(findings)["codeEvidence"])
         with self.assertRaisesRegex(
             FINALIZER.ContractError,
             r"codeEvidence: expected (?:an |schema type )?array",
@@ -1622,6 +1643,11 @@ The extraction root is not enforced.
                     data_flow_key: "request -> filesystem write",
                     "reachability": "An authenticated uploader can reach extraction.",
                 }
+                findings["findings"][0]["validation"] = {
+                    "assertions": ["The destination escapes the extraction root."],
+                    "evidence": "The archive entry path is not contained.",
+                    "limitations": ["The upload route was not exercised dynamically."],
+                }
 
                 report = FINALIZER._generate_report_projection(
                     self.manifest, findings, self.coverage
@@ -1629,6 +1655,9 @@ The extraction root is not enforced.
 
                 self.assertIn("request -\\> filesystem write", report)
                 self.assertIn("An authenticated uploader can reach extraction.", report)
+                self.assertIn("The destination escapes the extraction root.", report)
+                self.assertIn("The archive entry path is not contained.", report)
+                self.assertIn("The upload route was not exercised dynamically.", report)
 
     @pytest.mark.cross_platform
     def test_report_projection_prefers_populated_data_flow_alias(self) -> None:
@@ -1768,30 +1797,15 @@ The extraction root is not enforced.
             "summary": "",
         }
         findings["findings"][0]["root_cause"] = None
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            accepted["findings"][0]["validation"]["assertions"],
-            "The destination escapes the extraction root.",
-        )
-        self.assertEqual(accepted["findings"][0]["validation"]["limitations"], "")
-        self.assertIsNone(accepted["findings"][0]["validation"]["counterEvidence"])
-        self.assertEqual(accepted["findings"][0]["validation"]["method"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["status"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["summary"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["disposition"], "")
-        self.assertEqual(accepted["findings"][0]["validation"]["result"], "")
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["dataFlow"])
-        self.assertEqual(accepted["findings"][0]["attackPath"]["dataflow"]["summary"], "")
-        self.assertEqual(accepted["findings"][0]["attackPath"]["impact"]["level"], "")
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["likelihood"]["level"])
-        self.assertIsNone(accepted["findings"][0]["attackPath"]["reachability"])
-        self.assertEqual(accepted["findings"][0]["attackPath"]["summary"], "")
-        self.assertIsNone(accepted["findings"][0]["root_cause"])
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            compatible = self.compatible_finding(findings)
+            self.assertEqual(
+                compatible["validation"],
+                {"assertions": ["The destination escapes the extraction root."]},
+            )
+            self.assertEqual(
+                compatible["attackPath"], {"dataflow": {}, "impact": {}, "likelihood": {}}
+            )
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_rejects_malformed_canonical_root_cause(self) -> None:
@@ -1814,25 +1828,15 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["code_evidence"] = None
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertIsNone(accepted["findings"][0]["code_evidence"])
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            self.assertNotIn("code_evidence", self.compatible_finding(findings))
 
     def test_sealed_rerun_accepts_empty_legacy_root_cause(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["root_cause"] = ""
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted["findings"][0]["root_cause"], "")
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            pass
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
@@ -1847,13 +1851,11 @@ The extraction root is not enforced.
             {"id": "empty-code", "code": ""},
             {"id": "legacy-source", "code": "legacy_source()"},
         ]
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(accepted, findings)
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(
+                self.compatible_finding(findings)["code_evidence"],
+                [{"id": "legacy-source", "code": "legacy_source()"}],
+            )
 
     def test_unsealed_scan_rejects_malformed_legacy_evidence_rows(self) -> None:
         self.findings["findings"][0]["code_evidence"] = [None]
@@ -1895,20 +1897,8 @@ The extraction root is not enforced.
             "dataflow": ["archive entry path", "filesystem write"],
             "reachability": ["authenticated uploader"],
         }
-        self.rewrite_sealed_artifact("findings.json", findings)
-        sealed_bytes = (self.scan_dir / "findings.json").read_bytes()
-
-        _, accepted, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            accepted["findings"][0]["attackPath"]["dataflow"],
-            ["archive entry path", "filesystem write"],
-        )
-        self.assertEqual(
-            accepted["findings"][0]["attackPath"]["reachability"],
-            ["authenticated uploader"],
-        )
-        self.assertEqual((self.scan_dir / "findings.json").read_bytes(), sealed_bytes)
+        with self.preserving_sealed_findings(findings):
+            self.assertEqual(self.compatible_finding(findings)["attackPath"], {})
 
     def test_non_standard_json_numbers_are_rejected(self) -> None:
         self.findings["findings"][0]["validation"] = {"score": float("nan")}
@@ -2242,11 +2232,10 @@ The extraction root is not enforced.
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
                 self.assertIsNone(prepared[3]["findings"][0]["root_cause"])
-                self.assertTrue(
-                    any(
-                        "retained stronger duplicate logical finding" in warning
-                        for warning in warnings
-                    )
+                self.assertEqual(prepared[3]["findings"][0][evidence_field], [evidence])
+                self.assertEqual(
+                    warnings,
+                    ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
     @pytest.mark.cross_platform
@@ -2280,11 +2269,9 @@ The extraction root is not enforced.
                 )
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
-                self.assertTrue(
-                    any(
-                        "retained stronger duplicate logical finding" in warning
-                        for warning in warnings
-                    )
+                self.assertEqual(
+                    warnings,
+                    ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
     def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
