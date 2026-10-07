@@ -730,7 +730,7 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
-def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
+def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
@@ -746,8 +746,10 @@ def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
         repository, "commit-tree", git(repository, "write-tree"), "-p", base, "-m", "Byte path"
     )
     output = tmp_path / "in_scope_files.txt"
+    output.write_text("previous.py\n", encoding="utf-8")
     result = run_inventory(
         repository, ".", output, arguments=["--diff-base", base, "--diff-head", head]
     )
-    assert result.returncode == 0, result.stderr
-    assert output.read_bytes() == b"tests/caf\xe9.py\n"
+    assert result.returncode == 2
+    assert "cannot be encoded as UTF-8 for the file inventory" in result.stderr
+    assert output.read_text(encoding="utf-8") == "previous.py\n"
