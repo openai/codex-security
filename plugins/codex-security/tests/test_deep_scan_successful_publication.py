@@ -8,7 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    saved_coverage,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.fixture
@@ -223,17 +228,7 @@ def test_deep_publication_ignores_empty_canceled_checkpoint(
     result = add_worker(workbench_db, scan, status="canceled")
     checkpoint = write_checkpoint(
         result.parent / "checkpoints",
-        {
-            "scanId": scan.scan_id,
-            "complete": False,
-            "findings": [],
-            "coverage": {
-                "completeness": "partial",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
-        },
+        saved_draft(scan.scan_id, completeness="partial"),
     )
     source_bytes = checkpoint.read_bytes()
 
@@ -330,12 +325,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         "findings": [later_finding],
     }
     if source == "standard-worker-checkpoint":
-        saved["coverage"] = {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
+        saved["coverage"] = saved_coverage(completeness="partial")
     if source == "deep-reducer-result":
         checkpoint = None
         result.write_text(json.dumps(saved))
