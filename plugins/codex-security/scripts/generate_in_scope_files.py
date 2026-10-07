@@ -165,39 +165,24 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    from generate_rank_input import git_changed_paths, path_is_diff_excluded, run_git_changed_paths
+    from generate_rank_input import git_changed_paths
     from rank_preview import is_binary_file
 
     rows: list[bytes] = []
     try:
-        changed = (
-            [
-                (path, status)
-                for path, status, selected_mode in run_git_changed_paths(
-                    repository, [f"{base}..{head}"]
-                )
-                if selected_mode != b"120000"
-            ]
-            if mode == "revisions"
-            else git_changed_paths(repository, base, head, mode)
-        )
-        eligible = [
-            (path, status)
-            for path, status in changed
-            if not path_is_diff_excluded(path.relative_to(repository))
-        ]
+        changed = git_changed_paths(repository, base, head, mode)
         revision_refs = {
             path.relative_to(repository): (
                 f"{base if status == 'D' else head}:{path.relative_to(repository).as_posix()}"
             )
-            for path, status in eligible
+            for path, status in changed
             if mode == "revisions" or status == "D"
         }
         revision_samples = dict(
             zip(revision_refs, git_blob_samples(repository, list(revision_refs.values())))
         )
 
-        for path, status in eligible:
+        for path, status in changed:
             relative = path.relative_to(repository)
             if mode == "revisions" or status == "D":
                 sample = revision_samples[relative]
@@ -211,12 +196,17 @@ def generate_diff_in_scope_files(
                     continue
             elif path.is_symlink() or not path.is_file() or is_binary_file(path):
                 continue
-            relative_path = relative.as_posix()
-            if "\n" in relative_path or "\r" in relative_path:
+            try:
+                relative_path = relative.as_posix().encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise InventoryError(
+                    "Git changes contain a path that cannot be encoded as UTF-8 for the file inventory"
+                ) from error
+            if b"\n" in relative_path or b"\r" in relative_path:
                 raise InventoryError(
                     "Git changes contain a path that cannot fit in the file inventory"
                 )
-            rows.append(f"{relative_path}\n".encode())
+            rows.append(relative_path + b"\n")
     except (OSError, subprocess.CalledProcessError) as error:
         detail = getattr(error, "stderr", None)
         if isinstance(detail, bytes):

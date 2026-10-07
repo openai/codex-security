@@ -52,6 +52,8 @@ async function writeCurrentThreatModelDocument(
       "threat model document",
     );
     const python = context.pythonCommand ?? (await resolvePythonCommand());
+    const target = context.targetContract?.target as
+      Record<string, unknown> | undefined;
     const markdown = await renderThreatModel(python, context.pluginRoot!, {
       threatModel,
       provenance: {
@@ -59,7 +61,7 @@ async function writeCurrentThreatModelDocument(
         scanId: context.scanId,
         target: context.repoRoot,
         revision: context.targetRevision,
-        snapshotDigest: context.targetContract?.requiredSnapshotDigest,
+        snapshotDigest: target?.requiredSnapshotDigest,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined
