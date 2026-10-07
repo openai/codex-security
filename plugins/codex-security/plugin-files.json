@@ -104,6 +104,7 @@
     "scripts/workbench_target.py",
     "scripts/workbench_target_state.py",
     "scripts/workbench_validation.py",
+    "shared/workbench-migrations.json",
     "skills/attack-path-analysis/SKILL.md",
     "skills/attack-path-analysis/agents/openai.yaml",
     "skills/attack-path-analysis/references/attack-path-facts.md",

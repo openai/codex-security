@@ -652,7 +652,7 @@ test.each([
     const f = await interruptedScan("deep", scenario === "bulk");
     await finishDiscovery(f);
     const oldPlugin = join(f.root, "old-plugin");
-    for (const path of ["scripts", "schemas", ".codex-plugin"]) {
+    for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
       await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
         recursive: true,
       });

@@ -9,7 +9,6 @@ import os
 import shutil
 import sqlite3
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,7 +19,6 @@ from deep_scan_config import resolve_deep_scan_config
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
-from workbench_scan_start import compact_timestamp
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -756,12 +754,6 @@ def begin_deep_scan_for_target(
         scan_id = str(uuid.uuid4())
         timestamp = dependencies().now()
         target_id = dependencies().ensure_security_target(connection, target_path)
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{dependencies().safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -799,7 +791,6 @@ def begin_deep_scan_for_target(
             handoff_status="delivered",
             model=model,
             reasoning_effort=reasoning_effort,
-            scan_dir=scan_dir,
         )
         scan = dependencies().require_scan(connection, scan_id)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)

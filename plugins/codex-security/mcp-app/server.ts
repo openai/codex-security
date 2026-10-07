@@ -2230,7 +2230,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
     content: [
       {
         type: "text" as const,
-        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Author scan-manifest.json as an unsealed draft: omit scan.sealedAt and scan.artifacts because completion supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Then call complete_codex_security_scan once to index the completed findings.`,
+        text: `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
       },
     ],
     structuredContent: promptOnly,
