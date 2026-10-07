@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -243,7 +244,7 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             connection, history, lambda: TIMESTAMP, workbench_api["backfill_security_targets"]
         )
 
-    try:
+    with closing(connection):
         migrate(tuple(m for m in migrations if m[0] <= 37))
         with connection:
             for state in (completed, unfinished, pending):
@@ -300,14 +301,12 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         assert row["scope_all_repositories"] is None
         assert row["created_at"] == TIMESTAMP
         assert row["updated_at"] == "2026-08-02T00:00:00Z"
-    finally:
-        connection.close()
 
     # Reopen the actual file so this remains a persistence and migration test.
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    try:
+    with closing(connection):
         for state in (completed, unfinished, pending):
             assert workflow(workbench_api, connection, "get", workflow_id=state["id"]) == {
                 "workflow": state
@@ -347,5 +346,3 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             "status": "completed",
             "result": {"scanId": "resumed-scan"},
         }
-    finally:
-        connection.close()
