@@ -330,12 +330,7 @@ function renderCodeEvidence(
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, {
-      path: evidence.path,
-      startLine: evidence.startLine,
-      ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-      ...(evidence.role === undefined ? {} : { role: evidence.role }),
-    }),
+    renderLocation(target, evidence),
     "",
     fencedCode(evidence.code, evidence.language),
     "",

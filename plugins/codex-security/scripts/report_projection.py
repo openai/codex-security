@@ -28,8 +28,6 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if not normalized:
-        return ""
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
@@ -43,12 +41,7 @@ def _strings(value: Any) -> list[str]:
         value = [value]
     if not isinstance(value, list):
         return []
-    normalized: list[str] = []
-    for item in value:
-        text = _text(item, "")
-        if text:
-            normalized.append(text)
-    return normalized
+    return [text for item in value if (text := _text(item, ""))]
 
 
 def _cell(value: Any) -> str:
@@ -284,8 +277,6 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
             details.append({"summary": detail})
         elif isinstance(detail, dict):
             details.append(detail)
-        elif detail is not None:
-            continue
     if not details:
         return keys[0], None
 
