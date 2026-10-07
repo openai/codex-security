@@ -901,8 +901,8 @@ MIGRATIONS = (
         INSERT INTO scan_severity_assessments
         SELECT classification.scan_id, assessment.*
         FROM scan_severity_classifications AS classification
-        JOIN json_each(classification.finding_ids_json) AS selected
-        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
+        CROSS JOIN json_each(classification.finding_ids_json) AS selected
+        CROSS JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
         WHERE assessment.rubric_sha256 IS classification.rubric_sha256
           AND assessment.knowledge_base_sha256 IS classification.knowledge_base_sha256
           AND EXISTS (
