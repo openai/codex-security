@@ -735,12 +735,19 @@ def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, os.fsdecode(b"tests/caf\xe9.py"), b"changed = True\n")
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "Add byte path")
+    blob = git(repository, "rev-parse", f"{base}:app/routes.py")
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "-z", "--index-info"],
+        input=b"100644 " + blob.encode("ascii") + b"\ttests/caf\xe9.py\0",
+        check=True,
+        capture_output=True,
+    )
+    head = git(
+        repository, "commit-tree", git(repository, "write-tree"), "-p", base, "-m", "Byte path"
+    )
     output = tmp_path / "in_scope_files.txt"
     result = run_inventory(
-        repository, ".", output, arguments=["--diff-base", base, "--diff-head", "HEAD"]
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", head]
     )
     assert result.returncode == 0, result.stderr
     assert output.read_bytes() == b"tests/caf\xe9.py\n"
