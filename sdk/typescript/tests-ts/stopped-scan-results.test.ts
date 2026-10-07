@@ -1,17 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const path of temporaryDirectories.splice(0)) {
-    rmSync(path, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 const stoppedScanProbe = [
   "import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, sys, uuid",
@@ -80,7 +74,7 @@ const stoppedScanProbe = [
   "    connection = workbench_db.connect()",
   "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
   "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, *, projection_warnings=None: (_ for _ in ()).throw(OSError('synthetic cancellation publication failure'))",
-  "    workbench_db.cancel_scan_locked(connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
+  "    workbench_db.saved_results.cancel_scan_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
   "    connection.close()",
   "    run('preserve-scan-results', '--scan-id', scan_id, '--thread-id', 'stopped-result-owner')",
@@ -109,12 +103,12 @@ const stoppedScanProbe = [
   "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared, *, projection_warnings=None: (_ for _ in ()).throw(OSError('synthetic publication failure'))",
   "    first_failed = False",
   "    try:",
-  "        workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "        workbench_db.saved_results.preserve_scan_results_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, scan_id)",
   "    except OSError:",
   "        first_failed = True",
   "    frozen_after_failure = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
-  "    retry_published = workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "    retry_published = workbench_db.saved_results.preserve_scan_results_locked(workbench_db._WORKBENCH_DB_CONTEXT, connection, scan_id)",
   "    frozen_after_success = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
@@ -162,8 +156,7 @@ function runStoppedScanProbe(
 ) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
-  const root = mkdtempSync(join(tmpdir(), prefix));
-  temporaryDirectories.push(root);
+  const root = temporaryDirectories.create(prefix);
   const result = runNodePython(python!, [
     "-c",
     stoppedScanProbe,

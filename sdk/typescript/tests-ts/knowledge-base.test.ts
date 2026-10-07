@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
@@ -62,6 +64,177 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
+  test.each(["win32", "darwin", "linux"])(
+    "matches case-variant Git metadata using %s platform and filesystem rules",
+    async (platform) => {
+      const root = await temporaryDirectory();
+      await mkdir(join(root, ".GIT"));
+      await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
+      await writeFile(join(root, "guide.md"), "Synthetic guide");
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `
+      Object.defineProperty(process, "platform", { value: process.argv[1] });
+      const { prepareKnowledgeBase } = await import(process.argv[2]);
+      const { readdir, readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const prepared = await prepareKnowledgeBase([process.argv[3]]);
+      try {
+        console.log(JSON.stringify(await Promise.all((await readdir(prepared.path)).map(name => readFile(join(prepared.path, name), "utf8")))));
+      } finally { await prepared.cleanup(); }
+    `,
+          platform,
+          fileURLToPath(new URL("../src/knowledge-base.ts", import.meta.url)),
+          root,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).sort()).toEqual(
+        platform === "win32" || aliasesGit
+          ? ["Synthetic guide"]
+          : ["Synthetic guide", "Synthetic metadata"],
+      );
+    },
+  );
+
+  test.each([
+    [".git", "directory"],
+    [".GIT", "directory"],
+    [".GIT", "directory link"],
+    [".GIT", "Git file"],
+  ] as const)(
+    "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
+    async (metadataName, metadataKind) => {
+      const linked = metadataKind === "directory link";
+      const gitFile = metadataKind === "Git file";
+      const root = await temporaryDirectory();
+      if (gitFile) {
+        const template = await temporaryDirectory();
+        const initialized = spawnSync(
+          "git",
+          [
+            "init",
+            "--quiet",
+            `--template=${template}`,
+            "--initial-branch=synthetic",
+            root,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(initialized.status, initialized.stderr).toBe(0);
+        await filesystem.rename(join(root, ".git"), join(root, ".GIT"));
+        const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+          () => true,
+          () => false,
+        );
+        // Case-insensitive filesystems cannot represent this separate Git file.
+        if (!aliasesGit) await writeFile(join(root, ".git"), "gitdir: .GIT\n");
+        const recognized = spawnSync(
+          "git",
+          ["-C", root, "rev-parse", "--absolute-git-dir"],
+          { encoding: "utf8" },
+        );
+        expect(recognized.status, recognized.stderr).toBe(0);
+        expect(await filesystem.realpath(recognized.stdout.trim())).toBe(
+          await filesystem.realpath(join(root, ".GIT")),
+        );
+      } else {
+        await mkdir(join(root, metadataName));
+      }
+      const metadata = join(root, metadataName, "config");
+      await writeFile(
+        metadata,
+        (gitFile ? await readFile(metadata, "utf8") : "") +
+          "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      if (metadataName !== ".git" && !aliasesGit) {
+        if (linked) {
+          await symlink(
+            join(root, metadataName),
+            join(root, ".git"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        } else {
+          await mkdir(join(root, ".git"));
+          await writeFile(
+            join(root, ".git", "config"),
+            "Separate Git metadata.",
+          );
+        }
+      }
+      const directory = await prepareKnowledgeBase([root]);
+      temporaryDirectories.track(directory.path);
+      expect((await extractedDocuments(directory.path)).sort()).toEqual(
+        [
+          "Documented application behavior.",
+          ...(process.platform !== "win32" && !aliasesGit && !linked
+            ? [await readFile(metadata, "utf8")]
+            : []),
+        ].sort(),
+      );
+      const explicit = await prepareKnowledgeBase([metadata]);
+      temporaryDirectories.track(explicit.path);
+      expect(await extractedDocuments(explicit.path)).toEqual([
+        await readFile(metadata, "utf8"),
+      ]);
+    },
+  );
+
+  testPosix(
+    "omits case-variant metadata aliases on a case-insensitive filesystem",
+    async () => {
+      const root = await temporaryDirectory();
+      const preservedGit = join(root, ".GIT");
+      await mkdir(preservedGit);
+      const metadata = join(preservedGit, "config");
+      await writeFile(
+        metadata,
+        "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const originalStat = filesystem.stat;
+      const aliasSpy = spyOn(filesystem, "stat").mockImplementation(
+        async (path, options?) =>
+          Reflect.apply(originalStat, filesystem, [
+            path === join(root, ".git") ? preservedGit : path,
+            options,
+          ]),
+      );
+      try {
+        const directory = await prepareKnowledgeBase([root]);
+        temporaryDirectories.track(directory.path);
+        expect(await extractedDocuments(directory.path)).toEqual([
+          "Documented application behavior.",
+        ]);
+        const explicit = await prepareKnowledgeBase([metadata]);
+        temporaryDirectories.track(explicit.path);
+        expect(await extractedDocuments(explicit.path)).toEqual([
+          await readFile(metadata, "utf8"),
+        ]);
+      } finally {
+        aliasSpy.mockRestore();
+      }
+    },
+  );
+
   test("prepares nested supported documents and retains requested source roots", async () => {
     const root = await temporaryDirectory();
     const nested = join(root, "architecture", "threats");
@@ -70,8 +243,8 @@ describe("scan knowledge bases", () => {
     await writeFile(scope, "Ignore local debug endpoints.");
     await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
     await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
-    await mkdir(join(root, ".GiT"));
-    await writeFile(join(root, ".GiT", "config"), "Repository metadata.");
+    await mkdir(join(root, ".git"));
+    await writeFile(join(root, ".git", "config"), "Repository metadata.");
     await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));

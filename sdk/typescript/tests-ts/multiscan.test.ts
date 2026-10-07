@@ -95,6 +95,16 @@ async function repository(
   return { path, revision: git(path, "rev-parse", "HEAD") };
 }
 
+async function repositoryFixture(name: string, id = name) {
+  const paths = await fixture();
+  const source = await repository(paths.root, name);
+  await writeFile(
+    paths.input,
+    `id,repository,revision\n${id},${source.path},${source.revision}\n`,
+  );
+  return { paths, source };
+}
+
 async function completedScan(
   outputDir: string,
   completeness: "complete" | "partial" | "unknown" = "complete",
@@ -267,12 +277,7 @@ describe("multiscan", () => {
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
     "rejects unsupported bulk diff scopes before preparing a campaign: %j",
     async (target) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "configured-scope");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nexample,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("configured-scope", "example");
       const createSecurity = mock(() => {
         return security;
       });
@@ -297,12 +302,7 @@ describe("multiscan", () => {
   );
 
   test("canceled recovery retains the new checkout and attempt without appending a failure receipt", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "cancel-recovery");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("cancel-recovery", "repo");
     await runMultiscan(
       options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),
     );
@@ -341,12 +341,7 @@ describe("multiscan", () => {
   test.each([false, true])(
     "occupied bulk attempts preserve the checkout with missing knowledge=%p",
     async (missingKnowledge) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "occupied");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("occupied", "repo");
       const document = join(paths.root, "context.md");
       await writeFile(document, "Original context.");
       const scanDir = join(paths.output, "artifacts", "repo", "attempt-1");
@@ -440,12 +435,7 @@ describe("multiscan", () => {
   );
 
   test("CLI escapes bulk failure controls while preserving the saved receipt", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "failure");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("failure", "repo");
     const failure = "Bulk failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -694,12 +684,7 @@ describe("multiscan", () => {
   ] as const)(
     "recovery records the original attempt with failure=%p and retained %s",
     async (failure, layout) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "retained");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nretained,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("retained");
       await runMultiscan(
         options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),
       );
@@ -758,12 +743,7 @@ describe("multiscan", () => {
   test.each(["high", "low"] as const)(
     "recovery applies the campaign severity policy to %s findings and retains the outcome",
     async (severity) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "policy-recovery");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("policy-recovery", "repo");
       const configured = options(paths, client(rejecting("Interrupted scan")), {
         maxAttempts: 1,
         scanPrompt: "Shared scan instructions.",
@@ -804,12 +784,7 @@ describe("multiscan", () => {
   );
 
   test("bulk recovery requires an existing campaign and a CSV", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "missing-campaign");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("missing-campaign", "repo");
     for (const args of [
       ["--recover"],
       [paths.input, "--output-dir", paths.output, "--recover"],
@@ -848,12 +823,7 @@ describe("multiscan", () => {
   });
 
   test("uses GitHub credentials for discovered checkouts without changing global Git configuration", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "github-credentials");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("github-credentials", "private");
     const configured = gitText(
       [
         ...buildGitHubCredentialArgs("github.acme.example"),
@@ -923,12 +893,7 @@ describe("multiscan", () => {
   });
 
   test("records each completed scan's cost in the resumable ledger", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "priced");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\npriced,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("priced");
     const cost = {
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
@@ -954,12 +919,7 @@ describe("multiscan", () => {
   });
 
   test("records an exhausted repository budget without retrying the scan", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "over-budget");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nover-budget,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("over-budget");
     const cost = {
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
@@ -986,12 +946,7 @@ describe("multiscan", () => {
   });
 
   test("forwards a bulk CLI cost limit and rejects zero", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "sample");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("sample");
     const { runCli } = createCliTest(main);
 
     let scanOptions: unknown;
@@ -1026,12 +981,7 @@ describe("multiscan", () => {
   });
 
   test("surfaces optional post-scan warnings without failing completed scans", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "follow-up-warning");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nfollow-up-warning,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("follow-up-warning");
     const progress: Parameters<
       NonNullable<MultiscanOptions["onProgress"]>
     >[0][] = [];
@@ -1101,12 +1051,7 @@ describe("multiscan", () => {
   test.each([false, true])(
     "continues scanning when a progress observer fails %p",
     async (asynchronous) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "observer-failure");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nobserver-failure,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("observer-failure");
       const attempts = mock<SecurityClient["run"]>(
         async (_repository, scanOptions = {}) => {
           scanOptions.onWarning?.("Optional post-scan warning.");
@@ -1142,12 +1087,7 @@ describe("multiscan", () => {
   test.each(["partial", "unknown"] as const)(
     "retains sealed %s coverage without retries or multiplied costs",
     async (completeness) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, completeness);
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nsealed,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture(completeness, "sealed");
       const document = join(paths.root, "context.md");
       await writeFile(document, "Original context.");
       const knowledgeBasePaths = [document];
@@ -1266,11 +1206,9 @@ describe("multiscan", () => {
   test.each(["partial", "unknown"] as const)(
     "resumes legacy sealed %s coverage without rerunning or duplicating cost",
     async (completeness) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, `legacy-${completeness}`);
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
+      const { paths, source } = await repositoryFixture(
+        `legacy-${completeness}`,
+        "legacy",
       );
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
       await completedScan(outputDir, completeness);
@@ -1360,11 +1298,9 @@ describe("multiscan", () => {
   ] as const)(
     "continues retrying legacy %s",
     async (_scenario, completeness, error, missingArtifact) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "legacy-retry");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
+      const { paths, source } = await repositoryFixture(
+        "legacy-retry",
+        "legacy",
       );
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
       await completedScan(outputDir);
@@ -1409,12 +1345,7 @@ describe("multiscan", () => {
   test.each(["partial", "unknown"] as const)(
     "keeps sealed %s-coverage CLI runs fail-closed without retrying",
     async (completeness) => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "sample");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("sample");
       const outputDir = join(paths.output, "artifacts", "sample", "attempt-1");
       const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -1490,12 +1421,7 @@ describe("multiscan", () => {
   );
 
   test("retries incomplete scans that are missing required artifacts", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "missing-artifact");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nmissing,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("missing-artifact", "missing");
 
     const attempts = mock<SecurityClient["run"]>(
       async (_repository, scanOptions = {}) => {
@@ -1683,12 +1609,7 @@ describe("multiscan", () => {
   });
 
   test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "exclusive");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nexclusive,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("exclusive");
     const running = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
@@ -1737,12 +1658,7 @@ describe("multiscan", () => {
   });
 
   test("recovers a legacy supervisor lock when this live PID was reused", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "legacy-pid-reuse");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("legacy-pid-reuse", "legacy");
     const lock = join(paths.output, ".lock");
     const ownerPath = join(lock, "owner.json");
     await mkdir(lock, { recursive: true, mode: 0o700 });
@@ -1766,12 +1682,7 @@ describe("multiscan", () => {
   });
 
   test("preserves an active legacy supervisor lock", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "legacy-owner");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("legacy-owner", "legacy");
     const lock = join(paths.output, ".lock");
     const ownerPath = join(lock, "owner.json");
     await mkdir(lock, { recursive: true, mode: 0o700 });
@@ -1789,11 +1700,9 @@ describe("multiscan", () => {
 
   for (const previousHostname of [hostname(), "previous-container"]) {
     test(`recovers an expired supervisor lease from ${previousHostname === hostname() ? "a reused live PID" : "a replacement container"}`, async () => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "expired-supervisor");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nexpired,${source.path},${source.revision}\n`,
+      const { paths } = await repositoryFixture(
+        "expired-supervisor",
+        "expired",
       );
       const lock = join(paths.output, ".lock");
       const ownerPath = join(lock, "owner.json");
@@ -1821,12 +1730,7 @@ describe("multiscan", () => {
   }
 
   test("does not reclaim a live supervisor in another container", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "remote-supervisor");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nremote,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("remote-supervisor", "remote");
     const lock = join(paths.output, ".lock");
     const ownerPath = join(lock, "owner.json");
     await mkdir(lock, { recursive: true, mode: 0o700 });
@@ -1850,11 +1754,9 @@ describe("multiscan", () => {
   });
 
   test("recovers interrupted lock creation without an owner record", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "interrupted-owner");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ninterrupted,${source.path},${source.revision}\n`,
+    const { paths } = await repositoryFixture(
+      "interrupted-owner",
+      "interrupted",
     );
     const lock = join(paths.output, ".lock");
     await mkdir(lock, { recursive: true, mode: 0o700 });
@@ -1870,11 +1772,9 @@ describe("multiscan", () => {
   });
 
   test("preserves a supervisor lock while its owner record is being created", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "initializing-owner");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ninitializing,${source.path},${source.revision}\n`,
+    const { paths } = await repositoryFixture(
+      "initializing-owner",
+      "initializing",
     );
     const lock = join(paths.output, ".lock");
     await mkdir(lock, { recursive: true, mode: 0o700 });
@@ -1886,11 +1786,9 @@ describe("multiscan", () => {
   });
 
   test("recovers an interrupted stale-lock recovery claim", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "interrupted-recovery");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\ninterrupted,${source.path},${source.revision}\n`,
+    const { paths } = await repositoryFixture(
+      "interrupted-recovery",
+      "interrupted",
     );
     const lock = join(paths.output, ".lock");
     const recoveryPath = join(lock, ".recovering");
@@ -1915,12 +1813,7 @@ describe("multiscan", () => {
   });
 
   test("allows only one supervisor to recover an abandoned lock", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "recovery-race");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrace,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("recovery-race", "race");
     const lock = join(paths.output, ".lock");
     await mkdir(lock, { recursive: true, mode: 0o700 });
     await writeFile(
@@ -1961,11 +1854,9 @@ describe("multiscan", () => {
   });
 
   test("never removes a replacement owner's lock during interrupted cleanup", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "replacement-owner");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nreplacement,${source.path},${source.revision}\n`,
+    const { paths } = await repositoryFixture(
+      "replacement-owner",
+      "replacement",
     );
     const running = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
@@ -2003,11 +1894,9 @@ describe("multiscan", () => {
   });
 
   test("removes an empty supervisor lock when owner creation fails", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "owner-creation-failure");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nfailure,${source.path},${source.revision}\n`,
+    const { paths } = await repositoryFixture(
+      "owner-creation-failure",
+      "failure",
     );
     const lock = join(paths.output, ".lock");
     const ownerPath = join(lock, "owner.json");
@@ -2049,12 +1938,7 @@ describe("multiscan", () => {
       ) {
         return;
       }
-      const paths = await fixture();
-      const source = await repository(paths.root, "owner-creation-race");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nrace,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("owner-creation-race", "race");
       const lock = join(paths.output, ".lock");
       const ownerPath = join(lock, "owner.json");
       const replacement = JSON.stringify({
@@ -2114,16 +1998,11 @@ describe("multiscan", () => {
   );
 
   test("retries a failed attempt and records both durable receipts", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "retry");
+    const { paths } = await repositoryFixture("retry");
     const failure = "temporary failure: token=SYNTHETIC_MULTISCAN_TOKEN";
     const document = join(paths.root, "architecture.md");
     await writeFile(document, "Synthetic architecture.");
     const knowledgeBasePaths = [document];
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nretry,${source.path},${source.revision}\n`,
-    );
 
     let attempts = 0;
     const summary = await runMultiscan(
@@ -2961,12 +2840,7 @@ describe("multiscan", () => {
       )
     )
       return;
-    const paths = await fixture();
-    const source = await repository(paths.root, "private");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("private");
     const shimDirectory = join(paths.root, "node_modules", ".bin");
     const leakedCredential = join(paths.root, "leaked-credential");
     await mkdir(shimDirectory, { recursive: true });
@@ -3032,13 +2906,9 @@ describe("multiscan", () => {
   });
 
   test("removes mixed-case repository Git variables before cloning", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "isolated");
+    const { paths } = await repositoryFixture("isolated");
     const trace = join(paths.root, "git-events.jsonl");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nisolated,${source.path},${source.revision}\n`,
-    );
+
     const repositoryVariables = [
       "Git_Dir",
       "gIt_Work_Tree",
@@ -3085,12 +2955,7 @@ describe("multiscan", () => {
 
   test("rejects output-directory symlinks before deleting external checkouts", async () => {
     for (const directory of ["", "checkouts", "artifacts"]) {
-      const paths = await fixture();
-      const source = await repository(paths.root, "victim");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("victim");
       const external = join(paths.root, "external");
       const preserved = join(external, "victim", "keep.txt");
       await mkdir(join(external, "victim"), { recursive: true });
@@ -3111,12 +2976,7 @@ describe("multiscan", () => {
   });
 
   test("rejects linked task artifact directories without touching external files", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "victim");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("victim");
     const external = join(paths.root, "external");
     await mkdir(external);
     await writeFile(join(external, "preserved.txt"), "preserved\n");
@@ -3147,12 +3007,7 @@ describe("multiscan", () => {
   });
 
   test("rejects linked task artifacts before accepting completed receipts", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "victim");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
-    );
+    const { paths, source } = await repositoryFixture("victim");
     const external = join(paths.root, "external");
     await completedScan(join(external, "attempt-1"));
     await mkdir(join(paths.output, "artifacts"), {
@@ -3186,12 +3041,7 @@ describe("multiscan", () => {
   });
 
   test("rejects an output directory replaced during preparation when numeric identities collide", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "output-identity-race");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrace,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("output-identity-race", "race");
     await mkdir(paths.output, { mode: 0o700 });
     const originalLstat = filesystem.lstat;
     const canonicalOutput = await realpath(paths.output);
@@ -3232,12 +3082,7 @@ describe("multiscan", () => {
   testPosix(
     "rejects other-user-writable campaigns while preserving readable existing campaigns",
     async () => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "sample");
-      await writeFile(
-        paths.input,
-        `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-      );
+      const { paths } = await repositoryFixture("sample");
       await mkdir(paths.output, { mode: 0o755 });
       const security = client(mock(completeRun));
 
@@ -3260,12 +3105,7 @@ describe("multiscan", () => {
   );
 
   testPosix("rejects campaigns beneath an unsafe shared parent", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "sample");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("sample");
     const parent = join(paths.root, "shared");
     await mkdir(parent, { mode: 0o777 });
     await chmod(parent, 0o777);
@@ -3282,12 +3122,7 @@ describe("multiscan", () => {
   });
 
   test("preserves trusted user-selected campaign parent aliases", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "sample");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("sample");
     const canonicalParent = join(paths.root, "campaigns");
     const linkedParent = join(paths.root, "linked-campaigns");
     await mkdir(canonicalParent, { mode: 0o700 });
@@ -3326,12 +3161,7 @@ describe("multiscan", () => {
   });
 
   test("keeps campaign operations on their validated canonical directory", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "sample");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("sample");
     const canonicalParent = join(paths.root, "campaigns");
     const redirectedParent = join(paths.root, "redirected");
     const linkedParent = join(paths.root, "linked-campaigns");

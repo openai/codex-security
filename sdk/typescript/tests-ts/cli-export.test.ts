@@ -1,3 +1,4 @@
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
@@ -152,20 +153,9 @@ describe("CLI", () => {
       };
       const workbench = (args: readonly string[]) =>
         runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
-      const registered = await workbench([
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registered = await workbench(
+        scanRegistrationArguments(repository, scanDir),
+      );
       const scanId = registered["scanId"] as string;
       await copyCompletedScan(root);
       const content = "# Saved model\n\nSynthetic component boundaries.\n";

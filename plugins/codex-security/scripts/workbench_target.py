@@ -605,12 +605,9 @@ def source_directory_snapshot_paths(target: Path) -> list[Path]:
 def directory_content_digest(
     target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
 ) -> str:
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(target))
-        except ValueError:
-            continue
+    excluded_relative = [
+        path.relative_to(target) for path in excluded if path.is_relative_to(target)
+    ]
     paths = (
         source_directory_snapshot_paths(target)
         if include_ignored
@@ -622,10 +619,7 @@ def directory_content_digest(
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
         relative_path = path.relative_to(target)
-        if any(
-            relative_path == excluded_path or excluded_path in relative_path.parents
-            for excluded_path in excluded_relative
-        ):
+        if any(relative_path.is_relative_to(path) for path in excluded_relative):
             continue
         try:
             metadata = path.lstat()
@@ -675,12 +669,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
 
 
 def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Path, ...]) -> None:
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(source))
-        except ValueError:
-            continue
+    excluded_relative = [
+        path.relative_to(source) for path in excluded if path.is_relative_to(source)
+    ]
 
     def ignored(directory: str, names: list[str]) -> list[str]:
         relative = Path(directory).relative_to(source)
@@ -707,19 +698,13 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
     )
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
-    excluded_relative = []
-    for path in excluded:
-        try:
-            excluded_relative.append(path.relative_to(repository))
-        except ValueError:
-            continue
+    excluded_relative = [
+        path.relative_to(repository) for path in excluded if path.is_relative_to(repository)
+    ]
     destination.mkdir()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))
-        if any(
-            relative == excluded_path or excluded_path in relative.parents
-            for excluded_path in excluded_relative
-        ):
+        if any(relative.is_relative_to(path) for path in excluded_relative):
             continue
         source_path = repository / relative
         try:

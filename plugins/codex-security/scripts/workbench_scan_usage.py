@@ -267,8 +267,7 @@ def _discover_rollout_sessions(
             "thread_spawn_edges",
             {"parent_thread_id", "child_thread_id"},
         )
-        sessions: list[RolloutSession] = []
-        seen_thread_ids: set[str] = set()
+        sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
         for root in roots:
             row = database.execute(
@@ -279,14 +278,13 @@ def _discover_rollout_sessions(
                 missing_thread_ids.add(root)
                 warnings.add("scan_root_unavailable")
                 continue
-            if root not in seen_thread_ids:
+            if root not in sessions:
                 path = _rollout_path(row["rollout_path"])
                 if path is None:
                     missing_thread_ids.add(root)
                     warnings.add("rollout_unavailable")
                     continue
-                sessions.append(RolloutSession(root, None, path))
-                seen_thread_ids.add(root)
+                sessions[root] = RolloutSession(root, None, path)
             descendants = database.execute(
                 """
                 WITH RECURSIVE descendants(
@@ -335,16 +333,15 @@ def _discover_rollout_sessions(
                     missing_thread_ids.add(child_id)
                     warnings.add("thread_lineage_cycle")
                     continue
-                if child_id in seen_thread_ids:
+                if child_id in sessions:
                     continue
                 path = _rollout_path(descendant["rollout_path"])
                 if path is None:
                     missing_thread_ids.add(child_id)
                     warnings.add("rollout_unavailable")
                     continue
-                sessions.append(RolloutSession(child_id, parent_id, path))
-                seen_thread_ids.add(child_id)
-        return sessions, missing_thread_ids
+                sessions[child_id] = RolloutSession(child_id, parent_id, path)
+        return list(sessions.values()), missing_thread_ids
     finally:
         database.close()
 

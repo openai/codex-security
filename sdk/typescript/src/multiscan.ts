@@ -929,18 +929,10 @@ async function ensureManifest(
   const manifest = {
     version: 2,
     tasks,
-    ...(options.scanPrompt === undefined
-      ? {}
-      : { scanPrompt: options.scanPrompt }),
-    ...(options.validationPrompt === undefined
-      ? {}
-      : { validationPrompt: options.validationPrompt }),
-    ...(options.postScanPrompt === undefined
-      ? {}
-      : { postScanPrompt: options.postScanPrompt }),
-    ...(options.maxCostUsd === undefined
-      ? {}
-      : { maxCostUsd: options.maxCostUsd }),
+    scanPrompt: options.scanPrompt,
+    validationPrompt: options.validationPrompt,
+    postScanPrompt: options.postScanPrompt,
+    maxCostUsd: options.maxCostUsd,
     // Failed modes cannot start scans; bind their inputs only after repair.
     ...(Object.keys(knowledgeDigests).length > 0
       ? { knowledgeBaseDigests: knowledgeDigests }

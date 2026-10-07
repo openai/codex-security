@@ -286,14 +286,22 @@ SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
 
 Scans are report-only by default. `--fail-on-severity high` exits with `1` for
 high or critical findings. Incomplete scans exit with `2`, returning available
-results and a coverage warning. Runtime failures with JSON or JSONL output produce:
+results and a coverage warning. `scan`, `scans rerun`, and `scans resume`
+execution failures with `--json`, JSON, or JSONL output produce:
 
 ```json
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
-Diagnostics stay on stderr. `scan --schema --format json` describes the output.
+Saved-scan setup failures use the same output shape with
+`SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
+available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
+scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
+stderr-only failures, including when `--full-output` is selected.
+
+Diagnostics stay on stderr. Each command's `--schema --format json` describes
+its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Project files

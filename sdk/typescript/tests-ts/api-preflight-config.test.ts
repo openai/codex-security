@@ -442,7 +442,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("keeps persistent credentials and their ancestry read-only", () => {
+  test("denies model commands access to the persistent credential home", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");
     const config = scanRuntimeCodexConfig({}, credentialHome);
@@ -452,7 +452,7 @@ describe("CodexSecurity preflight configuration", () => {
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
-          [credentialHome]: "read",
+          [credentialHome]: { ".": "deny" },
         },
       },
       codex_security_policy: {
