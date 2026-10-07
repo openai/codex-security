@@ -4154,7 +4154,7 @@ function addScanCosts(
 ): ScanCost {
   if (previous === null) return { ...current };
   const { estimatedUsdRange: currentRange, ...currentCost } = current;
-  const previousRange = previous.estimatedUsdRange;
+  const previousRange = previous.estimatedUsdRange!;
   return {
     ...currentCost,
     inputTokens: previous.inputTokens + current.inputTokens,
@@ -4167,18 +4167,14 @@ function addScanCosts(
     current.cacheWriteInputTokensReported === false
       ? { cacheWriteInputTokensReported: false }
       : {}),
-    ...(previousRange === undefined || currentRange === undefined
-      ? {}
-      : {
-          estimatedUsdRange: {
-            context: "unknown" as const,
-            min: previousRange.min + currentRange.min,
-            max:
-              previousRange.max === null || currentRange.max === null
-                ? null
-                : previousRange.max + currentRange.max,
-          },
-        }),
+    estimatedUsdRange: {
+      context: "unknown" as const,
+      min: previousRange.min + currentRange!.min,
+      max:
+        previousRange.max === null || currentRange!.max === null
+          ? null
+          : previousRange.max + currentRange!.max,
+    },
   };
 }
 

@@ -18,12 +18,14 @@ import pytest
 from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
+    create_workspace,
     empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     request_remediation,
     request_remediation_action,
     run_workbench,
+    save_workspace,
     scan_command,
     set_remediation,
     start_delivered_scan,
@@ -881,28 +883,10 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--thread-id",
-        "thread-deep-export",
-        "--target-path",
-        str(target),
+    create_workspace(
+        state_dir, workspace_id, "--thread-id", "thread-deep-export", "--target-path", str(target)
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     run_workbench(
         state_dir,

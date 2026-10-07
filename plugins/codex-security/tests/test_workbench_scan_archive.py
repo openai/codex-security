@@ -8,7 +8,7 @@ from workbench_test_support import fail_scan, run_workbench
 
 
 def register_scan(
-    state_dir: Path, repository: Path, scan_dir: Path, *arguments: str
+    state_dir: Path, repository: Path, scan_dir: Path, *arguments: str, check: bool = True
 ) -> dict[str, object]:
     return run_workbench(
         state_dir,
@@ -27,6 +27,7 @@ def register_scan(
             }
         ),
         *arguments,
+        check=check,
     )
 
 
@@ -129,25 +130,7 @@ def test_archive_requires_previous_directory_when_artifacts_exist(tmp_path: Path
             ),
         )
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "archived scan directory is required" in str(rejected["stderr"])
@@ -161,25 +144,7 @@ def test_archive_does_not_replace_a_running_scan(tmp_path: Path) -> None:
     scan_dir.mkdir(mode=0o700)
     previous = register_scan(state_dir, repository, scan_dir)
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "Cannot archive the output of a running scan." in str(rejected["stderr"])
