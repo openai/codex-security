@@ -4382,7 +4382,7 @@ test.skipIf(process.platform === "win32")(
       "Preserving existing breaking-change label.",
     );
     expect(result.stdout).toContain("removed-stale-bug");
-    expect(result.stdout).toContain("labels[]=enhancement");
+    expect(result.stdout).not.toContain("labels[]=enhancement");
     expect(result.stdout).not.toContain("removed-manual-label");
   },
 );
@@ -4423,3 +4423,47 @@ test("imports maintainer utilities from Node stdin and eval modules", async () =
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.platform === "win32").each([
+  {
+    title: "fix: synthetic correction",
+    manual: "documentation",
+    stale: "enhancement",
+  },
+  { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
+])(
+  "uses the manual $manual release category after retitling to $title",
+  async ({ title, manual, stale }) => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST "*) echo added-automatic-category ;;
+      *) return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+        MOCK_PR_TITLE: title,
+        MANUAL_LABEL: manual,
+        STALE_LABEL: stale,
+      },
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
+    expect(result.stdout).toContain("removed-stale-label");
+    expect(result.stdout).not.toContain("removed-manual-label");
+    expect(result.stdout).not.toContain("added-automatic-category");
+  },
+);

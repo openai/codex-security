@@ -113,7 +113,7 @@ jobs:
                 done <<< "$label_events"
                 if [[ "$label_actor" != "github-actions[bot]" ]]; then
                   echo "Preserving existing $current_label label."
-                  if [[ "$current_label" == "$label" ]]; then
+                  if [[ "$current_label" != "skip-release-notes" || "$current_label" == "$label" ]]; then
                     label_already_present=true
                   fi
                 elif [[ "$current_label" != "$label" ]]; then
