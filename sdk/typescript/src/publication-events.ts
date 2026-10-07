@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import { isLinearIssueIdentifier, linearIssueReference } from "./linear.js";
 import { isRecord } from "./record.js";
 import {
@@ -55,12 +56,7 @@ export function collectPublicationEvents(
 
   for (const rawLine of output.split(/\r?\n/)) {
     if (rawLine.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(rawLine) as unknown;
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => rawLine);
     if (!isRecord(event) || event["type"] !== "item.completed") continue;
     const item = event["item"];
     if (!isLinearCreateCall(item)) continue;
@@ -221,11 +217,8 @@ function collectPublicationClaims(
         if (!isRecord(content) || typeof content["text"] !== "string") {
           continue;
         }
-        try {
-          nested.push(JSON.parse(content["text"]) as unknown);
-        } catch {
-          continue;
-        }
+        const parsed = parseJson(() => content["text"] as string);
+        if (isRecord(parsed)) nested.push(parsed);
       }
     }
     for (const child of nested.reverse()) {

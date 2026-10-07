@@ -214,7 +214,6 @@ export class FakeStore {
           this.workers.set(workerId, { ...discovery, mergeState: "buffered" });
         }
       }
-      this.run.phase = "discovery";
     }
     persisted.consecutiveErrors = this.run.consecutiveErrors;
     this.workers.set(update.id, persisted);
@@ -386,7 +385,6 @@ export class FakeStore {
       throw new Error("fixture progress persistence failure");
     }
     this.progress.push(structuredClone(input));
-    if (input.phase) this.run.phase = input.phase as DeepScanRunState["phase"];
   }
 }
 
