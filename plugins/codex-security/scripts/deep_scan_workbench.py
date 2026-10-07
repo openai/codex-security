@@ -20,6 +20,7 @@ from deep_scan_config import resolve_deep_scan_config
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
+from workbench_scan_start import compact_timestamp
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -757,7 +758,7 @@ def begin_deep_scan_for_target(
         target_id = dependencies().ensure_security_target(connection, target_path)
         scan_dir = Path(
             tempfile.mkdtemp(
-                prefix=f"{dependencies().safe_segment(revision)}_{dependencies().compact_timestamp()}_",
+                prefix=f"{dependencies().safe_segment(revision)}_{compact_timestamp()}_",
                 dir=target_root,
             )
         ).resolve()
@@ -855,6 +856,7 @@ def coordinator_lease_is_live(
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
             heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
+        # Missing or invalid heartbeat files leave the persisted lease timestamp in effect.
         pass
     current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)

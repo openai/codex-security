@@ -92,7 +92,7 @@ export class DeepScanCoordinator {
   private readonly schedulerWork = new Set<Promise<unknown>>();
   private heartbeatTimeout: ReturnType<typeof setTimeout> | undefined;
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
-  private ownershipCheck: Promise<boolean> | undefined;
+  private ownershipCheckInProgress = false;
   private resolveTerminal!: (state: DeepScanRunState) => void;
   private rejectTerminal!: (error: unknown) => void;
   private resolveCancellationReady!: () => void;
@@ -533,14 +533,12 @@ export class DeepScanCoordinator {
       });
     }
     this.scheduleHeartbeat();
-    if (this.terminal || this.ownershipCheck) return;
-    const ownershipCheck = this.stopAfterOwnershipChange(threadId, false);
-    this.ownershipCheck = ownershipCheck;
+    if (this.terminal || this.ownershipCheckInProgress) return;
+    this.ownershipCheckInProgress = true;
     try {
-      await ownershipCheck;
+      await this.stopAfterOwnershipChange(threadId, false);
     } finally {
-      if (this.ownershipCheck === ownershipCheck)
-        this.ownershipCheck = undefined;
+      this.ownershipCheckInProgress = false;
     }
   }
 

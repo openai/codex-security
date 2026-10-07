@@ -2487,7 +2487,9 @@ describe("GitHub release workflow safeguards", () => {
         githubReleaseWorkflow,
         "Resolve the successful protected release",
       );
-      const root = mkdtempSync(join(tmpdir(), "codex-security-release-wait-"));
+      const root = mkdtempSync(
+        join(tmpdir(), "codex-security-release-wait-$(echo literal)-'-"),
+      );
       const state = join(root, "release-state");
       const sleeps = join(root, "release-sleeps");
       const mocks = [
@@ -2509,7 +2511,7 @@ describe("GitHub release workflow safeguards", () => {
         "    *) return 65 ;;",
         "  esac",
         "}",
-        `sleep() { printf '%s\\n' "$1" >> "${sleeps}"; }`,
+        'sleep() { printf "%s\\n" "$1" >> "$MOCK_SLEEP_LOG"; }',
       ].join("\n");
 
       try {
@@ -2519,6 +2521,7 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_RUN_ID: releaseRun,
           INPUT_TAG: "npm-v0.1.2",
           MOCK_RUN_STATE: state,
+          MOCK_SLEEP_LOG: sleeps,
         });
 
         expect(result.status).toBe(0);
