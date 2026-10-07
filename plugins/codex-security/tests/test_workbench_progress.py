@@ -3,8 +3,8 @@ from pathlib import Path
 
 from workbench_test_support import (
     create_saved_workspace,
-    run_workbench,
     start_delivered_scan,
+    update_progress,
 )
 
 
@@ -16,26 +16,12 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
 
-    discovery = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-        "--reportable-findings-count",
-        "8",
+    discovery = update_progress(
+        state_dir, scan_id, "--phase", "discovery", "--reportable-findings-count", "8"
     )
     assert discovery["scan"]["progress"]["candidates"] == {"reportable": 8}
 
-    validation = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "validation",
-    )
+    validation = update_progress(state_dir, scan_id, "--phase", "validation")
     assert validation["scan"]["progress"]["candidates"] == {"reportable": 0}
 
 
@@ -47,10 +33,8 @@ def test_phase_progress_tracks_and_resets_phase_specific_receipts(tmp_path: Path
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
 
-    discovery = run_workbench(
+    discovery = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -67,24 +51,15 @@ def test_phase_progress_tracks_and_resets_phase_specific_receipts(tmp_path: Path
         "unit": "review_receipts",
     }
 
-    validation = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "validation",
-    )
+    validation = update_progress(state_dir, scan_id, "--phase", "validation")
     assert validation["scan"]["progress"]["phaseProgress"] == {
         "completed": 0,
         "total": 0,
         "unit": None,
     }
 
-    validation_progress = run_workbench(
+    validation_progress = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "3",
@@ -107,10 +82,8 @@ def test_phase_progress_rejects_regression_within_one_phase(tmp_path: Path) -> N
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "3",
@@ -120,15 +93,7 @@ def test_phase_progress_rejects_regression_within_one_phase(tmp_path: Path) -> N
         "checks",
     )
 
-    regressed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase-items-completed",
-        "1",
-        check=False,
-    )
+    regressed = update_progress(state_dir, scan_id, "--phase-items-completed", "1", check=False)
     assert regressed["returncode"] != 0
     assert "Completed phase items cannot decrease" in str(regressed["stderr"])
 
@@ -146,10 +111,8 @@ def test_preflight_issues_replace_and_remain_visible_after_preflight(tmp_path: P
         "severity": "block",
         "status": "fail",
     }
-    blocked = run_workbench(
+    blocked = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "4",
@@ -163,14 +126,7 @@ def test_preflight_issues_replace_and_remain_visible_after_preflight(tmp_path: P
     assert blocked["scan"]["progress"]["preflightIssues"] == [blocked_issue]
     assert blocked["scan"]["progress"]["preflightProgress"] == {"completed": 4, "total": 4}
 
-    clean = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--preflight-issues-json",
-        "[]",
-    )
+    clean = update_progress(state_dir, scan_id, "--preflight-issues-json", "[]")
     assert clean["scan"]["progress"]["preflightIssues"] == []
 
     warning_issue = {
@@ -179,10 +135,8 @@ def test_preflight_issues_replace_and_remain_visible_after_preflight(tmp_path: P
         "severity": "warn",
         "status": "fail",
     }
-    ready = run_workbench(
+    ready = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "4",
@@ -196,26 +150,11 @@ def test_preflight_issues_replace_and_remain_visible_after_preflight(tmp_path: P
     assert ready["scan"]["progress"]["preflightIssues"] == [warning_issue]
     assert ready["scan"]["progress"]["preflightProgress"] == {"completed": 4, "total": 4}
 
-    advanced = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "threat_model",
-    )
+    advanced = update_progress(state_dir, scan_id, "--phase", "threat_model")
     assert advanced["scan"]["progress"]["preflightIssues"] == [warning_issue]
     assert advanced["scan"]["progress"]["preflightProgress"] == {"completed": 4, "total": 4}
 
-    rejected = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--preflight-issues-json",
-        "[]",
-        check=False,
-    )
+    rejected = update_progress(state_dir, scan_id, "--preflight-issues-json", "[]", check=False)
     assert rejected["returncode"] != 0
     assert "only be updated during preflight" in str(rejected["stderr"])
 
@@ -234,10 +173,8 @@ def test_preflight_unknown_check_completes_only_after_clean_rerun(tmp_path: Path
         "status": "unknown",
     }
 
-    incomplete = run_workbench(
+    incomplete = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "4",
@@ -254,10 +191,8 @@ def test_preflight_unknown_check_completes_only_after_clean_rerun(tmp_path: Path
     }
     assert incomplete["scan"]["progress"]["preflightIssues"] == [unknown_issue]
 
-    resolved = run_workbench(
+    resolved = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase-items-total",
         "4",
@@ -281,10 +216,8 @@ def test_preflight_issues_reject_non_displayable_severity(tmp_path: Path) -> Non
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    rejected = run_workbench(
+    rejected = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         str(started["results"]["scanId"]),
         "--preflight-issues-json",
         json.dumps(

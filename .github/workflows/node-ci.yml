@@ -368,19 +368,19 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.10"
-            tests: plugins/codex-security/tests
+            markers: ""
           - os: ubuntu-latest
             python: "3.12"
-            tests: plugins/codex-security/tests
+            markers: ""
           - os: ubuntu-latest
             python: "3.14"
-            tests: plugins/codex-security/tests
+            markers: ""
           - os: macos-latest
             python: "3.12"
-            tests: plugins/codex-security/tests/test_workbench_scan_usage.py
+            markers: cross_platform or native_macos
           - os: windows-latest
             python: "3.12"
-            tests: plugins/codex-security/tests/test_windows_scan_local_files.py
+            markers: cross_platform or native_windows
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -428,8 +428,8 @@ jobs:
       - name: Test Python source contracts
         shell: bash
         env:
-          PYTHON_TEST_PATH: ${{ matrix.tests }}
-        run: python -m pytest "$PYTHON_TEST_PATH" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+          PYTEST_MARKERS: ${{ matrix.markers }}
+        run: python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
         run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"

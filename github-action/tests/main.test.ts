@@ -83,17 +83,8 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   let setups = 0;
   let processes = 0;
   let cleanups = 0;
-  let executionExit: number | undefined;
+  const configuration: { exitCode?: number; partial?: boolean; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> } = {};
   let scanOutput = '';
-  let cliFailure = false;
-  let scanProcess: Partial<ProcessResult> = {};
-  let scanResult: ((value: any) => void) | undefined;
-  let prepare: (() => void | Promise<void>) | undefined;
-  let missingReport: string | undefined;
-  let incomplete = false;
-  let omitSarif = false;
-  let mutateCheckout = false;
-  let cleanupFails = false;
   let summary = '';
   t.mock.method(core.summary, 'write', async () => {
     summary = core.summary.stringify();
@@ -103,7 +94,6 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   t.after(() => { core.summary.emptyBuffer(); });
   let capturedArgs: readonly string[] = [];
   let capturedEnvironment: NodeJS.ProcessEnv = {};
-  const processEnvironments: NodeJS.ProcessEnv[] = [];
   async function reports(): Promise<void> {
     await cp(new URL('./fixtures/completed-scan/', import.meta.url), runtime.resultsDirectory, { recursive: true });
     const manifestPath = join(runtime.resultsDirectory, 'scan-manifest.json');
@@ -120,7 +110,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
       sarif.runs[0].properties.codexSecurityTargetKind = 'git_diff';
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
-    if (incomplete) {
+    if (configuration.partial) {
       coverage.completeness = 'partial';
       coverage.deferred = [{id: 'unreviewed-route', reason: 'Dependency <example> unavailable; validation deferred.'}];
     }
@@ -128,27 +118,17 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     await writeFile(coveragePath, JSON.stringify(coverage));
     await writeFile(manifestPath, JSON.stringify(manifest));
     await writeFile(sarifPath, JSON.stringify(sarif));
-    if (omitSarif) await rm(sarifPath);
+    if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
-      scanDir: runtime.resultsDirectory, sarifPath: omitSarif ? null : sarifPath, cost: {estimatedUsd: 0.125}};
-    scanResult?.(value);
+      scanDir: runtime.resultsDirectory, sarifPath: configuration.missingSarif ? null : sarifPath, cost: {estimatedUsd: 0.125}};
+    configuration.scanResult?.(value);
     scanOutput = JSON.stringify(value);
-    if (missingReport) await rm(join(runtime.resultsDirectory, missingReport));
+    if (configuration.missingReport) await rm(join(runtime.resultsDirectory, configuration.missingReport));
   }
   return {
-    repository, sha, base, git, runtime,
+    repository, sha, git,
     setInput: (name: string, value: string) => { process.env[inputKey(name)] = value; },
-    configure: (options: { exitCode?: number; partial?: boolean; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> }) => {
-      executionExit = options.exitCode ?? executionExit; incomplete = options.partial ?? incomplete;
-      omitSarif = options.missingSarif ?? omitSarif;
-      mutateCheckout = options.mutateCheckout ?? mutateCheckout;
-      cleanupFails = options.cleanupFails ?? cleanupFails;
-      cliFailure = options.cliFailure ?? cliFailure;
-      scanProcess = options.scanProcess ?? scanProcess;
-      scanResult = options.scanResult ?? scanResult;
-      missingReport = options.missingReport ?? missingReport;
-      prepare = options.prepare ?? prepare;
-    },
+    configure: (options: typeof configuration) => Object.assign(configuration, options),
     run: async () => {
       const logs: string[] = [];
       const originalWrite = process.stdout.write;
@@ -162,21 +142,20 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
       try {
         process.exitCode = 0;
         await runAction(root, {
-          setupRuntime: async () => { setups++; await prepare?.(); await reports(); return runtime; },
-          cleanupRuntime: async () => { cleanups++; if (cleanupFails) throw new Error('Synthetic cleanup failure'); },
+          setupRuntime: async () => { setups++; await configuration.prepare?.(); await reports(); return runtime; },
+          cleanupRuntime: async () => { cleanups++; if (configuration.cleanupFails) throw new Error('Synthetic cleanup failure'); },
           runProcess: async (_executable, args, options): Promise<ProcessResult> => {
             processes++; capturedArgs = args; capturedEnvironment = options.env;
-            processEnvironments.push(options.env);
             options.log?.('[codex-security] Synthetic live CLI progress.');
-            if (mutateCheckout) await writeFile(join(repository, 'app.txt'), 'modified while scanning\n');
-            return { exitCode: executionExit ?? (process.env['INPUT_FAIL-ON-SEVERITY'] === 'high' ? 1 : 0), signal: null,
-              stdout: cliFailure ? JSON.stringify({status: 'failed', code: 'SCAN_FAILED', message: 'Synthetic API authentication failure.'}) : scanOutput,
-              stderr: '', interrupted: false, timedOut: false, ...scanProcess };
+            if (configuration.mutateCheckout) await writeFile(join(repository, 'app.txt'), 'modified while scanning\n');
+            return { exitCode: configuration.exitCode ?? (process.env['INPUT_FAIL-ON-SEVERITY'] === 'high' ? 1 : 0), signal: null,
+              stdout: configuration.cliFailure ? JSON.stringify({status: 'failed', code: 'SCAN_FAILED', message: 'Synthetic API authentication failure.'}) : scanOutput,
+              stderr: '', interrupted: false, timedOut: false, ...configuration.scanProcess };
           },
         });
         exitCode = process.exitCode;
       } finally { process.stdout.write = originalWrite; process.exitCode = previousExitCode; }
-      return { exitCode, setups, processes, cleanups, summary, args: capturedArgs, environment: capturedEnvironment, processEnvironments,
+      return { exitCode, setups, processes, cleanups, summary, args: capturedArgs, environment: capturedEnvironment,
         outputs: outputValues(await readFile(outputPath, 'utf8')), logs: logs.join('') };
     },
   };
@@ -260,7 +239,7 @@ test('same-repository Dependabot PR scans with a supplied key', async (t) => {
   const result = await app.run();
   assert.equal(result.exitCode, 0); assert.equal(result.setups, 1); assert.equal(result.processes, 1);
   assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['scanned-sha'], app.sha);
-  assert.equal(result.processEnvironments[0].OPENAI_API_KEY, 'synthetic-offline-test-key');
+  assert.equal(result.environment.OPENAI_API_KEY, 'synthetic-offline-test-key');
   assert.equal(result.outputs['sarif-upload-ready'], 'true');
 });
 
@@ -295,7 +274,6 @@ for (const threshold of ['none', 'high']) {
     const app = await harness(t);
     app.setInput('summary', 'true'); app.setInput('fail-on-severity', threshold);
     t.mock.method(core.summary, 'write', async () => { throw new Error('Synthetic summary write failure'); });
-    t.after(() => { core.summary.emptyBuffer(); });
     const result = await app.run();
     assert.equal(result.exitCode, threshold === 'none' ? 0 : 1);
     assert.equal(result.outputs['scan-status'], 'completed');
@@ -545,7 +523,7 @@ test('requested artifact upload failure remains fatal without SARIF', async (t) 
   assert.match(result.summary, /Synthetic artifact upload failure/);
 });
 
-test('CLI authentication failure is not reported as a findings threshold failure', async (t) => {
+test('CLI authentication failure leaves findings unavailable instead of reporting a threshold failure', async (t) => {
   const app = await harness(t); app.configure({exitCode: 2, cliFailure: true});
   const result = await app.run();
   assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
@@ -553,12 +531,6 @@ test('CLI authentication failure is not reported as a findings threshold failure
   assert.equal(result.outputs['json-path'], '');
   assert.match(result.summary, /Synthetic API authentication failure/);
   assert.doesNotMatch(result.logs, /Findings meet the configured failure threshold/);
-});
-
-
-test('unavailable CLI results keep count outputs empty and report unavailable findings', async (t) => {
-  const app = await harness(t); app.configure({cliFailure: true, exitCode: 2});
-  const result = await app.run();
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '');
   assert.match(result.summary, /\*\*Findings:\*\* unavailable/);
   assert.match(result.logs, /Provisional findings: unavailable/);

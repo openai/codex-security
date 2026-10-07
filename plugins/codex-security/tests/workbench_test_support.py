@@ -47,6 +47,15 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
+def saved_coverage(*, deferred=(), surfaces=(), completeness=None):
+    return {
+        "completeness": completeness or ("partial" if deferred else "complete"),
+        "surfaces": list(surfaces),
+        "explicitExclusions": [],
+        "deferred": list(deferred),
+    }
+
+
 def saved_draft(
     scan_id: str,
     *,
@@ -62,10 +71,7 @@ def saved_draft(
         "complete": complete,
         "findings": list(findings),
         "coverage": {
-            "completeness": completeness or ("partial" if deferred else "complete"),
-            "surfaces": list(surfaces),
-            "explicitExclusions": [],
-            "deferred": list(deferred),
+            **saved_coverage(deferred=deferred, surfaces=surfaces, completeness=completeness),
             **({"resolvedDeferred": list(closures)} if closures else {}),
         },
     }
@@ -180,11 +186,136 @@ def run_workbench(
     return json.loads(completed.stdout)
 
 
-def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+def set_triage(
+    state_dir: Path, occurrence_id: str, status: str, *extra: str, **options: Any
+) -> dict[str, object]:
     return run_workbench(
         state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence_id,
+        "--status",
+        status,
+        *extra,
+        **options,
+    )
+
+
+def mark_handoff_delivered(
+    state_dir: Path, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir, "mark-handoff-delivered", scan_id, claim_token, *extra, **options
+    )
+
+
+def attach_continuation(
+    state_dir: Path, scan_id: str, claim_token: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir,
+        "attach-scan-continuation-thread",
+        scan_id,
+        claim_token,
+        "--thread-id",
+        thread_id,
+        **options,
+    )
+
+
+def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
+
+
+def start_scan_command(
+    state_dir: Path, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return workspace_command(state_dir, "start-scan", workspace_id, *extra, **options)
+
+
+def get_scan(state_dir: Path, scan_id: str, *extra: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "get-scan", scan_id, *extra, **options)
+
+
+def fail_scan(
+    state_dir: Path, scan_id: str, message: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "fail-scan", scan_id, "--message", message, *extra, **options)
+
+
+def scan_command(
+    state_dir: Path, command: str, scan_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--scan-id", scan_id, *extra, **options)
+
+
+def scan_claim_command(
+    state_dir: Path, command: str, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir, command, "--scan-id", scan_id, "--claim-token", claim_token, *extra, **options
+    )
+
+
+def workspace_command(
+    state_dir: Path, command: str, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
+
+
+def save_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    target_path: str,
+    scope: str,
+    mode: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir,
+        "save-workspace",
+        workspace_id,
+        "--target-path",
+        target_path,
+        "--scope",
+        scope,
+        "--mode",
+        mode,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def create_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    *extra: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir, "create-workspace", workspace_id, *extra, environment=environment
+    )
+
+
+def update_progress(
+    state_dir: Path,
+    scan_id: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
+    )
+
+
+def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    return scan_command(
+        state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         message,
@@ -256,49 +387,6 @@ def configure_git_command(target: Path, key: str, script: Path) -> None:
         ["git", "config", key, shlex.join([sys.executable, str(script)])],
         cwd=target,
         check=True,
-    )
-
-
-def save_workspace(
-    state_dir: Path,
-    workspace_id: str,
-    target: str,
-    scope: str,
-    mode: str,
-    *args: str,
-    check: bool = True,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        target,
-        "--scope",
-        scope,
-        "--mode",
-        mode,
-        *args,
-        check=check,
-        environment=environment,
-    )
-
-
-def create_workspace(
-    state_dir: Path,
-    workspace_id: str,
-    *args: str,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        *args,
-        environment=environment,
     )
 
 

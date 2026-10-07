@@ -20,13 +20,21 @@ from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
     empty_target_scan,
+    fail_scan,
+    get_scan,
     initialize_git_repository,
+    mark_handoff_delivered,
     run_workbench,
     save_workspace,
+    scan_claim_command,
+    set_triage,
     stable_target_id,
     start_delivered_scan,
     start_saved_scan,
+    start_scan_command,
     start_workspace_scan,
+    update_progress,
+    workspace_command,
     write_completed_contract,
 )
 
@@ -787,10 +795,8 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
     assert listed[0]["model"] == "gpt-5.6-sol"
     assert listed[0]["reasoningEffort"] == "high"
 
-    updated = run_workbench(
+    updated = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -802,14 +808,7 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
     assert updated["model"] == "gpt-5.6-terra"
     assert updated["reasoningEffort"] == "low"
 
-    preserved = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-    )["scan"]
+    preserved = update_progress(state_dir, scan_id, "--phase", "discovery")["scan"]
     assert preserved["model"] == "gpt-5.6-terra"
     assert preserved["reasoningEffort"] == "low"
 
@@ -822,14 +821,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     workspace_id = str(saved["id"])
     assert saved["userContext"] == "Pay attention to uploaded archives."
 
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     results = started["results"]
     assert isinstance(results, dict)
     assert results["userContext"] == "Pay attention to uploaded archives."
@@ -844,29 +836,19 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert not (scan_dir / "events.jsonl").exists()
 
     claim_token = str(uuid.uuid4())
-    claimed = run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claimed = scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
     assert claimed["results"]["handoffClaimedAt"] is not None
     assert claimed["results"]["handoffClaimToken"] == claim_token
-    released = run_workbench(
-        state_dir, "release-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    released = scan_claim_command(state_dir, "release-handoff-delivery", scan_id, claim_token)
     assert released["results"]["handoffClaimedAt"] is None
-    claimed_again = run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claimed_again = scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
     assert claimed_again["results"]["handoffClaimedAt"] is not None
-    delivered = run_workbench(
-        state_dir, "mark-handoff-delivered", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimedAt"] is None
 
-    updated = run_workbench(
+    updated = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -887,9 +869,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert updated["scan"]["progress"]["candidates"] == {"reportable": 1}
 
     write_completed_contract(scan_dir, scan_id, target)
-    completed = run_workbench(
-        state_dir, "complete-scan", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    completed = scan_claim_command(state_dir, "complete-scan", scan_id, claim_token)
     completed_scan = completed["scan"]
     assert completed_scan["progress"]["status"] == "complete"
     assert completed_scan["findingCount"] == 1
@@ -926,7 +906,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert finding["remediationTests"] == ["Reject traversal entries during extraction."]
     assert finding["locations"][0]["absolutePath"] == str(target / "src" / "extract.py")
 
-    reopened = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    reopened = workspace_command(state_dir, "get-workspace", workspace_id)
     assert reopened["results"]["findings"][0]["findingId"].startswith("csf_")
     assert reopened["results"]["findings"][0]["occurrenceId"].startswith("occ_")
     assert reopened["results"]["findings"][0]["attackPath"]["reachability"] == (
@@ -954,29 +934,20 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
                 occurrence_id,
             ),
         )
-    aliased = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    aliased = get_scan(state_dir, scan_id)
     assert aliased["scan"]["findings"][0]["rootCause"] == {
         "code": "destination.write_bytes(entry.read())",
         "evidenceRefs": ["archive-write"],
         "summary": "Legacy containment details remain visible.",
     }
 
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "closed",
-        "--close-reason",
-        "already_fixed",
-    )
+    set_triage(state_dir, occurrence_id, "closed", "--close-reason", "already_fixed")
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE finding_occurrences SET details_json = '{}' WHERE id = ?",
             (occurrence_id,),
         )
-    backfilled = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    backfilled = workspace_command(state_dir, "get-workspace", workspace_id)
     assert backfilled["results"]["findings"][0]["attackPath"]["impact"]["level"] == "high"
     assert backfilled["results"]["findings"][0]["triage"]["status"] == "closed"
 
@@ -989,7 +960,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             """,
             (occurrence_id,),
         )
-    poisoned = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    poisoned = get_scan(state_dir, scan_id)
     assert "attackPath" not in poisoned["scan"]["findings"][0]
     assert poisoned["scan"]["findings"][0]["title"] == finding["title"]
 
@@ -3338,10 +3309,8 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    failed = run_workbench(
+    failed = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         str(started["results"]["scanId"]),
         "--review-items-total",
         "2",
@@ -3360,10 +3329,8 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -3373,26 +3340,12 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
         "6",
     )
 
-    phase_failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-        check=False,
-    )
+    phase_failed = update_progress(state_dir, scan_id, "--phase", "discovery", check=False)
     assert phase_failed["returncode"] != 0
     assert "earlier phase" in str(phase_failed["stderr"])
 
-    coverage_failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--review-items-completed",
-        "5",
-        check=False,
+    coverage_failed = update_progress(
+        state_dir, scan_id, "--review-items-completed", "5", check=False
     )
     assert coverage_failed["returncode"] != 0
     assert "cannot decrease" in str(coverage_failed["stderr"])
@@ -3403,36 +3356,14 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "deep",
-    )
-    saved = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target), "--mode", "deep")
+    saved = save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     assert started["results"]["progress"]["reviewPass"] is None
 
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -3443,14 +3374,7 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
         "--review-items-completed",
         "0",
     )
-    updated = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--review-items-completed",
-        "22",
-    )
+    updated = update_progress(state_dir, scan_id, "--review-items-completed", "22")
     assert updated["scan"]["progress"]["reviewPass"] == 2
     assert updated["scan"]["progress"]["coverage"] == {
         "closedRows": 22,
@@ -3466,14 +3390,8 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
         "--workspace-id",
         str(standard["id"]),
     )
-    failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        str(standard_scan["results"]["scanId"]),
-        "--deep-review-pass",
-        "1",
-        check=False,
+    failed = update_progress(
+        state_dir, str(standard_scan["results"]["scanId"]), "--deep-review-pass", "1", check=False
     )
     assert failed["returncode"] != 0
     assert "Only Deep Scan" in str(failed["stderr"])
@@ -3488,18 +3406,11 @@ def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Pa
     scan_id = str(started["results"]["scanId"])
     started_at = str(started["results"]["progress"]["updatedAt"])
     time.sleep(0.001)
-    updated = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "validation",
-    )
+    updated = update_progress(state_dir, scan_id, "--phase", "validation")
     updated_at = str(updated["scan"]["progress"]["updatedAt"])
     assert updated_at > started_at
     time.sleep(0.001)
-    failed = run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    failed = fail_scan(state_dir, scan_id, "Stopped.")
     assert str(failed["scan"]["progress"]["updatedAt"]) > updated_at
 
 
@@ -3886,3 +3797,27 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.cross_platform
+def test_large_patch_preview_preserves_digest_checks(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    patch = b"diff --git a/src.ts b/src.ts\n+" + b"x" * (2 * 1024 * 1024) + b"\n"
+    (tmp_path / "remediation.patch").write_bytes(patch)
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    scan = {"scan_dir": str(tmp_path)}
+    namespace["require_matching_patch_digest"](scan, "remediation.patch", digest)
+    preview, stats = namespace["patch_artifact_preview"](tmp_path, "remediation.patch", digest)
+    assert preview.startswith("diff --git a/src.ts b/src.ts\n+")
+    assert preview.endswith("... patch preview truncated ...")
+    assert stats["additions"] == 1
+    assert stats["fileCount"] == 1
+    assert stats["previewTruncated"] is True
+    with pytest.raises(SystemExit) as mismatch:
+        namespace["require_matching_patch_digest"](scan, "remediation.patch", f"sha256:{'0' * 64}")
+    assert str(mismatch.value) == "Patch digest does not match the scan-local patch file."
+    captured = capfd.readouterr()
+    assert captured.out.removeprefix("\ufeff").strip(" \t\r\n") == ""
+    assert captured.err.removeprefix("\ufeff") == ""
