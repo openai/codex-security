@@ -2,8 +2,7 @@
 import type { CalibrationCase, CalibrationVariant } from "../types.ts";
 
 import fs from "node:fs";
-import { variantCaseId } from "./calibration-identity.mts";
-export { variantCaseId } from "./calibration-identity.mts";
+import { hash } from "node:crypto";
 import path from "node:path";
 
 export const DEFAULT_DATASET = path.join(
@@ -57,6 +56,13 @@ function indentedBlock(value: unknown) {
   return `      ${String(value)
     .replace(/\r\n?/g, "\n")
     .replace(/\n/g, "\n      ")}`;
+}
+
+export function variantCaseId(
+  testCase: Pick<CalibrationCase, "case_id">,
+  variant: CalibrationVariant,
+) {
+  return `calibration-${hash("sha256", `${testCase.case_id}\0${variant.checkout_ref}`).slice(0, 16)}`;
 }
 
 function evidenceTerms(testCase: CalibrationCase) {

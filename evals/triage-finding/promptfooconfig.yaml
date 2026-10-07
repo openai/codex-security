@@ -12,6 +12,7 @@ providers:
       skip_git_repo_check: true
       approval_policy: never
       additional_directories:
+        - "{{triage_fixture_root}}"
         - "{{triage_node_root}}"
       cli_config:
         default_permissions: triage_runtime_only

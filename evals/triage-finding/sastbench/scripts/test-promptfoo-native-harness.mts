@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import childProcess from "node:child_process";
-import { stageSkillRuntime } from "../../scripts/run-promptfoo.mts";
 const sastbenchRoot = path.resolve(import.meta.dirname, "..");
 const evalRoot = path.resolve(sastbenchRoot, "..");
 const config = fs.readFileSync(
@@ -27,7 +25,7 @@ assert.doesNotMatch(
 );
 assert.match(
   config,
-  /additional_directories:\n\s+- "\{\{env\.SASTBENCH_TARGET_ROOT\}\}"\n\s+- "\{\{env\.SASTBENCH_GIT_CACHE_ROOT\}\}"/,
+  /additional_directories:\n\s+- "\{\{target_repo\}\}"\n\s+- "\{\{sastbench_git_cache_root\}\}"/,
 );
 assert.doesNotMatch(config, /sandbox_mode:/);
 assert.doesNotMatch(config, /network_access_enabled:/);
@@ -72,31 +70,6 @@ for (const metric of [
 }
 assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY/);
 assert.doesNotMatch(config, /maxConcurrency/);
-assert.match(config, /- "\{\{triage_node_root\}\}"/);
-assert.match(config, /CODEX_MCP_NODE_PATH: "\{\{triage_node_path\}\}"/);
-
-const transform = config.match(/^\s+transformVars: (.+)$/m)![1];
-for (const runtime of ["initial runtime", "resumed runtime"]) {
-  const transformed = childProcess.execFileSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      "-e",
-      `const processShim = new Proxy(process, { get: (target, key) => key === "mainModule" ? { require } : target[key] });
-     console.log(JSON.stringify(new Function("vars", "process", "return " + process.argv[1])({}, processShim)));`,
-      transform,
-    ],
-    {
-      encoding: "utf8",
-      cwd: evalRoot,
-      env: { ...process.env, TRIAGE_RUNTIME_ROOT: runtime },
-    },
-  );
-  const vars = JSON.parse(transformed);
-  assert.equal(vars.triage_runtime_root, runtime);
-  assert.equal(vars.triage_node_path, fs.realpathSync(process.execPath));
-}
-
 assert.doesNotMatch(config, /__count/);
 assert.match(
   config,
@@ -113,7 +86,7 @@ assert.match(
 assert.doesNotMatch(sampleConfig, /providers:/);
 assert.doesNotMatch(sampleConfig, /derivedMetrics:/);
 
-assert.match(packageJson.scripts["eval:sastbench"], /run-promptfoo\.mts eval/);
+assert.match(packageJson.scripts["eval:sastbench"], /promptfoo eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-share/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--filter-range/);
@@ -126,11 +99,11 @@ assert.doesNotMatch(
 );
 assert.match(
   packageJson.scripts["validate:sastbench:sample"],
-  /run-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /promptfoo validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(
   packageJson.scripts["eval:sastbench:sample"],
-  /run-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /promptfoo eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-share/);
@@ -140,8 +113,8 @@ assert.match(
 );
 assert.equal("sastbench:generate" in packageJson.scripts, false);
 assert.equal(
-  fs.existsSync(path.join(evalRoot, "scripts", "run-promptfoo.mts")),
-  true,
+  fs.existsSync(path.join(import.meta.dirname, "run-sastbench-promptfoo.mts")),
+  false,
 );
 assert.equal(
   fs.existsSync(
@@ -153,55 +126,5 @@ assert.equal(
   ),
   false,
 );
-
-const runtimeRoot = stageSkillRuntime();
-try {
-  const pluginRoot = path.join(runtimeRoot, "plugins", "codex-security");
-  const repoRoot = path.join(runtimeRoot, "policy-fixture");
-  const affectedFile = path.join(repoRoot, "src", "handler.js");
-  fs.mkdirSync(path.dirname(affectedFile), { recursive: true });
-  fs.writeFileSync(
-    path.join(repoRoot, "SECURITY.md"),
-    "Root policy for the synthetic fixture.\n",
-  );
-  fs.writeFileSync(
-    path.join(repoRoot, "src", "SECURITY.md"),
-    "Nested policy for request handlers.\n",
-  );
-  fs.writeFileSync(affectedFile, "export const handler = () => null;\n");
-  const launcher = path.join(
-    pluginRoot,
-    "scripts",
-    "launch_codex_security_mcp",
-  );
-  const command = process.platform === "win32" ? process.execPath : launcher;
-  const helperArgs =
-    process.platform === "win32"
-      ? [path.join(pluginRoot, "mcp", "helpers.mjs"), "resolve-security-md"]
-      : ["--helper", "resolve-security-md"];
-  const policy = childProcess.execFileSync(
-    command,
-    [...helperArgs, "--repo", repoRoot, "--scope", affectedFile, "--out", "-"],
-    {
-      encoding: "utf8",
-      cwd: runtimeRoot,
-      env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath },
-    },
-  );
-  assert.match(policy, /Root policy for the synthetic fixture/);
-  assert.match(policy, /Nested policy for request handlers/);
-  assert.ok(policy.indexOf("Root policy") < policy.indexOf("Nested policy"));
-  assert.equal(fs.existsSync(launcher + ".cmd"), true);
-  assert.equal(
-    fs.existsSync(path.join(pluginRoot, "skills", "triage-finding", "evals")),
-    false,
-  );
-  assert.equal(
-    fs.existsSync(path.join(pluginRoot, "mcp", "server.mjs")),
-    false,
-  );
-} finally {
-  fs.rmSync(runtimeRoot, { recursive: true, force: true });
-}
 
 console.log("sastbench native Promptfoo harness tests passed");

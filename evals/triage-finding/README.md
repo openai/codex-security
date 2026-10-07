@@ -4,22 +4,29 @@ This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the 
 JSON result shape. It also covers bare skill invocation with no supplied finding,
 which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, REST endpoints, and explicit Connector requests without querying live GitHub during the eval.
 
-The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The shared runner stages the checkout's triage skill and references in a temporary runtime, selects that source explicitly, and disables ambient plugins and memory. The default lane can read the staged synthetic fixture; each calibration case can read only its own hydrated checkout in addition to the runtime. Dataset labels, assertions, and sibling checkouts stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
+The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. Codex runs from the checkout's plugin directory and reads its triage skill directly, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
 Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
 The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
 
-Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner, check the TypeScript tooling, and build the checkout's policy helper:
+Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and check the TypeScript tooling:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
+```
+
+After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13.
+
+Before running model evals, build the checkout's policy helper (requires the [native build prerequisites](../../plugins/codex-security/native/README.md)):
+
+```bash
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13. Rebuild the policy helper after changing its source. The host build requires the pinned Rust toolchain described in [`native/README.md`](../../plugins/codex-security/native/README.md).
+Config validation and deterministic tests do not need this helper build.
 
 Validate the config:
 

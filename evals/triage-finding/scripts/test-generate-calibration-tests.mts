@@ -18,8 +18,8 @@ const generator = path.join(
 const dataset = path.join(evalDir, "datasets", "triage-calibration-seed.json");
 const trackedTests = path.join(evalDir, "tests", "calibration-oss.yaml");
 
-const tmpDir = fs.mkdtempSync(
-  path.join(os.tmpdir(), "triage-calibration-tests-"),
+const tmpDir = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), "triage-calibration-tests-")),
 );
 const generated = path.join(tmpDir, "calibration-oss.yaml");
 const generatedSmoke = path.join(tmpDir, "calibration-smoke.yaml");

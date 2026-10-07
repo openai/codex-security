@@ -4,10 +4,10 @@ import { runGit } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
 import {
   DEFAULT_DATASET,
   selectedVariants,
+  variantCaseId,
 } from "./generate-calibration-tests.mts";
 
 import fs from "node:fs";
-import { variantCaseId } from "./calibration-identity.mts";
 import path from "node:path";
 
 const DEFAULT_REPO_ROOT = path.join(

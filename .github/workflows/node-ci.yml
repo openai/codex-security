@@ -359,7 +359,7 @@ jobs:
 
   plugin-source:
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
-    needs: [validate-title, native]
+    needs: validate-title
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -443,12 +443,6 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Prepare native runtime for deterministic eval tests
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        uses: ./.github/actions/download-native
-      - name: Build policy helper for deterministic eval tests
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp
       - name: Build SDK and type-check eval tooling
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: pnpm --dir sdk/typescript run build:evals

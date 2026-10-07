@@ -1,4 +1,4 @@
-Read and follow plugins/codex-security/skills/triage-finding/SKILL.md from this checkout for the following request.
+Read and follow skills/triage-finding/SKILL.md from this checkout for the following request.
 
 {{invocation_preamble}}
 
