@@ -427,6 +427,7 @@ test(
     const exec = await readJson(join(directory, "exec.json"));
     assert.equal(preflight.cwd, prepared.repo);
     assert.equal(exec.effectiveCwd, prepared.repo);
+    assert.equal(exec.config.model_provider, undefined);
     assert.deepEqual(preflight.config, exec.config);
     assert.deepEqual(exec.config.features, {
       memories: false,

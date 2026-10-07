@@ -1442,6 +1442,37 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
   },
 );
 
+test.each([
+  ["openrouter", "api-key"],
+  ["openrouter", "chatgpt"],
+  ["fireworks", "api-key"],
+  ["fireworks", "chatgpt"],
+] as const)(
+  "component planning honors command authentication for %s with %s selection",
+  async (provider, auth) => {
+    const paths = await fixture();
+    const plan = mock(async () => ({ components }));
+    const result = await scan(paths, {
+      components: undefined,
+      auto: true,
+      planOnly: true,
+      environment: {},
+      config: {
+        codexOverrides: {
+          model_provider: provider,
+          model_providers: {
+            [provider]: { auth: { command: "synthetic-auth-helper" } },
+          },
+        },
+      },
+      scanOptions: { auth },
+      planComponents: plan,
+    });
+    expect(result.total).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
+  },
+);
+
 test("CLI requires an explicitly selected API key before automatic planning", async () => {
   const paths = await fixture();
   const planComponentsMock = mock(resolving({ components }));

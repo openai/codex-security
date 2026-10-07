@@ -2326,7 +2326,12 @@ describe("CLI", () => {
           await runCapturedCli(
             main,
             ["scan", ".", ...options],
-            dependencies({ onConfig: (value) => (config = value) }),
+            dependencies({
+              environment: {
+                [providerConfig.env_key]: "synthetic-provider-key",
+              },
+              onConfig: (value) => (config = value),
+            }),
           ),
         ).toBe(0);
         expect(config?.codexOverrides).toEqual({
