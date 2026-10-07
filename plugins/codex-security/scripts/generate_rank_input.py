@@ -170,58 +170,50 @@ def load_scopes_file(scopes_file: Path) -> list[str]:
 def scope_candidates(repo: Path, scope_path: Path) -> Iterable[Path]:
     """Enumerate a scope using the repository's existing ignore policy."""
     if scope_path.is_file():
-        candidates = (scope_path,)
-    else:
-        git_candidates = git_directory_snapshot_paths(scope_path)
-        if git_candidates is not None:
-            candidates = git_candidates
-        else:
-            command = [
-                "rg",
-                "--files",
-                "--hidden",
-                "--no-require-git",
-                "--null",
-                # Also exclude descendants when the scope starts inside .git.
-                "--glob",
-                "!**/.git",
-                "--glob",
-                "!**/.git/**",
-                "--",
-                str(scope_path.relative_to(repo)),
-            ]
-            try:
-                result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
-            except OSError as exc:
-                ignore_names = (".gitignore", ".ignore", ".rgignore")
-                ancestors = (scope_path, *scope_path.parents)
-                has_ignore_rules = (
-                    any((ancestor / ".git").exists() for ancestor in (repo, *repo.parents))
-                    or any(
-                        (ancestor / name).is_file()
-                        for ancestor in ancestors
-                        if ancestor == repo or repo in ancestor.parents
-                        for name in ignore_names
-                    )
-                    or any(
-                        path.name in ignore_names
-                        for path in scope_path.rglob("*")
-                        if path.is_file()
-                    )
-                )
-                if has_ignore_rules:
-                    raise SystemExit(
-                        "Could not safely enumerate ignored scoped files without Git or ripgrep."
-                    ) from exc
-                candidates = scope_path.rglob("*")
-            else:
-                if result.returncode not in (0, 1):
-                    detail = result.stderr.decode("utf-8", errors="replace").strip()
-                    raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
-                candidates = (
-                    repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
-                )
-    return candidates
+        return (scope_path,)
+    git_candidates = git_directory_snapshot_paths(scope_path)
+    if git_candidates is not None:
+        return git_candidates
+
+    command = [
+        "rg",
+        "--files",
+        "--hidden",
+        "--no-require-git",
+        "--null",
+        # Also exclude descendants when the scope starts inside .git.
+        "--glob",
+        "!**/.git",
+        "--glob",
+        "!**/.git/**",
+        "--",
+        str(scope_path.relative_to(repo)),
+    ]
+    try:
+        result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+    except OSError as exc:
+        ignore_names = (".gitignore", ".ignore", ".rgignore")
+        ancestors = (scope_path, *scope_path.parents)
+        has_ignore_rules = (
+            any((ancestor / ".git").exists() for ancestor in (repo, *repo.parents))
+            or any(
+                (ancestor / name).is_file()
+                for ancestor in ancestors
+                if ancestor == repo or repo in ancestor.parents
+                for name in ignore_names
+            )
+            or any(path.name in ignore_names for path in scope_path.rglob("*") if path.is_file())
+        )
+        if has_ignore_rules:
+            raise SystemExit(
+                "Could not safely enumerate ignored scoped files without Git or ripgrep."
+            ) from exc
+        return scope_path.rglob("*")
+
+    if result.returncode not in (0, 1):
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
+    return (repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
 
 
 def make_repo_rank_input(args: argparse.Namespace) -> None:
