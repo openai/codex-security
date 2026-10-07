@@ -1,5 +1,5 @@
 import { gitText } from "./support/shell.js";
-import { expect } from "bun:test";
+import { expect, beforeEach, afterEach } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -9,8 +9,22 @@ import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { createCliTest } from "./support/cli-run.js";
 
-export const CURRENT_REPOSITORY = resolve("/current/repository");
-export const SAVED_REPOSITORY = resolve("/saved/repository");
+const workflowDirectories = createTemporaryDirectories(true);
+export let CURRENT_REPOSITORY: string;
+export let SAVED_REPOSITORY: string;
+beforeEach(async () => {
+  const root = await workflowDirectories.create("patch-workflow-");
+  CURRENT_REPOSITORY = join(root, "current", "repository");
+  SAVED_REPOSITORY = join(root, "saved", "repository");
+  await Promise.all(
+    [
+      CURRENT_REPOSITORY,
+      SAVED_REPOSITORY,
+      resolve(CURRENT_REPOSITORY, "../other/repository"),
+    ].map((directory) => mkdir(directory, { recursive: true })),
+  );
+});
+afterEach(workflowDirectories.cleanup);
 export const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
 
 export async function readAppliedText(path: string) {
@@ -155,7 +169,7 @@ export const runGitRepositoryCommand: NonNullable<
 > = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
   const result = gitText(args, {
-    cwd: workingDirectory,
+    cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,

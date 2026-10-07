@@ -96,6 +96,41 @@ describe("trusted executable resolution", () => {
     });
   });
 
+  test("preserves independent invocation and worktree protection roots", async () => {
+    const root = await temporaryDirectory();
+    const invocation = join(root, "invocation");
+    const worktree = join(root, "worktree");
+    const trusted = join(root, "trusted");
+    const linked = join(root, "linked-invocation");
+    const executable = process.platform === "win32" ? "git.exe" : "git";
+    for (const directory of [invocation, worktree, trusted]) {
+      await mkdir(directory);
+      await writeFile(
+        join(directory, executable),
+        "synthetic local executable",
+      );
+      await chmod(join(directory, executable), 0o700);
+    }
+    await symlink(
+      invocation,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const resolved = await resolveTrustedExecutable(
+      "git",
+      {
+        PATH: [linked, invocation, worktree, trusted].join(delimiter),
+        KEEP: "unchanged",
+      },
+      worktree,
+      [invocation],
+    );
+    expect(resolved).toEqual({
+      executable: join(trusted, executable),
+      environment: { PATH: trusted, KEEP: "unchanged" },
+    });
+  });
+
   test("sanitizes repository-linked PATH entries when no trusted executable exists", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

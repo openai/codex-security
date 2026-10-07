@@ -8,7 +8,7 @@ import {
   readFile,
 } from "./helper-files";
 import { decodePosixBytes } from "./posix-path";
-import { object, parseJson } from "./json";
+import { escapeControls, object, parseJson } from "./json";
 
 interface Assessment {
   recommendation: "merge" | "revise" | "no_op" | "block" | "hold_for_evidence";
@@ -143,7 +143,25 @@ function readAssessment(path: string): unknown {
       ? decodePosixBytes(contents)
       : decodeUtf8(contents).replace(/\r\n?/gu, "\n");
   try {
-    return parseJson(text);
+    const value = parseJson(text);
+    // JSON syntax is already valid; check each object's decoded member names.
+    const objects: Set<string>[] = [];
+    for (let index = 0; index < text.length; index++) {
+      if (text[index] === "{") objects.push(new Set());
+      else if (text[index] === "}") objects.pop();
+      else if (text[index] === '"') {
+        const start = index;
+        for (index++; text[index] !== '"'; index++)
+          if (text[index] === "\\") index++;
+        if (!/^\s*:/u.test(text.slice(index + 1))) continue;
+        const key = JSON.parse(text.slice(start, index + 1)) as string;
+        const keys = objects.at(-1)!;
+        if (keys.has(key))
+          throw new Error(`duplicate JSON object key: ${escapeControls(key)}`);
+        keys.add(key);
+      }
+    }
+    return value;
   } catch (error) {
     if (error instanceof SyntaxError)
       throw new Error(`cannot read assessment: ${error.message}`);

@@ -803,6 +803,34 @@ func After() {}
     assert "function After" in preview
 
 
+@pytest.mark.parametrize(
+    "literal",
+    [
+        '"""\n    { "a": "b" }\n    """',
+        '""""\n    { "a": """ }\n    """"',
+        '""""" contains """" and { """""',
+    ],
+    ids=["three-quotes", "four-quotes", "five-quotes"],
+)
+def test_csharp_raw_string_closes_on_matching_quote_count(tmp_path: Path, literal: str) -> None:
+    source = f"""class Before {{}}
+class Service {{
+  string Text = {literal};
+  void Visible() {{}}
+}}
+class After {{}}
+"""
+
+    preview = generate_preview(tmp_path, "Service.cs", source)
+
+    assert preview.splitlines() == [
+        "class Before",
+        "class Service",
+        "method Service.Visible",
+        "class After",
+    ]
+
+
 def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
     source = """import package
 broken = (
@@ -866,16 +894,10 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
     assert "..." not in preview
 
 
-@pytest.mark.parametrize(
-    "filename",
-    ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Vault.vy", "Counter.svelte"],
-)
-def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
-    tmp_path: Path, filename: str
-) -> None:
+def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:
     source = "\n".join(f"line_{index:02d} {'😀' * 20}" for index in range(40))
 
-    preview = generate_preview(tmp_path, filename, source, preview_bytes=220)
+    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=220)
 
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview

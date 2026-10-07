@@ -1,12 +1,14 @@
+import { gitText } from "./support/shell.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { dependencies } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
 import {
   resultWithFindings,
   savedScan,
@@ -25,8 +27,12 @@ describe("patch change tracking", () => {
     ["local", "remote"].flatMap((location) =>
       [
         "codex-security",
+        "codex-security/patch-scan-1",
         "codex-security/patch-scan-1/other",
         "codex-security/patch-scan-10",
+        "archive/refs/heads/codex-security",
+        "archive/refs/heads/codex-security/patch-scan-1",
+        "archive/refs/heads/codex-security/patch-scan-1/other",
       ].map((existing) => [location, existing] as const),
     ),
   )(
@@ -38,7 +44,11 @@ describe("patch change tracking", () => {
       else git("branch", existing);
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
-      const blocked = existing !== "codex-security/patch-scan-10";
+      const blocked = [
+        "codex-security",
+        "codex-security/patch-scan-1",
+        "codex-security/patch-scan-1/other",
+      ].includes(existing);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
         async (
@@ -150,7 +160,7 @@ describe("patch change tracking", () => {
   );
 
   test.each([false, true])(
-    "preserves remote proxy settings with collision=%s",
+    "preserves remote proxy settings with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -276,10 +286,23 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["free", "occupied", "race", "option"] as const)(
+  test.each([
+    "free",
+    "occupied",
+    "race",
+    "option",
+    "uploadpack",
+    "legacy-free",
+    "legacy-occupied",
+    "legacy-settings",
+  ] as const)(
     "preserves all push destinations: second destination=%s",
     async (destination) => {
-      const occupied = destination === "occupied" || destination === "race";
+      const occupied =
+        destination === "occupied" ||
+        destination === "race" ||
+        destination === "legacy-occupied" ||
+        destination === "legacy-settings";
       const option = destination === "option";
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
@@ -294,7 +317,7 @@ describe("patch change tracking", () => {
           `refs/heads/${branch}`,
           original,
         );
-      if (destination === "occupied") occupy();
+      if (occupied && destination !== "race") occupy();
       git("remote", "set-url", "--add", "--push", "origin", remote);
       const marker = join(directory, "upload-pack-marker");
       const script = join(directory, "upload-pack.cjs");
@@ -312,6 +335,43 @@ describe("patch change tracking", () => {
           ? `--upload-pack=${commandPath(process.execPath)} ${commandPath(script)} ${commandPath(marker)}`
           : secondary,
       );
+      const uploadTrace = join(directory, ".git", "transport-trace");
+      if (destination === "uploadpack") {
+        const transportDirectory = await fixtures.create("patch-transport-");
+        const transport = join(transportDirectory, "transport.cjs");
+        await writeFile(
+          transport,
+          `
+const { spawnSync } = require("node:child_process");
+const { appendFileSync } = require("node:fs");
+if (process.argv[2] === "upload-pack") appendFileSync(${JSON.stringify(uploadTrace)}, process.argv[3] + "\\n");
+const result = spawnSync(${JSON.stringify(Bun.which("git")!)}, [process.argv[2], process.argv[3].replace(/\\.logical$/, "")], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+        );
+        for (const operation of ["upload", "receive"])
+          git(
+            "config",
+            `remote.origin.${operation}pack`,
+            `${commandPath(process.execPath)} ${commandPath(transport)} ${operation}-pack`,
+          );
+        git("config", "--unset-all", "remote.origin.pushurl");
+        git("config", "--add", "remote.origin.pushurl", `${remote}.logical`);
+        git("config", "--add", "remote.origin.pushurl", `${secondary}.logical`);
+        git("push", "origin", "HEAD:refs/heads/native-control");
+        git("ls-remote", "origin");
+        await writeFile(uploadTrace, "");
+      }
+      if (destination.startsWith("legacy-")) {
+        git("config", "--remove-section", "remote.origin");
+        await mkdir(join(directory, ".git", "remotes"));
+        await writeFile(
+          join(directory, ".git", "remotes", "origin"),
+          `URL: ${remote}\nURL: ${secondary}\nPull: refs/heads/main:refs/remotes/origin/main\n`,
+        );
+        if (destination === "legacy-settings")
+          git("config", "remote.origin.skipDefaultUpdate", "true");
+      }
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
@@ -331,28 +391,45 @@ describe("patch change tracking", () => {
           currentDirectory: directory,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[0] === "repo"
-                ? "synthetic-origin-id"
-                : args[1] === "list"
-                  ? "[]"
-                  : "https://github.example.test/example/repository/pull/1",
+          onRepositoryCommand: async (command, args, cwd, options) => {
+            if (command === "git") {
+              const execution = promisify(execFile)("git", [...args], {
+                cwd: options?.directory ?? cwd,
+                env: { ...process.env, ...options?.environment },
+                maxBuffer: options?.maxBuffer,
+              });
+              execution.child.stdin?.end(options?.input);
+              const { stdout } = await execution;
+              return options?.trim === false ? stdout : stdout.trim();
+            }
+            return args[0] === "repo"
+              ? "synthetic-origin-id"
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1";
+          },
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
+      if (destination === "uploadpack")
+        expect(
+          (await readFile(uploadTrace, "utf8")).trim().split("\n"),
+        ).toEqual([`${remote}.logical`, `${secondary}.logical`]);
       expect(onCodex).toHaveBeenCalledTimes(
-        destination === "occupied" || option ? 0 : 1,
+        (occupied && destination !== "race") || option ? 0 : 1,
       );
       await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-      if (destination === "occupied" || option) {
+      if ((occupied && destination !== "race") || option) {
+        if (destination.startsWith("legacy-"))
+          expect(outcome.stderr).toContain("already exists");
         expect(git("rev-parse", "HEAD")).toBe(original);
         expect(git("ls-remote", remote, `refs/heads/${branch}`)).toBe("");
         expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
           before,
         );
-      } else if (occupied) {
+        return;
+      }
+      if (occupied) {
         if (occupied)
           expect(
             git("--git-dir", secondary, "rev-parse", `refs/heads/${branch}`),
@@ -380,89 +457,6 @@ describe("patch change tracking", () => {
       }
     },
   );
-
-  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
-    const { directory, git } = await publicationRepository();
-    const sshDirectory = await fixtures.create("patch-git-ssh-");
-    await writeFile(
-      join(sshDirectory, "ssh"),
-      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
-      { mode: 0o755 },
-    );
-    const emptyPath = await fixtures.create("patch-no-ssh-");
-    const gitExecutable = Bun.which("git")!;
-    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
-    const environment = {
-      PATH: emptyPath,
-      GIT_EXEC_PATH: sshDirectory,
-      GIT_SSH: undefined,
-      GIT_SSH_COMMAND: undefined,
-    };
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "https://github.com/example/repository.git",
-    );
-    git(
-      "remote",
-      "set-url",
-      "--push",
-      "origin",
-      "git@GitHub-Work:example/repository.git",
-    );
-    const branch = "codex-security/saved-patch";
-    const commit = git("rev-parse", "HEAD");
-    git("branch", branch);
-    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
-    const url = "https://github.com/example/repository/pull/1";
-    let repositoryLookups = 0;
-    const outcome = await runWorkflow(
-      ["patch", "--resume-pr", branch, "--json"],
-      {
-        currentDirectory: directory,
-        environment,
-        onRepositoryCommand: async (command, args, cwd, options) => {
-          if (command === "gh") {
-            if (args[0] === "pr" && args[1] === "list")
-              return JSON.stringify([
-                {
-                  url,
-                  head: commit,
-                  repository: "synthetic-id",
-                  crossRepository: true,
-                },
-              ]);
-            expect(args).toEqual([
-              "repo",
-              "view",
-              "github.com/example/repository",
-              "--json",
-              "id",
-              "--jq",
-              ".id",
-            ]);
-            repositoryLookups++;
-            return "synthetic-id";
-          }
-          const { stdout } = await promisify(execFile)(
-            command === "git" ? gitExecutable : command,
-            args,
-            {
-              cwd,
-              env: { ...process.env, ...environment, ...options?.environment },
-              encoding: "utf8",
-            },
-          );
-          return options?.trim === false ? stdout : stdout.trim();
-        },
-        onCodex: throwing("must reuse the saved patch"),
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
-    expect(repositoryLookups).toBe(1);
-  });
 
   test.each(
     [
@@ -717,6 +711,11 @@ describe("patch change tracking", () => {
           "Synthetic body",
         );
       }
+      const unresolvedPush =
+        ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ||
+        transport === "ssh-mirror-only" ||
+        transport === "https-mirror-only";
+      const matchingRequest = ownIncluded && !unresolvedPush;
       const result = resultWithFindings(["high"]);
       let modelCalls = 0;
       let pushes = 0;
@@ -740,7 +739,7 @@ describe("patch change tracking", () => {
                   code: 1,
                 });
               }
-              if (args[0] === "-c" && !args.includes("ls-remote")) {
+              if (args[2] === "codex-security-ssh-config") {
                 sshLookups++;
                 expect(args.slice(0, 3)).toEqual([
                   "-c",
@@ -766,13 +765,24 @@ describe("patch change tracking", () => {
                   ? ""
                   : `hostname ${transport.endsWith("ipv6-api") ? "::1" : transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
               }
-              if (args.includes("ls-remote"))
+              if (args[0] === "ls-remote") {
+                expect(args.slice(0, 3)).toEqual([
+                  "ls-remote",
+                  "--heads",
+                  "--",
+                ]);
+                expect(args.slice(4)).toEqual([
+                  "refs/heads/codex-security",
+                  `refs/heads/${branch}`,
+                  `refs/heads/${branch}/*`,
+                ]);
                 return runGitRepositoryCommand(
                   command,
-                  ["ls-remote", "--heads", "--", remote],
+                  [...args.slice(0, 3), remote, ...args.slice(4)],
                   cwd,
                   options,
                 );
+              }
               if (args[0] === "push") {
                 pushes++;
                 expect(args).toEqual([
@@ -798,24 +808,70 @@ describe("patch change tracking", () => {
               return runGitRepositoryCommand(command, args, cwd, options);
             }
             if (args[0] === "repo") {
-              repositoryLookups++;
+              const selectedToken = gitText(
+                ["config", "--get", "remote.codex-security-push.url"],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                },
+              ).trim();
+              const selectedRemote = gitText(
+                ["ls-remote", "--get-url", selectedToken],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                },
+              ).trim();
+              expect(options?.environment?.["GH_REPO"]).toBe("");
+              expect(options?.environment?.["GH_HOST"]).toBe(hostingHost);
+              const unresolved =
+                selectedRemote === remote ||
+                selectedRemote === "origin" ||
+                selectedRemote.startsWith("file:") ||
+                selectedRemote.startsWith("C:\\") ||
+                selectedRemote.includes("mirror.example.test") ||
+                selectedRemote.toLowerCase().includes("github-work");
+              const first = selectedRemote.includes("/first-owner/repository");
+              const expected = first
+                ? `${hostingHost}${apiPort}/first-owner/repository`
+                : lookupRemote!;
+              const selectedRepository = expected?.slice(
+                expected.indexOf("/") + 1,
+              );
+              if (args[1] === "set-default") {
+                expect(args).toEqual(["repo", "set-default", "--view"]);
+                return unresolved ? "" : selectedRepository;
+              }
+              expect(unresolved).toBe(false);
               expect(args).toEqual([
                 "repo",
                 "view",
-                transport === "multiple-hosted" && repositoryLookups % 2 === 1
-                  ? `${hostingHost}${apiPort}/first-owner/repository`
-                  : lookupRemote!,
+                ...(apiPort
+                  ? [`${hostingHost}${apiPort}/${selectedRepository}`]
+                  : []),
                 "--json",
-                "id",
+                "id,url",
                 "--jq",
-                ".id",
+                "tojson",
               ]);
-              if (
-                transport === "multiple-hosted" &&
-                repositoryLookups % 2 === 1
-              )
-                return "synthetic-first-id";
-              return "synthetic-origin-id";
+              repositoryLookups++;
+              expect(
+                decodeURIComponent(new URL(selectedRemote).pathname)
+                  .replace(/^\/+|\/+$/gu, "")
+                  .replace(/\.git$/u, ""),
+              ).toBe(selectedRepository);
+              return JSON.stringify({
+                id: first ? "synthetic-first-id" : "synthetic-origin-id",
+                url: `${hostingUrl}/${first ? "first-owner" : "canonical-owner"}/repository`,
+              });
             }
             if (args[1] === "list") {
               expect(args).toEqual([
@@ -826,9 +882,9 @@ describe("patch change tracking", () => {
                 "--state",
                 "all",
                 "--json",
-                "url,headRefOid,headRepository,isCrossRepository",
+                "url,state,headRefOid,headRepository,isCrossRepository",
                 "--jq",
-                "[.[] | {url, head: .headRefOid, repository: .headRepository.id, crossRepository: .isCrossRepository}]",
+                "map({url, head: .headRefOid, state, repositoryId: .headRepository.id, crossRepository: .isCrossRepository}) | tojson",
               ]);
               return JSON.stringify(
                 transport === "no-candidates"
@@ -837,7 +893,8 @@ describe("patch change tracking", () => {
                       {
                         url: `${hostingUrl}/upstream/repository/pull/7`,
                         head: commit,
-                        repository: "synthetic-foreign-id",
+                        repositoryId: "synthetic-foreign-id",
+                        state: "OPEN",
                         crossRepository: true,
                       },
                       ...(ownIncluded
@@ -845,7 +902,8 @@ describe("patch change tracking", () => {
                             {
                               url: ownUrl,
                               head: commit,
-                              repository: "synthetic-origin-id",
+                              repositoryId: "synthetic-origin-id",
+                              state: "OPEN",
                               crossRepository: !!lookupRemote,
                             },
                           ]
@@ -864,11 +922,11 @@ describe("patch change tracking", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(
-        !resume && ownIncluded ? 2 : 0,
+        !resume && matchingRequest ? 2 : 0,
       );
-      const attempts = !resume && !ownIncluded ? 2 : 1;
+      const attempts = !resume && !matchingRequest ? 2 : 1;
       expect(repositoryLookups).toBe(
-        (!lookupRemote || transport === "no-candidates"
+        (!lookupRemote || unresolvedPush || transport === "no-candidates"
           ? 0
           : transport === "multiple-hosted"
             ? 2
@@ -877,12 +935,102 @@ describe("patch change tracking", () => {
       expect(sshLookups).toBe(
         (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) * attempts,
       );
-      expect(modelCalls).toBe(resume || ownIncluded ? 0 : 1);
-      expect(pushes).toBe(ownIncluded ? 0 : 1);
-      if (resume || !ownIncluded)
+      expect(modelCalls).toBe(resume || matchingRequest ? 0 : 1);
+      expect(pushes).toBe(matchingRequest ? 0 : 1);
+      if (resume || !matchingRequest)
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
-          ownIncluded ? ownUrl : createdUrl,
+          matchingRequest ? ownUrl : createdUrl,
         );
     },
   );
+
+  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
+    const { directory, git } = await publicationRepository();
+    const sshDirectory = await fixtures.create("patch-git-ssh-");
+    await writeFile(
+      join(sshDirectory, "ssh"),
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
+      { mode: 0o755 },
+    );
+    const emptyPath = await fixtures.create("patch-no-ssh-");
+    const gitExecutable = Bun.which("git")!;
+    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
+    const environment = {
+      PATH: emptyPath,
+      GIT_EXEC_PATH: sshDirectory,
+      GIT_SSH: undefined,
+      GIT_SSH_COMMAND: undefined,
+    };
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/example/repository.git",
+    );
+    git(
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@GitHub-Work:example/repository.git",
+    );
+    const branch = "codex-security/saved-patch";
+    const commit = git("rev-parse", "HEAD");
+    git("branch", branch);
+    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+    const url = "https://github.com/example/repository/pull/1";
+    let repositoryLookups = 0;
+    const outcome = await runWorkflow(
+      ["patch", "--resume-pr", branch, "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "gh") {
+            if (args[0] === "pr" && args[1] === "list")
+              return JSON.stringify([
+                {
+                  url,
+                  head: commit,
+                  repositoryId: "synthetic-id",
+                  state: "OPEN",
+                  crossRepository: true,
+                },
+              ]);
+            if (args[1] === "set-default") {
+              expect(args).toEqual(["repo", "set-default", "--view"]);
+              return "example/repository";
+            }
+            expect(args).toEqual([
+              "repo",
+              "view",
+              "--json",
+              "id,url",
+              "--jq",
+              "tojson",
+            ]);
+            repositoryLookups++;
+            return JSON.stringify({
+              id: "synthetic-id",
+              url: "https://github.com/example/repository",
+            });
+          }
+          const { stdout } = await promisify(execFile)(
+            command === "git" ? gitExecutable : command,
+            args,
+            {
+              cwd,
+              env: { ...process.env, ...environment, ...options?.environment },
+              encoding: "utf8",
+            },
+          );
+          return options?.trim === false ? stdout : stdout.trim();
+        },
+        onCodex: throwing("must reuse the saved patch"),
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
+    expect(repositoryLookups).toBe(1);
+  });
 });

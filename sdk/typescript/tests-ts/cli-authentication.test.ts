@@ -1807,6 +1807,7 @@ describe("skill authentication", () => {
         await stderr.run(
           [command, "Synthetic issue", "--auth", "api-key"],
           dependencies({
+            currentDirectory: stateDirectory,
             onCodex: (_args, output, environment, input) =>
               runCodexSkillCommand(
                 ["-e", 'throw new Error("must not launch")'],

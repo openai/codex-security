@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -528,40 +529,67 @@ describe("scan target normalization", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("does not execute worktree-local Git shims when scanning a subdirectory", async () => {
-    const repo = await repository();
-    const target = join(repo, "src");
-    const unsafeBin = join(repo, "node_modules", ".bin");
-    const marker = join(repo, "git-executed");
-    const revision = git(repo, "rev-parse", "HEAD");
-    await createRepositoryGitShim(unsafeBin, marker);
+  test.each(["ordinary", "nested"])(
+    "does not execute worktree-local Git shims when scanning a subdirectory (%s)",
+    async (layout) => {
+      const nested = layout === "nested";
+      const repo = await repository();
+      const target = join(repo, "src");
+      const unsafeBin = join(repo, "node_modules", ".bin");
+      const marker = join(repo, "git-executed");
+      const revision = git(repo, "rev-parse", "HEAD");
+      const outerMetadata = join(repo, "..", "outer-git");
+      if (nested) {
+        git(
+          target,
+          "init",
+          "--separate-git-dir",
+          join(repo, "..", "child-git"),
+          "-b",
+          "main",
+        );
+        git(target, "config", "user.email", "test@example.com");
+        git(target, "config", "user.name", "Test");
+        git(target, "config", "core.worktree", target);
+        git(target, "add", ".");
+        git(target, "commit", "-m", "initial child");
+        await rename(join(repo, ".git"), outerMetadata);
+      }
+      await createRepositoryGitShim(unsafeBin, marker);
 
-    const script = `
+      const script = `
         const { enclosingGitWorktreeRoot, repositoryRevision } = await import(process.argv[1]);
-        console.log(await enclosingGitWorktreeRoot(process.argv[2]));
-        console.log(await repositoryRevision(process.argv[2]));
+        const nested = process.argv[4] === "true";
+        console.log(await enclosingGitWorktreeRoot(process.argv[2], undefined,
+          nested ? { requireIfPresent: true, protectedRoot: process.argv[3] } : undefined));
+        if (!nested) console.log(await repositoryRevision(process.argv[2]));
       `;
-    const result = spawnSync(
-      process.execPath,
-      [
-        "-e",
-        script,
-        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
-        target,
-      ],
-      {
-        cwd: target,
-        encoding: "utf8",
-        env: environmentWithPath([unsafeBin]),
-      },
-    );
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim().split(/\r?\n/u)).toEqual([
-      await realpath(repo),
-      revision,
-    ]);
-    expect(existsSync(marker)).toBe(false);
-  });
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          script,
+          fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+          target,
+          repo,
+          String(nested),
+        ],
+        {
+          cwd: target,
+          encoding: "utf8",
+          env: {
+            ...environmentWithPath([unsafeBin]),
+            ...(nested ? { GIT_DIR: outerMetadata, GIT_WORK_TREE: repo } : {}),
+          },
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+      expect(result.stdout.trim().split(/\r?\n/u)).toEqual(
+        nested ? [await realpath(target)] : [await realpath(repo), revision],
+      );
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
 
   test("keeps the requested base and head when refs diverge", async () => {
     const repo = await repository();
@@ -715,3 +743,34 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
 });
+
+test.each(["common-disabled", "enabled-correct", "enabled-rebound"])(
+  "honors common configuration when binding a linked checkout: %s",
+  async (kind) => {
+    const main = await repository();
+    const linked = join(main, "..", "linked");
+    git(main, "worktree", "add", "--detach", linked, "HEAD");
+    const metadata = git(linked, "rev-parse", "--absolute-git-dir");
+    git(main, "config", "core.worktree", main);
+    git(
+      main,
+      "config",
+      "extensions.worktreeConfig",
+      kind === "common-disabled" ? "false" : "true",
+    );
+    if (kind === "enabled-correct")
+      git(linked, "config", "--worktree", "core.worktree", linked);
+    const result = enclosingGitWorktreeRoot(linked, undefined, {
+      requireIfPresent: true,
+      runGit: async (args) =>
+        execFileSync(
+          "git",
+          [`--git-dir=${metadata}`, `--work-tree=${linked}`, ...args],
+          { cwd: linked, encoding: "utf8" },
+        ).trim(),
+    });
+    if (kind === "enabled-rebound")
+      await expect(result).rejects.toThrow("Git metadata is not bound");
+    else expect(await result).toBe(await realpath(linked));
+  },
+);

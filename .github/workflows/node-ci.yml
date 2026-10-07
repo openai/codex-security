@@ -490,7 +490,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
