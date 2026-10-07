@@ -4178,6 +4178,7 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     assert "markdownReport" not in reopened["scan"]["artifacts"]
 
 
+@pytest.mark.cross_platform
 def test_large_patch_preview_preserves_digest_checks(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
