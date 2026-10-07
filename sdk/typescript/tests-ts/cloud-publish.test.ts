@@ -75,10 +75,10 @@ async function csvFixture(contents = `${csvHeader}\n${csvRow}\n`) {
 
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(homeName = "home") {
   const root = await temporaryDirectory("codex-security-cloud-");
   const scan = join(root, "scan");
-  const home = join(root, "home");
+  const home = join(root, homeName);
   await copyCompletedScanFixture(scan);
   if (process.platform !== "win32") await chmod(scan, 0o700);
   await mkdir(home, { mode: 0o700 });
@@ -366,7 +366,24 @@ describe("Cloud publication", () => {
   });
 
   test("posts validated findings and scan provenance with only ChatGPT access credentials", async () => {
-    const { scan, environment } = await fixture();
+    const { scan, home, environment } = await fixture(
+      process.platform === "win32" ? "home" : " home ",
+    );
+    if (home !== home.trim()) {
+      await mkdir(home.trim(), { mode: 0o700 });
+      await writeFile(
+        join(home.trim(), "config.toml"),
+        'cli_auth_credentials_store = "file"\n',
+      );
+      await writeFile(
+        join(home.trim(), "auth.json"),
+        JSON.stringify({
+          ...login,
+          tokens: { ...login.tokens, access_token: "wrong-trimmed-home-token" },
+        }),
+        { mode: 0o600 },
+      );
+    }
     const manifest = JSON.parse(
       await readFile(join(scan, "scan-manifest.json"), "utf8"),
     );

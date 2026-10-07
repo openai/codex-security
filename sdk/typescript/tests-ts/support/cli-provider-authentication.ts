@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect } from "bun:test";
 import { main, runCodexSkillCommand } from "../../src/cli.js";
+import type { JsonObject } from "../../src/index.js";
 import { dependencies as cliDependencies } from "../cli-fixtures.js";
 import { createCliTest } from "./cli-run.js";
 import { readJsonLines } from "./json.js";
@@ -20,7 +21,7 @@ export async function runProviderSkill(
   }: {
     command?: "validate" | "patch" | "verify-fix";
     auth?: "auto" | "chatgpt" | "api-key";
-    overrides: readonly string[];
+    overrides: readonly string[] | JsonObject;
     environment?: NodeJS.ProcessEnv;
     ambientConfig?: string;
     storedCredentials?: boolean;
@@ -52,7 +53,9 @@ export async function runProviderSkill(
       "Synthetic issue",
       "--auth",
       auth,
-      ...overrides.flatMap((value) => ["--codex", value]),
+      ...(Array.isArray(overrides)
+        ? overrides.flatMap((value) => ["--codex", value])
+        : []),
     ],
     cliDependencies({
       currentDirectory: repository,
@@ -64,6 +67,8 @@ export async function runProviderSkill(
         SYNTHETIC_SKILL_COMMAND: command,
       },
       onCodex: async (args, output, environment, input) => {
+        if (!Array.isArray(overrides) && output !== undefined)
+          output = { ...output, codexOverrides: overrides as JsonObject };
         const originalOverrides = structuredClone(output?.codexOverrides);
         const result = await runCodexSkillCommand(
           [
