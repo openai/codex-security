@@ -43,6 +43,10 @@ function hasReviewedText(value) {
   return !value.includes("\0") && /\S/u.test(value);
 }
 
+/**
+ * @param {string} version
+ * @param {string} notes
+ */
 export function parseReviewedReleaseNotes(version, notes) {
   const expectedHeader = `<!-- release-version: ${version} -->`;
   const normalized =
@@ -105,6 +109,10 @@ export function resolveReleaseSummary(version, taggedNotes, existingNotes) {
   return extractHistoricalReleaseSummary(existingNotes);
 }
 
+/**
+ * @param {string} generatedNotes
+ * @param {string | null} releaseSummary
+ */
 export function composeReleaseNotes(generatedNotes, releaseSummary) {
   if (releaseSummary === null || releaseSummary === "") {
     return generatedNotes;

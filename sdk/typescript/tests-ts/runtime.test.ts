@@ -1,3 +1,4 @@
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
@@ -4964,20 +4965,7 @@ describe("runtime directories and plugin Python boundary", () => {
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
       },
-      [
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDirectory,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ],
+      scanRegistrationArguments(repository, scanDirectory),
     );
     expect(registration["scanId"]).toBeString();
 
@@ -5074,20 +5062,10 @@ describe("runtime directories and plugin Python boundary", () => {
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
         },
       };
-      const registration = await runWorkbench(workbenchOptions, [
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registration = await runWorkbench(
+        workbenchOptions,
+        scanRegistrationArguments(repository, scanDir),
+      );
       await Promise.all(
         present.map((filename) =>
           copyFile(
@@ -5139,20 +5117,10 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       },
     };
-    const registration = await runWorkbench(workbenchOptions, [
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "standard",
-        repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
+    const registration = await runWorkbench(
+      workbenchOptions,
+      scanRegistrationArguments(repository, scanDir),
+    );
     await symlink(
       join(root, "missing-manifest.json"),
       join(scanDir, "scan-manifest.json"),

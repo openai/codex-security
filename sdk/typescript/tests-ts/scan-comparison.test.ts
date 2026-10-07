@@ -3,7 +3,6 @@ import { once } from "node:events";
 import {
   copyFile,
   mkdir,
-  rm,
   readFile,
   realpath,
   symlink,
@@ -30,29 +29,17 @@ import {
   type ScanComparisonOptions,
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
-import { temporaryDirectory as createTemporaryDirectory } from "./support/temporary-directories.js";
+import {
+  temporaryDirectory as createTemporaryDirectory,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map(async (path) => {
-      // Bun 1.3.13 ignores fs.rm's retry options.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await rm(path, { recursive: true, force: true });
-          return;
-        } catch (error) {
-          if (
-            (error as NodeJS.ErrnoException).code !== "EBUSY" ||
-            attempt === 10
-          )
-            throw error;
-          await Bun.sleep(100 * (attempt + 1));
-        }
-      }
-    }),
+    temporaryDirectories.splice(0).map(removeTemporaryDirectory),
   );
 });
 
