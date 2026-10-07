@@ -275,6 +275,32 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
   }
 });
 
+test("native profile children hide Windows console windows", async () => {
+  const f = await fixture();
+  const originalSpawn = childProcess.spawn;
+  let launched = false;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[],
+    options: SpawnOptions,
+  ) => {
+    launched = true;
+    assert.equal(options?.windowsHide, true);
+    return originalSpawn(command, args, options);
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  try {
+    await createCodexProfileClient(f.options)
+      .startThread()
+      .run("synthetic prompt");
+    assert.equal(launched, true);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    await f.cleanup();
+  }
+});
+
 for (const mode of ["null_usage", "missing_usage"]) {
   for (const resumed of [false, true]) {
     for (const streamed of [false, true]) {

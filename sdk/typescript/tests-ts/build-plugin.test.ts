@@ -78,14 +78,17 @@ describe("bundled plugin build", () => {
       await cp(join(plugin, "schemas"), join(source, "schemas"), {
         recursive: true,
       });
-      await writeFixture(
-        source,
-        "scripts/reserved_artifact_paths.json",
-        await readFile(
-          join(plugin, "scripts", "reserved_artifact_paths.json"),
-          "utf8",
-        ),
-      );
+      for (const file of [
+        "reserved_artifact_paths.json",
+        "codex_profile.mjs",
+        "codex_profile.d.mts",
+      ]) {
+        await writeFixture(
+          source,
+          `scripts/${file}`,
+          await readFile(join(plugin, "scripts", file), "utf8"),
+        );
+      }
       await symlink(
         join(plugin, "mcp-app", "node_modules"),
         join(source, "mcp-app", "node_modules"),

@@ -240,6 +240,10 @@ model_reasoning_summary = "none"
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof startedArtifactRoot, "string");
+    await writeFile(
+      path.join(installedPluginRoot, "scripts", "workbench_db.py"),
+      'raise RuntimeError("Installed plugin helpers replaced during another scan")\n',
+    );
     assert.equal(workerContext.pluginRoot, pluginRoot);
     assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));

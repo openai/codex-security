@@ -133,8 +133,14 @@ async function loadWorkerSettings(root: string) {
   return workerRuntimeSettings;
 }
 
-test.each(["selected profile", "null profile"])(
-  "concurrent provider snapshots (%s) do not inherit another scan's credentials",
+test.each([
+  "root",
+  "selected profile",
+  "null profile",
+  "profile override",
+  "profile only",
+] as const)(
+  "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -190,30 +196,57 @@ test.each(["selected profile", "null profile"])(
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
-                profile: "selected",
-                web_search: index === 0 ? "live" : "disabled",
-                profiles: {
-                  selected: {
-                    ...(selection === "null profile"
-                      ? {
-                          model_provider: null,
-                          model: null,
-                          model_reasoning_effort: null,
-                        }
-                      : {}),
-                    features: featureOverrides,
-                    web_search: webSearch,
-                  },
-                },
                 model_provider: "openrouter",
-                model_providers: {
-                  openrouter: provider,
-                  "required.gateway": {
-                    name: "Managed selection",
-                    wire_api: "responses",
-                    env_key: "SYNTHETIC_REQUIRED_KEY",
-                  },
-                },
+                web_search: selection === "root" ? webSearch : "live",
+                features: selection === "root" ? featureOverrides : {},
+                ...(selection === "profile only"
+                  ? {}
+                  : {
+                      model_providers: {
+                        openrouter:
+                          selection === "profile override"
+                            ? {
+                                ...provider,
+                                env_key: "SYNTHETIC_UNUSED_KEY",
+                              }
+                            : provider,
+                        "required.gateway": {
+                          name: "Managed selection",
+                          wire_api: "responses",
+                          env_key: "SYNTHETIC_REQUIRED_KEY",
+                        },
+                      },
+                    }),
+                ...(selection === "root"
+                  ? {}
+                  : {
+                      profile: "selected",
+                      profiles: {
+                        selected: {
+                          features: featureOverrides,
+                          web_search: webSearch,
+                          ...(selection === "null profile"
+                            ? {
+                                model_provider: null,
+                                model: null,
+                                model_reasoning_effort: null,
+                              }
+                            : selection === "selected profile"
+                              ? {}
+                              : {
+                                  model_provider: "openrouter",
+                                  model_providers: {
+                                    openrouter: provider,
+                                    "required.gateway": {
+                                      name: "Managed selection",
+                                      wire_api: "responses",
+                                      env_key: "SYNTHETIC_REQUIRED_KEY",
+                                    },
+                                  },
+                                }),
+                        },
+                      },
+                    }),
               },
             },
             {

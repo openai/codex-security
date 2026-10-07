@@ -569,7 +569,7 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("projects the external payload with its session launcher", async () => {
+  test("preserves the external payload while routing the installed launcher", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
     await mkdir(workspace);
@@ -625,11 +625,11 @@ describe("plugin runtime preparation", () => {
           readFile(projectedPath),
         ]);
         if (path === ".mcp.json") {
-          const configuration = JSON.parse(sourceContents.toString("utf8"));
-          configuration.mcpServers["codex-security"].command =
+          const expected = JSON.parse(sourceContents.toString("utf8"));
+          expected.mcpServers["codex-security"].command =
             "./scripts/launch_codex_security_mcp_sdk";
           expect(JSON.parse(projectedContents.toString("utf8"))).toEqual(
-            configuration,
+            expected,
           );
         } else {
           expect({
@@ -832,8 +832,9 @@ describe("plugin runtime preparation", () => {
     "direct node",
     "direct node with root",
     "direct node with flags",
+    "direct node unprefixed",
   ])(
-    "keeps legacy %s MCP roots isolated outside the credential home",
+    "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
       const selected = await plugin(root);
@@ -859,10 +860,14 @@ describe("plugin runtime preparation", () => {
         : process.platform === "win32"
           ? "node.exe"
           : "node";
+      const nodeEntry =
+        interpreter === "direct node unprefixed"
+          ? "mcp/server.mjs"
+          : "./mcp/server.mjs";
       const argumentsAfterEntry = [
         "--stdio",
         "synthetic ! % & argument",
-        "./mcp/server.mjs",
+        nodeEntry,
       ];
       const mcp = {
         mcpServers: {
@@ -871,7 +876,7 @@ describe("plugin runtime preparation", () => {
               ? nodeCommand
               : "./scripts/launch_codex_security_mcp",
             args: directNode
-              ? [...nodeOptions, "./mcp/server.mjs", ...argumentsAfterEntry]
+              ? [...nodeOptions, nodeEntry, ...argumentsAfterEntry]
               : argumentsAfterEntry,
             cwd: ".",
             env_vars: [
@@ -2160,12 +2165,14 @@ ${directNode ? "}" : ""}
           break;
       }
 
-      const expectedInstallCount = damage.endsWith("marketplace manifest")
-        ? 1
-        : 2;
+      const expectedInstalls =
+        damage === "missing marketplace manifest" ||
+        damage === "incomplete marketplace manifest"
+          ? 1
+          : 2;
       await bootstrap();
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(
-        expectedInstallCount,
+        expectedInstalls,
       );
       expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
       expect(existsSync(join(staged, "stale.py"))).toBe(false);
@@ -2176,7 +2183,7 @@ ${directNode ? "}" : ""}
       });
       await bootstrap();
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(
-        expectedInstallCount,
+        expectedInstalls,
       );
     });
   });
