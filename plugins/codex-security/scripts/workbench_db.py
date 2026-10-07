@@ -396,7 +396,7 @@ def inspect_setup_values(
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or Path(repository_root).resolve() != target:
+    if repository_root is None or not Path(repository_root).samefile(target):
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )

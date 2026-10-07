@@ -18,7 +18,6 @@ import secrets
 import stat
 import struct
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
@@ -91,7 +90,7 @@ class ContractError(ValueError):
 
 
 class RecoverableContractError(ContractError):
-    """Raised when report projection can safely be retried before publication."""
+    """Raised when scan completion can safely be retried before publication."""
 
 
 class SealedArtifactError(ContractError):
@@ -132,21 +131,10 @@ def _generate_report_projection(
         raise ContractError(f"could not load report projection helper: {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    attempts = (
-        getattr(sys.modules.get("workbench_constants"), "SQLITE_RETRY_ATTEMPTS", 1)
-        if coverage.get("mode") == "deep_repository"
-        else 1
-    )
-    for attempt in range(attempts):
-        try:
-            return module.generate_report_markdown(manifest, findings, coverage)
-        except OSError as exc:
-            if attempt == attempts - 1:
-                raise RecoverableContractError(f"report projection failed: {exc}") from exc
-            time.sleep(0.05 * (2**attempt))
-        except ValueError as exc:
-            raise ContractError(f"report projection failed: {exc}") from exc
-    raise AssertionError("Report projection retry loop exhausted unexpectedly.")
+    try:
+        return module.generate_report_markdown(manifest, findings, coverage)
+    except ValueError as exc:
+        raise ContractError(f"report projection failed: {exc}") from exc
 
 
 def _threat_model_renderer() -> Any:
@@ -593,15 +581,23 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
         raise
 
 
-def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
-    return _open_scan_local_file_with_path(scan_dir, relative_path, context)[0]
+def open_scan_local_file_descriptor(
+    scan_dir: Path, relative_path: str, context: str, *, portable: bool = True
+) -> int:
+    return _open_scan_local_file_with_path(scan_dir, relative_path, context, portable=portable)[0]
 
 
 def _open_scan_local_file_with_path(
-    scan_dir: Path, relative_path: str, context: str, *, resolve_spelling: bool = False
+    scan_dir: Path,
+    relative_path: str,
+    context: str,
+    *,
+    resolve_spelling: bool = False,
+    portable: bool = True,
 ) -> tuple[int, str]:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, context)
+    validate_path = _require_portable_relative_path if portable else _require_safe_relative_path
+    relative_path = validate_path(relative_path, context)
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
@@ -2255,7 +2251,7 @@ def _open_source_file(source_root: Path, relative_path: str) -> TextIO | None:
     file_fd: int | None = None
     try:
         file_fd = open_scan_local_file_descriptor(
-            source_root, relative_path, f"source file {relative_path}"
+            source_root, relative_path, f"source file {relative_path}", portable=False
         )
         handle = os.fdopen(file_fd, "r", encoding="utf-8", errors="replace")
         file_fd = None
@@ -2440,7 +2436,7 @@ def _github_line_hash_cache(
     return line_hash_cache
 
 
-def _sarif_location(location: dict[str, Any], location_id: int | None = None) -> dict[str, Any]:
+def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
     sarif_location: dict[str, Any] = {
         "physicalLocation": {
             "artifactLocation": {
@@ -2452,8 +2448,6 @@ def _sarif_location(location: dict[str, Any], location_id: int | None = None) ->
             },
         }
     }
-    if location_id is not None:
-        sarif_location["id"] = location_id
     if location.get("role"):
         sarif_location["message"] = {"text": location["role"]}
     return sarif_location
@@ -2482,7 +2476,7 @@ def _sarif_result(
     line_hash = _github_primary_location_line_hash(finding, source_root, line_hash_cache)
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
-    result = {
+    return {
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
@@ -2491,7 +2485,6 @@ def _sarif_result(
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
     }
-    return result
 
 
 def build_sarif(
@@ -3088,6 +3081,7 @@ def main() -> int:
     parser.add_argument("--write-threat-model", action="store_true")
     args = parser.parse_args()
     try:
+        args.scan_dir = args.scan_dir.resolve()
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
