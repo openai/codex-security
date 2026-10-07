@@ -658,7 +658,7 @@ describe("CodexSecurity finding validation", () => {
 
 describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
-    "workbench usage uses the managed home with an explicit database override: %s",
+    "workbench usage uses the managed home with an explicit database override: %p",
     async (overrideDatabase) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const ambientHome = join(root, "ambient-home");
