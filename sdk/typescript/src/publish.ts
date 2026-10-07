@@ -217,18 +217,6 @@ type PublicationHandoffEvidence = {
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
 
-interface IndexedPublicationEvidence {
-  byOwner: Map<string, PublicationEvidence[]>;
-  unowned: PublicationEvidence[];
-  claimLedger: Map<
-    string,
-    {
-      kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string | undefined>;
-    }
-  >;
-}
-
 interface ReconciledPublication {
   created: PublishedScanIssue[];
   failed: FailedScanPublication[];
@@ -931,148 +919,136 @@ async function collectPublicationHandoffEvidence(
     return [];
   }
 
-  const evidence: PublicationHandoffEvidence[] = [];
   const expectedIssues = new Map(publication.issues.map(findingEntry));
-  for (const rawLine of content.split(/\r?\n/)) {
-    if (rawLine.trim().length === 0) continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(rawLine) as unknown;
-    } catch {
-      evidence.push({
-        source: "handoff",
-        status: "invalid",
-        resolution: resolveClaims([]),
-        error: "Codex wrote an invalid Linear publication handoff.",
-      });
-      continue;
-    }
-
-    const resolution = resolvePublicationClaims(record);
-    const possibleMutation =
-      isRecord(record) && record["possibleMutation"] === true
-        ? { possibleMutation: true as const }
-        : {};
-    if (!isRecord(record) || typeof record["findingId"] !== "string") {
-      evidence.push({
-        source: "handoff",
-        status: "invalid",
-        resolution,
-        ...possibleMutation,
-        error: "Codex wrote an unexpected Linear publication handoff.",
-      });
-      continue;
-    }
-    const issue = expectedIssues.get(record["findingId"]);
-    if (issue === undefined) {
-      evidence.push({
-        source: "handoff",
-        status: "invalid",
-        resolution,
-        ...possibleMutation,
-        error: "Codex wrote a Linear publication for an unknown finding.",
-      });
-      continue;
-    }
-
-    const argumentsValid = hasExpectedPublicationArguments(
-      publication,
-      issue,
-      record["arguments"],
-    );
-    const mutationPossible =
-      record["possibleMutation"] === true ||
-      (!Object.hasOwn(record, "error") && argumentsValid);
-    const base = {
-      source: "handoff" as const,
-      ownerFindingId: issue.findingId,
-      resolution,
-      ...(mutationPossible ? { possibleMutation: true as const } : {}),
-    };
-    if (
-      record["scanId"] !== publication.scanId ||
-      record["occurrenceId"] !== issue.occurrenceId
-    ) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        error:
-          "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
-      });
-      continue;
-    }
-
-    const identityNames = ["issueIdentifier", "identifier", "key", "id"].filter(
-      (name) => Object.hasOwn(record, name),
-    );
-    if (Object.hasOwn(record, "error")) {
-      const error = record["error"];
-      const hasInvalidPossibleMutation =
-        Object.hasOwn(record, "possibleMutation") &&
-        record["possibleMutation"] !== true;
-      if (
-        identityNames.length === 0 &&
-        !Object.hasOwn(record, "url") &&
-        resolution.claims.length === 0 &&
-        !hasInvalidPossibleMutation &&
-        typeof error === "string" &&
-        error.trim().length > 0
-      ) {
-        evidence.push({ ...base, status: "failure", error });
-      } else {
-        evidence.push({
-          ...base,
+  return content
+    .split(/\r?\n/)
+    .flatMap((rawLine): PublicationHandoffEvidence | [] => {
+      if (rawLine.trim().length === 0) return [];
+      let record: unknown;
+      try {
+        record = JSON.parse(rawLine) as unknown;
+      } catch {
+        return {
+          source: "handoff",
           status: "invalid",
-          error: "Codex wrote an invalid Linear publication failure.",
-        });
+          resolution: resolveClaims([]),
+          error: "Codex wrote an invalid Linear publication handoff.",
+        };
       }
-      continue;
-    }
 
-    if (resolution.state === "conflicting") {
-      evidence.push({
+      const resolution = resolvePublicationClaims(record);
+      const possibleMutation =
+        isRecord(record) && record["possibleMutation"] === true
+          ? { possibleMutation: true as const }
+          : {};
+      if (!isRecord(record) || typeof record["findingId"] !== "string") {
+        return {
+          source: "handoff",
+          status: "invalid",
+          resolution,
+          ...possibleMutation,
+          error: "Codex wrote an unexpected Linear publication handoff.",
+        };
+      }
+      const issue = expectedIssues.get(record["findingId"]);
+      if (issue === undefined) {
+        return {
+          source: "handoff",
+          status: "invalid",
+          resolution,
+          ...possibleMutation,
+          error: "Codex wrote a Linear publication for an unknown finding.",
+        };
+      }
+
+      const argumentsValid = hasExpectedPublicationArguments(
+        publication,
+        issue,
+        record["arguments"],
+      );
+      const mutationPossible =
+        record["possibleMutation"] === true ||
+        (!Object.hasOwn(record, "error") && argumentsValid);
+      const base = {
+        source: "handoff" as const,
+        ownerFindingId: issue.findingId,
+        resolution,
+        ...(mutationPossible ? { possibleMutation: true as const } : {}),
+      };
+      const invalid = (
+        error: string,
+        recoverableWithEvent?: true,
+      ): PublicationHandoffEvidence => ({
         ...base,
         status: "invalid",
-        error:
+        ...(recoverableWithEvent === undefined ? {} : { recoverableWithEvent }),
+        error,
+      });
+      if (
+        record["scanId"] !== publication.scanId ||
+        record["occurrenceId"] !== issue.occurrenceId
+      ) {
+        return invalid(
+          "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
+        );
+      }
+
+      const identityNames = [
+        "issueIdentifier",
+        "identifier",
+        "key",
+        "id",
+      ].filter((name) => Object.hasOwn(record, name));
+      if (Object.hasOwn(record, "error")) {
+        const error = record["error"];
+        const hasInvalidPossibleMutation =
+          Object.hasOwn(record, "possibleMutation") &&
+          record["possibleMutation"] !== true;
+        if (
+          identityNames.length === 0 &&
+          !Object.hasOwn(record, "url") &&
+          resolution.claims.length === 0 &&
+          !hasInvalidPossibleMutation &&
+          typeof error === "string" &&
+          error.trim().length > 0
+        ) {
+          return { ...base, status: "failure", error };
+        } else {
+          return invalid("Codex wrote an invalid Linear publication failure.");
+        }
+      }
+
+      if (resolution.state === "conflicting") {
+        return invalid(
           "Codex wrote conflicting Linear publication issue identifiers or URLs.",
+        );
+      }
+      const topLevelResolution = resolveTopLevelPublicationClaims(record);
+      const hasInvalidIdentityField = identityNames.some((name) => {
+        const value = record[name];
+        return typeof value !== "string" || value.trim().length === 0;
       });
-      continue;
-    }
-    const topLevelResolution = resolveTopLevelPublicationClaims(record);
-    const hasInvalidIdentityField = identityNames.some((name) => {
-      const value = record[name];
-      return typeof value !== "string" || value.trim().length === 0;
-    });
-    const topLevelUrl = record["url"];
-    if (
-      resolution.state !== "resolved" ||
-      topLevelResolution.state !== "resolved" ||
-      topLevelResolution.issueIdentifier !== resolution.issueIdentifier ||
-      hasInvalidIdentityField ||
-      (topLevelUrl !== undefined &&
-        (typeof topLevelUrl !== "string" || topLevelUrl.trim().length === 0))
-    ) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        error:
+      const topLevelUrl = record["url"];
+      if (
+        resolution.state !== "resolved" ||
+        topLevelResolution.state !== "resolved" ||
+        topLevelResolution.issueIdentifier !== resolution.issueIdentifier ||
+        hasInvalidIdentityField ||
+        (topLevelUrl !== undefined &&
+          (typeof topLevelUrl !== "string" || topLevelUrl.trim().length === 0))
+      ) {
+        return invalid(
           "Codex wrote a Linear publication without a valid created issue identifier.",
-      });
-      continue;
-    }
-    if (!argumentsValid) {
-      evidence.push({
-        ...base,
-        status: "invalid",
-        recoverableWithEvent: true,
-        error:
+        );
+      }
+      if (!argumentsValid) {
+        return invalid(
           "Codex wrote a Linear publication with unexpected arguments or destination.",
-      });
-      continue;
-    }
-    evidence.push({ ...base, status: "success" });
-  }
-  return evidence;
+          true,
+        );
+      }
+      return { ...base, status: "success" };
+    });
 }
 
 function resolveTopLevelPublicationClaims(
@@ -1092,14 +1068,37 @@ function reconcilePublicationEvidence(
   evidence: readonly PublicationEvidence[],
   failureMessage: string,
 ): ReconciledPublication {
-  const indexed = indexPublicationEvidence(evidence);
+  const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
+  const claimLedger = new Map<
+    string,
+    {
+      kinds: Set<PublicationClaim["kind"]>;
+      owners: Set<string | undefined>;
+    }
+  >();
+
+  for (const item of evidence) {
+    for (const claim of item.resolution.claims) {
+      for (const alias of publicationClaimAliases(claim)) {
+        const key = alias.value;
+        const reservation = claimLedger.get(key) ?? {
+          kinds: new Set<PublicationClaim["kind"]>(),
+          owners: new Set<string | undefined>(),
+        };
+        reservation.kinds.add(alias.kind);
+        reservation.owners.add(item.ownerFindingId);
+        claimLedger.set(key, reservation);
+      }
+    }
+  }
+
   const outcomes = publication.issues.map((issue) =>
-    reconcileFindingEvidence(issue, indexed.byOwner.get(issue.findingId)),
+    reconcileFindingEvidence(issue, byOwner.get(issue.findingId)),
   );
   let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
 
   const collidingOwners = new Set<string>();
-  for (const reservation of indexed.claimLedger.values()) {
+  for (const reservation of claimLedger.values()) {
     if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
       for (const owner of reservation.owners) {
         if (owner !== undefined) collidingOwners.add(owner);
@@ -1114,7 +1113,7 @@ function reconcilePublicationEvidence(
     indeterminate = true;
   }
 
-  const unowned = indexed.unowned;
+  const unowned = byOwner.get(undefined) ?? [];
   if (
     unowned.some(
       (item) =>
@@ -1157,39 +1156,6 @@ function reconcilePublicationEvidence(
         : [{ findingId: outcome.issue.findingId, error: outcome.error }],
     ),
   };
-}
-
-function indexPublicationEvidence(
-  evidence: readonly PublicationEvidence[],
-): IndexedPublicationEvidence {
-  const byOwner = new Map<string, PublicationEvidence[]>();
-  const unowned: PublicationEvidence[] = [];
-  const claimLedger: IndexedPublicationEvidence["claimLedger"] = new Map();
-
-  for (const item of evidence) {
-    for (const claim of item.resolution.claims) {
-      for (const alias of publicationClaimAliases(claim)) {
-        const key = alias.value;
-        const reservation = claimLedger.get(key) ?? {
-          kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string | undefined>(),
-        };
-        reservation.kinds.add(alias.kind);
-        reservation.owners.add(item.ownerFindingId);
-        claimLedger.set(key, reservation);
-      }
-    }
-
-    if (item.ownerFindingId === undefined) {
-      unowned.push(item);
-      continue;
-    }
-    const bucket = byOwner.get(item.ownerFindingId) ?? [];
-    bucket.push(item);
-    byOwner.set(item.ownerFindingId, bucket);
-  }
-
-  return { byOwner, unowned, claimLedger };
 }
 
 function reconcileFindingEvidence(

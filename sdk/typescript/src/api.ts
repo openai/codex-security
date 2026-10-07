@@ -519,7 +519,7 @@ export class CodexSecurity {
   /** @internal */
   public constructor(
     config: CodexSecurityConfig,
-    dependencies: ClientDependencies,
+    dependencies: ClientDependencies | undefined,
     runtimeOptions: CodexSecurityRuntimeOptions,
   );
   public constructor(
@@ -3631,14 +3631,7 @@ export async function listRepositoryFindings(
 export function createSecurity(
   config: CodexSecurityConfig = {},
 ): CodexSecurity {
-  return createSecurityInternal(config, { surface: "sdk" });
-}
-
-export function createSecurityInternal(
-  config: CodexSecurityConfig = {},
-  runtimeOptions: CodexSecurityRuntimeOptions,
-): CodexSecurity {
-  return new CodexSecurity(config, DEFAULT_DEPENDENCIES, runtimeOptions);
+  return new CodexSecurity(config);
 }
 
 export async function initialCredentialsAvailable(
@@ -3700,7 +3693,6 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   modelProvider?: unknown;
   workbenchValidated?: boolean;
   model?: string;
-  expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
@@ -3747,12 +3739,6 @@ export async function runScanEvents(
           notifyObserver(options, "onActivity")(activity);
         }
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          if (
-            options.expectedFilesTotal !== undefined &&
-            progress.filesTotal !== options.expectedFilesTotal
-          ) {
-            continue;
-          }
           notifyObserver(options, "onProgress")(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
@@ -4144,14 +4130,7 @@ function scanRecipe({
 }): JsonObject {
   return {
     repository,
-    target: {
-      kind: target.kind,
-      paths: [...target.paths],
-      ...(target.base === undefined ? {} : { base: target.base }),
-      ...(target.head === undefined ? {} : { head: target.head }),
-      ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
-      ...(target.headRef === undefined ? {} : { headRef: target.headRef }),
-    },
+    target: { ...target, paths: [...target.paths] },
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
@@ -4897,13 +4876,13 @@ function selectedWorkerRuntimeConfig(
     : [];
   const providerEnvironment = Object.fromEntries(
     providerEnvironmentNames.flatMap((name) => {
-      const value =
-        environment[name] ??
-        (process.platform === "win32"
-          ? Object.entries(environment).find(
-              ([key]) => key.toUpperCase() === name.toUpperCase(),
-            )?.[1]
-          : undefined);
+      const key =
+        process.platform === "win32"
+          ? Object.keys(environment)
+              .sort()
+              .find((key) => key.toUpperCase() === name.toUpperCase())
+          : name;
+      const value = key === undefined ? undefined : environment[key];
       return value === undefined ? [] : [[name, value]];
     }),
   );

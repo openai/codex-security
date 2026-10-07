@@ -43,10 +43,10 @@ export function withoutOpenAiApiKeys<Value>(
 
 /** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
   return resolve(
     expandHome(
-      environmentEntry(environment, "CODEX_HOME")?.trim() ||
-        join(homedir(), ".codex"),
+      configured?.trim() ? configured : join(homedir(), ".codex"),
       environment,
     ),
   );

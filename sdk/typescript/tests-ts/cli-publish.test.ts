@@ -1,5 +1,5 @@
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test, mock } from "bun:test";
@@ -242,69 +242,77 @@ describe("publish scan to custom", () => {
 });
 
 describe("publish check", () => {
-  test("resolves the shared destination options without invoking publication", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
+  test.each(["completed-scan", "~/completed-scan"])(
+    "resolves %s and shared options without invoking publication",
+    async (scanDir) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-    const currentDirectory = join(tmpdir(), "codex-security-check-current");
-    const result: CheckScanPublicationResult = {
-      scanId: "scan-example",
-      destination: {
-        type: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-      },
-      recorded: [],
-      counts: { findings: 2, recorded: 0, pending: 2 },
-      access: {
-        transport: "linear-api",
-        authentication: "verified",
-        team: "verified",
-        project: "verified",
-        assignee: "verified",
-        issueCreation: "not-tested",
-      },
-    };
-    const deps = dependencies({
-      currentDirectory,
-      environment: {
-        CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
-        CODEX_SECURITY_LINEAR_TEAM: "environment-team",
-      },
-    });
-    deps.publishScan = async () => fail("Check must not publish.");
-    deps.checkScanPublication = async (directory, options) => {
-      expect(directory).toBe(resolve(currentDirectory, "completed-scan"));
-      expect(options).toEqual({
-        destination: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-        linearApiKey: "explicit-key",
-        assigneeId: "teammate@example.com",
-        signal: expect.any(AbortSignal),
+      const currentDirectory = join(tmpdir(), "codex-security-check-current");
+      const result: CheckScanPublicationResult = {
+        scanId: "scan-example",
+        destination: {
+          type: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+        },
+        recorded: [],
+        counts: { findings: 2, recorded: 0, pending: 2 },
+        access: {
+          transport: "linear-api",
+          authentication: "verified",
+          team: "verified",
+          project: "verified",
+          assignee: "verified",
+          issueCreation: "not-tested",
+        },
+      };
+      const deps = dependencies({
+        currentDirectory,
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+          CODEX_SECURITY_LINEAR_TEAM: "environment-team",
+        },
       });
-      return result;
-    };
-    expect(
-      await runCli(
-        [
-          "publish",
-          "check",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--linear-api-key",
-          "explicit-key",
-          "--linear-assignee",
-          "teammate@example.com",
-          "--json",
-        ],
-        deps,
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result);
-    expect(stderr.text()).toBe("");
-    expect(stdout.text()).not.toContain("explicit-key");
-    expect(stdout.text()).not.toContain("teammate@example.com");
-  });
+      deps.publishScan = async () => fail("Check must not publish.");
+      deps.checkScanPublication = async (directory, options) => {
+        expect(directory).toBe(
+          resolve(
+            scanDir.startsWith("~/") ? homedir() : currentDirectory,
+            "completed-scan",
+          ),
+        );
+        expect(options).toEqual({
+          destination: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+          linearApiKey: "explicit-key",
+          assigneeId: "teammate@example.com",
+          signal: expect.any(AbortSignal),
+        });
+        return result;
+      };
+      expect(
+        await runCli(
+          [
+            "publish",
+            "check",
+            scanDir,
+            ...DESTINATION_OPTIONS,
+            "--linear-api-key",
+            "explicit-key",
+            "--linear-assignee",
+            "teammate@example.com",
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text()).toBe("");
+      expect(stdout.text()).not.toContain("explicit-key");
+      expect(stdout.text()).not.toContain("teammate@example.com");
+    },
+  );
 
   test("reports a failed check without publishing or returning a successful result", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
