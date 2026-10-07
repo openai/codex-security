@@ -513,7 +513,7 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path, m
     write_file(repository, "app/routes.py", b"changed = True\n")
     write_file(repository, "app/new handler.py", b"handler = True\n")
     write_file(repository, "app/binary.py", b"\x00\xff\x01")
-    write_file(repository, "tests/demo.py", b"excluded = True\n")
+    write_file(repository, "tests/demo.py", b"changed = True\n")
     write_file(repository, ".github/workflows/ci.yml", b"name: CI\n")
     write_file(
         repository,
@@ -549,6 +549,7 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path, m
         "app/new handler.py",
         "app/routes.py",
         "app/évidence.py",
+        "tests/demo.py",
     ]
 
 
@@ -684,7 +685,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/decoded-nul.ps1",
         b"\xff\xfe" + "text\0binary".encode("utf-16-le"),
     )
-    write_file(repository, "tests/excluded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
+    write_file(repository, "tests/encoded.ps1", b"\xff\xfe" + source.encode("utf-16-le"))
 
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
@@ -700,6 +701,7 @@ def test_diff_inventory_includes_bom_marked_utf16_text(tmp_path: Path, mode: str
         "app/utf16-be.ps1",
         "app/utf16-le.ps1",
         "app/utf8.ps1",
+        "tests/encoded.ps1",
     ]
 
 

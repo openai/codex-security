@@ -5,7 +5,7 @@ description: "Review a pull request, commit, branch diff, or working-tree patch 
 
 # Security Diff Scan
 
-Review every changed source file, including deleted files. Follow changed behavior into supporting code without expanding into an unrelated repository audit.
+Review every changed text file, including deleted files. Follow changed behavior into supporting code without expanding into an unrelated repository audit.
 
 ## Setup
 
@@ -21,6 +21,8 @@ Save context changes with `update_codex_security_scan_context`. Advance each sta
 
 Read `../../references/config-preflight.md` before dispatching the `security_diff_scan` capability preflight. When the host explicitly identifies itself as the desktop app, also read `../../references/desktop-config-preflight.md` before running the helper. For a durable scan, use its authoritative scan context, ask before applying actionable remediation, and wait without creating a scan goal or calling `fail_codex_security_scan`. Do not fail automatically for declined or unavailable remediation, helper errors, or a non-ready rerun; preserve the running scan and retry or hand off while recovery may still be possible. Use `cancel_codex_security_scan` only when the user explicitly cancels; call `fail_codex_security_scan` only after documented recovery is exhausted and the blocker is confirmed unrecoverable. Do not treat a config value that differs from a suggested patch as a warning unless the capability requirement itself is unmet.
 
+The inventory includes changed text files regardless of filename, extension, or directory. Tracked changes remain in scope even when they match ignore rules; local patches also include untracked files that Git does not ignore. Deleted files are classified from the base revision. Assess security relevance from the file's behavior and reachability, including build, deployment, and CI use, rather than its path alone.
+
 1. Run `$threat-model` once, or use the supplied model. Preserve a supplied schema-valid canonical `threatModel` object unchanged. Otherwise retain the exact supplied text, or the completed generated Markdown, as `{ "format": "markdown", "content": "<model text>" }`; mark supplied text with `origin: "provided"` and generated text with `origin: "generated"`. Model the repository unless the user requests a narrower scope, and record the model's known scope rather than substituting the changed-file scope. Immediately save a `complete: false` semantic draft with that model, no findings yet, and partial coverage. The host writes `<scan_dir>/threatmodel.md`; later phases retain the same canonical model.
 2. Prepare the file list with `prepare_codex_security_review_items` and read all pages from `list_codex_security_review_items`. Inspect deleted files at the baseline revision and unchanged files only when needed to explain the change.
 3. Run `$finding-discovery` in compact diff mode across the existing file inventory. Do not create ranked worklists, per-finding ledgers, or discovery reports. Divide large changes among available workers without overlap; review any unassigned files yourself. Keep independently reachable bugs separate and record all candidates once with `record_codex_security_discovery_candidates`.
@@ -33,8 +35,6 @@ For terminal scans without a `scanId`, generate the changed-file list with:
 ```text
 <python_command> <plugin_dir>/scripts/generate_in_scope_files.py --repo <repo_root> --scope . --diff-base <base> --diff-head <head> --diff-mode <revisions|local-patch> --out <discovery_dir>/in_scope_files.txt
 ```
-
-The inventory includes changed text files regardless of extension, subject to the existing path exclusions. Deleted files are classified from the base revision.
 
 Record candidates with `<plugin_dir>/scripts/launch_codex_security_mcp --helper normalize-candidates --input <candidate-source> --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt --allow-missing-in-scope`. Use the `.cmd` launcher on Windows. Add validation and attack-path decisions to that same file. Following `../../references/final-report.md`, assemble unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before running `finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>`.
 
