@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import git_blob_bytes, git_command
+from workbench_target import git_blob_samples, git_command
 
 
 class InventoryError(ValueError):
@@ -157,34 +157,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     return write_inventory(output, sorted(set(rows)))
 
 
-def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
-    result = git_command(
-        repository,
-        "diff",
-        "--raw",
-        "-z",
-        "--diff-filter=ACMRD",
-        f"{base}..{head}",
-        text=False,
-    )
-    result.check_returncode()
-    fields = result.stdout.split(b"\0")
-    changed: list[tuple[Path, str]] = []
-    index = 0
-    while index < len(fields) - 1:
-        metadata = fields[index].split()
-        status = chr(metadata[-1][0])
-        index += 1
-        if status in {"C", "R"}:
-            index += 1
-        path = os.fsdecode(fields[index])
-        index += 1
-        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
-        if selected_mode != b"120000":
-            changed.append((repository / path, status))
-    return changed
-
-
 def generate_diff_in_scope_files(
     repository: Path,
     base: str,
@@ -193,17 +165,19 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    from generate_rank_input import git_changed_paths, path_is_diff_excluded
-    from rank_preview import (
-        TEXT_CODE_EXTENSIONS,
-        is_binary_file,
-        is_binary_sample,
-    )
+    from generate_rank_input import git_changed_paths, path_is_diff_excluded, run_git_changed_paths
+    from rank_preview import is_binary_file
 
     rows: list[bytes] = []
     try:
         changed = (
-            committed_changed_paths(repository, base, head)
+            [
+                (path, status)
+                for path, status, selected_mode in run_git_changed_paths(
+                    repository, [f"{base}..{head}"]
+                )
+                if selected_mode != b"120000"
+            ]
             if mode == "revisions"
             else git_changed_paths(repository, base, head, mode)
         )
@@ -211,36 +185,32 @@ def generate_diff_in_scope_files(
             (path, status)
             for path, status in changed
             if not path_is_diff_excluded(path.relative_to(repository))
-            and path.suffix.lower() in TEXT_CODE_EXTENSIONS
         ]
-        revision_paths = [
-            path.relative_to(repository)
-            for path, status in eligible
-            if mode == "revisions" and status != "D"
-        ]
-        revision_blobs = dict(
-            zip(
-                revision_paths,
-                git_blob_bytes(
-                    repository,
-                    [f"{head}:{path.as_posix()}" for path in revision_paths],
-                ),
+        revision_refs = {
+            path.relative_to(repository): (
+                f"{base if status == 'D' else head}:{path.relative_to(repository).as_posix()}"
             )
+            for path, status in eligible
+            if mode == "revisions" or status == "D"
+        }
+        revision_samples = dict(
+            zip(revision_refs, git_blob_samples(repository, list(revision_refs.values())))
         )
 
         for path, status in eligible:
             relative = path.relative_to(repository)
-            if status != "D":
-                if mode == "revisions":
-                    contents = revision_blobs[relative]
-                    if contents is None:
-                        raise InventoryError(
-                            f"could not read committed diff blob: {head}:{relative.as_posix()}"
-                        )
-                    if is_binary_sample(contents):
-                        continue
-                elif path.is_symlink() or not path.is_file() or is_binary_file(path):
+            if mode == "revisions" or status == "D":
+                sample = revision_samples[relative]
+                if sample is None:
+                    revision = base if status == "D" else head
+                    raise InventoryError(
+                        f"could not read committed diff blob: {revision}:{relative.as_posix()}"
+                    )
+                _, is_binary = sample
+                if is_binary:
                     continue
+            elif path.is_symlink() or not path.is_file() or is_binary_file(path):
+                continue
             relative_path = relative.as_posix()
             if "\n" in relative_path or "\r" in relative_path:
                 raise InventoryError(

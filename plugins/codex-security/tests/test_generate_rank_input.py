@@ -63,6 +63,7 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     (repo / "src" / "zeta.py").write_text("zeta = 2", encoding="utf-8")
     (repo / "src" / "alpha.py").write_text("alpha = 1", encoding="utf-8")
     (repo / "src" / "binary.py").write_bytes(b"value\x00binary")
+    (repo / "src" / "binary.unlisted").write_bytes(b"x" * (64 * 1024 + 1) + b"\0binary")
     (repo / "tests" / "ignored.py").write_text("ignored = True", encoding="utf-8")
     (repo / "README.md").write_text("ignored", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
@@ -80,25 +81,6 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     assert output.read_text(encoding="utf-8") == (GOLDEN_DIR / "rank_input.jsonl").read_text(
         encoding="utf-8"
     )
-
-
-def test_make_repo_rank_input_keeps_declarations_after_cpp_raw_strings(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "sample.cpp").write_text(
-        """void before() {}
-const char* text = R"tag("{)tag";
-void after() {}
-""",
-        encoding="utf-8",
-    )
-    output = tmp_path / "rank_input.jsonl"
-
-    run_cli("make-repo-rank-input", "--repo", str(repo), "--out", str(output))
-
-    rows = read_jsonl(output)
-    assert [row["path"] for row in rows] == ["sample.cpp"]
-    assert rows[0]["preview"] == "function before\nfunction after"
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions"])
@@ -130,39 +112,6 @@ def test_rank_input_keeps_large_generated_python(tmp_path: Path, mode: str) -> N
     assert rows[1]["preview"] == "value = 1"
 
 
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-@pytest.mark.parametrize(
-    "source",
-    ['{"\\ud800":1}', '{"value":' + "1" * 4301 + "}"],
-    ids=["surrogate", "integer-limit"],
-)
-def test_rank_input_samples_json_without_a_renderable_outline(
-    tmp_path: Path, mode: str, source: str
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    git(repo, "commit", "--allow-empty", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    (repo / "data.json").write_text(source, encoding="utf-8")
-    output = tmp_path / "rank.jsonl"
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo)]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--mode", mode, "--base", base]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", "HEAD"])
-
-    run_cli(*arguments, "--preview-bytes", "128", "--out", str(output))
-
-    rows = read_jsonl(output)
-    assert len(rows) == 1
-    assert rows[0]["path"] == "data.json"
-    assert rows[0]["preview"] == source[:128]
-
-
 def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -189,7 +138,10 @@ def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
         str(output),
     )
 
-    assert read_jsonl(output)[0]["preview"] == "function visible()"
+    preview = read_jsonl(output)[0]["preview"]
+    assert preview.startswith("def visible():\n    pass\n# comment")
+    assert len(preview.encode("utf-8")) <= 1024
+    assert "outside" not in preview
 
 
 def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path: Path) -> None:
@@ -219,13 +171,17 @@ def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path
 
 
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
-def test_rank_input_bounds_large_text_reads(
+def test_rank_input_streams_classification_and_bounds_previews(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
 ) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     source = repo / "src" / "large.py"
-    source.write_bytes(b"def visible():\n    pass\n" + b"# source comment\n" * (128 * 1024))
+    source.write_bytes(
+        b"def visible():\n    pass\n"
+        + b"# source comment\n" * (128 * 1024)
+        + b"def outside():\n    pass\n"
+    )
     output = tmp_path / "rank_input.jsonl"
     arguments = ["make-repo-rank-input", "--repo", str(repo), "--out", str(output)]
     if scope in {"explicit", "overlap"}:
@@ -253,7 +209,7 @@ def test_rank_input_bounds_large_text_reads(
             reads.append(0)
 
             def bounded_read(size: int = -1) -> bytes:
-                assert 0 <= size <= 64 * 1024 - reads[index]
+                assert 0 <= size <= 64 * 1024
                 data = read(size)
                 reads[index] += len(data)
                 return data
@@ -265,11 +221,14 @@ def test_rank_input_bounds_large_text_reads(
     with patch.object(Path, "open", tracked_open):
         runpy.run_path(str(SCRIPT), run_name="__main__")
 
-    assert reads and all(count == 64 * 1024 for count in reads)
+    assert set(reads) == {64 * 1024, source.stat().st_size}
     rows = read_jsonl(output)
     assert len(rows) == 1
     assert rows[0]["path"] == "src/large.py"
-    assert rows[0]["preview"] == "function visible()"
+    preview = rows[0]["preview"]
+    assert preview.startswith("def visible():\n    pass\n# source comment")
+    assert len(preview.encode("utf-8")) <= 1024
+    assert "outside" not in preview
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
@@ -314,7 +273,7 @@ def test_rank_input_includes_source_cases(tmp_path: Path, mode: str) -> None:
         {
             "path": case.path,
             "area": "." if mode == "repo" else "diff",
-            "preview": case.after if case.preview is None else case.preview,
+            "preview": case.after,
         }
         for case in sorted(SOURCE_CASES, key=lambda case: case.path)
     ]
@@ -730,7 +689,7 @@ def test_make_repo_rank_input_keeps_explicit_binary_file_without_preview(tmp_pat
     repo = tmp_path / "repo"
     repo.mkdir()
     with (repo / "payload.bin").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 256)
+        payload.write(b"header-without-a-nul" * 4096)
         payload.truncate(256 * 1024 * 1024)
     scopes = tmp_path / "target-paths.json"
     scopes.write_text(json.dumps(["payload.bin"]), encoding="utf-8")
@@ -754,7 +713,7 @@ def test_make_repo_rank_input_bounds_explicit_source_like_binary(tmp_path: Path)
     source = repo / "src"
     source.mkdir(parents=True)
     with (source / "payload.py").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 256)
+        payload.write(b"header-without-a-nul" * 4096)
         payload.write(b"\0binary")
         payload.truncate(256 * 1024 * 1024)
     scopes = tmp_path / "target-paths.json"
@@ -774,27 +733,47 @@ def test_make_repo_rank_input_bounds_explicit_source_like_binary(tmp_path: Path)
     assert read_jsonl(output) == [{"path": "src/payload.py", "area": "src", "preview": ""}]
 
 
-def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_make_diff_rank_input_keeps_changed_and_deleted_text(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     initialize_repo(repo)
     (repo / "src" / "alpha.py").write_text("alpha = 1", encoding="utf-8")
     deleted_guard = repo / "src" / "deleted_guard.py"
     deleted_guard.write_text("guard = True", encoding="utf-8")
+    deleted_entrypoint = repo / "src" / "entrypoint"
+    deleted_entrypoint.write_text("exec service", encoding="utf-8")
+    deleted_binary = repo / "src" / "deleted.bin"
+    deleted_binary.write_bytes(b"value\x00binary")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
+    gitlink = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},removed-module")
+    git(repo, "commit", "--amend", "-qm", "base")
     base = git(repo, "rev-parse", "HEAD")
 
     (repo / "src" / "alpha.py").write_text("alpha = 2", encoding="utf-8")
     (repo / "src" / "beta.py").write_text("beta = 1", encoding="utf-8")
+    (repo / "src" / "binary.unlisted").write_bytes(b"x" * (64 * 1024 + 1) + b"\0binary")
     (repo / ".github" / "workflows").mkdir(parents=True)
     (repo / ".github" / "workflows" / "ci.yml").write_text("name: CI", encoding="utf-8")
+    (repo / ".gitmodules").write_text(
+        '[submodule "added-module"]\npath = added-module\nurl = ../module.git\n',
+        encoding="utf-8",
+    )
     deleted_guard.unlink()
+    deleted_entrypoint.unlink()
+    deleted_binary.unlink()
     (repo / "README.md").write_text("ignored", encoding="utf-8")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "change")
-    head = git(repo, "rev-parse", "HEAD")
-    git(repo, "checkout", "-q", base)
+    arguments = ["--mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repo, "add", ".")
+    git(repo, "update-index", "--force-remove", "removed-module")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},added-module")
+    if mode == "revisions":
+        git(repo, "commit", "-qm", "change")
+        arguments = ["--head", git(repo, "rev-parse", "HEAD")]
+        git(repo, "checkout", "-q", base)
     output = tmp_path / "diff.jsonl"
 
     run_cli(
@@ -803,8 +782,7 @@ def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
         str(repo),
         "--base",
         base,
-        "--head",
-        head,
+        *arguments,
         "--out",
         str(output),
     )
@@ -812,11 +790,13 @@ def test_make_diff_rank_input_for_revision_range(tmp_path: Path) -> None:
     rows = read_jsonl(output)
     assert [row["path"] for row in rows] == [
         ".github/workflows/ci.yml",
+        ".gitmodules",
         "src/alpha.py",
         "src/beta.py",
         "src/deleted_guard.py",
+        "src/entrypoint",
     ]
-    assert rows[-1]["preview"] == ""
+    assert [row["preview"] for row in rows[-2:]] == ["", ""]
 
 
 def test_make_diff_rank_input_uses_empty_tree_for_root_commit(tmp_path: Path) -> None:
@@ -921,6 +901,16 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     (repo / ".github" / "workflows").mkdir(parents=True)
     (repo / ".github" / "workflows" / "ci.yaml").write_text("name: CI", encoding="utf-8")
     git(repo, "add", "src/beta.py")
+    index_only = repo / "src" / "index-only.py"
+    index_only.write_text("index_only = True", encoding="utf-8")
+    git(repo, "add", "src/index-only.py")
+    index_only.unlink()
+    nested = repo / "nested"
+    nested.mkdir()
+    initialize_repo(nested)
+    (nested / "source.py").write_text("nested = True", encoding="utf-8")
+    git(nested, "add", ".")
+    git(nested, "commit", "-qm", "nested repository")
     output = tmp_path / "patch.jsonl"
 
     run_cli(
@@ -939,7 +929,9 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
         ".github/workflows/ci.yaml",
         "src/alpha.py",
         "src/beta.py",
+        "src/index-only.py",
     ]
+    assert read_jsonl(output)[-1]["preview"] == ""
 
 
 @pytest.mark.parametrize("mode", ["repo", "explicit-file", "revisions", "local-patch"])
