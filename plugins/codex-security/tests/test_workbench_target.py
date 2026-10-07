@@ -55,7 +55,7 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
     ("encoding", "bom"),
     [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
 )
-def test_git_blob_samples_bound_reads_and_classify_full_content(
+def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
 ) -> None:
     target = tmp_path / "target"
@@ -107,6 +107,10 @@ def test_git_blob_samples_bound_reads_and_classify_full_content(
         (b"after\n", False),
     ]
     assert max(reads) == 64 * 1024
+
+    from rank_preview import is_binary_file
+
+    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
 
 
 @pytest.mark.parametrize(

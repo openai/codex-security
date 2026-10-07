@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generate_in_scope_files import windows_stream_component
 from rank_preview import (
     DEFAULT_PREVIEW_BYTES,
+    is_binary_file,
     preview_for,
     preview_for_bytes,
 )
@@ -294,8 +295,10 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
                 continue
 
             preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary and not directly_requested:
-                continue
+            if is_binary or is_binary_file(path):
+                if not directly_requested:
+                    continue
+                preview = ""
             rows_by_path.setdefault(
                 rel.as_posix(),
                 {"path": rel.as_posix(), "area": area, "preview": preview},
@@ -483,7 +486,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview = ""
             else:
                 preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
+                if is_binary or is_binary_file(path):
                     continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 

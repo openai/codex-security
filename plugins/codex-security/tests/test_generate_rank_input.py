@@ -63,7 +63,7 @@ def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -
     (repo / "src" / "zeta.py").write_text("zeta = 2", encoding="utf-8")
     (repo / "src" / "alpha.py").write_text("alpha = 1", encoding="utf-8")
     (repo / "src" / "binary.py").write_bytes(b"value\x00binary")
-    (repo / "src" / "binary.unlisted").write_bytes(b"value\x00binary")
+    (repo / "src" / "binary.unlisted").write_bytes(b"x" * (64 * 1024 + 1) + b"\0binary")
     (repo / "tests" / "ignored.py").write_text("ignored = True", encoding="utf-8")
     (repo / "README.md").write_text("ignored", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
@@ -201,7 +201,7 @@ def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path
 
 
 @pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
-def test_rank_input_bounds_large_text_reads(
+def test_rank_input_streams_classification_and_bounds_previews(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
 ) -> None:
     repo = tmp_path / "repo"
@@ -235,7 +235,7 @@ def test_rank_input_bounds_large_text_reads(
             reads.append(0)
 
             def bounded_read(size: int = -1) -> bytes:
-                assert 0 <= size <= 64 * 1024 - reads[index]
+                assert 0 <= size <= 64 * 1024
                 data = read(size)
                 reads[index] += len(data)
                 return data
@@ -247,7 +247,7 @@ def test_rank_input_bounds_large_text_reads(
     with patch.object(Path, "open", tracked_open):
         runpy.run_path(str(SCRIPT), run_name="__main__")
 
-    assert reads and all(count == 64 * 1024 for count in reads)
+    assert set(reads) == {64 * 1024, source.stat().st_size}
     rows = read_jsonl(output)
     assert len(rows) == 1
     assert rows[0]["path"] == "src/large.py"
@@ -712,7 +712,7 @@ def test_make_repo_rank_input_keeps_explicit_binary_file_without_preview(tmp_pat
     repo = tmp_path / "repo"
     repo.mkdir()
     with (repo / "payload.bin").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 256)
+        payload.write(b"header-without-a-nul" * 4096)
         payload.truncate(256 * 1024 * 1024)
     scopes = tmp_path / "target-paths.json"
     scopes.write_text(json.dumps(["payload.bin"]), encoding="utf-8")
@@ -736,7 +736,7 @@ def test_make_repo_rank_input_bounds_explicit_source_like_binary(tmp_path: Path)
     source = repo / "src"
     source.mkdir(parents=True)
     with (source / "payload.py").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 256)
+        payload.write(b"header-without-a-nul" * 4096)
         payload.write(b"\0binary")
         payload.truncate(256 * 1024 * 1024)
     scopes = tmp_path / "target-paths.json"
@@ -777,7 +777,7 @@ def test_make_diff_rank_input_keeps_changed_and_deleted_text(tmp_path: Path, mod
 
     (repo / "src" / "alpha.py").write_text("alpha = 2", encoding="utf-8")
     (repo / "src" / "beta.py").write_text("beta = 1", encoding="utf-8")
-    (repo / "src" / "binary.unlisted").write_bytes(b"value\x00binary")
+    (repo / "src" / "binary.unlisted").write_bytes(b"x" * (64 * 1024 + 1) + b"\0binary")
     (repo / ".github" / "workflows").mkdir(parents=True)
     (repo / ".github" / "workflows" / "ci.yml").write_text("name: CI", encoding="utf-8")
     (repo / ".gitmodules").write_text(

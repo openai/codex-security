@@ -560,8 +560,8 @@ def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) 
     base = git(repository, "rev-parse", "HEAD")
     write_file(repository, "app/surrogate.json", b'{"\\ud800":1}')
     write_file(repository, "app/integer.json", ('{"value":' + "1" * 4301 + "}").encode())
-    write_file(repository, "app/binary.py", b"x" * 4096 + b"\0")
-    write_file(repository, "app/binary.unlisted", b"x" * 4096 + b"\0")
+    write_file(repository, "app/binary.py", b"x" * (64 * 1024 + 1) + b"\0")
+    write_file(repository, "app/binary.unlisted", b"x" * (64 * 1024 + 1) + b"\0")
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
         git(repository, "add", ".")

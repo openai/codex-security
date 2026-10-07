@@ -61,11 +61,20 @@ def is_binary_sample(data: bytes) -> bool:
 
 
 def is_binary_file(path: Path) -> bool:
+    """Classify the whole file in bounded chunks."""
     try:
         with path.open("rb") as source:
-            return is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES))
+            sample = source.read(DEFAULT_PREVIEW_READ_BYTES)
+            if is_binary_sample(sample):
+                return True
+            bom = sample[:2] if sample.startswith(_UTF16_BOMS) else b""
+            while chunk := source.read(DEFAULT_PREVIEW_READ_BYTES):
+                # Even-sized reads preserve UTF-16 code-unit alignment and byte order.
+                if is_binary_sample(bom + chunk) if bom else b"\0" in chunk:
+                    return True
     except OSError:
         return True
+    return False
 
 
 def compact_preview_line(line: str) -> str:
