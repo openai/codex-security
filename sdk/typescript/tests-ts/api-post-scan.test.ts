@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
+import type { ThreadEvent, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import {
@@ -24,6 +24,7 @@ import { writeThreatModel } from "../src/artifact-export.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
+  codexFactory,
   completedEvents,
   failedPostScanEvents,
   preparedRuntime,
@@ -82,64 +83,54 @@ async function startPostScan(scenario: PostScanScenario) {
   }
   let turns = 0;
   let original = Buffer.alloc(0);
-  const client = new TestClient(
-    {},
-    {
-      prepareRuntime: async () => runtime,
-      resolvePluginPython: async () => python!,
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      prepareScanArtifactRestorer: async (...args) => {
-        const restorer = await prepareScanArtifactRestorer(...args);
-        return scenario.wrapRestorer?.(restorer, context) ?? restorer;
-      },
-      createCodex: () => ({
-        startThread: () => ({
-          id: "thread-1",
-          async runStreamed(_input, options) {
-            expect(options.cyberAccessProgram).toBe("daybreak_blue");
-            turns += 1;
-            if (turns === 1) {
-              await copyCompletedScan(root);
-              if (scenario.initialContents !== undefined) {
-                await mkdir(dirname(artifactPath), { recursive: true });
-                await writeFile(artifactPath, scenario.initialContents);
-                const manifestPath = join(scanDir, "scan-manifest.json");
-                const manifest = JSON.parse(
-                  await readFile(manifestPath, "utf8"),
-                );
-                if (scenario.threatModel !== undefined)
-                  manifest.scan.threatModel = scenario.threatModel;
-                if (scenario.artifact !== "threatmodel.md")
-                  manifest.scan.artifacts.push({
-                    path: scenario.artifact,
-                    sha256: hash("sha256", await readFile(artifactPath)),
-                    mediaType: scenario.artifact.endsWith(".bin")
-                      ? "application/octet-stream"
-                      : "application/json",
-                  });
-                await writeFile(manifestPath, JSON.stringify(manifest));
-                if (scenario.threatModel !== undefined)
-                  await writeThreatModel(scanDir, {
-                    pluginRoot: runtime.plugin.installedRoot,
-                    pythonPath: python!,
-                    protectedRoot: repository,
-                  });
-              }
-              original = await readFile(artifactPath);
-              return { events: completedEvents() };
-            }
-            if (scenario.artifact === "threatmodel.md")
-              original = await readFile(artifactPath);
-            await scenario.mutate(context);
-            return {
-              events: scenario.followUpEvents?.() ?? failedPostScanEvents(),
-            };
-          },
-        }),
-      }),
+  const client = TestClient.withDependencies({
+    prepareRuntime: async () => runtime,
+    resolvePluginPython: async () => python!,
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+    prepareScanArtifactRestorer: async (...args) => {
+      const restorer = await prepareScanArtifactRestorer(...args);
+      return scenario.wrapRestorer?.(restorer, context) ?? restorer;
     },
-  );
+    createCodex: codexFactory(async (_input: string, options: TurnOptions) => {
+      expect(options.cyberAccessProgram).toBe("daybreak_blue");
+      turns += 1;
+      if (turns === 1) {
+        await copyCompletedScan(root);
+        if (scenario.initialContents !== undefined) {
+          await mkdir(dirname(artifactPath), { recursive: true });
+          await writeFile(artifactPath, scenario.initialContents);
+          const manifestPath = join(scanDir, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          if (scenario.threatModel !== undefined)
+            manifest.scan.threatModel = scenario.threatModel;
+          if (scenario.artifact !== "threatmodel.md")
+            manifest.scan.artifacts.push({
+              path: scenario.artifact,
+              sha256: hash("sha256", await readFile(artifactPath)),
+              mediaType: scenario.artifact.endsWith(".bin")
+                ? "application/octet-stream"
+                : "application/json",
+            });
+          await writeFile(manifestPath, JSON.stringify(manifest));
+          if (scenario.threatModel !== undefined)
+            await writeThreatModel(scanDir, {
+              pluginRoot: runtime.plugin.installedRoot,
+              pythonPath: python!,
+              protectedRoot: repository,
+            });
+        }
+        original = await readFile(artifactPath);
+        return { events: completedEvents() };
+      }
+      if (scenario.artifact === "threatmodel.md")
+        original = await readFile(artifactPath);
+      await scenario.mutate(context);
+      return {
+        events: scenario.followUpEvents?.() ?? failedPostScanEvents(),
+      };
+    }, "thread-1"),
+  });
   const scan = client.run(repository, {
     postScanPrompt: "Draft confirmed fixes.",
     cyberAccessProgram: "daybreak_blue",

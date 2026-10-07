@@ -124,14 +124,15 @@ async function multiscanInventory(root: string): Promise<void> {
       "initial",
     ],
   ]) {
-    const result = await runCommand("git", args, { timeout: 10_000 });
+    const result = await runCommand("git", args);
     expect(result.status, result.stderr).toBe(0);
   }
-  const { status, stdout, stderr } = await runCommand(
-    "git",
-    ["-C", repository, "rev-parse", "HEAD"],
-    { timeout: 10_000 },
-  );
+  const { status, stdout, stderr } = await runCommand("git", [
+    "-C",
+    repository,
+    "rev-parse",
+    "HEAD",
+  ]);
   expect(status, stderr).toBe(0);
   await writeFile(
     join(root, "repositories.csv"),
@@ -549,7 +550,7 @@ describe("CLI", () => {
         ["init", "-q", root],
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
       ]) {
-        const result = await runCommand("git", args, { timeout: 10_000 });
+        const result = await runCommand("git", args);
         expect(result.status, result.stderr).toBe(0);
       }
       let started = false;
@@ -640,11 +641,13 @@ describe("CLI", () => {
         '#!/bin/sh\nprintf "codex-security\\n" > "$CODEX_SECURITY_HOOK_MARKER"\nexit 0\n',
         { mode: 0o755 },
       );
-      const staged = await runCommand(
-        "git",
-        ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
-        { timeout: 10_000 },
-      );
+      const staged = await runCommand("git", [
+        "-C",
+        root,
+        "add",
+        "-f",
+        "node_modules/.bin/codex-security",
+      ]);
       expect(staged.status, staged.stderr).toBe(0);
       const commit = await runCommand(
         "git",
@@ -671,7 +674,6 @@ describe("CLI", () => {
             OPENAI_API_KEY: "",
             PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
           },
-          timeout: 10_000,
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
