@@ -4307,7 +4307,7 @@ test.skipIf(process.platform === "win32").each([
   { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
   { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
 ])(
-  "uses the manual $manual release category after retitling to $title",
+  "uses the manual $manual release category over stale $stale after retitling to $title",
   async ({ title, manual, stale }) => {
     const script = workflowStepShell(
       releaseLabelsWorkflow,
