@@ -153,6 +153,8 @@ test("mixed writers retain unchanged Python embeddings and replace supplied Node
       process.env.PYTHON ?? "python",
       [
         "-I",
+        "-X",
+        "utf8",
         "-c",
         `import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
