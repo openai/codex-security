@@ -17,6 +17,7 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    SealedArtifactError,
     build_threat_model_export,
     csv_cell,
     finalize_scan,
@@ -24,7 +25,6 @@ from finalize_scan_contract import (
     finding_csv_columns,
     write_export_output,
     write_sarif_projection,
-    write_scan_local_bytes,
 )
 
 
@@ -447,17 +447,20 @@ def write_csv_export(
                 row["end_line"],
             )
         )
+    destination = scan_dir / "exports" / "findings.csv"
     try:
-        write_scan_local_bytes(
+        write_export_output(
             scan_dir,
-            "exports/findings.csv",
+            destination,
+            "csv",
             output.getvalue().encode("utf-8"),
         )
+    except SealedArtifactError as exc:
+        raise SystemExit(str(exc)) from exc
     except ContractError as exc:
         raise SystemExit(
             "exports: expected a regular directory inside the scan directory."
         ) from exc
-    destination = scan_dir / "exports" / "findings.csv"
     path = db.available_artifact_path(scan_dir, destination)
     if path is None:
         raise SystemExit("findings.csv: expected a regular file inside the scan directory.")

@@ -1,3 +1,4 @@
+import type { BulkScanPrompt } from "../../src/bulk-scan-discovery.js";
 import type { main as cliMain } from "../../src/cli.js";
 import { capture } from "../cli-fixtures.js";
 
@@ -40,4 +41,11 @@ export function runCapturedCli(
   dependencies: Parameters<Main>[3],
 ) {
   return main(args, capture().stream, capture().stream, dependencies);
+}
+
+export function selectionPrompt(
+  select: BulkScanPrompt["select"],
+  isInteractive = () => true,
+) {
+  return { isInteractive, select };
 }

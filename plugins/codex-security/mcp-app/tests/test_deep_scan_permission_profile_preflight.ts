@@ -33,6 +33,7 @@ const {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: profileId,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
+  readDeepScanRuntimeConfig,
 } = await importSource(
   path.join(
     import.meta.dirname,
@@ -73,7 +74,7 @@ await testMalformedAndUnsupportedResponsesFailClosed();
 await testEarlyExecutableExitIsNotVersionError();
 await testUnexpectedTerminationRemainsRetryable();
 await testStdioFailuresRemainRetryable();
-await testUnknownJsonRpcFailuresRemainRetryableAndSafe();
+await testUnknownJsonRpcFailuresPreserveNativeDiagnostics();
 await testRuntimeFallbackWarningClassification();
 await testSpawnErrorFailsClosed();
 await testMissingWorkerDirectoryRemainsRetryable();
@@ -109,13 +110,29 @@ async function testAllowedProfileAndRawArgv() {
       ],
     },
     async ({ codexPath, cwd, argvPath, callsPath }) => {
-      await preflight(codexPath, cwd);
+      await preflightDeepScanWorkerPermissionProfile({
+        codexPath,
+        cwd,
+        configOverrides: [
+          ...rawOverrides,
+          'model_provider="synthetic.gateway"',
+        ],
+        providerConfigOverrides: [
+          'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        ],
+        expectedProfile,
+        signal: new AbortController().signal,
+      });
 
       assert.deepEqual(await readJson(argvPath), [
         "--config",
         rawOverrides[0],
         "--config",
         rawOverrides[1],
+        "--config",
+        'model_provider="synthetic.gateway"',
+        "--config",
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
         "app-server",
         "--stdio",
       ]);
@@ -344,7 +361,7 @@ async function testDisallowedProfileGivesAdminGuidance() {
           error.message.includes("existing allowlist") &&
           error.message.includes(`${profileId} = true`) &&
           error.message.includes("Deep Scan did not run.") &&
-          !error.message.includes("SECRET_REPOSITORY_PATH"),
+          error.message.includes("SECRET_REPOSITORY_PATH"),
       );
       const calls = await readJsonLines(callsPath);
       assert.deepEqual(
@@ -582,7 +599,7 @@ async function testStdioFailuresRemainRetryable() {
             error.message.includes(
               "could not exchange app-server JSON-RPC over stdio",
             ) &&
-            !error.message.includes("SECRET_REPOSITORY_PATH"),
+            error.message.includes("SECRET_REPOSITORY_PATH"),
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -590,7 +607,7 @@ async function testStdioFailuresRemainRetryable() {
   }
 }
 
-async function testUnknownJsonRpcFailuresRemainRetryableAndSafe() {
+async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
   for (const code of [-32603, -32602, -32000, undefined]) {
     await withFakeCodex(
       {
@@ -611,7 +628,7 @@ async function testUnknownJsonRpcFailuresRemainRetryableAndSafe() {
             (code === undefined
               ? !error.message.includes("JSON-RPC code")
               : error.message.includes(`JSON-RPC code ${code}`)) &&
-            !error.message.includes("SECRET_REPOSITORY_PATH") &&
+            error.message.includes("SECRET_REPOSITORY_PATH") &&
             !error.message.includes("does not support"),
         );
         await assertPreflightStopped(children, terminatedPath);
@@ -652,6 +669,7 @@ async function testRuntimeFallbackWarningClassification() {
   const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
   const error = deepScanPermissionProfileFallbackError(warning);
   assert.equal(error?.name, "DeepScanNonRetryableError");
+  assert.equal(error?.message.includes(warning), true);
   assert.equal(
     error?.message.includes(
       "worker was stopped and its results were discarded",
@@ -684,29 +702,61 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  await withFakeCodex(
-    {
-      hangAt: "config/read",
-    },
-    async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-      const controller = new AbortController();
-      const running = preflightDeepScanWorkerPermissionProfile({
-        codexPath,
-        cwd,
-        configOverrides: rawOverrides,
-        expectedProfile,
-        signal: controller.signal,
-      });
-      await waitForFile(readyPath);
-      controller.abort(new DOMException("fixture aborted", "AbortError"));
-      await assert.rejects(
-        running,
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "AbortError",
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
+  for (const run of [
+    preflightDeepScanWorkerPermissionProfile,
+    readDeepScanRuntimeConfig,
+  ]) {
+    for (const stderr of ["", "synthetic native abort diagnostic\n"]) {
+      for (const reason of [
+        undefined,
+        new DOMException("fixture aborted", "AbortError"),
+        Object.assign(
+          new Error("fixture caller error", { cause: { fixture: true } }),
+          { code: "SYNTHETIC_CANCELED" },
+        ),
+      ]) {
+        await withFakeCodex(
+          { hangAt: "config/read", stderr },
+          async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+            const controller = new AbortController();
+            const running = run({
+              codexPath,
+              cwd,
+              configOverrides: rawOverrides,
+              expectedProfile,
+              signal: controller.signal,
+            });
+            if (stderr) {
+              await new Promise<void>((resolve) => {
+                children[0].stderr!.once("data", () => resolve());
+              });
+            }
+            await waitForFile(readyPath);
+            controller.abort(reason);
+            const aborted = controller.signal.reason;
+            const expected = {
+              message: aborted.message + (stderr ? "\n" + stderr : ""),
+              name: aborted.name,
+              code: aborted.code,
+              cause: aborted.cause,
+            };
+            await assert.rejects(running, (error: Error) => {
+              assert.equal(error, aborted);
+              assert.equal(error.name, expected.name);
+              assert.equal(error.message, expected.message);
+              assert.equal(
+                (error as NodeJS.ErrnoException).code,
+                expected.code,
+              );
+              assert.equal(error.cause, expected.cause);
+              return true;
+            });
+            await assertPreflightStopped(children, terminatedPath);
+          },
+        );
+      }
+    }
+  }
 }
 
 async function assertPreflightStopped(
