@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -249,42 +249,34 @@ test("a missing member rolls back the entire dedupe batch and leaves the connect
   assert.ok("groups" in storeDedupeGroups(database, [[a, b]], "retry"));
 });
 
-test("Python and Node retries preserve Unicode group identities and timestamps", async (t) => {
-  const path = join(
-    await temporary.create("workbench-duplicates-"),
-    "workbench.sqlite3",
+test("retries preserve persisted legacy Unicode group identities and timestamps", (t) => {
+  const database = open(t);
+  // Captured from the retired Python writer, including its persisted member order.
+  const group = {
+    groupId:
+      "fdg_6f25bc42f005cebe1de9d4efe6448acdb1d42b1882d58aed74476385dfaa9f3c",
+    findingIds: [
+      "finding-\u007f",
+      "finding-λ",
+      "finding-\ue000",
+      "finding-\u{10000}",
+    ],
+    createdAt: "first",
+  };
+  for (const id of group.findingIds) finding(database, id);
+  database
+    .prepare("INSERT INTO finding_dedupe_groups (id, created_at) VALUES (?, ?)")
+    .run(group.groupId, group.createdAt);
+  const member = database.prepare(
+    "INSERT INTO finding_dedupe_group_members (group_id, finding_id) VALUES (?, ?)",
   );
-  const database = open(t, path);
-  const ids = [
-    "finding-λ",
-    "finding-\u{10000}",
-    "finding-\ue000",
-    "finding-\u007f",
-  ];
-  for (const id of ids) finding(database, id);
-  const original = JSON.parse(
-    execFileSync(
-      process.env.PYTHON ?? "python",
-      [
-        "-I",
-        "-c",
-        `import json, sqlite3, sys
-sys.path.insert(0, sys.argv[1])
-from workbench_findings import store_dedupe_groups
-with sqlite3.connect(sys.argv[2]) as db:
-    db.row_factory = sqlite3.Row
-    print(json.dumps(store_dedupe_groups(db, json.load(sys.stdin), "first")))`,
-        fileURLToPath(new URL("../../scripts/", import.meta.url)),
-        path,
-      ],
-      { input: JSON.stringify([ids]), encoding: "utf8" },
-    ),
-  );
+  for (const id of group.findingIds) member.run(group.groupId, id);
+  const original = { groups: [group] };
   assert.deepEqual(
-    storeDedupeGroups(database, [[...ids].reverse()], "later"),
+    storeDedupeGroups(database, [[...group.findingIds].reverse()], "later"),
     original,
   );
-  assert.deepEqual(listDedupeGroups(database, ids[0]), original);
+  assert.deepEqual(listDedupeGroups(database, group.findingIds[0]), original);
   assert.equal(
     database
       .prepare("SELECT count(*) AS count FROM finding_dedupe_groups")

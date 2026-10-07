@@ -271,10 +271,11 @@ order is last update descending, then severity descending for findings, then ID
 ascending. Text sorts ignore case; severity and member counts use their natural
 order. The dashboard uses the same unauthenticated endpoint as the API.
 
-### Migrating direct dashboard helper calls
+### Migrating direct Python helper calls
 
-The Python `workbench_db.py dashboard` command has been retired. Direct helper
-callers can use the existing Node helper from an installed plugin directory:
+The Python `workbench_db.py` commands listed below have been retired. Direct
+helper callers can use the existing Node helpers from an installed plugin
+directory. For example:
 
 ```bash
 scripts/launch_codex_security_mcp --helper dashboard < dashboard-request.json
@@ -298,6 +299,21 @@ specifies the absolute directory containing the existing `workbench.sqlite3`:
 
 Use an absolute Windows path on Windows. The SDK, service API, and
 `codex-security` CLI already use the Node implementation and need no changes.
+
+Use the same command name after `--helper`, with these fields in `payload`:
+
+| Command                     | Payload fields                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `dashboard`                 | The dashboard query shown above; optional `direction`, `query`, `repository`, and `id`.           |
+| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                      |
+| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                       |
+| `find-potential-duplicates` | `findingId` and `scope`: either `{"repositoryId":"REPOSITORY_ID"}` or `{"allRepositories":true}`. |
+| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                          |
+| `list-dedupe-groups`        | `findingId`.                                                                                      |
+
+Pagination and finding/repository selectors move from Python command flags into
+these JSON fields. Retained scan commands such as `workbench_db.py list-findings`
+keep their existing interface.
 
 ## Deduplicate a scan
 
