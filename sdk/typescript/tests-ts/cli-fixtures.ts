@@ -214,7 +214,6 @@ export function dependencies(
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
-    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
       args: readonly string[],
       input?: string,
@@ -288,7 +287,6 @@ export function dependencies(
         repository,
         commandOptions,
       )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
