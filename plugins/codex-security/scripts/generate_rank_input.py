@@ -9,7 +9,7 @@ This script stays deliberately model-free:
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
 
-Candidate selection uses repository scope, ignore rules, and binary detection,
+Candidate selection uses repository scope, native tool ignore rules, and binary detection,
 not filename or directory classifications. Ranking inputs use bounded source previews.
 """
 
@@ -168,7 +168,12 @@ def load_scopes_file(scopes_file: Path) -> list[str]:
 
 
 def scope_candidates(repo: Path, scope_path: Path) -> Iterable[Path]:
-    """Enumerate a scope using the repository's existing ignore policy."""
+    """Use Git's inventory in worktrees and ripgrep's ignore rules elsewhere.
+
+    Git retains tracked files and applies its standard exclusions to untracked files.
+    Outside Git, ripgrep also honors .ignore and .rgignore alongside .gitignore.
+    Explicit file scopes bypass directory ignore rules.
+    """
     if scope_path.is_file():
         return (scope_path,)
     git_candidates = git_directory_snapshot_paths(scope_path)
@@ -291,15 +296,15 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     print(f"Wrote {len(rows)} scoped paths to {output}")
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str, bytes]]:
-    """Return changed paths, statuses, and modes from the selected side of each change."""
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
         "diff",
         "--ignore-submodules=all",
         "--raw",
         "-z",
-        "--diff-filter=ACMRD",
+        "--diff-filter=ACMRDT",
         *diff_args,
         text=False,
     )
@@ -308,7 +313,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str, bytes]] = []
+    changed: list[tuple[Path, str]] = []
     index = 0
     while index < len(fields):
         metadata = fields[index].split()
@@ -319,15 +324,14 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         path = repo / os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
-        changed.append((path, status, selected_mode))
+        if selected_mode.startswith(b"100"):
+            changed.append((path, status))
     return changed
 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return [
-            (path, status) for path, status, _ in run_git_changed_paths(repo, [f"{base}..{head}"])
-        ]
+        return run_git_changed_paths(repo, [f"{base}..{head}"])
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -340,14 +344,18 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             text=False,
         )
         untracked.check_returncode()
-        combined = {path: status for path, status, _ in staged}
-        combined.update((path, status) for path, status, _ in unstaged)
+        combined = dict(staged)
+        combined.update(unstaged)
         combined.update(
             (repo / os.fsdecode(relative), "A")
             for relative in untracked.stdout.split(b"\0")
             if relative and not relative.endswith(b"/")
         )
-        return sorted(combined.items())
+        return sorted(
+            (path, status)
+            for path, status in combined.items()
+            if status == "D" or (not path.is_symlink() and path.is_file())
+        )
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 

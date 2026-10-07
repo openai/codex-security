@@ -829,6 +829,8 @@ def test_make_diff_rank_input_keeps_changed_and_deleted_text(tmp_path: Path, mod
     git(repo, "update-index", "--force-remove", "removed-module")
     git(repo, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},added-module")
     if mode == "revisions":
+        link_blob = git(repo, "hash-object", "-w", "--stdin", input="../outside")
+        git(repo, "update-index", "--add", "--cacheinfo", f"120000,{link_blob},tests/link.py")
         git(repo, "commit", "-qm", "change")
         arguments = ["--head", git(repo, "rev-parse", "HEAD")]
         git(repo, "checkout", "-q", base)
@@ -963,7 +965,7 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     index_only = repo / "src" / "index-only.py"
     index_only.write_text("index_only = True", encoding="utf-8")
     git(repo, "add", "src/index-only.py")
-    index_only.unlink()
+    index_only.unlink()  # The selected working tree no longer contains this staged addition.
     nested = repo / "nested"
     nested.mkdir()
     initialize_repo(nested)
@@ -988,9 +990,7 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
         ".github/workflows/ci.yaml",
         "src/alpha.py",
         "src/beta.py",
-        "src/index-only.py",
     ]
-    assert read_jsonl(output)[-1]["preview"] == ""
 
 
 @pytest.mark.parametrize("mode", ["repo", "explicit-file", "revisions", "local-patch"])

@@ -727,3 +727,20 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "diff scans must use the repository root" in result.stderr
     assert output.read_text(encoding="utf-8") == "previous.py\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
+def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, os.fsdecode(b"tests/caf\xe9.py"), b"changed = True\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "Add byte path")
+    output = tmp_path / "in_scope_files.txt"
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", "HEAD"]
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b"tests/caf\xe9.py\n"

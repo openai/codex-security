@@ -165,22 +165,12 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    from generate_rank_input import git_changed_paths, run_git_changed_paths
+    from generate_rank_input import git_changed_paths
     from rank_preview import is_binary_file
 
     rows: list[bytes] = []
     try:
-        changed = (
-            [
-                (path, status)
-                for path, status, selected_mode in run_git_changed_paths(
-                    repository, [f"{base}..{head}"]
-                )
-                if selected_mode != b"120000"
-            ]
-            if mode == "revisions"
-            else git_changed_paths(repository, base, head, mode)
-        )
+        changed = git_changed_paths(repository, base, head, mode)
         revision_refs = {
             path.relative_to(repository): (
                 f"{base if status == 'D' else head}:{path.relative_to(repository).as_posix()}"
@@ -206,12 +196,12 @@ def generate_diff_in_scope_files(
                     continue
             elif path.is_symlink() or not path.is_file() or is_binary_file(path):
                 continue
-            relative_path = relative.as_posix()
-            if "\n" in relative_path or "\r" in relative_path:
+            relative_path = os.fsencode(relative.as_posix())
+            if b"\n" in relative_path or b"\r" in relative_path:
                 raise InventoryError(
                     "Git changes contain a path that cannot fit in the file inventory"
                 )
-            rows.append(f"{relative_path}\n".encode())
+            rows.append(relative_path + b"\n")
     except (OSError, subprocess.CalledProcessError) as error:
         detail = getattr(error, "stderr", None)
         if isinstance(detail, bytes):
