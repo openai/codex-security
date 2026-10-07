@@ -1,6 +1,5 @@
 import { asRecord as record, isNonEmptyString } from "../record.js";
 import { isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { DeepScanNonRetryableError } from "./errors.js";
 
@@ -23,18 +22,11 @@ export function resolveDeepWorkerParentSandbox(
   extra: unknown,
 ): DeepWorkerParentSandbox {
   const state = trustedSandboxState(extra);
-  validateSandboxCwd(state.sandboxCwd);
 
   const profile = record(state.permissionProfile);
   if (!profile || profile.type !== "managed") {
     throw unsupportedParentSandbox(
       "the parent must provide a managed filesystem permission profile",
-    );
-  }
-
-  if (profile.network !== "enabled" && profile.network !== "restricted") {
-    throw unsupportedParentSandbox(
-      "the parent network permission is missing or invalid",
     );
   }
 
@@ -183,29 +175,6 @@ function trustedSandboxState(extra: unknown): Record<string, unknown> {
     );
   }
   return state;
-}
-
-function validateSandboxCwd(value: unknown): void {
-  if (value === undefined) return;
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
-  if (value.startsWith("file:")) {
-    try {
-      if (isAbsolute(fileURLToPath(value))) return;
-    } catch {
-      throw unsupportedParentSandbox(
-        "the parent sandbox working directory is invalid",
-      );
-    }
-  }
-  if (!isAbsolute(value)) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
 }
 
 function resolveGlobScanMaxDepth(

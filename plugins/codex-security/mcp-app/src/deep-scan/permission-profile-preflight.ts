@@ -1,5 +1,5 @@
 import type { JsonObject as JsonRecord } from "../types.js";
-import { asRecord as record, isNonEmptyString } from "../record.js";
+import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
@@ -82,7 +82,6 @@ export async function readDeepScanRuntimeConfig(
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
 ): Promise<{ useOpenAiApiKey: boolean }> {
-  validateOptions(options);
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -265,13 +264,6 @@ class AppServerPreflightClient {
         }
         if (typeof entry.allowed !== "boolean")
           throw malformedPreflightError(this.options.context);
-        if (
-          entry.description !== null &&
-          entry.description !== undefined &&
-          typeof entry.description !== "string"
-        ) {
-          throw malformedPreflightError(this.options.context);
-        }
         entries.push(entry);
       }
 
@@ -442,14 +434,8 @@ function verifyPreflightResult(
     throw profileNotSelectedError(options.context);
   }
 
-  const expectedProfile = comparableProfile(
-    options.expectedProfile,
-    options.context,
-  );
-  const actualWithoutDescription = comparableProfile(
-    actualProfile,
-    options.context,
-  );
+  const expectedProfile = comparableProfile(options.expectedProfile);
+  const actualWithoutDescription = comparableProfile(actualProfile);
   if (!isDeepStrictEqual(actualWithoutDescription, expectedProfile)) {
     throw profileCollisionError(options.context);
   }
@@ -477,19 +463,14 @@ function existingAllowlistExcludesProfile(
 /**
  * `config/read` serializes omitted TOML options as null. Drop only those null
  * placeholders; every unexpected non-null field still participates in the
- * strict comparison. A display description is intentionally not security
- * relevant, but it must remain a string when present.
+ * strict comparison. A display description does not affect permissions.
  */
 function comparableProfile(
   value: Readonly<Record<string, unknown>>,
-  context?: "helper",
 ): JsonRecord {
-  const normalized = stripNullObjectFields(value) as JsonRecord;
-  const description = normalized.description;
-  if (description !== undefined && typeof description !== "string") {
-    throw malformedPreflightError(context);
-  }
-  const { description: _description, ...rest } = normalized;
+  const { description: _description, ...rest } = stripNullObjectFields(
+    value,
+  ) as JsonRecord;
   return rest;
 }
 
@@ -507,23 +488,6 @@ function stripNullObjectFields(value: unknown): unknown {
       .filter(([, entry]) => entry !== null)
       .map(([key, entry]) => [key, stripNullObjectFields(entry)]),
   );
-}
-
-function validateOptions(
-  options: DeepScanPermissionProfilePreflightOptions,
-): void {
-  if (
-    !isNonEmptyString(options.codexPath) ||
-    !isNonEmptyString(options.cwd) ||
-    !Array.isArray(options.configOverrides) ||
-    options.configOverrides.some((value) => !isNonEmptyString(value)) ||
-    !record(options.expectedProfile) ||
-    !options.signal ||
-    typeof options.signal.addEventListener !== "function"
-  ) {
-    throw malformedPreflightError(options.context);
-  }
-  comparableProfile(options.expectedProfile, options.context);
 }
 
 // Verified permission incompatibilities explicitly stop the scan. A failed

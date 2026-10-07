@@ -930,9 +930,19 @@ async function testSdkInvocationAndThreadCapture() {
       "mcp_servers.codex-security.enabled": false,
     });
     assertReadOnlyWorkerPolicy(invocation.argv);
-    assert.equal(
-      workerPermissionProfileOverride(invocation.argv),
-      'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
+    assert.deepEqual(
+      JSON.parse(
+        JSON.stringify(
+          parseToml(workerPermissionProfileOverride(invocation.argv))
+            .permissions,
+        ),
+      ),
+      { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
+    );
+    const preflight = await readJson(fixture.preflightMarkerPath);
+    assert.deepEqual(
+      nativeConfigOverrides(preflight.argv),
+      nativeConfigOverrides(invocation.argv),
     );
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assertFlagPair(invocation.argv, "--cd", workingDirectory);
@@ -1862,15 +1872,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
               false,
             );
-            assert.equal(
-              workerPermissionProfileOverride(launch.args),
-              workerPermissionProfileOverride(
-                workerLaunches.find(
-                  (worker) =>
-                    worker.environment!.CODEX_SECURITY_CONFIG_PATH ===
-                    selectedProvider.path,
-                )!.args,
+            const execution = workerLaunches.find(
+              (worker) =>
+                worker.environment!.CODEX_SECURITY_CONFIG_PATH ===
+                selectedProvider.path,
+            )!;
+            assert.deepEqual(
+              nativeConfigOverrides(launch.args).filter(
+                (override) => !override.startsWith("model_providers="),
               ),
+              nativeConfigOverrides(execution.args),
             );
           }
           await Promise.all(
@@ -2040,19 +2051,12 @@ async function testWorkerCyberAccessSettings() {
           } else {
             assertFlagPair(invocation.argv, "--cyber-access-program", program);
           }
-          for (const feature of [
-            "api_key_cyber_access_programs",
-            "api_key_model_discovery",
-          ]) {
-            assert.deepEqual(
-              invocation.argv.filter((arg: string) =>
-                arg.startsWith(`features.${feature}=`),
-              ),
-              features[feature] === undefined
-                ? []
-                : [`features.${feature}=${features[feature]}`],
-            );
-          }
+          assertConfigOverrides(invocation.argv, {
+            "features.api_key_cyber_access_programs":
+              features.api_key_cyber_access_programs,
+            "features.api_key_model_discovery":
+              features.api_key_model_discovery,
+          });
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             "synthetic-worker-api-key",
@@ -2126,11 +2130,9 @@ async function testBedrockCredentialsReachWorker() {
           invocation.argv.includes("resume"),
           resumeThreadId !== undefined,
         );
-        assert.ok(
-          invocation.argv.some((arg: string) =>
-            arg.includes("mcp_servers.codex-security.enabled=false"),
-          ),
-        );
+        assertConfigOverrides(invocation.argv, {
+          "mcp_servers.codex-security.enabled": false,
+        });
       }
     }
   } finally {
@@ -2930,9 +2932,11 @@ function assertReadOnlyWorkerPolicy(args: readonly string[]) {
     false,
   );
   const override = workerPermissionProfileOverride(args);
-  assert.equal(override.includes('extends=":read-only"'), true);
-  assert.equal(override.includes('":root"="read"'), true);
-  assert.equal(override.includes("network={enabled=false}"), true);
+  assertConfigOverrides(args, {
+    "permissions.codex_security_deep_scan_worker.extends": ":read-only",
+    "permissions.codex_security_deep_scan_worker.filesystem.:root": "read",
+    "permissions.codex_security_deep_scan_worker.network.enabled": false,
+  });
   assert.equal(override.includes('"write"'), false);
 }
 
@@ -2976,12 +2980,18 @@ function restoreEnv(name: string, value: string | undefined) {
   else process.env[name] = value;
 }
 
+function nativeConfigOverrides(args: readonly string[]) {
+  return args.flatMap((arg, index) =>
+    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
+  );
+}
+
 function assertConfigOverrides(
   args: readonly string[],
   values: Record<string, string | number | boolean | undefined>,
 ) {
-  const overrides = args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [parseToml(args[index + 1])] : [],
+  const overrides = nativeConfigOverrides(args).map((value) =>
+    parseToml(value),
   );
   for (const [key, value] of Object.entries(values)) {
     const supplied = overrides.map((config) =>

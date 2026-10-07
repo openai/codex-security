@@ -180,7 +180,7 @@ function nativeArguments(options, thread, id, turn, schemaPath) {
 
 function toml(value) {
   if (typeof value === "string" || typeof value === "boolean")
-    return JSON.stringify(value);
+    return JSON.stringify(value).replace(/\u007f/g, "\\u007f");
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(toml).join(", ")}]`;
   if (value !== null && typeof value === "object") {
@@ -188,7 +188,7 @@ function toml(value) {
       .filter(([, child]) => child !== undefined)
       .map(
         ([key, child]) =>
-          `${/^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(key)} = ${toml(child)}`,
+          `${/^[A-Za-z0-9_-]+$/.test(key) ? key : toml(key)} = ${toml(child)}`,
       )
       .join(", ")}}`;
   }

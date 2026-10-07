@@ -4,6 +4,7 @@ import { assertNoError, assertFlagPair } from "./assertions.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
+import { parse as parseToml } from "smol-toml";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -278,17 +279,10 @@ model_reasoning_summary = "none"
       true,
     );
     assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
-    assert.equal(
-      startedWorker.argv.includes(
-        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT=${JSON.stringify(pluginRoot)}`,
-      ),
-      true,
-    );
-    assert.equal(
-      startedWorker.argv.includes(
-        `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
-      ),
-      true,
+    assertWorkerArtifactEnvironment(
+      startedWorker.argv,
+      pluginRoot,
+      pythonWrapperPath,
     );
 
     // Another client can replace this shared install while the scan is active.
@@ -959,11 +953,10 @@ model_reasoning_summary = "none"
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) assert.equal(context.pluginRoot, pluginRoot);
-        assert.equal(
-          execution.argv.includes(
-            `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT=${JSON.stringify(pluginRoot)}`,
-          ),
-          true,
+        assertWorkerArtifactEnvironment(
+          execution.argv,
+          pluginRoot,
+          pythonWrapperPath,
         );
         assertFlagPair(
           execution.argv,
@@ -975,12 +968,7 @@ model_reasoning_summary = "none"
             `model_reasoning_effort=${JSON.stringify(afterRestart ? "max" : "high")}`,
           ),
         );
-        assert.equal(
-          execution.argv.includes(
-            `mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND=${JSON.stringify(pythonWrapperPath)}`,
-          ),
-          true,
-        );
+
         assert.equal(
           execution.argv.includes('model_reasoning_summary="none"'),
           true,
@@ -1034,6 +1022,19 @@ function toolCall(
   };
 }
 
+function assertWorkerArtifactEnvironment(
+  args: string[],
+  expectedPluginRoot: string,
+  expectedPython: string,
+) {
+  const override = args.find((value) => value.startsWith("mcp_servers="));
+  assert.ok(override);
+  const env = JSON.parse(JSON.stringify(parseToml(override))).mcp_servers
+    .cs_artifacts.env;
+  assert.equal(env.CODEX_SECURITY_PLUGIN_ROOT, expectedPluginRoot);
+  assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
+}
+
 function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
@@ -1058,9 +1059,14 @@ function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
   const overrides = args.filter((arg) =>
     arg.startsWith("permissions.codex_security_deep_scan_worker="),
   );
-  assert.deepEqual(overrides, [
-    `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
-  ]);
+  assert.deepEqual(
+    overrides.map((value) => parseToml(value)),
+    [
+      parseToml(
+        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
+      ),
+    ],
+  );
 }
 
 async function waitForScanId({

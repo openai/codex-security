@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { loadBundledRuntime } from "./plugin-root.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 
 type WorkerEvent =
   | { type: "thread.started"; thread_id: string }
@@ -52,7 +53,8 @@ async function bundledWorkerExecutor(
     "Codex",
     fileSystemImport!,
     "workerPermissionProfile",
-    "workerPermissionProfileConfigOverrides",
+    "profileConfigOverrides",
+    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "snapshotWorkerEnvironment",
     "workerRuntimeSettings",
     "environmentVariable",
@@ -68,9 +70,10 @@ async function bundledWorkerExecutor(
     FakeCodex,
     { promises: { readFile: async () => "fixture worker prompt" } },
     () => ({}),
-    () => [],
+    profileConfigOverrides,
+    "codex_security_deep_scan_worker",
     async () => ({}),
-    async () => ({}),
+    async () => ({ config: {} }),
     () => undefined,
     preflight,
     () => undefined,

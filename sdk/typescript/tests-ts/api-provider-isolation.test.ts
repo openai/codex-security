@@ -12,6 +12,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -103,6 +104,42 @@ async function effectiveProvider(
   return config.model_providers?.[config.model_provider];
 }
 
+test("native worker override tables retain inherited features and MCP servers", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "home");
+  await mkdir(home, { mode: 0o700 });
+  const original = stringifyToml({
+    features: { shell_tool: false, view_image: false },
+    mcp_servers: {
+      "inherited.server": { command: "node", args: ["inherited-argument"] },
+      "codex-security": { command: "node", enabled: true },
+    },
+  });
+  await writeFile(join(home, "config.toml"), original);
+  const { config } = await nativeRequest(
+    { CODEX_HOME: home },
+    root,
+    profileConfigOverrides({
+      features: { api_key_model_discovery: false },
+      mcp_servers: { "codex-security": { command: "node", enabled: false } },
+    }).flatMap((value) => ["--config", value]),
+    "config/read",
+    { cwd: root, includeLayers: false },
+  );
+  expect(config.features).toMatchObject({
+    shell_tool: false,
+    view_image: false,
+    api_key_model_discovery: false,
+  });
+  expect(config.mcp_servers["inherited.server"]).toMatchObject({
+    command: "node",
+    args: ["inherited-argument"],
+    enabled: true,
+  });
+  expect(config.mcp_servers["codex-security"].enabled).toBe(false);
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
+});
+
 async function bundleWorkerSettings(root: string) {
   const executor = fileURLToPath(
     new URL(
@@ -135,10 +172,9 @@ async function loadWorkerSettings(root: string) {
     pathToFileURL(await bundleWorkerSettings(root)).href
   )) as {
     workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      configOverrides?: string[];
+      config: JsonObject;
       nativeProfile?: string;
       environment?: Record<string, string>;
-      features?: JsonObject;
     }>;
   };
 
@@ -322,14 +358,14 @@ test.each(["root", "profile override", "profile only"] as const)(
                     ).not.toContain("synthetic-key-");
                     const settings = await workerRuntimeSettings(environment);
                     expect(settings.environment).toEqual(providerEnvironment);
-                    expect(settings.features).toMatchObject(featureOverrides);
-                    expect(settings.configOverrides).toContain(
-                      `web_search=${JSON.stringify(webSearch)}`,
+                    expect(settings.config["features"]).toMatchObject(
+                      featureOverrides,
                     );
+                    expect(settings.config["web_search"]).toBe(webSearch);
                     const actual = await effectiveProvider(
                       environment,
                       repository,
-                      settings.configOverrides ?? [],
+                      profileConfigOverrides(settings.config),
                       settings.nativeProfile,
                     );
                     expect(actual).toMatchObject(provider);
@@ -430,16 +466,12 @@ test("workers preserve native provider inheritance without an explicit selection
       }),
     );
     const settings = await workerRuntimeSettings(environment);
-    expect(
-      settings.configOverrides?.some((value) =>
-        value.startsWith("model_provider="),
-      ),
-    ).not.toBe(true);
+    expect(settings.config["model_provider"]).toBeUndefined();
     expect(
       await effectiveProvider(
         environment,
         root,
-        settings.configOverrides ?? [],
+        profileConfigOverrides(settings.config),
         settings.nativeProfile,
       ),
     ).toMatchObject(providers?.["inherited.gateway"] ?? provider);

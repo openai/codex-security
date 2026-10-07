@@ -18,7 +18,6 @@ import {
 } from "node:path";
 import {
   Codex,
-  type CodexOptions,
   type CyberAccessProgram,
   type ThreadEvent,
 } from "@openai/codex-sdk";
@@ -26,6 +25,7 @@ import { parse as parseToml } from "smol-toml";
 import {
   createCodexProfileClient,
   preflightProviderDefinitions,
+  profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -63,13 +63,10 @@ export interface CodexSdkWorkerArtifactContext {
 
 interface CodexSdkWorkerRuntimeSettings {
   environment?: Record<string, string>;
-  configOverrides?: string[];
+  config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
-  reasoningSummary?: string;
-  serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
-  features?: NonNullable<CodexOptions["config"]>;
 }
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
@@ -88,8 +85,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(parentSandbox);
-      const configOverrides =
-        workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
@@ -105,7 +100,27 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
-      configOverrides.push(...(runtimeSettings.configOverrides ?? []));
+      // Keep one native configuration for the policy check and the worker turn.
+      // Worker-owned tool and permission settings take precedence over inheritance.
+      const configOverrides = profileConfigOverrides({
+        ...runtimeSettings.config,
+        ...(this.modelSettings.reasoningEffort
+          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+          : {}),
+        mcp_servers: {
+          // A disabled server still needs a valid transport during native resolution.
+          "codex-security": { command: "node", enabled: false },
+          ...this.compactArtifactServer(request),
+        },
+        ...workerSubagentConfig(
+          request.subagents,
+          runtimeSettings.config.features,
+        ),
+        approval_policy: "never",
+        default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+        [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
+          workerProfile,
+      });
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -140,27 +155,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
-        config: {
-          ...(runtimeSettings.reasoningSummary === undefined
-            ? {}
-            : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
-          ...(runtimeSettings.serviceTier === undefined
-            ? {}
-            : { service_tier: runtimeSettings.serviceTier }),
-          // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
-          ...(this.modelSettings.reasoningEffort
-            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-            : {}),
-          mcp_servers: {
-            // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
-            // A disabled server still needs a valid transport while Codex resolves plugin configuration.
-            "codex-security": { command: "node", enabled: false },
-            ...this.compactArtifactServer(request),
-          },
-          ...workerSubagentConfig(request.subagents, runtimeSettings.features),
-        },
-        // Structured SDK config cannot preserve literal filesystem keys such as
-        // ":root" or "/repo/.env"; raw overrides keep this inline TOML intact.
+        // Raw overrides preserve literal filesystem and MCP keys.
         configOverrides,
       };
       const codex =
@@ -175,7 +170,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? { model: this.modelSettings.model }
           : {}),
         threadSource: "security_scan",
-        approvalPolicy: "never",
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory,
       } as const;
@@ -320,17 +314,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerSubagentConfig(
-  subagents: number,
-  inheritedFeatures: CodexSdkWorkerRuntimeSettings["features"],
-) {
+function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
     ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
     features: {
-      ...inheritedFeatures,
+      ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
         enabled: false,
         max_concurrent_threads_per_session: subagents + 1,
@@ -346,10 +337,7 @@ function workerSubagentConfig(
   };
 }
 
-type TomlValue = string | number | boolean | TomlObject;
-type TomlObject = { [key: string]: TomlValue };
-
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
+function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
@@ -367,30 +355,6 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
     ]),
     network: { enabled: false },
   };
-}
-
-function workerPermissionProfileConfigOverrides(profile: TomlObject): string[] {
-  return [
-    `default_permissions=${tomlString(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
-    `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${tomlInlineValue(profile)}`,
-  ];
-}
-
-function tomlInlineValue(value: TomlValue): string {
-  if (typeof value === "string") return tomlString(value);
-  if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  return `{${Object.entries(value)
-    .map(([key, entry]) => `${tomlKey(key)}=${tomlInlineValue(entry)}`)
-    .join(",")}}`;
-}
-
-function tomlKey(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
-}
-
-function tomlString(value: string): string {
-  return JSON.stringify(value).replace(/\u007f/g, "\\u007f");
 }
 
 /**
@@ -513,25 +477,21 @@ async function workerRuntimeSettings(
     "CODEX_SECURITY_CONFIG_PATH",
     process.platform,
   );
-  if (!configPath) return {};
+  if (!configPath) return { config: {} };
   const config = parseToml(await fs.readFile(configPath, "utf8"));
   const profiles = config.profiles;
   const profile =
     typeof config.profile === "string" && isRecord(profiles)
       ? profiles[config.profile]
       : undefined;
-  const summary =
-    isRecord(profile) && profile.model_reasoning_summary !== undefined
-      ? profile.model_reasoning_summary
-      : config.model_reasoning_summary;
-  const serviceTier =
-    isRecord(profile) && profile.service_tier !== undefined
-      ? profile.service_tier
-      : config.service_tier;
-  const settings: CodexSdkWorkerRuntimeSettings = {
-    ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
-    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
-  };
+  const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
+  const inherited = Object.fromEntries(
+    ["model_reasoning_summary", "service_tier"].map((key) => [
+      key,
+      selected[key],
+    ]),
+  );
+  const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
   const workerConfigPath = environmentVariable(
     environment,
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -540,12 +500,15 @@ async function workerRuntimeSettings(
   const snapshot = workerConfigPath
     ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
     : undefined;
-  const workerConfig = isRecord(snapshot) ? snapshot : {};
-  const workerEnvironment = workerConfig.environment;
+  const {
+    environment: workerEnvironment,
+    native_profile: nativeProfile,
+    model_providers: legacyProviders,
+    ...workerConfig
+  } = isRecord(snapshot) ? snapshot : {};
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }
-  const nativeProfile = workerConfig.native_profile;
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.
     if (nativeProfile.length === 0 || /[^A-Za-z0-9_-]/.test(nativeProfile)) {
@@ -568,13 +531,12 @@ async function workerRuntimeSettings(
         nativeProfileConfig.model_providers,
       );
       if (Object.keys(providers).length > 0) {
-        settings.preflightProviderOverrides = [
-          `model_providers=${tomlInlineValue(providers as TomlObject)}`,
-        ];
+        settings.preflightProviderOverrides = profileConfigOverrides({
+          model_providers: providers,
+        });
       }
     }
   }
-  const legacyProviders = workerConfig.model_providers;
   if (
     settings.nativeProfile === undefined &&
     isRecord(legacyProviders) &&
@@ -584,51 +546,24 @@ async function workerRuntimeSettings(
       "This Deep Scan provider snapshot needs private native profile support. Update the SDK and bundled plugin together.",
     );
   }
-  const provider = workerConfig.model_provider;
-  for (const key of [
-    "model_instructions_file",
-    "model_verbosity",
-    "web_search",
-  ]) {
-    const value = workerConfig[key];
-    if (typeof value === "string") {
-      (settings.configOverrides ??= []).push(`${key}=${JSON.stringify(value)}`);
-    }
-  }
-  const windows = workerConfig.windows;
-  if (isRecord(windows) && typeof windows.sandbox === "string") {
-    (settings.configOverrides ??= []).push(
-      `windows.sandbox=${JSON.stringify(windows.sandbox)}`,
-    );
-  }
-  if (typeof provider === "string") {
-    (settings.configOverrides ??= []).push(
-      `model_provider=${JSON.stringify(provider)}`,
-    );
-  }
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
     settings.cyberAccessProgram =
       security.cyber_access_program as CyberAccessProgram;
   }
-  const features = config.features;
-  if (isRecord(features)) {
-    for (const name of [
-      "api_key_cyber_access_programs",
-      "api_key_model_discovery",
-    ] as const) {
-      const value = features[name];
-      if (typeof value === "boolean") {
-        (settings.features ??= {})[name] = value;
-      }
-    }
-  }
-  if (isRecord(workerConfig.features)) {
-    settings.features = {
-      ...settings.features,
-      ...(workerConfig.features as NonNullable<CodexOptions["config"]>),
-    };
-  }
+  const features = isRecord(config.features) ? config.features : {};
+  settings.config = {
+    ...inherited,
+    ...workerConfig,
+    features: {
+      ...Object.fromEntries(
+        ["api_key_cyber_access_programs", "api_key_model_discovery"].map(
+          (key) => [key, features[key]],
+        ),
+      ),
+      ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
+    },
+  };
   return settings;
 }
 
