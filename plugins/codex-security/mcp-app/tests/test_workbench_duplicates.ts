@@ -168,16 +168,18 @@ test("cosine scoring handles large and scaled vectors without argument spreading
   });
 });
 
-test("cosine scoring ranks candidates above the threshold and excludes scores below it", (t) => {
+test("cosine scoring includes the threshold and excludes scores below it", (t) => {
   const database = open(t);
   const anchor = finding(database, 1, [7, 0]);
-  const candidate = finding(database, 2, [0.56, Math.sqrt(1 - 0.56 ** 2)]);
+  const candidate = finding(database, 2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
   finding(database, 3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
   const strongest = finding(database, 4, [1, 0]);
-  assert.deepEqual(findPotentialDuplicates(database, anchor.findingId), {
-    finding: anchor,
-    potentialDuplicates: [strongest, candidate],
-  });
+  finding(database, 5, [0.549e-161, Math.sqrt(1 - 0.549 ** 2) * 1e-161]);
+  for (const repository of [undefined, "synthetic-repository"])
+    assert.deepEqual(
+      findPotentialDuplicates(database, anchor.findingId, repository),
+      { finding: anchor, potentialDuplicates: [strongest, candidate] },
+    );
 });
 
 test("dedupe retries retain durable hashes, first timestamps, and overlapping groups", (t) => {

@@ -189,7 +189,7 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         "scanDir": str(tmp_path / "scan"),
         "artifactDigest": "synthetic-artifact-hash",
         "destination": "https://synthetic.invalid/",
-        "scope": {"repositoryId": "synthetic-repository"},
+        "scope": {"repositoryId": "synthetic-repository\0retained tail"},
         "stages": {
             "scan": {"status": "completed", "result": None},
             "publish": {"status": "completed", "result": {"findingIds": []}},
@@ -214,6 +214,22 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         "id": "migrated-pending",
         "stages": {stage: {"status": "pending"} for stage in ("scan", "publish", "dedupe")},
     }
+    review_binding = {
+        "version": 1,
+        "codexVersion": "synthetic-version",
+        "source": {
+            "repository": completed["repositoryPath"],
+            "revision": "synthetic-revision",
+            "refsDigest": "synthetic-refs",
+            "content": "synthetic-content",
+        },
+        "scope": completed["scope"],
+        "model": "synthetic-model",
+        "effort": "high",
+        "promptDigest": "synthetic-prompt",
+        "contractDigest": "synthetic-contract",
+    }
+    review_result = {"decision": "DISTINCT", "rationale": "Synthetic reviewed result"}
     migrations = workbench_api["MIGRATIONS"]
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
@@ -225,13 +241,23 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         )
 
     try:
-        migrate(tuple(m for m in migrations if m[0] <= 36))
+        migrate(tuple(m for m in migrations if m[0] <= 37))
         with connection:
             for state in (completed, unfinished, pending):
                 connection.execute(
                     "INSERT INTO finding_workflows VALUES (?, ?, ?, ?)",
                     (state["id"], json.dumps(state), TIMESTAMP, "2026-08-02T00:00:00Z"),
                 )
+            connection.execute(
+                "INSERT INTO finding_workflow_reviews VALUES (?, ?, ?, ?, ?)",
+                (
+                    completed["id"],
+                    "synthetic-review",
+                    json.dumps(review_binding),
+                    json.dumps(review_result),
+                    TIMESTAMP,
+                ),
+            )
             connection.execute(
                 "CREATE TABLE synthetic_workflow_references "
                 "(workflow_id TEXT REFERENCES finding_workflows(id) ON DELETE CASCADE)"
@@ -283,6 +309,23 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             assert workflow(workbench_api, connection, "get", workflow_id=state["id"]) == {
                 "workflow": state
             }
+        assert workflow(
+            workbench_api,
+            connection,
+            "bind",
+            workflow_id=completed["id"],
+            binding={"scope": completed["scope"]},
+        ) == {"workflow": completed}
+        review = connection.execute("SELECT * FROM finding_workflow_reviews").fetchone()
+        assert review["scope_repository_id"] == completed["scope"]["repositoryId"]
+        assert review["prompt_digest"] == review_binding["promptDigest"]
+        assert workflow(
+            workbench_api,
+            connection,
+            "get-review",
+            workflow_id=completed["id"],
+            key="synthetic-review",
+        ) == {"review": review_result}
         for stage in ("scan", "publish", "dedupe"):
             state = workflow(
                 workbench_api, connection, "begin", workflow_id=completed["id"], stage=stage

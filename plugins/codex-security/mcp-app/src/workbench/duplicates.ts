@@ -11,7 +11,15 @@ export interface DedupeGroup {
 }
 
 function normalizedVector(vector: number[]): number[] {
-  const norm = vector.reduce((norm, value) => Math.hypot(norm, value), 0);
+  const maximum = vector.reduce(
+    (maximum, value) => Math.max(maximum, Math.abs(value)),
+    0,
+  );
+  // Binary scaling keeps ratios exact; 1023 is the largest finite Number exponent.
+  const scale = 2 ** Math.min(Math.floor(Math.log2(maximum)), 1023);
+  const norm =
+    scale *
+    Math.sqrt(vector.reduce((sum, value) => sum + (value / scale) ** 2, 0));
   if (!vector.every(Number.isFinite) || norm === 0 || !Number.isFinite(norm))
     throw new RangeError("A stored embedding cannot be compared.");
   return vector.map((value) => value / norm);

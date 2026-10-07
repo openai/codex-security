@@ -268,8 +268,9 @@ start scans, publication, or deduplication.
 
 Overview counts cover the whole service, regardless of filters. The default
 order is last update descending, then severity descending for findings, then ID
-ascending. Text sorts ignore case; severity and member counts use their natural
-order. The dashboard uses the same unauthenticated endpoint as the API.
+ascending. Search compares uppercase JavaScript strings; text sorts compare
+lowercase strings. Severity and member counts use their natural order. The
+dashboard uses the same unauthenticated endpoint as the API.
 
 ### Migrating direct Python helper calls
 

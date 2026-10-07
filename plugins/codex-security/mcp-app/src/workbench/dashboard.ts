@@ -106,6 +106,9 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   database.function("dashboard_lower", { deterministic: true }, (value) =>
     (JSON.parse(value as string) as string).toLowerCase(),
   );
+  database.function("dashboard_upper", { deterministic: true }, (value) =>
+    (JSON.parse(value as string) as string).toUpperCase(),
+  );
   database.function("repository_label", { deterministic: true }, (value) =>
     repositoryIds(JSON.parse(value as string))
       .join(", ")
@@ -116,9 +119,9 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
   if (query.query) {
     const columns = ["id", "title", "repositoryIds"];
     clauses.push(
-      `(${columns.map((column) => `instr(dashboard_lower(json_quote(COALESCE(records.${column}, ''))), ?) > 0`).join(" OR ")})`,
+      `(${columns.map((column) => `instr(dashboard_upper(json_quote(COALESCE(records.${column}, ''))), ?) > 0`).join(" OR ")})`,
     );
-    values.push(...columns.map(() => query.query!.toLowerCase()));
+    values.push(...columns.map(() => query.query!.toUpperCase()));
   }
   if (query.repository) {
     clauses.push(

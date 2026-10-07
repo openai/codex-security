@@ -50,7 +50,7 @@ function insert(
 test("dashboard selects details independently of filters and pagination", (t) => {
   const db = database(t);
   insert(db, "a", "Alpha");
-  const selected = insert(db, "b", "beta");
+  const selected = insert(db, "b", "beta", "ΟΣΑ");
   insert(db, "c", "Alpha");
   db.exec(`INSERT INTO finding_dedupe_groups VALUES ('group', 'created');
     INSERT INTO finding_dedupe_group_members VALUES ('group', 'a'), ('group', 'b');`);
@@ -92,6 +92,17 @@ test("dashboard selects details independently of filters and pagination", (t) =>
   assert.deepEqual(groups.items[0].repositoryIds, ["Alpha", "beta"]);
   assert.equal(groups.items[0].memberCount, 2);
   assert.deepEqual(groups.detail?.group, result.detail?.groups?.[0]);
+  for (const query of ["ΟΣ", "οσ", "ος"])
+    assert.deepEqual(
+      dashboard(db, {
+        view: "findings",
+        sort: "title",
+        query,
+        limit: 50,
+        offset: 0,
+      }).items.map((item) => item.id),
+      ["b"],
+    );
   assert.deepEqual(db.prepare("SELECT total_changes() AS count").get(), before);
 });
 
