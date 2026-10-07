@@ -346,16 +346,16 @@ function workflowStepShell(workflow: string, stepName: string): string {
     .join("\n");
 }
 
-function evaluateWorkflowCondition(
+async function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
-): boolean {
-  return evaluateWorkflowConditions([{ condition, values }])[0]!;
+): Promise<boolean> {
+  return (await evaluateWorkflowConditions([{ condition, values }]))[0]!;
 }
 
-function evaluateWorkflowConditions(
+async function evaluateWorkflowConditions(
   conditions: Array<{ condition: string; values: Record<string, string> }>,
-): boolean[] {
+): Promise<boolean[]> {
   const expressions = conditions.map(({ condition, values }) => {
     let expression = condition
       .replace(/^\$\{\{\s*/u, "")
@@ -376,11 +376,14 @@ result=$?
 if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
 printf '%s\n' "$result"`;
   });
-  const result = spawnSync(bash, ["-c", expressions.join("\n")], {
-    encoding: "utf8",
+  const result = await runCommand(bash, ["-c", expressions.join("\n")], {
+    timeout: 30_000,
   });
   if (result.status !== 0) {
-    throw new Error("Could not evaluate workflow conditions.");
+    throw new Error(
+      `Could not evaluate workflow conditions (status ${result.status}, signal ${result.signal}):\n${result.stderr}`,
+      { cause: result.error },
+    );
   }
   return result.stdout
     .trimEnd()
@@ -1629,12 +1632,12 @@ describe("GitHub release workflow safeguards", () => {
       headBranch: "none",
       expected: true,
     },
-  ])("gates release cutting for $name", (scenario) => {
+  ])("gates release cutting for $name", async (scenario) => {
     const workflow = Bun.YAML.parse(releaseCutWorkflow) as {
       jobs: { cut: { if: string } };
     };
     expect(
-      evaluateWorkflowCondition(workflow.jobs.cut.if, {
+      await evaluateWorkflowCondition(workflow.jobs.cut.if, {
         "github.event.workflow_run.conclusion": scenario.conclusion,
         "github.event.workflow_run.head_branch": scenario.headBranch,
         "github.event.workflow_run.event": scenario.sourceEvent,
@@ -3629,7 +3632,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", () => {
+  test("keeps required contexts stable for every change", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3759,7 +3762,7 @@ describe("GitHub release workflow safeguards", () => {
       expect(coverageGate(gate)?.run).toBe("exit 1");
     }
 
-    const conditions = evaluateWorkflowConditions(conditionCases);
+    const conditions = await evaluateWorkflowConditions(conditionCases);
     for (const [index, item] of conditionCases.entries()) {
       expect(conditions[index], item.message).toBe(item.expected);
     }
