@@ -32,22 +32,18 @@ test.each([
     const file = join(root, "empty.md");
     if (scenario === "empty file") await writeFile(file, " \n");
     let recipe: JsonObject | undefined;
-    await using client = new TestClient(
-      {},
-      {
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (_options, args, input) => {
-          if (args[0] === "register-cli-scan")
-            recipe = JSON.parse(input!).recipe;
-          return mockWorkbench(args, input);
-        },
-        createCodex: completedCodex(root, "thread-1"),
+    await using client = TestClient.withDependencies({
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+      prepareRuntime: async () => preparedRuntime(codexHome),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      runWorkbench: async (_options, args, input) => {
+        if (args[0] === "register-cli-scan") recipe = JSON.parse(input!).recipe;
+        return mockWorkbench(args, input);
       },
-    );
+      createCodex: completedCodex(root, "thread-1"),
+    });
     await client.run(
       repository,
       scenario === "empty file" ? { scanPromptFile: file } : { scanPrompt },
@@ -94,13 +90,10 @@ test.each([
       linked,
       process.platform === "win32" ? "junction" : "dir",
     );
-    await using client = new TestClient(
-      {},
-      {
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-        prepareRuntime: rejecting("Runtime must not start"),
-      },
-    );
+    await using client = TestClient.withDependencies({
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+      prepareRuntime: rejecting("Runtime must not start"),
+    });
     for (const operation of ["preflight", "run"] as const) {
       await expect(
         client[operation](repository, { [fileOption]: external }),
@@ -137,15 +130,12 @@ test("SDK prompt files retain empty-file and deep-validation behavior", async ()
   const validation = join(root, "validation.md");
   await writeFile(empty, " \n");
   await writeFile(validation, "Validate the synthetic fixture.");
-  await using client = new TestClient(
-    {},
-    {
-      environment: {
-        CODEX_HOME: join(root, "ambient"),
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      },
+  await using client = TestClient.withDependencies({
+    environment: {
+      CODEX_HOME: join(root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
     },
-  );
+  });
   await expect(
     client.preflight(repository, {
       scanPromptFile: empty,
