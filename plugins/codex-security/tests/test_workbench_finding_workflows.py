@@ -185,14 +185,17 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         "id": "migrated-completed",
         "repositoryPath": str(tmp_path / "repository"),
         "scanRequestDigest": "synthetic-request-hash",
-        "scanId": "synthetic-scan",
+        "scanId": "synthetic-scan\0retained tail",
         "scanDir": str(tmp_path / "scan"),
         "artifactDigest": "synthetic-artifact-hash",
         "destination": "https://synthetic.invalid/",
         "scope": {"repositoryId": "synthetic-repository\0retained tail"},
         "stages": {
             "scan": {"status": "completed", "result": None},
-            "publish": {"status": "completed", "result": {"findingIds": []}},
+            "publish": {
+                "status": "completed",
+                "result": {"findingIds": [], "legacyCounter": 2**60 + 1},
+            },
             "dedupe": {"status": "completed", "result": {"duplicateGroups": []}},
         },
     }
@@ -314,7 +317,7 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             connection,
             "bind",
             workflow_id=completed["id"],
-            binding={"scope": completed["scope"]},
+            binding={"scanId": completed["scanId"], "scope": completed["scope"]},
         ) == {"workflow": completed}
         review = connection.execute("SELECT * FROM finding_workflow_reviews").fetchone()
         assert review["scope_repository_id"] == completed["scope"]["repositoryId"]

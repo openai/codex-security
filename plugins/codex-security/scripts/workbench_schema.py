@@ -16,20 +16,25 @@ MIGRATIONS = tuple(
 )
 
 
+def migration_json_extract(document: str, path: str) -> str | int | float | None:
+    # The fixed scalar paths in migrations 38/39 must retain embedded NULs on older SQLite.
+    value = json.loads(document)
+    for key in path[2:].split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
 def migrate_finding_workflow_results(connection: sqlite3.Connection) -> None:
     for row in connection.execute("SELECT id, results_json FROM finding_workflows").fetchall():
-        state = json.loads(row["results_json"])
-        stages = state["stages"]
+        stages = json.loads(row["results_json"])["stages"]
         results = {stage: value["result"] for stage, value in stages.items() if "result" in value}
         if "pendingWrite" in stages["dedupe"]:
             results["dedupePendingWrite"] = stages["dedupe"]["pendingWrite"]
-        # Older SQLite JSON extraction truncates embedded NULs in scope IDs and diagnostics.
+        # SQLite JSON extraction on older runtimes truncates embedded NULs in diagnostics.
         connection.execute(
-            "UPDATE finding_workflows SET scope_repository_id = ?, "
-            "scan_error = ?, publish_error = ?, dedupe_error = ?, "
+            "UPDATE finding_workflows SET scan_error = ?, publish_error = ?, dedupe_error = ?, "
             "results_json = ? WHERE id = ?",
             (
-                state.get("scope", {}).get("repositoryId"),
                 stages["scan"].get("error"),
                 stages["publish"].get("error"),
                 stages["dedupe"].get("error"),
@@ -75,28 +80,13 @@ def apply_migrations(
                 elif version == 11:
                     repair_deep_scan_migration(connection)
             else:
-                if version == 39:
-                    # The SQL backfill replaces binding_json, so retain complete scope IDs first.
-                    review_scopes = [
-                        (
-                            json.loads(row["binding_json"])["scope"].get("repositoryId"),
-                            row["workflow_id"],
-                            row["review_key"],
-                        )
-                        for row in connection.execute(
-                            "SELECT workflow_id, review_key, binding_json FROM finding_workflow_reviews"
-                        ).fetchall()
-                    ]
+                if version in (38, 39):
+                    connection.create_function("migration_json_extract", 2, migration_json_extract)
+                    sql = sql.replace("json_extract(", "migration_json_extract(")
                 for statement in sql_statements(sql):
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version == 39:
-                    connection.executemany(
-                        "UPDATE finding_workflow_reviews SET scope_repository_id = ? "
-                        "WHERE workflow_id = ? AND review_key = ?",
-                        review_scopes,
-                    )
             if version not in applied:
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
