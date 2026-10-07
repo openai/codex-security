@@ -183,6 +183,7 @@ export interface WorkbenchCommandOptions {
   pluginRoot: string;
   environment: ProcessEnvironment;
   stateDirectory?: string;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1576,7 +1577,7 @@ export async function runWorkbench(
         ? await resolveTrustedExecutable(
             "node",
             options.environment,
-            process.cwd(),
+            options.protectedRoot ?? process.cwd(),
           )
         : undefined;
     if (node === null) {
