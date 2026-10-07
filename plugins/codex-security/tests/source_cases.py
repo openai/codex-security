@@ -1,7 +1,7 @@
 """Shared source examples for inventory and ranking integration tests.
 
-Add source-selection regressions here so every inventory and ranking mode uses
-the same examples. Expectations are independent of the production allowlist.
+Add source-selection and preview regressions here so every inventory and ranking
+mode uses the same examples, including source with unfamiliar or no extensions.
 """
 
 from __future__ import annotations
@@ -18,6 +18,34 @@ class SourceCase(NamedTuple):
 
 
 SOURCE_CASES = (
+    SourceCase("scripts/entrypoint", "exec service --before", "exec service --after"),
+    SourceCase("src/handler.unlisted", "render(before)", "render(after)"),
+    SourceCase(
+        "src/raw.cpp",
+        "void before() {}",
+        'void before() {}\nconst char* text = R"tag("{)tag";\nvoid after() {}',
+        "function before\nfunction after",
+    ),
+    SourceCase(
+        "src/raw.go",
+        "package sample\n\nfunc Before() {}",
+        "package sample\n\nfunc Before() {}\n\nconst Root = `C:\\`\n\nfunc After() {}",
+        "function Before\nfunction After",
+    ),
+    *(
+        SourceCase(
+            f"src/{name}.cs",
+            "class Before {}",
+            f"class Before {{}}\nclass Service {{\n  string Text = {literal};\n"
+            "  void Visible() {}\n}\nclass After {}",
+            "class Before\nclass Service\nmethod Service.Visible\nclass After",
+        )
+        for name, literal in (
+            ("three_quotes", '"""\n    { "a": "b" }\n    """'),
+            ("four_quotes", '""""\n    { "a": """ }\n    """"'),
+            ("five_quotes", '""""" contains """" and { """""'),
+        )
+    ),
     SourceCase(
         "infra/main.tf",
         'variable "enabled" { default = false }',
