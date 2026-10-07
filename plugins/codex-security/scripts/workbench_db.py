@@ -105,9 +105,6 @@ from workbench_schema import (
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
 )
-from workbench_schema import (
-    sql_statements as sql_statements,
-)
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
