@@ -41,10 +41,6 @@ def is_binary_file(path: Path) -> bool:
     return False
 
 
-def compact_preview_line(line: str) -> str:
-    return " ".join(line.split())
-
-
 def truncate_utf8(text: str, max_bytes: int) -> str:
     if max_bytes <= 0:
         return ""
@@ -55,9 +51,9 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
 
 
 def select_preview_lines(lines: list[str]) -> list[str]:
-    compact = [value for line in lines if (value := compact_preview_line(line))]
-    head = compact[:PREVIEW_HEAD_LINES]
-    remainder = compact[PREVIEW_HEAD_LINES:]
+    nonblank = [line for line in lines if line.strip()]
+    head = nonblank[:PREVIEW_HEAD_LINES]
+    remainder = nonblank[PREVIEW_HEAD_LINES:]
     if len(remainder) <= PREVIEW_SAMPLE_LINES:
         return [*head, *remainder]
 
@@ -79,7 +75,7 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
 
     def render(line_bytes: int) -> str:
         return "\n".join(
-            line if line == "..." else truncate_utf8(line, line_bytes).rstrip() for line in lines
+            line if line == "..." else truncate_utf8(line, line_bytes) for line in lines
         )
 
     high = max(len(line.encode("utf-8")) for line in lines)
@@ -87,7 +83,9 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
         range(high + 1), max_bytes, key=lambda size: len(render(size).encode("utf-8"))
     )
     best = render(limit - 1) if limit else ""
-    return best or truncate_utf8(full_preview, max_bytes)
+    if best.strip() not in {"", "..."}:
+        return best
+    return truncate_utf8(full_preview, max_bytes)
 
 
 def preview_for(
@@ -105,16 +103,23 @@ def preview_for(
             data = sample + remaining
     except OSError:
         return "", True
-    return preview_for_bytes(path, data, preview_bytes)
+    return preview_for_bytes(data, preview_bytes)
 
 
-def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
+def preview_for_bytes(data: bytes, preview_bytes: int) -> tuple[str, bool]:
     if is_binary_sample(data):
         return "", True
-    text = _decode_source(data).replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = _decode_source(data).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    lines = lines[start:end]
+    text = "\n".join(lines)
     if len(text.encode("utf-8")) <= preview_bytes:
         return text, False
-    return fit_preview_lines(select_preview_lines(text.splitlines()), preview_bytes), False
+    return fit_preview_lines(select_preview_lines(lines), preview_bytes), False
 
 
 if __name__ == "__main__":

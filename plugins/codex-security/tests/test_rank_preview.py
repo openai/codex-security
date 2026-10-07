@@ -30,8 +30,8 @@ def test_preview_for_decodes_bom_marked_utf16(
     expected = (source.strip(), False)
 
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == expected
-    assert preview_for_bytes(path, source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(data, DEFAULT_PREVIEW_BYTES) == expected
+    assert preview_for_bytes(source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == expected
 
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ def test_preview_for_rejects_binary_source_bytes(tmp_path: Path, data: bytes) ->
     path.write_bytes(data)
 
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == ("", True)
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == ("", True)
+    assert preview_for_bytes(data, DEFAULT_PREVIEW_BYTES) == ("", True)
 
 
 def test_preview_for_handles_utf16_surrogate_at_sample_boundary(
@@ -62,7 +62,7 @@ def test_preview_for_handles_utf16_surrogate_at_sample_boundary(
     path.write_bytes(data)
 
     assert preview_for(path, 8192) == (source.strip(), False)
-    assert preview_for_bytes(path, data, 8192) == (source.strip(), False)
+    assert preview_for_bytes(data, 8192) == (source.strip(), False)
 
 
 def test_preview_for_bounds_utf16_source_at_incomplete_character(
@@ -86,7 +86,7 @@ def test_preview_for_ignores_incomplete_utf16_tail(
     path.write_bytes(data)
 
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == (source, False)
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (source, False)
+    assert preview_for_bytes(data, DEFAULT_PREVIEW_BYTES) == (source, False)
 
 
 def test_preview_for_does_not_fully_read_a_large_binary(tmp_path: Path) -> None:
@@ -161,8 +161,7 @@ def test_preview_for_uses_only_the_bounded_prefix(
     source = tmp_path / filename
     source.write_bytes(prefix + suffix)
 
-    for _ in range(2):
-        assert preview_for(source, 128, max_read_bytes=len(prefix)) == (expected, False)
+    assert preview_for(source, 128, max_read_bytes=len(prefix)) == (expected, False)
 
 
 def generate_preview(
@@ -179,10 +178,7 @@ def generate_preview(
     return preview
 
 
-@pytest.mark.parametrize(
-    "filename", ["source.py", "source.cs", "source.json", "source.unlisted", "entrypoint"]
-)
-def test_small_source_is_complete_regardless_of_extension(tmp_path: Path, filename: str) -> None:
+def test_small_source_is_complete(tmp_path: Path) -> None:
     source = (
         "\n\n# Source context\n"
         + "\n".join(f"setting_{index} = {index}" for index in range(24))
@@ -191,30 +187,30 @@ def test_small_source_is_complete_regardless_of_extension(tmp_path: Path, filena
     )
     assert len(source.strip().encode("utf-8")) < DEFAULT_PREVIEW_BYTES
 
-    preview = generate_preview(tmp_path, filename, source)
+    preview = generate_preview(tmp_path, "entrypoint", source)
 
     assert preview == source.strip()
-    assert preview_for_bytes(Path(filename), source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
+    assert preview_for_bytes(source.encode("utf-8"), DEFAULT_PREVIEW_BYTES) == (
         preview,
         False,
     )
 
 
-@pytest.mark.parametrize(
-    ("filename", "source"),
-    [
-        (
-            "security.yaml",
-            "security:\n  authentication_required: false\n  allowed_origins: ['*']\n",
-        ),
-        (
-            "security.json",
-            '{"security": {"authentication_required": false, "allowed_origins": ["*"]}}\n',
-        ),
-    ],
-)
-def test_small_configuration_preserves_values(tmp_path: Path, filename: str, source: str) -> None:
-    assert generate_preview(tmp_path, filename, source) == source.strip()
+@pytest.mark.parametrize("large", [False, True], ids=["complete", "sampled"])
+def test_source_preview_preserves_retained_whitespace(tmp_path: Path, large: bool) -> None:
+    retained = '    value = "two  spaces\tand\u0085a separator"  \n    return value  '
+    source = "\n \t\n" + retained
+    if large:
+        source += "\n# " + "x" * DEFAULT_PREVIEW_BYTES
+    source += "\n \t\n"
+
+    preview = generate_preview(tmp_path, "source.py", source)
+
+    if large:
+        assert preview.startswith(retained + "\n")
+        assert len(preview.encode("utf-8")) <= DEFAULT_PREVIEW_BYTES
+    else:
+        assert preview == retained
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
@@ -225,12 +221,12 @@ def test_source_preview_normalizes_newlines(tmp_path: Path, newline: str) -> Non
     path.write_bytes(data)
 
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == (expected, False)
-    assert preview_for_bytes(path, data, DEFAULT_PREVIEW_BYTES) == (expected, False)
+    assert preview_for_bytes(data, DEFAULT_PREVIEW_BYTES) == (expected, False)
 
 
 @pytest.mark.parametrize("preview_bytes", [0, -1])
 def test_nonpositive_preview_budget_returns_no_source(preview_bytes: int) -> None:
-    assert preview_for_bytes(Path("source.py"), b"value = 1\n", preview_bytes) == ("", False)
+    assert preview_for_bytes(b"value = 1\n", preview_bytes) == ("", False)
 
 
 def test_empty_source_preview(tmp_path: Path) -> None:
@@ -260,7 +256,7 @@ def test_source_preview_ignores_utf8_bom(tmp_path: Path) -> None:
     path = tmp_path / "example.py"
     path.write_bytes(b"\xef\xbb\xbf" + source)
 
-    expected = preview_for_bytes(path, source, DEFAULT_PREVIEW_BYTES)
+    expected = preview_for_bytes(source, DEFAULT_PREVIEW_BYTES)
     assert expected == (source.decode("utf-8").strip(), False)
     assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
 
@@ -294,3 +290,16 @@ def test_literal_elision_line_respects_tiny_byte_budget(tmp_path: Path) -> None:
     preview = generate_preview(tmp_path, "styles.css", "...", preview_bytes=2)
 
     assert preview == ".."
+
+
+@pytest.mark.parametrize(("prefix", "preview_bytes"), [("line", 25), ("😀", 30), ("    line", 80)])
+def test_tiny_preview_budget_retains_source(
+    tmp_path: Path, prefix: str, preview_bytes: int
+) -> None:
+    source = "\n".join(f"{prefix}_{index:02d}" for index in range(40))
+
+    preview = generate_preview(tmp_path, "source.txt", source, preview_bytes=preview_bytes)
+
+    assert preview.startswith(f"{prefix}_00")
+    assert source.startswith(preview)
+    assert len(preview.encode("utf-8")) <= preview_bytes

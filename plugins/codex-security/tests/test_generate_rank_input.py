@@ -139,7 +139,7 @@ def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
     )
 
     preview = read_jsonl(output)[0]["preview"]
-    assert preview.startswith("def visible():\npass\n# comment")
+    assert preview.startswith("def visible():\n    pass\n# comment")
     assert len(preview.encode("utf-8")) <= 1024
     assert "outside" not in preview
 
@@ -226,7 +226,7 @@ def test_rank_input_streams_classification_and_bounds_previews(
     assert len(rows) == 1
     assert rows[0]["path"] == "src/large.py"
     preview = rows[0]["preview"]
-    assert preview.startswith("def visible():\npass\n# source comment")
+    assert preview.startswith("def visible():\n    pass\n# source comment")
     assert len(preview.encode("utf-8")) <= 1024
     assert "outside" not in preview
 
