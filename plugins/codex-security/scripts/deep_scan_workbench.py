@@ -438,7 +438,7 @@ def independent_review_progress(
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] == "reducing",
+        "consolidating": run["phase"] in {"reducing", "terminal"},
         "updatedAt": str(run["updated_at"]),
     }
 

@@ -71,6 +71,7 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  warnings?: string[];
   policyFailed?: boolean;
 }
 
@@ -113,6 +114,7 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
+  warnings?: { repository: string; warnings: string[] }[];
   policyFailed?: boolean;
 }
 
@@ -221,6 +223,7 @@ async function runCampaign(
   let completed = 0;
   let incomplete = 0;
   let policyFailed = false;
+  const warnings: NonNullable<MultiscanResult["warnings"]> = [];
   const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
     (settings) => settings.failureSeverity !== undefined,
   );
@@ -258,6 +261,17 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (receipt.status !== "failed" && receipt.warnings?.length) {
+        warnings.push({ repository: task.id, warnings: receipt.warnings });
+        for (const warning of receipt.warnings) {
+          notifyProgress(options, {
+            repository: task.id,
+            status: receipt.status,
+            attempt: receipt.attempt,
+            warning,
+          });
+        }
+      }
       if (receipt.status === "completed") {
         policyFailed ||= receipt.policyFailed === true;
         completed += 1;
@@ -295,6 +309,7 @@ async function runCampaign(
       failed: 0,
       skipped,
       resultsPath: ledger,
+      ...(warnings.length === 0 ? {} : { warnings }),
       ...(hasPolicy ? { policyFailed } : {}),
     };
   }
@@ -326,6 +341,7 @@ async function runCampaign(
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
+        const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
@@ -430,13 +446,15 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
-              onWarning: (warning) =>
+              onWarning: (warning) => {
+                runWarnings.push(warning);
                 notifyProgress(options, {
                   repository: task.id,
                   attempt,
                   status: "started",
                   warning,
-                }),
+                });
+              },
               ...(options.signal === undefined
                 ? {}
                 : { signal: options.signal }),
@@ -498,6 +516,7 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
             ...(attemptPolicyFailed === undefined
               ? {}
               : { policyFailed: attemptPolicyFailed }),
@@ -519,6 +538,9 @@ async function runCampaign(
         });
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
+          if (runWarnings.length > 0) {
+            warnings.push({ repository: task.id, warnings: runWarnings });
+          }
           if (warning === undefined) completed += 1;
           else incomplete += 1;
           break;
@@ -553,6 +575,7 @@ async function runCampaign(
     failed,
     skipped,
     resultsPath: ledger,
+    ...(warnings.length === 0 ? {} : { warnings }),
     ...(hasPolicy ? { policyFailed } : {}),
   };
 }
@@ -828,18 +851,10 @@ async function ensureManifest(
     {
       version: 1,
       tasks,
-      ...(options.scanPrompt === undefined
-        ? {}
-        : { scanPrompt: options.scanPrompt }),
-      ...(options.validationPrompt === undefined
-        ? {}
-        : { validationPrompt: options.validationPrompt }),
-      ...(options.postScanPrompt === undefined
-        ? {}
-        : { postScanPrompt: options.postScanPrompt }),
-      ...(options.maxCostUsd === undefined
-        ? {}
-        : { maxCostUsd: options.maxCostUsd }),
+      scanPrompt: options.scanPrompt,
+      validationPrompt: options.validationPrompt,
+      postScanPrompt: options.postScanPrompt,
+      maxCostUsd: options.maxCostUsd,
       ...(options.scanOptionsByMode === undefined
         ? {}
         : {

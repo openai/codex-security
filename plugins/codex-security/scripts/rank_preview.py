@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import re
+from bisect import bisect_right
 from pathlib import Path
 
 DEFAULT_PREVIEW_BYTES = 1024
@@ -15,6 +16,8 @@ PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 TEXT_CODE_EXTENSIONS = {
+    ".ascx",
+    ".aspx",
     ".c",
     ".cc",
     ".cfg",
@@ -22,6 +25,7 @@ TEXT_CODE_EXTENSIONS = {
     ".clj",
     ".cpp",
     ".cs",
+    ".cshtml",
     ".css",
     ".cts",
     ".cue",
@@ -42,6 +46,8 @@ TEXT_CODE_EXTENSIONS = {
     ".java",
     ".js",
     ".json",
+    ".jsp",
+    ".jspx",
     ".jsx",
     ".kt",
     ".kts",
@@ -57,6 +63,7 @@ TEXT_CODE_EXTENSIONS = {
     ".psd1",
     ".psm1",
     ".py",
+    ".razor",
     ".rb",
     ".rs",
     ".scala",
@@ -104,13 +111,14 @@ BRACE_LANGUAGE_EXTENSIONS = {
 }
 NESTED_BLOCK_COMMENT_EXTENSIONS = {".kt", ".kts", ".rs", ".scala", ".swift"}
 CPP_RAW_STRING_RE = re.compile(r'(?<![\w\x80-\U0010ffff])(?:u8|u|U|L)?R"([^\s()\\]{0,16})\(')
+CSHARP_RAW_STRING_RE = re.compile(r'"{3,}')
 RUST_RAW_STRING_RE = re.compile(r'(?:br|r)(#{0,16})"')
 RUST_LIFETIME_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
 PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
 
 
 def _decode_source(data: bytes) -> str:
-    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8"
+    encoding = "utf-16" if data.startswith(_UTF16_BOMS) else "utf-8-sig"
     return data.decode(encoding, errors="ignore")
 
 
@@ -118,6 +126,14 @@ def is_binary_sample(data: bytes) -> bool:
     if data.startswith(_UTF16_BOMS):
         return "\0" in _decode_source(data)
     return b"\0" in data
+
+
+def is_binary_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as source:
+            return is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES))
+    except OSError:
+        return True
 
 
 def compact_preview_line(line: str) -> str:
@@ -161,23 +177,12 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
             line if line == "..." else truncate_utf8(line, line_bytes).rstrip() for line in lines
         )
 
-    content_lines = [line for line in lines if line != "..."]
-    if not content_lines:
-        return truncate_utf8(full_preview, max_bytes)
-    low = 0
-    high = max(len(line.encode("utf-8")) for line in content_lines)
-    best = ""
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best:
-        return best
-    return truncate_utf8(full_preview, max_bytes)
+    high = max(len(line.encode("utf-8")) for line in lines)
+    limit = bisect_right(
+        range(high + 1), max_bytes, key=lambda size: len(render(size).encode("utf-8"))
+    )
+    best = render(limit - 1) if limit else ""
+    return best or truncate_utf8(full_preview, max_bytes)
 
 
 def python_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
@@ -235,40 +240,7 @@ def python_outline(text: str) -> list[str]:
     return outline
 
 
-def javascript_regex_end(text: str, start: int) -> int | None:
-    if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
-        return None
-    previous = start - 1
-    while previous >= 0 and text[previous] in " \t\r":
-        previous -= 1
-    if previous >= 0 and text[previous] not in "=(:,[!&|?{};\n":
-        prefix = text[max(0, previous - 8) : previous + 1]
-        if not re.search(r"\b(?:case|return|throw)$", prefix):
-            return None
-
-    index = start + 1
-    in_character_class = False
-    while index < len(text):
-        char = text[index]
-        if char == "\n":
-            return None
-        if char == "\\" and index + 1 < len(text):
-            index += 2
-            continue
-        if char == "[":
-            in_character_class = True
-        elif char == "]":
-            in_character_class = False
-        elif char == "/" and not in_character_class:
-            index += 1
-            while index < len(text) and text[index].isalpha():
-                index += 1
-            return index
-        index += 1
-    return None
-
-
-def mask_c_style_source(text: str, suffix: str) -> str:
+def mask_c_style_source(text: str, suffix: str) -> str | None:
     masked: list[str] = []
     index = 0
     block_comment_depth = 0
@@ -389,6 +361,14 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             quote = '@"'
             index += 2
             continue
+        if suffix == ".cs":
+            raw_match = CSHARP_RAW_STRING_RE.match(text, index)
+            if raw_match:
+                token = raw_match.group(0)
+                masked.extend(" " * len(token))
+                raw_terminator = token
+                index += len(token)
+                continue
         if suffix == ".go" and char == "`":
             masked.append(" ")
             raw_terminator = "`"
@@ -408,12 +388,6 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 heredoc_terminator = heredoc_match.group(1)
                 index += len(token)
                 continue
-        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index)
-            if regex_end is not None:
-                masked.extend(" " * (regex_end - index))
-                index = regex_end
-                continue
         if char == "/" and next_char == "/":
             masked.extend((" ", " "))
             in_line_comment = True
@@ -429,6 +403,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             in_line_comment = True
             index += 1
             continue
+        if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
+            # Regex literals and division need grammar context; sample the original source.
+            return None
         if char in {'"', "'", "`"}:
             quote = char
             masked.append(" ")
@@ -693,7 +670,10 @@ def strip_leading_annotations(original: str, masked: str) -> tuple[str, str, lis
 
 def brace_language_outline(text: str, suffix: str) -> list[str]:
     original_lines = text.splitlines()
-    masked_lines = mask_c_style_source(text, suffix).splitlines()
+    masked = mask_c_style_source(text, suffix)
+    if masked is None:
+        return []
+    masked_lines = masked.splitlines()
     outline: dict[str, None] = {}
     type_stack: list[tuple[str, int]] = []
     function_depths: list[int] = []
@@ -944,7 +924,7 @@ def simple_language_outline(text: str, suffix: str) -> list[str]:
 def json_outline(text: str) -> list[str]:
     try:
         parsed = json.loads(text)
-    except (json.JSONDecodeError, RecursionError, MemoryError):
+    except (ValueError, RecursionError, MemoryError):
         return []
     if not isinstance(parsed, dict):
         return []
@@ -995,7 +975,11 @@ def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str,
     text = _decode_source(data)
     outline = structural_outline(path, text)
     preview_lines = select_preview_lines(outline or text.splitlines())
-    return fit_preview_lines(preview_lines, preview_bytes), False
+    try:
+        preview = fit_preview_lines(preview_lines, preview_bytes)
+    except UnicodeEncodeError:
+        preview = fit_preview_lines(select_preview_lines(text.splitlines()), preview_bytes)
+    return preview, False
 
 
 if __name__ == "__main__":

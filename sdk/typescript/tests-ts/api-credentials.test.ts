@@ -11,18 +11,33 @@ import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
-import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import {
+  codexFactory,
+  completedEvents,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile"])(
+  test.each([
+    "direct",
+    "profile",
+    "profile-providers",
+    "profile-providers-ambient",
+    "profile-inherited-cwd",
+    "profile-overridden-cwd",
+    "profile-strict",
+  ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
-      const profile = selection === "profile";
+      const profile = selection !== "direct";
+      const profileProviders = profile && selection !== "profile";
+      const inheritedCwd = selection === "profile-inherited-cwd";
+      const overriddenCwd = selection === "profile-overridden-cwd";
+      const strict = selection === "profile-strict";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -40,30 +55,63 @@ describe("CodexSecurity orchestration", () => {
         refresh_interval_ms: 1000,
         ...(profile ? { cwd: "helpers" } : {}),
       };
+      const definition = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      const rootDefinition = {
+        ...definition,
+        auth: {
+          ...auth,
+          ...(inheritedCwd || overriddenCwd ? { cwd: "root-helpers" } : {}),
+        },
+      };
+      const selectedDefinition =
+        inheritedCwd || overriddenCwd
+          ? {
+              auth: {
+                command: "./selected-auth",
+                ...(overriddenCwd ? { cwd: "selected-helpers" } : {}),
+              },
+            }
+          : definition;
       const overrides = {
+        ...(strict ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
-              profiles: { review: { model_provider: "synthetic.provider" } },
+              profiles: {
+                review: {
+                  model_provider: "synthetic.provider",
+                  service_tier: "fast",
+                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(profileProviders
+                    ? {
+                        model_providers: {
+                          "synthetic.provider": selectedDefinition,
+                        },
+                      }
+                    : {}),
+                },
+              },
             }
           : { model_provider: "synthetic.provider" }),
-        model_providers: {
-          "synthetic.provider": {
-            name: "Synthetic",
-            base_url: "https://provider.example/v1",
-            wire_api: "responses",
-            auth,
-          },
-        },
+        ...(!profileProviders || inheritedCwd || overriddenCwd
+          ? { model_providers: { "synthetic.provider": rootDefinition } }
+          : {}),
       };
-      let captured: CodexOptions | undefined;
+      const originalOverrides = structuredClone(overrides);
+      let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
         {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
             CODEX_SECURITY_STATE_DIR: state,
-            ...(profile
+            ...(selection === "profile" ||
+            selection === "profile-providers-ambient"
               ? {
                   OPENAI_API_KEY: "synthetic-ambient-key",
                   CODEX_API_KEY: "synthetic-other-key",
@@ -86,7 +134,30 @@ describe("CodexSecurity orchestration", () => {
             return {
               startThread: () => ({
                 id: null,
-                runStreamed: rejecting("synthetic command-auth scan started"),
+                async runStreamed() {
+                  if (!profile) {
+                    const preflightConfig = parseToml(
+                      await readFile(
+                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(preflightConfig["model_provider"]).toBe(
+                      "synthetic.provider",
+                    );
+                    expect(preflightConfig["model_providers"]).toBeUndefined();
+                    if (process.platform !== "win32") {
+                      expect(
+                        (
+                          await stat(
+                            options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                          )
+                        ).mode & 0o777,
+                      ).toBe(0o600);
+                    }
+                  }
+                  throw new Error("synthetic command-auth scan started");
+                },
               }),
             };
           },
@@ -107,26 +178,56 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
-          ...overrides.model_providers["synthetic.provider"],
-          auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
+          ...definition,
+          auth: {
+            ...auth,
+            ...(inheritedCwd || overriddenCwd
+              ? { command: "./selected-auth" }
+              : {}),
+            cwd: !profile
+              ? home
+              : join(
+                  home,
+                  inheritedCwd
+                    ? "root-helpers"
+                    : overriddenCwd
+                      ? "selected-helpers"
+                      : "helpers",
+                ),
+          },
         };
-        expect(parseToml(captured!.configOverrides![0]!)).toEqual({
+        expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
+          "model_providers",
+        );
+        expect(
+          parseToml(
+            await readFile(
+              join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          ),
+        ).toEqual({
           model_providers: { "synthetic.provider": provider },
         });
         if (profile) {
-          expect(captured?.config?.["profile"]).toBe("review");
-          expect(captured?.config?.["profiles"]).toEqual({
-            review: { model_provider: "synthetic.provider" },
-          });
+          expect(captured?.config?.["profile"]).toBeUndefined();
+          expect(captured?.config?.["profiles"]).toBeUndefined();
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config?.["service_tier"]).toBe("fast");
+          if (strict)
+            expect(captured?.config?.["approval_policy"]).toBe("never");
         } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
-          expect(saved["model_providers"]).toEqual({
-            "synthetic.provider": provider,
-          });
+          expect(saved["model_provider"]).toBeUndefined();
+          expect(saved["model_providers"]).toBeUndefined();
+          expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
+        expect(overrides).toEqual(originalOverrides);
       } finally {
         await client.close();
       }
@@ -213,7 +314,7 @@ describe("CodexSecurity orchestration", () => {
                         "plugins",
                         "codex-security",
                         "codex-home",
-                      )]: "read",
+                      )]: { ".": "deny" },
                     },
                   },
                 },
@@ -232,7 +333,7 @@ describe("CodexSecurity orchestration", () => {
                 allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
-                windows: { sandbox: "unelevated" },
+                windows: { sandbox: "elevated" },
                 mcp_servers: {
                   private: {
                     command: "echo",
@@ -421,42 +522,34 @@ describe("CodexSecurity orchestration", () => {
                 options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
               expect(typeof deepScanConfigPath).toBe("string");
               deepScanConfigPaths.add(deepScanConfigPath!);
-              return {
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    if (++scansStarted === 2) {
-                      expect(
-                        existsSync(
-                          join(credentialHome, ".codex-security-scan.lock"),
-                        ),
-                      ).toBe(false);
-                      concurrentScans.resolve();
-                    }
-                    const credentialConfig = parseToml(
-                      await readFile(
-                        join(credentialHome, "config.toml"),
-                        "utf8",
-                      ),
-                    );
-                    expect(credentialConfig["model"]).toBeUndefined();
-                    const before = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(before["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    await concurrentScans.promise;
-                    const after = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(after["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    throw new Error("parallel managed scan reached");
-                  },
-                }),
-              };
+              return codexFactory(async () => {
+                if (++scansStarted === 2) {
+                  expect(
+                    existsSync(
+                      join(credentialHome, ".codex-security-scan.lock"),
+                    ),
+                  ).toBe(false);
+                  concurrentScans.resolve();
+                }
+                const credentialConfig = parseToml(
+                  await readFile(join(credentialHome, "config.toml"), "utf8"),
+                );
+                expect(credentialConfig["model"]).toBeUndefined();
+                const before = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(before["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                await concurrentScans.promise;
+                const after = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(after["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                throw new Error("parallel managed scan reached");
+              })();
             },
           },
         );

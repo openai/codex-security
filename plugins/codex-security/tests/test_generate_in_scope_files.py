@@ -6,6 +6,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 import pytest
+from source_cases import SOURCE_CASES
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "generate_in_scope_files.py"
 
@@ -532,74 +533,40 @@ def test_diff_inventory_keeps_changed_and_deleted_source_files(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_terraform(tmp_path: Path, mode: str) -> None:
+def test_diff_inventory_only_classifies_source_bytes(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)
-    write_file(repository, "infra/main.tf", b'variable "enabled" { default = false }\n')
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "infra/main.tf", b'variable "enabled" { default = true }\n')
+    write_file(repository, "app/surrogate.json", b'{"\\ud800":1}')
+    write_file(repository, "app/integer.json", ('{"value":' + "1" * 4301 + "}").encode())
+    write_file(repository, "app/binary.py", b"x" * 4096 + b"\0")
     arguments = ["--diff-base", base, "--diff-mode", mode]
     if mode == "revisions":
         git(repository, "add", ".")
         git(repository, "commit", "-qm", "change")
-        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
-        git(repository, "checkout", "-q", base)
+        arguments.extend(["--diff-head", "HEAD"])
     output = tmp_path / "in_scope_files.txt"
 
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "infra/main.tf\n"
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_objective_c(tmp_path: Path, mode: str) -> None:
-    repository = make_repository(tmp_path)
-    sources = {
-        "ios/Bridge.mm": b"@implementation Bridge\n@end\n",
-        "ios/ViewController.h": b"@interface ViewController : NSObject\n@end\n",
-        "ios/ViewController.m": b"@implementation ViewController\n@end\n",
-    }
-    for name, source in sources.items():
-        write_file(repository, name, source)
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-    for name, source in sources.items():
-        write_file(repository, name, source + b"// Changed.\n")
-    arguments = ["--diff-base", base, "--diff-mode", mode]
-    if mode == "revisions":
-        git(repository, "add", ".")
-        git(repository, "commit", "-qm", "change")
-        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
-        git(repository, "checkout", "-q", base)
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(repository, ".", output, arguments=arguments)
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == sorted(sources)
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "app/integer.json",
+        "app/surrogate.json",
+    ]
 
 
 @pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
-def test_diff_inventory_includes_changed_cpp_headers(tmp_path: Path, mode: str) -> None:
+def test_diff_inventory_includes_source_cases(tmp_path: Path, mode: str) -> None:
     repository = make_repository(tmp_path)
-    names = [
-        "include/base.h",
-        "include/base.hpp",
-        "include/lower.hh",
-        "include/lower.hxx",
-        "include/upper.HH",
-        "include/upper.HXX",
-    ]
-    for name in names:
-        write_file(repository, name, b"inline int answer() { return 1; }\n")
+    for case in SOURCE_CASES:
+        write_file(repository, case.path, (case.before + "\n").encode("utf-8"))
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    for name in names:
-        write_file(repository, name, b"inline int answer() { return 2; }\n")
+    for case in SOURCE_CASES:
+        write_file(repository, case.path, (case.after + "\n").encode("utf-8"))
     arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
     if mode in {"revisions", "staged"}:
         git(repository, "add", ".")
@@ -612,79 +579,9 @@ def test_diff_inventory_includes_changed_cpp_headers(tmp_path: Path, mode: str) 
     result = run_inventory(repository, ".", output, arguments=arguments)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8").splitlines() == sorted(names)
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_solidity(tmp_path: Path, mode: str) -> None:
-    repository = make_repository(tmp_path)
-    source = b"pragma solidity ^0.8.24;\ncontract Vault {}\n"
-    write_file(repository, "contracts/Vault.sol", source)
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "contracts/Vault.sol", source + b"// Changed.\n")
-    arguments = ["--diff-base", base, "--diff-mode", mode]
-    if mode == "revisions":
-        git(repository, "add", ".")
-        git(repository, "commit", "-qm", "change")
-        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
-        git(repository, "checkout", "-q", base)
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(repository, ".", output, arguments=arguments)
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "contracts/Vault.sol\n"
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_changed_vyper(tmp_path: Path, mode: str) -> None:
-    repository = make_repository(tmp_path)
-    source = b"stored: public(uint256)\n"
-    write_file(repository, "contracts/Vault.vy", source)
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, "contracts/Vault.vy", source + b"# Changed.\n")
-    arguments = ["--diff-base", base, "--diff-mode", mode]
-    if mode == "revisions":
-        git(repository, "add", ".")
-        git(repository, "commit", "-qm", "change")
-        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
-        git(repository, "checkout", "-q", base)
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(repository, ".", output, arguments=arguments)
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == "contracts/Vault.vy\n"
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-@pytest.mark.parametrize("filename", ["+page.svelte", "profile.ejs", "show.html.erb", "card.phtml"])
-def test_diff_inventory_includes_changed_templates(
-    tmp_path: Path, mode: str, filename: str
-) -> None:
-    repository = make_repository(tmp_path)
-    path = f"src/routes/{filename}"
-    write_file(repository, path, b"<p>before</p>\n")
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "base")
-    base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, path, b"<p>after</p>\n")
-    arguments = ["--diff-base", base, "--diff-mode", mode]
-    if mode == "revisions":
-        git(repository, "add", ".")
-        git(repository, "commit", "-qm", "change")
-        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
-        git(repository, "checkout", "-q", base)
-    output = tmp_path / "in_scope_files.txt"
-
-    result = run_inventory(repository, ".", output, arguments=arguments)
-
-    assert result.returncode == 0, result.stderr
-    assert output.read_text(encoding="utf-8") == f"{path}\n"
+    assert output.read_text(encoding="utf-8").splitlines() == sorted(
+        case.path for case in SOURCE_CASES
+    )
 
 
 def test_diff_inventory_keeps_every_javascript_module_extension(tmp_path: Path) -> None:

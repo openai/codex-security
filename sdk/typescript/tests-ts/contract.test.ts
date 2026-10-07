@@ -53,6 +53,16 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
+function pythonExport(scanDir: string) {
+  return runPython(process.env["PYTHON"] ?? Bun.which("python3") ?? "python", [
+    join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+    "--scan-dir",
+    scanDir,
+    "--export-format",
+    "json",
+  ]);
+}
+
 function expectation(
   target: NormalizedTarget,
   mode: "standard" | "deep" = "standard",
@@ -438,6 +448,123 @@ describe("canonical scan contract", () => {
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 
+  test.each(["rootCause", "root_cause"])(
+    "reads legacy %s evidence references in both readers without rewriting the seal",
+    async (section) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["code_evidence"] = [
+        { id: "synthetic-evidence", code: "handler()" },
+      ];
+      findings["findings"][0][section] = {
+        summary: "Synthetic root cause.",
+        evidenceRefs: [null, "synthetic-evidence", 3],
+      };
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const bytes = await readFile(findingsPath);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.findings.findings[0]?.[section as "rootCause"]).toEqual({
+        summary: "Synthetic root cause.",
+        evidenceRefs: ["synthetic-evidence"],
+      });
+      expect(await readFile(findingsPath)).toEqual(bytes);
+    },
+  );
+
+  test("rejects duplicate sealed findings in both readers", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"].push(structuredClone(findings["findings"][0]));
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+    expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("duplicate finding");
+  });
+
+  test.each([
+    ["title", " \t\n", false],
+    ["summary", " \t\n", false],
+    ["remediation", " \t\n", false],
+    ["confidence.rationale", " \t\n", false],
+    ["taxonomy.category", " \t\n", false],
+    ["provenance.source", " \t\n", false],
+    ["severity.scoringSystem", " \t\n", false],
+    ["title", "\u0085\u001c", false],
+    ["title", "\ufeff", true],
+    ["title", "  Synthetic required text. \n", true],
+  ] as const)(
+    "agrees with Python on required finding text %s %j",
+    async (field, text, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      const finding = findings["findings"][0];
+      finding["severity"]["score"] = 5;
+      finding["severity"]["scoringSystem"] = "synthetic";
+      const parts = field.split(".");
+      const object = parts.length === 1 ? finding : finding[parts[0]!];
+      object[parts.at(-1)!] = text;
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode === 0).toBe(valid);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      if (valid) {
+        await expect(loaded).resolves.toBeDefined();
+        expect(JSON.parse(new TextDecoder().decode(exported.stdout))).toEqual(
+          findings,
+        );
+      } else {
+        await expect(loaded).rejects.toThrow("non-empty string");
+      }
+      expect(await readJson(findingsPath)).toEqual(findings);
+    },
+  );
+
+  test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
+    "reads a UTF-8 BOM in sealed %s without changing its bytes",
+    async (filename) => {
+      const scanDir = await copyExample();
+      const path = join(scanDir, filename);
+      const bytes = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        await readFile(path),
+      ]);
+      await writeFile(path, bytes);
+      if (filename !== "scan-manifest.json") await reseal(scanDir);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).resolves.toBeDefined();
+      expect(await readFile(path)).toEqual(bytes);
+    },
+  );
+
+  test("rejects noncanonical remote backslashes in both readers", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["target"]["remote"] =
+      "https://example.test/synthetic/repo\\name";
+    await writeJson(manifestPath, manifest);
+    expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("canonical absolute URL");
+  });
+
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");
@@ -731,6 +858,29 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test.each([-1, 0])(
+    "agrees with Python on a finding end-line offset of %i",
+    async (offset) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      const location = findings["findings"][0]["locations"][0];
+      location["endLine"] = location["startLine"] + offset;
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+
+      expect(pythonExport(scanDir).exitCode === 0).toBe(offset === 0);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      if (offset === 0) {
+        await expect(loaded).resolves.toBeDefined();
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "findings.findings[0].locations[0].endLine: expected an integer >= startLine.",
+        );
+      }
+    },
+  );
+
   test("rejects trailing-dot aliases for sealed artifacts", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
@@ -781,35 +931,28 @@ describe("canonical scan contract", () => {
     expect(stderr).toContain("duplicate artifact path");
   });
 
-  test("rejects calendar-invalid RFC 3339 timestamps", async () => {
+  test.each([
+    ["2026-02-30T18:00:00Z", false],
+    ["0000-01-01T00:00:00Z", false],
+    ["1900-02-29T00:00:00Z", false],
+    ["2026-01-01T24:00:00Z", false],
+    ["2026-01-01T00:00:60Z", false],
+    ["2026-01-01T00:00:00+24:00", false],
+    ["2026-01-01T00:00Z", false],
+    ["2026-05-31t18:09:00z", true],
+    ["0001-01-01T00:00:00Z", true],
+    ["2000-02-29T23:59:59.123456+23:59", true],
+    ["2026-01-01T00:00:00Z\n", false],
+  ] as const)("validates RFC 3339 timestamp %j", async (value, valid) => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-02-30T18:00:00Z";
-    manifest["scan"]["sealedAt"] = "2026-02-30T18:00:00Z";
+    manifest["scan"]["completedAt"] = value;
+    manifest["scan"]["sealedAt"] = value;
     await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-
-    manifest["scan"]["completedAt"] = "0000-01-01T00:00:00Z";
-    manifest["scan"]["sealedAt"] = "0000-01-01T00:00:00Z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-  });
-
-  test("accepts lowercase RFC 3339 separators", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-05-31t18:09:00z";
-    manifest["scan"]["sealedAt"] = "2026-05-31t18:09:00z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toBeDefined();
+    const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (valid) await expect(loaded).resolves.toBeDefined();
+    else await expect(loaded).rejects.toThrow("date-time");
   });
 
   test("requires completed and sealed timestamps to match exactly", async () => {

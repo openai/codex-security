@@ -1,25 +1,15 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { pythonExecutable } from "./support/python.js";
 import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync(true);
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function git(directory: string, ...args: string[]): void {
   const result = spawnSync("git", ["-C", directory, ...args], {
@@ -30,10 +20,7 @@ function git(directory: string, ...args: string[]): void {
 }
 
 test("writes nested Git pointers as UTF-8 independently of the locale", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-nested-git-utf8-")),
-  );
-  temporaryDirectories.push(root);
+  const root = temporaryDirectories.create("codex-security-nested-git-utf8-");
   const repository = join(root, "repository");
   const nested = join(repository, "nested-漢字");
   const checkout = join(root, "checkout");

@@ -2,6 +2,7 @@ import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
   cp,
@@ -405,28 +406,34 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   const code = await runCli(["scans", "resume", f.scanId, "--json"], {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
     runWorkbench: f.command,
-    createSecurity: resumeClient(f, (options) => ({
-      startThread() {
-        throw new Error("Resume must not create a new thread.");
-      },
-      resumeThread(threadId) {
-        expect(threadId).toBe(f.threadId);
-        expect(options.env).toMatchObject({
-          AWS_PROFILE: "synthetic-bedrock",
-        });
-        expect(options.apiKey).toBeUndefined();
-        return {
-          id: threadId,
-          async runStreamed(prompt) {
-            expect(prompt).toContain("Amazon Bedrock with AWS authentication");
-            expect(prompt).toContain(
-              "Skip the ChatGPT account Daybreak access advisory",
-            );
-            throw new Error("Resumed Bedrock prompt captured");
-          },
-        };
-      },
-    })),
+    createSecurity: resumeClient(
+      f,
+      (options) => ({
+        startThread() {
+          throw new Error("Resume must not create a new thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          expect(options.env).toMatchObject({
+            AWS_PROFILE: "synthetic-bedrock",
+          });
+          expect(options.apiKey).toBeUndefined();
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+              throw new Error("Resumed Bedrock prompt captured");
+            },
+          };
+        },
+      }),
+      { deepScanConfigPath: join(f.codexHome, "deep-scan.toml") },
+    ),
   });
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
@@ -437,12 +444,16 @@ function resumeClient(
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
+  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
 ) {
   return (config: ConstructorParameters<typeof TestClient>[0]) =>
     new TestClient(config, {
       environment: f.environment,
       prepareRuntime: async () => {
-        const runtime = preparedRuntime(f.codexHome);
+        const runtime = {
+          ...preparedRuntime(f.codexHome),
+          ...runtimeOverrides,
+        };
         runtime.configPath = join(f.root, "resumed-runtime.toml");
         runtime.environment = Object.fromEntries(
           Object.entries(f.environment).filter(
@@ -506,6 +517,58 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     join(f.scanDir, "scan-manifest.json"),
   ]);
 }
+
+test.each([false, true])(
+  "resumed CLI starts with terminal Deep progress (interactive=%p)",
+  async (interactive) => {
+    const f = await interruptedScan();
+    await finishDiscovery(f);
+    const { stderr, runCli } = createCliTest(main, { stderr: interactive });
+    const progress = Promise.withResolvers<void>();
+    const createSecurity = resumeClient(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        return {
+          id: threadId,
+          async runStreamed() {
+            await progress.promise;
+            const text = stripVTControlCharacters(stderr.text()).replace(
+              /\s+/gu,
+              " ",
+            );
+            expect(text).toContain("consolidating results");
+            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
+            expect(text).not.toContain("Scan phase: discovery");
+            throw new Error("Terminal progress captured");
+          },
+        };
+      },
+    }));
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+      ...dependencies({
+        environment: f.environment,
+        currentDirectory: f.root,
+      }),
+      runWorkbench: f.command,
+      createSecurity: (config) => {
+        const security = createSecurity(config);
+        const run = security.run.bind(security);
+        security.run = (repository, options = {}) =>
+          run(repository, {
+            ...options,
+            onDeepProgress(update) {
+              options.onDeepProgress?.(update);
+              progress.resolve();
+            },
+          });
+        return security;
+      },
+    });
+    expect(code).toBe(2);
+    expect(stderr.text()).toContain("Terminal progress captured");
+  },
+);
 
 test.each([
   [false, false],

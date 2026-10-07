@@ -5,7 +5,7 @@ export interface DeepScanProgress {
   completed: number;
   active: number;
   maximum: number;
-  /** Whether the coordinator is consolidating accepted review results. */
+  /** Whether the coordinator is reducing results or has finished. */
   consolidating?: boolean;
 }
 
@@ -92,7 +92,8 @@ export function deepScanProgressFromWorkbench(
       isSafeNonNegativeInteger(completed) &&
       isSafeNonNegativeInteger(active) &&
       isSafeNonNegativeInteger(maximum) &&
-      maximum > 0
+      maximum > 0 &&
+      (consolidating === undefined || typeof consolidating === "boolean")
     ) {
       return {
         completed,

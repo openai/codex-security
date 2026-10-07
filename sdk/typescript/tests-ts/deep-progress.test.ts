@@ -40,6 +40,8 @@ describe("Deep Scan progress", () => {
     { completed: -1, active: 0, maximum: 40 },
     { completed: 0, active: 0, maximum: 0 },
     { completed: 0, active: "two", maximum: 40 },
+    { completed: 2, active: 0, maximum: 40, consolidating: "false" },
+    { completed: 2, active: 0, maximum: 40, consolidating: null },
   ])("rejects invalid workbench progress %#", (independentReviews) => {
     expect(() =>
       deepScanProgressFromWorkbench(workbenchResult(independentReviews)),
