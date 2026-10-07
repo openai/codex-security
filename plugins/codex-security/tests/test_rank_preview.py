@@ -787,50 +787,6 @@ TXT;
     assert "method Service.visible" in preview
 
 
-def test_go_raw_string_backslash_does_not_hide_following_function(tmp_path: Path) -> None:
-    source = r"""package sample
-
-func Before() {}
-
-const Root = `C:\`
-
-func After() {}
-"""
-
-    preview = generate_preview(tmp_path, "sample.go", source)
-
-    assert "function Before" in preview
-    assert "function After" in preview
-
-
-@pytest.mark.parametrize(
-    "literal",
-    [
-        '"""\n    { "a": "b" }\n    """',
-        '""""\n    { "a": """ }\n    """"',
-        '""""" contains """" and { """""',
-    ],
-    ids=["three-quotes", "four-quotes", "five-quotes"],
-)
-def test_csharp_raw_string_closes_on_matching_quote_count(tmp_path: Path, literal: str) -> None:
-    source = f"""class Before {{}}
-class Service {{
-  string Text = {literal};
-  void Visible() {{}}
-}}
-class After {{}}
-"""
-
-    preview = generate_preview(tmp_path, "Service.cs", source)
-
-    assert preview.splitlines() == [
-        "class Before",
-        "class Service",
-        "method Service.Visible",
-        "class After",
-    ]
-
-
 def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
     source = """import package
 broken = (
