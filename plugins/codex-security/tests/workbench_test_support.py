@@ -350,6 +350,14 @@ def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -
     return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
 
 
+def preserve_scan_results(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "preserve-scan-results", scan_id, "--thread-id", thread_id, **options
+    )
+
+
 def start_scan_command(
     state_dir: Path, workspace_id: str, *extra: str, **options: Any
 ) -> dict[str, object]:
@@ -729,7 +737,6 @@ def write_completed_contract(
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
-    exclude_paths = []
     include_paths = include_paths or ["."]
     target_contract = {
         "kind": target_kind,
@@ -820,7 +827,7 @@ def write_completed_contract(
         "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
-        "excludePaths": exclude_paths,
+        "excludePaths": [],
         "surfaces": [
             {
                 "id": "surface_archive_extraction",
@@ -845,7 +852,7 @@ def write_completed_contract(
             "startedAt": "2026-06-02T18:00:00Z",
             "completedAt": "2026-06-02T18:09:00Z",
             "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": exclude_paths},
+            "scope": {"includePaths": include_paths, "excludePaths": []},
             "coverageRef": "coverage.json",
             "findingsRef": "findings.json",
         },
