@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -26,10 +27,7 @@ from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    segment = "".join(
-        character if character.isalnum() or character in "._-" else "-" for character in value
-    )
-    return segment.strip("-") or "scan"
+    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
 
 
 def compact_timestamp() -> str:
