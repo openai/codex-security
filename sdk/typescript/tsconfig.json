@@ -15,7 +15,7 @@
     "scripts/run-ci-tests.mts"
   ],
   "compilerOptions": {
-    "allowJs": false,
+    "allowJs": true,
     "checkJs": false,
     "incremental": true,
     "isolatedModules": true,
