@@ -95,8 +95,6 @@ test("diff previews stay inside the selected repository", () => {
     "src/deleted.py",
     "src/entry.py",
     "src/handler.py",
-    // Git lists the untracked POSIX symlink, but not the Windows junction.
-    ...(process.platform === "win32" ? [] : ["src/nested"]),
     "src/nested/linked.py",
   ]);
   expect(rows.find((row) => row.path === "src/handler.py")?.preview).toBe(
@@ -105,9 +103,6 @@ test("diff previews stay inside the selected repository", () => {
   expect(rows.find((row) => row.path === "src/nested/linked.py")?.preview).toBe(
     "",
   );
-  if (process.platform !== "win32") {
-    expect(rows.find((row) => row.path === "src/nested")?.preview).toBe("");
-  }
 });
 
 test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {

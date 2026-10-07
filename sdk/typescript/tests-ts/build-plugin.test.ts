@@ -95,9 +95,11 @@ describe("bundled plugin build", () => {
         filter: (path) =>
           !["node_modules", ".preview"].includes(basename(path)),
       });
-      await cp(join(plugin, "schemas"), join(source, "schemas"), {
-        recursive: true,
-      });
+      for (const directory of ["schemas", "shared"]) {
+        await cp(join(plugin, directory), join(source, directory), {
+          recursive: true,
+        });
+      }
       for (const file of [
         "reserved_artifact_paths.json",
         "codex_profile.mjs",

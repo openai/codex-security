@@ -56,11 +56,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
-import {
-  resolveCodexCommand,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
@@ -1639,6 +1635,8 @@ describe("CodexSecurity orchestration", () => {
         {
           model_reasoning_summary: "auto",
           service_tier: "flex",
+          model_context_window: 64_000,
+          model_auto_compact_token_limit: 48_000,
           windows: { sandbox: "unelevated" },
         },
         "auto",
@@ -1647,10 +1645,14 @@ describe("CodexSecurity orchestration", () => {
       [
         {
           profile: "cloud",
+          model_context_window: 64_000,
+          model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
               model_reasoning_summary: "concise",
               service_tier: "fast",
+              model_context_window: 96_000,
+              model_auto_compact_token_limit: 72_000,
               windows: { sandbox: "elevated" },
             },
           },
@@ -1661,6 +1663,8 @@ describe("CodexSecurity orchestration", () => {
       [
         {
           profile: "cloud.production",
+          model_context_window: 128_000,
+          model_auto_compact_token_limit: 96_000,
           windows: { sandbox: "elevated" },
           profiles: {
             "cloud.production": {
@@ -1668,6 +1672,7 @@ describe("CodexSecurity orchestration", () => {
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
               model_verbosity: "high",
+              model_auto_compact_token_limit: 112_000,
               windows: { sandbox: "unelevated" },
             },
           },
@@ -1752,6 +1757,15 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
+                  for (const key of [
+                    "model_context_window",
+                    "model_auto_compact_token_limit",
+                  ]) {
+                    const value = resolveCodexProfile(overrides)[key] as
+                      number | undefined;
+                    expect(options.config?.[key]).toBe(value);
+                    expect(workerConfig[key]).toBe(value);
+                  }
                   expect(workerConfig["model_verbosity"]).toBe(
                     resolveCodexProfile(overrides)["model_verbosity"],
                   );
@@ -2386,7 +2400,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
@@ -4875,7 +4889,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
