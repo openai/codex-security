@@ -11,9 +11,10 @@ from test_workbench_checkpoint_heads import drafts, select
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
 from workbench_test_support import (
     fail_deep_scan,
-    run_workbench,
+    get_scan,
     saved_binding,
     saved_discovery_worker,
+    scan_command,
     write_checkpoint,
 )
 
@@ -190,15 +191,8 @@ def test_order_metadata_is_not_new_evidence(tmp_path: Path) -> None:
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
     orphan = scan_dir / "source-order" / ("0" * 64 + ".json")
     orphan.write_text(json.dumps({"scanId": scan_id, "sources": {}}))
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is False
-    )
-    run_workbench(
-        state,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )
     assert (scan_dir / "scan-manifest.json").read_bytes() == manifest
