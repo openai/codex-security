@@ -48,6 +48,22 @@ type ScanEventOptions = Omit<
   "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
 > & { abortController?: AbortController };
 
+export function completedTurn(): Extract<
+  ThreadEvent,
+  { type: "turn.completed" }
+> {
+  return {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
+      output_tokens: 3,
+      reasoning_output_tokens: 1,
+    },
+  };
+}
+
 export async function* completedEvents(
   threadId = "thread-1",
   events?: AsyncIterable<ThreadEvent>,
@@ -61,16 +77,7 @@ export async function* completedEvents(
       item: { id: "message-1", type: "agent_message", text: "scan complete" },
     };
   }
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    },
-  };
+  yield completedTurn();
 }
 
 export function runEvents(
