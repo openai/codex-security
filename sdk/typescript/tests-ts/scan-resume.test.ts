@@ -402,65 +402,78 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
   const { stderr, runCli } = createCliTest(main);
 
-  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
-    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-    runWorkbench: f.command,
-    createSecurity: resumeClient(f, (options) => ({
-      startThread() {
-        throw new Error("Resume must not create a new thread.");
-      },
-      resumeThread(threadId) {
-        expect(threadId).toBe(f.threadId);
-        expect(options.env).toMatchObject({
-          AWS_PROFILE: "synthetic-bedrock",
-        });
-        expect(options.apiKey).toBeUndefined();
-        return {
-          id: threadId,
-          async runStreamed(prompt) {
-            expect(prompt).toContain("Amazon Bedrock with AWS authentication");
-            expect(prompt).toContain(
-              "Skip the ChatGPT account Daybreak access advisory",
-            );
-            throw new Error("Resumed Bedrock prompt captured");
-          },
-        };
-      },
-    })),
-  });
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json"],
+    resumeDependencies(
+      f,
+      (options) => ({
+        startThread() {
+          throw new Error("Resume must not create a new thread.");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          expect(options.env).toMatchObject({
+            AWS_PROFILE: "synthetic-bedrock",
+          });
+          expect(options.apiKey).toBeUndefined();
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+              throw new Error("Resumed Bedrock prompt captured");
+            },
+          };
+        },
+      }),
+      { deepScanConfigPath: join(f.codexHome, "deep-scan.toml") },
+    ),
+  );
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
 
-function resumeClient(
+function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
+  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
 ) {
-  return (config: ConstructorParameters<typeof TestClient>[0]) =>
-    new TestClient(config, {
-      environment: f.environment,
-      prepareRuntime: async () => {
-        const runtime = preparedRuntime(f.codexHome);
-        runtime.configPath = join(f.root, "resumed-runtime.toml");
-        runtime.environment = Object.fromEntries(
-          Object.entries(f.environment).filter(
-            (entry): entry is [string, string] => entry[1] !== undefined,
-          ),
-        );
-        runtime.plugin.version = JSON.parse(
-          await readFile(
-            join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-            "utf8",
-          ),
-        ).version;
-        return runtime;
-      },
-      resolvePluginPython: async () => f.python,
-      runWorkbench,
-      createCodex,
-    });
+  return {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config: ConstructorParameters<typeof TestClient>[0]) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => {
+          const runtime = {
+            ...preparedRuntime(f.codexHome),
+            ...runtimeOverrides,
+          };
+          runtime.configPath = join(f.root, "resumed-runtime.toml");
+          runtime.environment = Object.fromEntries(
+            Object.entries(f.environment).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          );
+          runtime.plugin.version = JSON.parse(
+            await readFile(
+              join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+              "utf8",
+            ),
+          ).version;
+          return runtime;
+        },
+        resolvePluginPython: async () => f.python,
+        runWorkbench,
+        createCodex,
+      }),
+  };
 }
 
 async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
@@ -535,26 +548,19 @@ test.each([
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, () => ({
-          startThread: () => fail("Unexpected new session"),
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed() {
-                if (!alreadyFinished) await finishDiscovery(f);
-                return { events: completedEvents(threadId) };
-              },
-            };
-          },
-        })),
-      },
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              if (!alreadyFinished) await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
     );
     // Preserve the CLI's nonzero exit for a valid, sealed partial result.
     expect(code, stderr.text()).toBe(2);
@@ -689,26 +695,19 @@ test.each([
       scenario === "bulk"
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, () => ({
-          startThread: () => fail("Unexpected new session"),
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed() {
-                turns++;
-                return { events: completedEvents(threadId) };
-              },
-            };
-          },
-        })),
-      },
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              turns++;
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
     );
     expect(code, stderr.text()).toBe(2);
     expect(
@@ -867,79 +866,72 @@ test.each([
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      {
-        ...dependencies({
-          environment: f.environment,
-          currentDirectory: f.root,
-        }),
-        runWorkbench: f.command,
-        createSecurity: resumeClient(f, (options) => {
-          expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
-            settings.safetyIdentifier,
-          );
-          expect(options.apiKey).toBe(
-            auth === "chatgpt" ? undefined : "synthetic-resume-key",
-          );
-          expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
-          expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
-          expect(options.config?.["features"]).toMatchObject({
-            api_key_cyber_access_programs: true,
-          });
-          return {
-            startThread: () => fail("Resume must use the original session."),
-            resumeThread(threadId) {
-              expect(threadId).toBe(f.threadId);
-              return {
-                id: threadId,
-                async runStreamed(prompt, turnOptions) {
-                  expect(turnOptions?.cyberAccessProgram).toBe(
-                    settings.cyberAccessProgram,
+      resumeDependencies(f, (options) => {
+        expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+          settings.safetyIdentifier,
+        );
+        expect(options.apiKey).toBe(
+          auth === "chatgpt" ? undefined : "synthetic-resume-key",
+        );
+        expect(options.env?.["OPENAI_API_KEY"]).toBeUndefined();
+        expect(options.env?.["CODEX_API_KEY"]).toBeUndefined();
+        expect(options.config?.["features"]).toMatchObject({
+          api_key_cyber_access_programs: true,
+        });
+        return {
+          startThread: () => fail("Resume must use the original session."),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed(prompt, turnOptions) {
+                expect(turnOptions?.cyberAccessProgram).toBe(
+                  settings.cyberAccessProgram,
+                );
+                prompts.push(prompt as string);
+                if (prompts.length === 1) {
+                  expect(prompt).toContain(
+                    "Keep the original scan instructions.",
                   );
-                  prompts.push(prompt as string);
-                  if (prompts.length === 1) {
-                    expect(prompt).toContain(
-                      "Keep the original scan instructions.",
-                    );
-                    const deep = await readFile(
-                      join(f.codexHome, "codex-security", "config.toml"),
-                      "utf8",
-                    );
-                    expect(deep).toContain("subagents = 0");
-                    expect(deep).toContain("stop_after_consecutive_errors = 2");
-                    expect(deep).toContain("max_time_hours = 1.5");
-                    const workerConfigPath =
-                      options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-                    expect(workerConfigPath).toBe(
-                      join(f.root, "resumed-runtime.toml"),
-                    );
-                    const workerConfig = parseToml(
-                      await readFile(workerConfigPath!, "utf8"),
-                    );
-                    expect(workerConfig).toMatchObject({
-                      codex_security: {
-                        cyber_access_program: settings.cyberAccessProgram,
-                      },
-                      features: {
-                        api_key_cyber_access_programs: true,
-                      },
-                    });
-                    const saved = await f.command([
-                      "get-scan-recipe",
-                      "--scan-id",
-                      f.scanId,
-                    ]);
-                    expect(saved["recipe"]).toMatchObject({
-                      cyberAccessProgram: settings.cyberAccessProgram,
-                    });
-                    await finishDiscovery(f);
-                  }
-                  return { events: completedEvents(threadId) };
-                },
-              };
-            },
-          };
-        }),
-      },
+                  const deep = await readFile(
+                    join(f.codexHome, "codex-security", "config.toml"),
+                    "utf8",
+                  );
+                  expect(deep).toContain("subagents = 0");
+                  expect(deep).toContain("stop_after_consecutive_errors = 2");
+                  expect(deep).toContain("max_time_hours = 1.5");
+                  const workerConfigPath =
+                    options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                  expect(workerConfigPath).toBe(
+                    join(f.root, "resumed-runtime.toml"),
+                  );
+                  const workerConfig = parseToml(
+                    await readFile(workerConfigPath!, "utf8"),
+                  );
+                  expect(workerConfig).toMatchObject({
+                    codex_security: {
+                      cyber_access_program: settings.cyberAccessProgram,
+                    },
+                    features: {
+                      api_key_cyber_access_programs: true,
+                    },
+                  });
+                  const saved = await f.command([
+                    "get-scan-recipe",
+                    "--scan-id",
+                    f.scanId,
+                  ]);
+                  expect(saved["recipe"]).toMatchObject({
+                    cyberAccessProgram: settings.cyberAccessProgram,
+                  });
+                  await finishDiscovery(f);
+                }
+                return { events: completedEvents(threadId) };
+              },
+            };
+          },
+        };
+      }),
     );
     expect(code, stderr.text()).toBe(2);
     expect(prompts, stderr.text()).toHaveLength(2);
@@ -959,13 +951,12 @@ test("missing session logs do not create another session or fail the original sc
   await rm(f.sessionPath);
   const { stderr, runCli } = createCliTest(main);
 
-  const code = await runCli(["scans", "resume", f.scanId], {
-    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-    runWorkbench: f.command,
-    createSecurity: resumeClient(f, () =>
+  const code = await runCli(
+    ["scans", "resume", f.scanId],
+    resumeDependencies(f, () =>
       fail("Must not invoke Codex without the original session"),
     ),
-  });
+  );
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("original Codex session");
   expect(

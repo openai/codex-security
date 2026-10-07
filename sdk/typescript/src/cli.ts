@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { isNonEmptyString } from "./value.js";
+import { listenForAbort } from "./cli-signals.js";
+import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -58,11 +59,10 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
-  createSecurityInternal,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
@@ -195,6 +195,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -684,7 +685,6 @@ class PublicationProgressPresenter {
       try {
         dashboard.stop();
       } catch {}
-      this.#dashboard = null;
     }
   }
 
@@ -1027,16 +1027,18 @@ interface ScanOutcome {
   error?: string;
 }
 
-const scanOutputSchema = z
-  .union([
-    z.record(z.string(), z.unknown()),
-    z.object({
-      status: z.literal("failed"),
-      code: z.literal("SCAN_FAILED"),
-      message: z.string(),
-    }),
-  ])
-  .optional();
+function scanOutputSchema(...codes: [string, ...string[]]) {
+  return z
+    .union([
+      z.record(z.string(), z.unknown()),
+      z.object({
+        status: z.literal("failed"),
+        code: z.literal(codes),
+        message: z.string(),
+      }),
+    ])
+    .optional();
+}
 
 type ExportArguments = ArtifactExportArguments;
 
@@ -1224,7 +1226,7 @@ interface CliDependencies {
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
-    createSecurityInternal(config, { surface: "cli" }),
+    new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
@@ -1355,7 +1357,9 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = structuredClone(output.codexOverrides ?? {});
+      const overrides = parseToml(
+        stringifyToml(output.codexOverrides ?? {}),
+      ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
@@ -1371,7 +1375,7 @@ export async function runCodexSkillCommand(
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
-      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const commandAuth = providerConfiguration?.["auth"] != null;
       const explicitChatgpt =
         output.auth === "chatgpt" && !isExternalModelProvider(provider);
       const providerBearer =
@@ -1672,14 +1676,10 @@ export async function runCodexSkillCommand(
               }),
             ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
-        let completed = false;
         const complete = (
           code: number | null,
           signal: NodeJS.Signals | null,
         ): void => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
           resolve(
             requestedSignal === "SIGINT" || signal === "SIGINT"
               ? 130
@@ -1689,12 +1689,7 @@ export async function runCodexSkillCommand(
           );
         };
         forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", (error) => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          reject(error);
-        });
+        invocation.once("error", reject);
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
@@ -1828,6 +1823,35 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  let filteredScanFailure:
+    { format: string; data: Record<string, unknown> } | undefined;
+  let renderedScanFailure: string | undefined;
+  const finishScan = (
+    outcome: ScanOutcome,
+    format: string,
+    incurError: (error: {
+      code: string;
+      message: string;
+      exitCode: number;
+    }) => never,
+    code = "SCAN_FAILED",
+  ): Record<string, unknown> | undefined => {
+    exitCode = outcome.exitCode;
+    if (outcome.error === undefined) return outcome.data;
+    if (format === "json" || format === "jsonl") {
+      const message = errorMessage(outcome.error);
+      if (!argv.includes("--full-output")) {
+        const data = { status: "failed", code, message };
+        if (argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument)))
+          filteredScanFailure = { format, data };
+        return data;
+      }
+      // Incur would wrap returned data in an ok: true envelope.
+      scanStructuredError = true;
+      return incurError({ code, message, exitCode });
+    }
+    return incurError({ code, message: outcome.error, exitCode });
+  };
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -1881,28 +1905,9 @@ export async function main(
     selection: MatchingCliOptions,
   ): Promise<JsonObject> => {
     const controller = new AbortController();
-    let firstSignalAt = 0;
-    const cancel = (signal: SignalName): void => {
-      if (controller.signal.aborted) {
-        if (
-          signal === controller.signal.reason &&
-          dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
-        ) {
-          return;
-        }
-        removeListeners();
-        dependencies.forceExit(signal);
-      } else {
-        firstSignalAt = dependencies.now();
-        controller.abort(signal);
-      }
-    };
-    const onInterrupt = (): void => cancel("SIGINT");
-    const onTerminate = (): void => cancel("SIGTERM");
-    const removeListeners = (): void => {
-      signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
-    };
-    signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+    const removeListeners = listenForAbort(dependencies, controller, (signal) =>
+      dependencies.forceExit(signal),
+    );
     let previousProgress = "";
     try {
       const result = await operation({
@@ -2056,17 +2061,43 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolveCliPath(
+      const requestedRepository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
+      );
+      const repository = await realpath(requestedRepository).catch(
+        () => requestedRepository,
       );
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
+            const repositories = value["repositories"] as JsonObject[];
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === requestedRepository,
+            );
+            const canonicalTarget = repositories.find(
               (entry) => entry["targetPath"] === repository,
             );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                requestedRepository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (await sameFile(storedPath, requestedRepository)) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []
@@ -2233,8 +2264,8 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench([
@@ -2274,23 +2305,15 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          exitCode = 2;
-          return incurError({
-            code: "SCAN_RESUME_UNAVAILABLE",
-            message,
-            exitCode,
-          });
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_RESUME_UNAVAILABLE",
+          );
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("rerun", {
@@ -2321,7 +2344,11 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: z.record(z.string(), z.unknown()).optional(),
+      output: scanOutputSchema(
+        "SCAN_FAILED",
+        "SCAN_REPLAY_UNAVAILABLE",
+        "SCAN_IMPORT_FAILED",
+      ),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -2330,7 +2357,19 @@ export async function main(
           exitCode = 2;
           return;
         }
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        let scanId: string | undefined;
+        try {
+          scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        } catch (error) {
+          const message = errorMessage(error);
+          if (exitCode === 0) errorOutput.write(`codex-security: ${message}\n`);
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_REPLAY_UNAVAILABLE",
+          );
+        }
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
@@ -2360,10 +2399,10 @@ export async function main(
             }
             const imported = recipe["import"];
             const sourcePath = imported["sourcePath"];
-            const format = imported["format"];
+            const importFormat = imported["format"];
             if (
               !isNonEmptyString(sourcePath) ||
-              (format !== "csv" && format !== "json")
+              (importFormat !== "csv" && importFormat !== "json")
             ) {
               throw new CodexSecurityError(
                 "The saved scan recipe contains invalid import settings.",
@@ -2371,18 +2410,15 @@ export async function main(
             }
             const outcome = await runImport({
               sourcePath,
-              format,
+              format: importFormat,
               parentScanId,
             });
-            exitCode = outcome.exitCode;
-            if (outcome.error !== undefined) {
-              return incurError({
-                code: "SCAN_IMPORT_FAILED",
-                message: outcome.error,
-                exitCode,
-              });
-            }
-            return outcome.data;
+            return finishScan(
+              outcome,
+              format,
+              incurError,
+              "SCAN_IMPORT_FAILED",
+            );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
@@ -2410,12 +2446,12 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          exitCode = 2;
-          return incurError({
-            code: "SCAN_REPLAY_UNAVAILABLE",
-            message,
-            exitCode,
-          });
+          return finishScan(
+            { exitCode: 2, error: message },
+            format,
+            incurError,
+            "SCAN_REPLAY_UNAVAILABLE",
+          );
         }
         const outcome = await runScan(
           scanArguments,
@@ -2423,15 +2459,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("match", {
@@ -3137,7 +3165,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });
@@ -3366,7 +3394,7 @@ export async function main(
                 createSecurity:
                   dependencies.createPolicySecurity ??
                   ((config) =>
-                    createSecurityInternal(config, { surface: "cli" })),
+                    new CodexSecurity(config, undefined, { surface: "cli" })),
                 chooseAuthentication: (config, auth, signal) =>
                   chooseInteractiveAuthentication(
                     {
@@ -3572,7 +3600,7 @@ export async function main(
             message: "--mock cannot be combined with --dry-run or --patch.",
           },
         ),
-      output: scanOutputSchema,
+      output: scanOutputSchema("SCAN_FAILED"),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3652,30 +3680,16 @@ export async function main(
           errorOutput.write(`${message}\n`);
           outcome = { exitCode: 2, error: message };
         }
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          if (format === "json" || format === "jsonl") {
-            const message = errorMessage(outcome.error);
-            if (!argv.includes("--full-output"))
-              return { status: "failed", code: "SCAN_FAILED", message };
-            // Incur would wrap returned data in an ok: true envelope.
-            scanStructuredError = true;
-            return incurError({ code: "SCAN_FAILED", message, exitCode });
-          }
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
         if (
+          outcome.error === undefined &&
           !options.dryRun &&
           format === "toon" &&
           !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
+          exitCode = outcome.exitCode;
           return;
         }
-        return outcome.data;
+        return finishScan(outcome, format, incurError);
       },
     })
     .command("install-hook", {
@@ -5821,6 +5835,34 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  if (filteredScanFailure !== undefined) {
+    // Success-field filters do not apply to diagnostics. Reuse Incur's format
+    // and token controls without running the saved scan a second time.
+    const failureOutput = captureOutput();
+    const failureArguments = ["render", "--format", filteredScanFailure.format];
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index]!;
+      if (!/^--token-(?:count|limit|offset)(?:=|$)/u.test(argument)) continue;
+      const separator = argument.indexOf("=");
+      if (separator !== -1)
+        failureArguments.push(
+          argument.slice(0, separator),
+          argument.slice(separator + 1),
+        );
+      else {
+        failureArguments.push(argument);
+        if (argument !== "--token-count") failureArguments.push(argv[++index]!);
+      }
+    }
+    const failure = filteredScanFailure.data;
+    await Cli.create("codex-security-scan-error")
+      .command("render", { run: () => failure })
+      .serve(failureArguments, {
+        stdout: failureOutput.stream.write,
+        exit: () => undefined,
+      });
+    renderedScanFailure = failureOutput.text();
+  }
   const frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
@@ -5834,7 +5876,11 @@ export async function main(
       return 2;
     }
   }
-  if (frameworkOutput.length === 0 && streamedLogs === undefined)
+  if (
+    frameworkOutput.length === 0 &&
+    streamedLogs === undefined &&
+    renderedScanFailure === undefined
+  )
     return exitCode;
   try {
     // Incur can add a stale-skills CTA after the logs handler returns.
@@ -5848,6 +5894,7 @@ export async function main(
     await writeCliOutput(
       output,
       logOutput ??
+        renderedScanFailure ??
         renderedPolicy ??
         renderedPatch ??
         renderedPublication ??
@@ -7654,12 +7701,7 @@ export async function readSkillCommandOutput(
 
   for await (const line of createInterface({ input: Readable.from(stream) })) {
     if (line.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => line);
     if (typeof event !== "object" || event === null) {
       continue;
     }
@@ -7923,12 +7965,8 @@ function incurErrorMessage(output: string): string {
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
   if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
-  }
+  const parsed = parseJson(() => message);
+  return typeof parsed === "string" ? parsed : message;
 }
 
 async function runExport(
@@ -9512,7 +9550,6 @@ export class Progress {
   #timerLineActive = false;
   #cursorHidden = false;
   #observingStreamErrors = false;
-  #streamErrorsActive = false;
   #streamErrorGeneration = 0;
   readonly #onStreamError = (): void => {};
 
@@ -9580,14 +9617,12 @@ export class Progress {
       }
     } finally {
       if (this.#observingStreamErrors) {
-        this.#streamErrorsActive = false;
         const generation = this.#streamErrorGeneration;
         try {
           this.#stream.write("", () => {
             queueMicrotask(() => {
               if (
                 generation === this.#streamErrorGeneration &&
-                !this.#streamErrorsActive &&
                 this.#observingStreamErrors
               ) {
                 this.#stream.off?.("error", this.#onStreamError);
@@ -9623,7 +9658,6 @@ export class Progress {
   }
 
   #observeStreamErrors(): void {
-    this.#streamErrorsActive = true;
     this.#streamErrorGeneration += 1;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);
@@ -9695,23 +9729,6 @@ if (invokedAsMain()) {
       process.exitCode = 2;
     },
   );
-}
-
-function listenForAbort(
-  dependencies: Pick<
-    CliDependencies,
-    "addSignalListener" | "removeSignalListener"
-  >,
-  controller: AbortController,
-): () => void {
-  const onInterrupt = () => controller.abort("SIGINT");
-  const onTerminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
-  return () => {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
-  };
 }
 
 function withoutLinearCredentials(

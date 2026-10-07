@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import re
+from bisect import bisect_right
 from pathlib import Path
 
 DEFAULT_PREVIEW_BYTES = 1024
@@ -13,68 +14,6 @@ DEFAULT_PREVIEW_READ_BYTES = 64 * 1024
 PREVIEW_HEAD_LINES = 12
 PREVIEW_SAMPLE_LINES = 10
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
-
-TEXT_CODE_EXTENSIONS = {
-    ".c",
-    ".cc",
-    ".cfg",
-    ".cjs",
-    ".clj",
-    ".cpp",
-    ".cs",
-    ".css",
-    ".cts",
-    ".cue",
-    ".cxx",
-    ".dart",
-    ".ejs",
-    ".erb",
-    ".ex",
-    ".exs",
-    ".go",
-    ".graphql",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".hs",
-    ".html",
-    ".hxx",
-    ".java",
-    ".js",
-    ".json",
-    ".jsx",
-    ".kt",
-    ".kts",
-    ".lua",
-    ".m",
-    ".mjs",
-    ".mm",
-    ".mts",
-    ".php",
-    ".phtml",
-    ".proto",
-    ".ps1",
-    ".psd1",
-    ".psm1",
-    ".py",
-    ".rb",
-    ".rs",
-    ".scala",
-    ".sh",
-    ".sol",
-    ".sql",
-    ".svelte",
-    ".swift",
-    ".tf",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".vue",
-    ".vy",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
 
 JAVASCRIPT_EXTENSIONS = {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"}
 JAVA_LIKE_EXTENSIONS = {
@@ -104,6 +43,7 @@ BRACE_LANGUAGE_EXTENSIONS = {
 }
 NESTED_BLOCK_COMMENT_EXTENSIONS = {".kt", ".kts", ".rs", ".scala", ".swift"}
 CPP_RAW_STRING_RE = re.compile(r'(?<![\w\x80-\U0010ffff])(?:u8|u|U|L)?R"([^\s()\\]{0,16})\(')
+CSHARP_RAW_STRING_RE = re.compile(r'"{3,}')
 RUST_RAW_STRING_RE = re.compile(r'(?:br|r)(#{0,16})"')
 RUST_LIFETIME_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
 PHP_HEREDOC_RE = re.compile(r"<<<\s*['\"]?([A-Za-z_]\w*)['\"]?")
@@ -121,11 +61,20 @@ def is_binary_sample(data: bytes) -> bool:
 
 
 def is_binary_file(path: Path) -> bool:
+    """Classify the whole file in bounded chunks."""
     try:
         with path.open("rb") as source:
-            return is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES))
+            sample = source.read(DEFAULT_PREVIEW_READ_BYTES)
+            if is_binary_sample(sample):
+                return True
+            bom = sample[:2] if sample.startswith(_UTF16_BOMS) else b""
+            while chunk := source.read(DEFAULT_PREVIEW_READ_BYTES):
+                # Even-sized reads preserve UTF-16 code-unit alignment and byte order.
+                if is_binary_sample(bom + chunk) if bom else b"\0" in chunk:
+                    return True
     except OSError:
         return True
+    return False
 
 
 def compact_preview_line(line: str) -> str:
@@ -169,23 +118,12 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
             line if line == "..." else truncate_utf8(line, line_bytes).rstrip() for line in lines
         )
 
-    content_lines = [line for line in lines if line != "..."]
-    if not content_lines:
-        return truncate_utf8(full_preview, max_bytes)
-    low = 0
-    high = max(len(line.encode("utf-8")) for line in content_lines)
-    best = ""
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best:
-        return best
-    return truncate_utf8(full_preview, max_bytes)
+    high = max(len(line.encode("utf-8")) for line in lines)
+    limit = bisect_right(
+        range(high + 1), max_bytes, key=lambda size: len(render(size).encode("utf-8"))
+    )
+    best = render(limit - 1) if limit else ""
+    return best or truncate_utf8(full_preview, max_bytes)
 
 
 def python_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
@@ -364,6 +302,14 @@ def mask_c_style_source(text: str, suffix: str) -> str | None:
             quote = '@"'
             index += 2
             continue
+        if suffix == ".cs":
+            raw_match = CSHARP_RAW_STRING_RE.match(text, index)
+            if raw_match:
+                token = raw_match.group(0)
+                masked.extend(" " * len(token))
+                raw_terminator = token
+                index += len(token)
+                continue
         if suffix == ".go" and char == "`":
             masked.append(" ")
             raw_terminator = "`"

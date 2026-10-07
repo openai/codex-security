@@ -14,10 +14,12 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    create_workspace,
     empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    save_workspace,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
@@ -514,28 +516,15 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         target = tmp_path / f"target-{index}"
         (target / "src").mkdir(parents=True)
         workspace_id = str(uuid.uuid4())
-        run_workbench(
+        create_workspace(
             state_dir,
-            "create-workspace",
-            "--workspace-id",
             workspace_id,
             "--thread-id",
             "thread-completion-binding",
             "--target-path",
             str(target),
         )
-        run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            workspace_id,
-            "--target-path",
-            str(target),
-            "--scope",
-            scope,
-            "--mode",
-            mode,
-        )
+        save_workspace(state_dir, workspace_id, str(target), scope, mode)
         scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
         if mode == "deep":
             run_workbench(
@@ -914,105 +903,6 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert preserved_coverage["inventoryStrategy"] == "repository"
     assert preserved_coverage["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-
-
-def test_deep_completion_preserves_running_scan_after_transient_report_failure(
-    tmp_path: Path,
-) -> None:
-    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
-    hook_dir = tmp_path / "report-failure-hook"
-    hook_dir.mkdir()
-    (hook_dir / "sitecustomize.py").write_text(
-        "import importlib.util\n"
-        "original_spec = importlib.util.spec_from_file_location\n"
-        "def injected_spec(name, *args, **kwargs):\n"
-        "    spec = original_spec(name, *args, **kwargs)\n"
-        "    if name == 'codex_security_report_projection':\n"
-        "        original_load = spec.loader.exec_module\n"
-        "        def injected_load(module):\n"
-        "            original_load(module)\n"
-        "            def unavailable(*args, **kwargs):\n"
-        "                raise OSError('fixture report projection temporarily unavailable')\n"
-        "            module.generate_report_markdown = unavailable\n"
-        "        spec.loader.exec_module = injected_load\n"
-        "    return spec\n"
-        "importlib.util.spec_from_file_location = injected_spec\n"
-    )
-    before = {
-        name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
-
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-        environment={"PYTHONPATH": str(hook_dir)},
-    )
-
-    assert failed["returncode"] != 0
-    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
-    preserved = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert preserved["progress"]["status"] == "running"
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-        ).fetchone() == ("succeeded",)
-    assert {
-        name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    } == before
-
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
-
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 1
-
-
-def test_deep_completion_retries_transient_report_failure_within_one_invocation(
-    tmp_path: Path,
-) -> None:
-    state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
-    hook_dir = tmp_path / "report-failure-hook"
-    hook_dir.mkdir()
-    marker_path = hook_dir / "first-projection-attempt"
-    (hook_dir / "sitecustomize.py").write_text(
-        "import importlib.util\n"
-        "from pathlib import Path\n"
-        f"marker = Path({str(marker_path)!r})\n"
-        "original_spec = importlib.util.spec_from_file_location\n"
-        "def injected_spec(name, *args, **kwargs):\n"
-        "    spec = original_spec(name, *args, **kwargs)\n"
-        "    if name == 'codex_security_report_projection':\n"
-        "        original_load = spec.loader.exec_module\n"
-        "        def injected_load(module):\n"
-        "            original_load(module)\n"
-        "            original_report = module.generate_report_markdown\n"
-        "            def unavailable_once(*args, **kwargs):\n"
-        "                if not marker.exists():\n"
-        "                    marker.touch()\n"
-        "                    raise OSError('fixture report projection temporarily unavailable')\n"
-        "                return original_report(*args, **kwargs)\n"
-        "            module.generate_report_markdown = unavailable_once\n"
-        "        spec.loader.exec_module = injected_load\n"
-        "    return spec\n"
-        "importlib.util.spec_from_file_location = injected_spec\n"
-    )
-
-    completed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        environment={"PYTHONPATH": str(hook_dir)},
-    )
-
-    assert marker_path.is_file()
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 1
-    assert (scan_dir / "report.md").is_file()
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])

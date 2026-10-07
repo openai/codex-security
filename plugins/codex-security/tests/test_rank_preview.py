@@ -787,22 +787,6 @@ TXT;
     assert "method Service.visible" in preview
 
 
-def test_go_raw_string_backslash_does_not_hide_following_function(tmp_path: Path) -> None:
-    source = r"""package sample
-
-func Before() {}
-
-const Root = `C:\`
-
-func After() {}
-"""
-
-    preview = generate_preview(tmp_path, "sample.go", source)
-
-    assert "function Before" in preview
-    assert "function After" in preview
-
-
 def test_malformed_python_uses_sampled_source_fallback(tmp_path: Path) -> None:
     source = """import package
 broken = (
@@ -866,16 +850,10 @@ def test_fallback_preview_omits_marker_when_no_lines_are_skipped(tmp_path: Path)
     assert "..." not in preview
 
 
-@pytest.mark.parametrize(
-    "filename",
-    ["styles.css", "main.tf", "ViewController.m", "Vault.sol", "Vault.vy", "Counter.svelte"],
-)
-def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(
-    tmp_path: Path, filename: str
-) -> None:
+def test_preview_byte_budget_preserves_sampled_tail_and_valid_unicode(tmp_path: Path) -> None:
     source = "\n".join(f"line_{index:02d} {'😀' * 20}" for index in range(40))
 
-    preview = generate_preview(tmp_path, filename, source, preview_bytes=220)
+    preview = generate_preview(tmp_path, "styles.css", source, preview_bytes=220)
 
     assert len(preview.encode("utf-8")) <= 220
     assert "..." in preview

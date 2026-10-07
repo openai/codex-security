@@ -867,6 +867,13 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
 )
 
 

@@ -1,3 +1,4 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
 import { spawnSync } from "node:child_process";
@@ -5,32 +6,23 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const temporaryRoots: string[] = [];
+const temporaryRoots = createTemporaryDirectoriesSync(true);
 const testPosix = process.platform === "win32" ? test.skip : test;
 
-afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryRoots.cleanup);
 
 test("diff previews stay inside the selected repository", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-rank-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-rank-");
   const repository = join(root, "repository");
   const nested = join(repository, "src", "nested");
   mkdirSync(nested, { recursive: true });
@@ -103,6 +95,8 @@ test("diff previews stay inside the selected repository", () => {
     "src/deleted.py",
     "src/entry.py",
     "src/handler.py",
+    // Git lists the untracked POSIX symlink, but not the Windows junction.
+    ...(process.platform === "win32" ? [] : ["src/nested"]),
     "src/nested/linked.py",
   ]);
   expect(rows.find((row) => row.path === "src/handler.py")?.preview).toBe(
@@ -111,13 +105,13 @@ test("diff previews stay inside the selected repository", () => {
   expect(rows.find((row) => row.path === "src/nested/linked.py")?.preview).toBe(
     "",
   );
+  if (process.platform !== "win32") {
+    expect(rows.find((row) => row.path === "src/nested")?.preview).toBe("");
+  }
 });
 
 test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-rank-unicode-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-rank-unicode-");
   const repository = join(root, "repository-漢字");
   const source = join(repository, "src", "変更.py");
   mkdirSync(join(repository, "src"), { recursive: true });
@@ -216,10 +210,7 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
 testPosix(
   "uses only the host-selected Git executable for rank and inventory helpers",
   () => {
-    const root = realpathSync(
-      mkdtempSync(join(tmpdir(), "codex-security-host-git-")),
-    );
-    temporaryRoots.push(root);
+    const root = temporaryRoots.create("codex-security-host-git-");
     const repository = join(root, "repository");
     const shimDirectory = join(repository, "tools");
     const shim = join(shimDirectory, "git");
