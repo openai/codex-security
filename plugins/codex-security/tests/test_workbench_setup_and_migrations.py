@@ -9,9 +9,11 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Timer
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -71,6 +73,21 @@ EXPECTED_MIGRATIONS = [
     (40, "index finding identity and comparison history"),
     (41, "checkpoint finding severity assessments"),
 ]
+
+
+def apply_historical_migrations(
+    connection: sqlite3.Connection,
+    namespace: dict[str, Any],
+    migrations: Iterable[tuple[int, str, str]],
+    timestamp: str,
+) -> None:
+    for version, name, sql in migrations:
+        for statement in namespace["sql_statements"](sql):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            (version, name, timestamp),
+        )
 
 
 def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
@@ -840,6 +857,7 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
         }
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("migration_recorded", (False, True))
 def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     migration_recorded: bool,
@@ -2286,6 +2304,7 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.cross_platform
 def test_workbench_upgrades_public_cli_completion_warning_migration() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     apply_migrations = namespace["apply_migrations"]
@@ -2681,3 +2700,80 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
     assert {"execution_model", "reasoning_effort"}.issubset(scan_columns)
     assert "legacy_execution_model" not in scan_columns
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("profile_migration", "follow_up_migration", "supported"),
+    (
+        ("scan execution profiles", "scan continuation threads", True),
+        ("scan execution profiles", "phase-specific scan progress", True),
+        ("unknown execution profile migration", "scan continuation threads", False),
+    ),
+)
+def test_workbench_reconciles_profile_and_public_warning_histories(
+    tmp_path: Path, profile_migration: str, follow_up_migration: str, supported: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    database = state_dir / "workbench.sqlite3"
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    timestamp = "2026-07-30T00:00:00Z"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        apply_historical_migrations(connection, namespace, namespace["MIGRATIONS"][:10], timestamp)
+        for table in ("workspaces", "scans"):
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model TEXT")
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT")
+        follow_up = next(item for item in namespace["MIGRATIONS"] if item[1] == follow_up_migration)
+        for statement in namespace["sql_statements"](follow_up[2]):
+            connection.execute(statement)
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            ((11, profile_migration, timestamp), (12, follow_up_migration, timestamp)),
+        )
+        connection.execute(
+            "ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (25, "persist scan completion warnings", timestamp),
+        )
+
+    upgrade = run_workbench(state_dir, "database-info", check=False)
+    assert upgrade["returncode"] == (0 if supported else 1)
+    if not supported:
+        assert "unsupported execution-profile migration history" in upgrade["stderr"]
+
+    with sqlite3.connect(database) as connection:
+        migrations = dict(
+            connection.execute(
+                "SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 20, 25, 26)"
+            )
+        )
+        assert migrations == (
+            {
+                11: "deep scan orchestration state",
+                12: "scan continuation threads",
+                20: "phase-specific scan progress",
+                25: "persist scan model settings",
+                26: "persist scan completion warnings",
+            }
+            if supported
+            else {
+                11: profile_migration,
+                12: follow_up_migration,
+                25: "persist scan completion warnings",
+            }
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        assert ("legacy_execution_model" in columns) is supported
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'"
+            ).fetchone()
+            is not None
+        ) is supported
