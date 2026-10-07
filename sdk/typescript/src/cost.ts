@@ -455,7 +455,9 @@ function readSessionChunk(
     const fragment = contents.subarray(lineStart, lineEnd);
 
     if (newline === -1) {
-      session.pendingLine.push(Buffer.from(fragment));
+      if (fragment.length > 0) {
+        session.pendingLine.push(Buffer.from(fragment));
+      }
       return;
     }
 
