@@ -63,7 +63,6 @@ function preparedPublication(
 ): PreparedScanPublication {
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: join(tmpdir(), "completed-scan"),
     destination: {
       type: "linear",
@@ -376,6 +375,7 @@ describe("skip-recorded publication", () => {
         },
         preparePublicationStore: rejecting("Previews must not write history."),
         resolveCodex: throwing("Previews must not start Codex."),
+        runCodex: rejecting("Previews must not start Codex."),
         writeReceipt: rejecting("Previews must not write receipts."),
       },
     );
@@ -387,7 +387,16 @@ describe("skip-recorded publication", () => {
         inspectPublicationStore: rejecting("Ordinary previews stay offline."),
       },
     );
-    expect(ordinary.issues).toEqual(publication.issues);
+    expect(ordinary).toEqual({
+      scanId: "scan-example",
+      uploadId: "scan-example",
+      destination: publication.destination,
+      created: [],
+      failed: [],
+      counts: { findings: 2, created: 0, failed: 0 },
+      dryRun: true,
+      issues: publication.issues,
+    });
     expect(ordinary).not.toHaveProperty("skipped");
     const preview = await publishScanInternal(
       "scan",
@@ -1037,7 +1046,8 @@ describe("connected Linear publication", () => {
   test("rejects pre-aborted publication before preparing scans or touching local state", async () => {
     const publication = preparedPublication();
     const controller = new AbortController();
-    controller.abort(new Error("Publication was canceled before it started."));
+    const reason = new Error("Publication was canceled before it started.");
+    controller.abort(reason);
     const prepare = mock(resolving(publication));
     const preparePublicationStore = mock(async () => {});
     const resolveCodex = mock(unusedCodexCommand);
@@ -1062,7 +1072,7 @@ describe("connected Linear publication", () => {
           },
         ),
       ),
-    ).rejects.toThrow("Publication was canceled before it started.");
+    ).rejects.toBe(reason);
 
     expect(prepare).not.toHaveBeenCalled();
     expect(preparePublicationStore).not.toHaveBeenCalled();
@@ -2869,60 +2879,6 @@ describe("connected Linear publication", () => {
     ).rejects.toThrow("local scan history does not contain this finding");
 
     expect(resolveCodex).not.toHaveBeenCalled();
-    expect(runCodex).not.toHaveBeenCalled();
-  });
-
-  test("previews every finding without starting Codex or writing a receipt", async () => {
-    const publication = preparedPublication(2);
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      { ...OPTIONS, dryRun: true },
-      dependencies(
-        publication,
-        {},
-        {
-          resolveCodex: throwing("dry runs must not resolve Codex"),
-          runCodex: rejecting("dry runs must not start Codex"),
-          writeReceipt: rejecting("dry runs must not write receipts"),
-        },
-      ),
-    );
-
-    expect(result).toEqual({
-      scanId: "scan-example",
-      uploadId: "scan-example",
-      destination: publication.destination,
-      created: [],
-      failed: [],
-      counts: { findings: 2, created: 0, failed: 0 },
-      dryRun: true,
-      issues: publication.issues,
-    });
-  });
-
-  test("rejects an already-aborted publication before preparing or starting Codex", async () => {
-    const publication = preparedPublication();
-    const controller = new AbortController();
-    const reason = new Error("Publication was canceled before startup.");
-    controller.abort(reason);
-    const prepare = mock(resolving(publication));
-    const runCodex = mock(successfulCodexResult);
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        { ...OPTIONS, signal: controller.signal },
-        dependencies(
-          publication,
-          {},
-          {
-            prepare,
-            runCodex,
-          },
-        ),
-      ),
-    ).rejects.toBe(reason);
-    expect(prepare).not.toHaveBeenCalled();
     expect(runCodex).not.toHaveBeenCalled();
   });
 
