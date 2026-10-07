@@ -62,24 +62,12 @@ function tacToolCall(
 async function* tacEvents(
   items: readonly McpToolCallItem[],
 ): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
-  yield { type: "turn.started" };
   for (const item of items) {
     yield { type: "item.completed", item };
   }
   yield {
     type: "item.completed",
     item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    },
   };
 }
 
@@ -91,7 +79,7 @@ function runTacEvents(
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void,
   authentication?: ScanAuthentication,
 ): ReturnType<typeof runEvents> {
-  return runEvents(scanDir, tacEvents(items), {
+  return runEvents(scanDir, completedEvents("thread-1", tacEvents(items)), {
     authentication,
     onObserverError,
     onTrustedAccessStatus,
@@ -285,7 +273,7 @@ describe("one-shot scan events", () => {
         const statuses: ScanTrustedAccessStatus[] = [];
         const result = await runEvents(
           scanDir,
-          tacEvents([tacToolCall(status)]),
+          completedEvents("thread-1", tacEvents([tacToolCall(status)])),
           {
             authentication,
             modelProvider: "amazon-bedrock",
@@ -475,7 +463,10 @@ describe("one-shot scan events", () => {
     };
     const result = await runScanEvents({
       thread: { id: null },
-      events: tacEvents([tacToolCall("not_granted")]),
+      events: completedEvents(
+        "thread-1",
+        tacEvents([tacToolCall("not_granted")]),
+      ),
       signal: new AbortController().signal,
       scanDir,
       pluginRoot: PLUGIN_ROOT,
@@ -1005,8 +996,6 @@ describe("one-shot scan events", () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1038,20 +1027,10 @@ describe("one-shot scan events", () => {
           text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":6,"started":3}',
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, workerEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", workerEvents()), {
         onWorkerStatus: (status) => statuses.push(status),
       }),
     ).resolves.toBeDefined();
@@ -1066,8 +1045,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* activityEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const [type, status] of [
         ["item.started", "in_progress"],
         ["item.completed", "completed"],
@@ -1083,20 +1060,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, activityEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", activityEvents()), {
         onActivity: (activity) => activities.push(activity),
       }),
     ).resolves.toBeDefined();
@@ -1123,8 +1090,6 @@ describe("one-shot scan events", () => {
     const activities: ScanActivity[] = [];
 
     async function* reasoningEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       yield {
         type: "item.completed",
         item: {
@@ -1135,19 +1100,9 @@ describe("one-shot scan events", () => {
             "**Planning batch file size verification and progress output**",
         },
       };
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
-    await runEvents(scanDir, reasoningEvents(), {
+    await runEvents(scanDir, completedEvents("thread-1", reasoningEvents()), {
       onActivity: (activity) => activities.push(activity),
     });
 
@@ -1171,8 +1126,6 @@ describe("one-shot scan events", () => {
     const updates: ScanProgress[] = [];
 
     async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
       for (const text of [
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
@@ -1187,20 +1140,10 @@ describe("one-shot scan events", () => {
           },
         };
       }
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 1,
-        },
-      };
     }
 
     await expect(
-      runEvents(scanDir, progressEvents(), {
+      runEvents(scanDir, completedEvents("thread-1", progressEvents()), {
         onProgress: (progress) => updates.push(progress),
       }),
     ).resolves.toBeDefined();
