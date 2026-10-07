@@ -1,3 +1,4 @@
+import { modelResponseText } from "./support/model-response-text.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
@@ -52,12 +53,7 @@ function fakeCodex(response: unknown) {
       return {
         async run(prompt, turn) {
           calls.push({ prompt, thread, turn });
-          return {
-            finalResponse:
-              typeof response === "string"
-                ? response
-                : JSON.stringify(response),
-          };
+          return { finalResponse: modelResponseText(response) };
         },
       };
     },
