@@ -1,7 +1,6 @@
 {
   "extends": "../plugins/codex-security/mcp-app/tsconfig.json",
   "compilerOptions": {
-    "lib": ["ES2024", "ESNext.Iterator"],
     "typeRoots": ["../sdk/typescript/node_modules/@types"]
   },
   "include": [
