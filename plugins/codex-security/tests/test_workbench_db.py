@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     SCRIPT,
+    begin_deep_scan,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -24,9 +25,11 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_handoff_delivered,
+    resume_deep_scan,
     run_workbench,
     save_workspace,
     scan_claim_command,
+    scan_command,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -139,10 +142,8 @@ def budget_scan_fixture(
     scan_id = str(registered["scanId"])
     if mode != "deep":
         return state_dir, target, scan_dir, scan_id, scan_dir / "candidate_ledger.jsonl"
-    run_workbench(
+    begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "sdk-thread",
         "--scan-id",
         scan_id,
@@ -184,10 +185,9 @@ def budget_scan_fixture(
 
 
 def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
-    return run_workbench(
+    return scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
         json.dumps(BUDGET_COST),
@@ -201,27 +201,14 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
     tmp_path: Path,
 ) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
-    original = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+    original = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     for limit in (0.0055, 0.006):
-        run_workbench(
-            state_dir,
-            "set-scan-cost-limit",
-            "--scan-id",
-            scan_id,
-            "--max-cost-usd",
-            str(limit),
-        )
-    saved = run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]
+        scan_command(state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", str(limit))
+    saved = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     assert saved == {**original, "maxCostUsd": 0.006}
     assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
-    stopped = run_workbench(
-        state_dir,
-        "set-scan-cost-limit",
-        "--scan-id",
-        scan_id,
-        "--max-cost-usd",
-        "1",
-        check=False,
+    stopped = scan_command(
+        state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", "1", check=False
     )
     assert stopped["returncode"] != 0
 
@@ -229,20 +216,11 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
 @pytest.mark.parametrize("limit", ["0", "-1", "nan", "inf", "0.004", "0.005"])
 def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limit: str) -> None:
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path, mode="standard")
-    result = run_workbench(
-        state_dir,
-        "set-scan-cost-limit",
-        "--scan-id",
-        scan_id,
-        "--max-cost-usd",
-        limit,
-        check=False,
+    result = scan_command(
+        state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", limit, check=False
     )
     assert result["returncode"] != 0
-    assert (
-        run_workbench(state_dir, "get-scan-recipe", "--scan-id", scan_id)["recipe"]["maxCostUsd"]
-        == 0.005
-    )
+    assert scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]["maxCostUsd"] == 0.005
 
 
 def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
@@ -461,10 +439,9 @@ def test_budget_exhaustion_rejects_scan_below_configured_limit(tmp_path: Path) -
     state_dir, _, _, scan_id, _ = budget_scan_fixture(tmp_path)
     cost = {**BUDGET_COST, "estimatedUsd": 0.005}
 
-    rejected = run_workbench(
+    rejected = scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
         json.dumps(cost),
@@ -482,10 +459,7 @@ def test_budget_exhaustion_rejects_incomplete_discovery(tmp_path: Path) -> None:
 
     assert rejected["returncode"] != 0
     assert "requires successfully completed Deep Scan discovery" in str(rejected["stderr"])
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "running"
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
 
 def test_budget_exhaustion_rejects_standard_scan(tmp_path: Path) -> None:
@@ -598,24 +572,13 @@ def test_workbench_reopens_workspace_only_from_owning_thread(tmp_path: Path) -> 
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-a")
 
-    reopened = run_workbench(
-        state_dir,
-        "get-workspace",
-        "--workspace-id",
-        str(workspace["id"]),
-        "--thread-id",
-        "thread-a",
+    reopened = workspace_command(
+        state_dir, "get-workspace", str(workspace["id"]), "--thread-id", "thread-a"
     )
     assert reopened["id"] == workspace["id"]
 
-    rejected = run_workbench(
-        state_dir,
-        "get-workspace",
-        "--workspace-id",
-        str(workspace["id"]),
-        "--thread-id",
-        "thread-b",
-        check=False,
+    rejected = workspace_command(
+        state_dir, "get-workspace", str(workspace["id"]), "--thread-id", "thread-b", check=False
     )
     assert rejected["returncode"] != 0
     assert "workspace not found in this thread" in str(rejected["stderr"])
@@ -634,15 +597,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     )
     save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-i",
-        environment={"CODEX_HOME": str(codex_home)},
-    )
+    resume_deep_scan(state_dir, scan_id, "thread-i", environment={"CODEX_HOME": str(codex_home)})
     manifest_path = scan_dir / "coordinator-manifest.json"
     manifest_path.write_text("{}\n")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -663,7 +618,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
         inventory_strategy="deep_repository_repeated_discovery",
     )
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
     coverage = json.loads((scan_dir / "coverage.json").read_text())
@@ -729,14 +684,8 @@ def test_scan_start_rejects_artifact_root_inside_target(tmp_path: Path) -> None:
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(target / "scan-artifacts"),
-        check=False,
+    failed = start_scan_command(
+        state_dir, str(saved["id"]), "--scan-root", str(target / "scan-artifacts"), check=False
     )
 
     assert failed["returncode"] != 0
@@ -2243,7 +2192,7 @@ def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Pat
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_scan_command(state_dir, str(saved["id"]))
     scan_dir = Path(str(started["results"]["scanDir"]))
     assert scan_dir.is_relative_to(state_dir / "scans")
 
@@ -2257,13 +2206,8 @@ def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda _: run_workbench(
-                    state_dir,
-                    "start-scan",
-                    "--workspace-id",
-                    workspace_id,
-                    "--scan-root",
-                    str(tmp_path / "scans"),
+                lambda _: start_scan_command(
+                    state_dir, workspace_id, "--scan-root", str(tmp_path / "scans")
                 ),
                 range(2),
             )
@@ -2280,7 +2224,7 @@ def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> No
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    start_scan_command(state_dir, str(saved["id"]))
 
     failed = save_workspace(state_dir, str(saved["id"]), str(target), ".", "standard", check=False)
 
@@ -2362,7 +2306,7 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
     assert relabeled["targetSummary"] == f"Commit {revision[:7]}"
 
     subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=target, check=True)
-    detached = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    detached = workspace_command(state_dir, "get-workspace", workspace_id)
     assert detached["targetMetadata"]["branch"] is None
     assert detached["targetMetadata"]["detachedHead"] is True
     assert detached["targetMetadata"]["shortRevision"] == revision[:7]
@@ -2454,13 +2398,7 @@ def assert_unversioned_codebase_scan_starts(
     saved = save_workspace(
         state_dir, workspace_id, str(target), ".", "standard", environment=environment
     )
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        environment=environment,
-    )
+    started = start_scan_command(state_dir, workspace_id, environment=environment)
 
     assert saved["setup"] == {"submitted": True}
     assert started["results"]["targetRevision"] == "unversioned"
@@ -2580,10 +2518,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
 
-    updated = run_workbench(
+    updated = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2593,10 +2530,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert updated["scan"]["userContext"] == "Prioritize tenant isolation."
     assert updated["workspace"]["userContext"] == "Prioritize tenant isolation."
 
-    rejected_workspace = run_workbench(
+    rejected_workspace = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(uuid.uuid4()),
@@ -2608,10 +2544,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert "selected workspace" in str(rejected_workspace["stderr"])
 
     url_context = "OAuth issuer: https://accounts.example.test/oauth/authorize"
-    updated_url = run_workbench(
+    updated_url = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2621,11 +2556,10 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert updated_url["scan"]["userContext"] == url_context
     assert updated_url["workspace"]["userContext"] == url_context
 
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "fixture")
-    rejected_terminal = run_workbench(
+    fail_scan(state_dir, scan_id, "fixture")
+    rejected_terminal = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2729,10 +2663,9 @@ def create_saved_working_tree_workspace(
         *(["--diff-head-revision", head_revision] if head_revision is not None else []),
     )
     create_workspace(state_dir, workspace_id, "--target-path", str(target), *diff_arguments)
-    return run_workbench(
+    return workspace_command(
         state_dir,
         "save-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2756,13 +2689,7 @@ def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) 
     subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Second commit"], cwd=target, check=True)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        check=False,
-    )
+    failed = start_scan_command(state_dir, workspace_id, check=False)
     assert failed["returncode"] != 0
     assert "HEAD changed" in str(failed["stderr"])
 
@@ -2778,13 +2705,7 @@ def test_workbench_rejects_working_tree_target_after_contents_change(tmp_path: P
     )
     (target / "new-file.txt").write_text("new untracked content\n")
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        check=False,
-    )
+    failed = start_scan_command(state_dir, workspace_id, check=False)
     assert failed["returncode"] != 0
     assert "contents changed" in str(failed["stderr"])
 
@@ -2888,13 +2809,7 @@ def test_workbench_can_validate_legacy_nested_working_tree_scan(tmp_path: Path) 
             (str(nested_target.resolve()), scan_id),
         )
 
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-    )
+    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert "repository root" not in str(failed["stderr"])
     assert "scan-manifest.json" in str(failed["stderr"])
@@ -3165,14 +3080,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
         connection.execute(
             "UPDATE workspaces SET target_summary = NULL WHERE id = ?", (workspace_id,)
         )
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     assert started["results"]["diffTarget"]["headRevision"] == revision
     assert started["results"]["targetSummary"] == f"Commit {revision[:7]}"
 
