@@ -1,4 +1,4 @@
-import { delimiter, resolve } from "node:path";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import {
   bundledPluginRoot,
   workbenchEnvironment,
@@ -93,6 +93,7 @@ export class SqliteFindingsStore implements FindingsStore {
   private async resolveOptions(): Promise<
     Omit<WorkbenchCommandOptions, "python">
   > {
+    const protectedRoot = process.cwd();
     const environment: NodeJS.ProcessEnv = workbenchEnvironment(
       this.environment,
     );
@@ -105,12 +106,17 @@ export class SqliteFindingsStore implements FindingsStore {
             process.platform === "win32"
               ? entry.replace(/^"(.*)"$/u, "$1")
               : entry;
-          return directory ? resolve(directory) : directory;
+          if (!directory) return directory;
+          if (process.platform === "win32") return resolve(directory);
+          // Keep POSIX symlink/.. traversal intact.
+          return isAbsolute(directory)
+            ? directory
+            : `${protectedRoot}/${directory}`;
         })
         .join(delimiter);
     }
     return {
-      protectedRoot: process.cwd(),
+      protectedRoot,
       pluginRoot: await bundledPluginRoot(),
       environment,
       stateDirectory: environment["CODEX_SECURITY_STATE_DIR"],
