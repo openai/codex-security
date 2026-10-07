@@ -876,7 +876,17 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
 
 
-def test_projection_preserves_identifier_text_and_code_path_spelling() -> None:
+@pytest.mark.parametrize(
+    ("source_path", "rendered_location"),
+    [
+        ("app/api/[id]/route.ts", "`app/api/[id]/route.ts:7`"),
+        ("app/api/`id`/route.ts", "``app/api/`id`/route.ts:7``"),
+        ("`route`.ts", "`` `route`.ts:7 ``"),
+    ],
+)
+def test_projection_preserves_identifier_text_and_code_path_spelling(
+    source_path: str, rendered_location: str
+) -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
     finding["title"] = "__proto__ pollution"
@@ -885,7 +895,7 @@ def test_projection_preserves_identifier_text_and_code_path_spelling() -> None:
         {
             "id": "source",
             "label": "Source control",
-            "path": "app/api/[id]/route.ts",
+            "path": source_path,
             "startLine": 7,
             "code": "handle(request)",
             "explanation": "A source-backed operation.",
@@ -893,4 +903,4 @@ def test_projection_preserves_identifier_text_and_code_path_spelling() -> None:
     ]
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert "\\_\\_proto\\_\\_ pollution" in markdown
-    assert "`app/api/[id]/route.ts:7`" in markdown
+    assert rendered_location in markdown
