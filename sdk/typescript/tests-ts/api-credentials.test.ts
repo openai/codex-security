@@ -11,7 +11,11 @@ import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
-import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import {
+  codexFactory,
+  completedEvents,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -518,42 +522,34 @@ describe("CodexSecurity orchestration", () => {
                 options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
               expect(typeof deepScanConfigPath).toBe("string");
               deepScanConfigPaths.add(deepScanConfigPath!);
-              return {
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    if (++scansStarted === 2) {
-                      expect(
-                        existsSync(
-                          join(credentialHome, ".codex-security-scan.lock"),
-                        ),
-                      ).toBe(false);
-                      concurrentScans.resolve();
-                    }
-                    const credentialConfig = parseToml(
-                      await readFile(
-                        join(credentialHome, "config.toml"),
-                        "utf8",
-                      ),
-                    );
-                    expect(credentialConfig["model"]).toBeUndefined();
-                    const before = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(before["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    await concurrentScans.promise;
-                    const after = parseToml(
-                      await readFile(deepScanConfigPath!, "utf8"),
-                    );
-                    expect(after["deep_scan"]).toMatchObject({
-                      workers: index + 2,
-                    });
-                    throw new Error("parallel managed scan reached");
-                  },
-                }),
-              };
+              return codexFactory(async () => {
+                if (++scansStarted === 2) {
+                  expect(
+                    existsSync(
+                      join(credentialHome, ".codex-security-scan.lock"),
+                    ),
+                  ).toBe(false);
+                  concurrentScans.resolve();
+                }
+                const credentialConfig = parseToml(
+                  await readFile(join(credentialHome, "config.toml"), "utf8"),
+                );
+                expect(credentialConfig["model"]).toBeUndefined();
+                const before = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(before["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                await concurrentScans.promise;
+                const after = parseToml(
+                  await readFile(deepScanConfigPath!, "utf8"),
+                );
+                expect(after["deep_scan"]).toMatchObject({
+                  workers: index + 2,
+                });
+                throw new Error("parallel managed scan reached");
+              })();
             },
           },
         );

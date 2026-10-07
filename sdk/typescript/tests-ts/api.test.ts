@@ -6147,16 +6147,13 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
     await mkdir(codexHome);
-    const client = new TestClient(
-      {},
-      {
-        environment: { OPENAI_API_KEY: "ambient-key" },
-        prepareRuntime: runtimePreparer(codexHome, () => ({
-          environment: { CODEX_HOME: codexHome },
-        })),
-        createCodex: unusedCodex,
-      },
-    );
+    const client = TestClient.withDependencies({
+      environment: { OPENAI_API_KEY: "ambient-key" },
+      prepareRuntime: runtimePreparer(codexHome, () => ({
+        environment: { CODEX_HOME: codexHome },
+      })),
+      createCodex: unusedCodex,
+    });
     await expect(client.account()).resolves.toEqual({
       authenticated: true,
       details: "Authenticated with an API key.",
@@ -6267,27 +6264,24 @@ describe("CodexSecurity orchestration", () => {
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
       const createCodex = mock(completedCodex(root));
-      const client = new TestClient(
-        {},
-        {
+      const client = TestClient.withDependencies({
+        environment: {
+          OPENAI_API_KEY: "ambient-key",
+          CODEX_CLI_PATH: ` ${executable} `,
+          PATH: searchPath,
+        },
+        prepareRuntime: runtimePreparer(codexHome, () => ({
           environment: {
-            OPENAI_API_KEY: "ambient-key",
+            CODEX_HOME: codexHome,
             CODEX_CLI_PATH: ` ${executable} `,
             PATH: searchPath,
           },
-          prepareRuntime: runtimePreparer(codexHome, () => ({
-            environment: {
-              CODEX_HOME: codexHome,
-              CODEX_CLI_PATH: ` ${executable} `,
-              PATH: searchPath,
-            },
-          })),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          createCodex,
-        },
-      );
+        })),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex,
+      });
 
       await client.run(repository);
       expect(createCodex.mock.lastCall?.[0]?.codexPathOverride).toBe(
@@ -6373,19 +6367,16 @@ describe("CodexSecurity orchestration", () => {
     };
     const originalEnvironment = { ...runtimeEnvironment };
     const createCodex = mock(completedCodex(root));
-    const client = new TestClient(
-      {},
-      {
-        environment: callerEnvironment,
-        prepareRuntime: runtimePreparer(codexHome, () => ({
-          environment: runtimeEnvironment,
-        })),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex,
-      },
-    );
+    const client = TestClient.withDependencies({
+      environment: callerEnvironment,
+      prepareRuntime: runtimePreparer(codexHome, () => ({
+        environment: runtimeEnvironment,
+      })),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex,
+    });
     try {
       await client.run(repository);
       const options = createCodex.mock.lastCall?.[0] ?? null;
@@ -6476,31 +6467,28 @@ process.exit(2);
       mock<(authentication: ScanAuthentication) => void>();
     let pythonEnvironment: Record<string, string | undefined> | undefined;
     let pythonProtectedRoot: string | undefined;
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          openai_api_key: "stale-key",
-          OPENAI_API_KEY: "ambient-key",
-          Codex_Api_Key: "secondary-key",
-        },
-        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-          CODEX_HOME: codexHome,
-          OpenAi_Api_Key: "forwarded-openai-key",
-          codex_api_key: "forwarded-codex-key",
-          ...fakeCommand.environment,
-        })),
-        resolveCodexCommand: () => fakeCommand.command,
-        resolvePluginPython: async (options) => {
-          pythonEnvironment = options?.environment;
-          pythonProtectedRoot = options?.protectedRoot;
-          return "/managed/python";
-        },
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex,
+    const client = TestClient.withDependencies({
+      environment: {
+        openai_api_key: "stale-key",
+        OPENAI_API_KEY: "ambient-key",
+        Codex_Api_Key: "secondary-key",
       },
-    );
+      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
+        CODEX_HOME: codexHome,
+        OpenAi_Api_Key: "forwarded-openai-key",
+        codex_api_key: "forwarded-codex-key",
+        ...fakeCommand.environment,
+      })),
+      resolveCodexCommand: () => fakeCommand.command,
+      resolvePluginPython: async (options) => {
+        pythonEnvironment = options?.environment;
+        pythonProtectedRoot = options?.protectedRoot;
+        return "/managed/python";
+      },
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex,
+    });
 
     await client.run(repository, {
       onAuthentication,
@@ -6557,21 +6545,18 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     );
     const fakeCommand = nodeCodex(fakeCodex);
 
-    const client = new TestClient(
-      {},
-      {
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-          CODEX_HOME: codexHome,
-          ...fakeCommand.environment,
-        })),
-        resolveCodexCommand: () => fakeCommand.command,
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => fail("managed keyring scan reached"),
-      },
-    );
+    const client = TestClient.withDependencies({
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
+        CODEX_HOME: codexHome,
+        ...fakeCommand.environment,
+      })),
+      resolveCodexCommand: () => fakeCommand.command,
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: () => fail("managed keyring scan reached"),
+    });
 
     try {
       await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
@@ -6649,24 +6634,21 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       mock<(authentication: ScanAuthentication) => void>();
     const selectedApiKeys: Array<string | undefined> = [];
     const codexEnvironments: Array<Record<string, string> | undefined> = [];
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_HOME: ambientHome,
-          OPENAI_API_KEY: "synthetic-openai-key",
-        },
-        prepareRuntime: unauthenticatedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => {
-          selectedApiKeys.push(options.apiKey);
-          codexEnvironments.push(options.env);
-          throw new Error("scan reached");
-        },
+    const client = TestClient.withDependencies({
+      environment: {
+        CODEX_HOME: ambientHome,
+        OPENAI_API_KEY: "synthetic-openai-key",
       },
-    );
+      prepareRuntime: unauthenticatedRuntime(codexHome),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: (options: CodexOptions) => {
+        selectedApiKeys.push(options.apiKey);
+        codexEnvironments.push(options.env);
+        throw new Error("scan reached");
+      },
+    });
 
     await expect(
       client.run(repository, {
@@ -6811,20 +6793,17 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       OPENAI_API_KEY: "first-key",
     };
     const selectedKeys: Array<string | undefined> = [];
-    const client = new TestClient(
-      {},
-      {
-        environment,
-        prepareRuntime: unauthenticatedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => {
-          selectedKeys.push(options.apiKey);
-          throw new Error("scan reached");
-        },
+    const client = TestClient.withDependencies({
+      environment,
+      prepareRuntime: unauthenticatedRuntime(codexHome),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: (options: CodexOptions) => {
+        selectedKeys.push(options.apiKey);
+        throw new Error("scan reached");
       },
-    );
+    });
 
     await expect(client.run(repository)).rejects.toThrow("scan reached");
     environment["OPENAI_API_KEY"] = "second-key";
@@ -6839,16 +6818,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const environment: Record<string, string | undefined> = {
       openai_api_key: "ambient-key",
     };
-    const client = new TestClient(
-      {},
-      {
-        environment,
-        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-          CODEX_HOME: codexHome,
-        })),
-        createCodex: () => fail("must not start Codex without credentials"),
-      },
-    );
+    const client = TestClient.withDependencies({
+      environment,
+      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
+        CODEX_HOME: codexHome,
+      })),
+      createCodex: () => fail("must not start Codex without credentials"),
+    });
 
     await expect(client.account()).resolves.toMatchObject({
       authenticated: true,
@@ -6872,17 +6848,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const prepared =
       Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
     const createCodex = mock(throwing("turn continued after close"));
-    const client = new TestClient(
-      {},
-      {
-        prepareRuntime: async () => {
-          if (attempts++ === 0) throw preparationFailure;
-          started.resolve();
-          return await prepared.promise;
-        },
-        createCodex,
+    const client = TestClient.withDependencies({
+      prepareRuntime: async () => {
+        if (attempts++ === 0) throw preparationFailure;
+        started.resolve();
+        return await prepared.promise;
       },
-    );
+      createCodex,
+    });
     await expect(client.run(repository)).rejects.toBe(preparationFailure);
     const turn = client.run(repository);
     await started.promise;
@@ -6900,19 +6873,16 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const started = Promise.withResolvers<void>();
     const prepared =
       Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
-    const client = new TestClient(
-      {},
-      {
-        prepareRuntime: async () => {
-          started.resolve();
-          return await prepared.promise;
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: completedCodex(root),
+    const client = TestClient.withDependencies({
+      prepareRuntime: async () => {
+        started.resolve();
+        return await prepared.promise;
       },
-    );
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: completedCodex(root),
+    });
     const controller = new AbortController();
     const canceled = client.run(repository, { signal: controller.signal });
     await started.promise;
@@ -6935,20 +6905,17 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const started = Promise.withResolvers<void>();
     const blocked = Promise.withResolvers<void>();
     const createCodex = mock(throwing("turn continued after close"));
-    const client = new TestClient(
-      {},
-      {
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => {
-          started.resolve();
-          await blocked.promise;
-          return "deadbeef";
-        },
-        createCodex,
+    const client = TestClient.withDependencies({
+      prepareRuntime: async () => preparedRuntime(codexHome),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => {
+        started.resolve();
+        await blocked.promise;
+        return "deadbeef";
       },
-    );
+      createCodex,
+    });
     const turn = client.run(repository);
     await started.promise;
     const closing = client.close();
@@ -6962,31 +6929,22 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const { repository, codexHome, scanDir } = await scanDirectories();
     let scanSignal: AbortSignal | undefined;
 
-    const client = new TestClient(
-      {},
-      {
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(
-              _input: string,
-              options: { signal: AbortSignal },
-            ) {
-              scanSignal = options.signal;
-              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-                yield { type: "thread.started", thread_id: "thread-1" };
-                yield {
-                  type: "turn.failed",
-                  error: { message: "upstream authentication failed" },
-                };
-              }
-              return { events: failedEvents() };
-            },
-          }),
-        }),
-      },
-    );
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: codexFactory(
+        async (_input: string, options: { signal: AbortSignal }) => {
+          scanSignal = options.signal;
+          async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "thread-1" };
+            yield {
+              type: "turn.failed",
+              error: { message: "upstream authentication failed" },
+            };
+          }
+          return { events: failedEvents() };
+        },
+      ),
+    });
 
     await expect(client.run(repository)).rejects.toThrow(
       "upstream authentication failed",
@@ -7015,26 +6973,23 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       ].join("\n"),
     );
     const nodeExecutable = nodeCommand().command;
-    const client = new TestClient(
-      {},
-      {
-        prepareRuntime: runtimePreparer(codexHome, () => ({
-          environment: { CODEX_HOME: codexHome },
-        })),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) =>
-          new Codex({
-            ...options,
-            codexPathOverride: nodeExecutable,
-            env: {
-              ...options.env,
-              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-            },
-          }),
-      },
-    );
+    const client = TestClient.withDependencies({
+      prepareRuntime: runtimePreparer(codexHome, () => ({
+        environment: { CODEX_HOME: codexHome },
+      })),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex: (options: CodexOptions) =>
+        new Codex({
+          ...options,
+          codexPathOverride: nodeExecutable,
+          env: {
+            ...options.env,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+          },
+        }),
+    });
 
     await expect(client.run(repository)).rejects.toThrow("401 invalid API key");
     await expect(client.close()).resolves.toBeUndefined();
@@ -7271,21 +7226,18 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       'process.on("SIGTERM", () => {});\nconsole.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nsetInterval(() => {}, 1000);\nawait new Promise(() => {});\n',
     );
     const fakeCommand = nodeCodex(fakeCodex);
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: root,
-          ...fakeCommand.environment,
-        },
-        prepareRuntime: unauthenticatedRuntime(
-          codexHome,
-          () => fakeCommand.environment,
-        ),
-        resolveCodexCommand: () => fakeCommand.command,
-        createCodex: unusedCodex,
+    const client = TestClient.withDependencies({
+      environment: {
+        CODEX_SECURITY_STATE_DIR: root,
+        ...fakeCommand.environment,
       },
-    );
+      prepareRuntime: unauthenticatedRuntime(
+        codexHome,
+        () => fakeCommand.environment,
+      ),
+      resolveCodexCommand: () => fakeCommand.command,
+      createCodex: unusedCodex,
+    });
     const login = await client.loginChatGPTDeviceCode();
     expect(login.verificationUrl).toBe("https://auth.example.test/device");
     expect(login.userCode).toBe("ABCD-EFGH");
@@ -7314,25 +7266,22 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     const createCodex = mock(completedCodex(root));
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "ambient-key",
-        },
-        prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-          ...process.env,
-          CODEX_HOME: codexHome,
-          OPENAI_API_KEY: "ambient-key",
-          CODEX_API_KEY: "secondary-ambient-key",
-        })),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex,
+    const client = TestClient.withDependencies({
+      environment: {
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "ambient-key",
       },
-    );
+      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
+        ...process.env,
+        CODEX_HOME: codexHome,
+        OPENAI_API_KEY: "ambient-key",
+        CODEX_API_KEY: "secondary-ambient-key",
+      })),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      createCodex,
+    });
     try {
       await client.run(repository);
       expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
@@ -7366,21 +7315,18 @@ setInterval(() => {}, 1000);
 `,
     );
     const fakeCommand = nodeCodex(fakeCodex);
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: root,
-          ...fakeCommand.environment,
-        },
-        prepareRuntime: unauthenticatedRuntime(
-          codexHome,
-          () => fakeCommand.environment,
-        ),
-        resolveCodexCommand: () => fakeCommand.command,
-        createCodex: unusedCodex,
+    const client = TestClient.withDependencies({
+      environment: {
+        CODEX_SECURITY_STATE_DIR: root,
+        ...fakeCommand.environment,
       },
-    );
+      prepareRuntime: unauthenticatedRuntime(
+        codexHome,
+        () => fakeCommand.environment,
+      ),
+      resolveCodexCommand: () => fakeCommand.command,
+      createCodex: unusedCodex,
+    });
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
     try {
