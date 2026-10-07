@@ -65,6 +65,12 @@ SOURCE_CASES = (
             ("profile.EJS", "<% const count = 0; %>\n<p><%= count %></p>"),
             ("show.html.erb", "<% count = 0 %>\n<p><%= count %></p>"),
             ("card.phtml", "<?php $count = 0; ?>\n<p><?= $count ?></p>"),
+            ("index.jsp", "<% int count = 0; %>\n<p><%= count %></p>"),
+            ("list.jspx", "<jsp:scriptlet>int count = 0;</jsp:scriptlet>\n<p>${count}</p>"),
+            ("Index.cshtml", "@{ var count = 0; }\n<p>@count</p>"),
+            ("Counter.razor", "<p>@count</p>\n@code { int count = 0; }"),
+            ("Default.ASPX", "<% var count = 0; %>\n<p><%= count %></p>"),
+            ("Header.ascx", "<% var count = 0; %>\n<p><%= count %></p>"),
         )
     ),
 )
