@@ -452,26 +452,42 @@ function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
 ): boolean {
-  let expression = condition
-    .replace(/^\$\{\{\s*/u, "")
-    .replace(/\s*\}\}$/u, "");
-  for (const [identifier, value] of Object.entries(values).sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    if (!/^[a-z0-9_/-]+$/u.test(value)) {
-      throw new Error(`Unsafe workflow test value: ${value}`);
-    }
-    expression = expression.replaceAll(identifier, `'${value}'`);
-  }
-  if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
-    throw new Error(`Unsupported workflow condition: ${condition}`);
-  }
+  return evaluateWorkflowConditions([{ condition, values }])[0]!;
+}
 
-  const result = spawnSync(bash, ["-c", `[[ ${expression} ]]`]);
-  if (result.status !== 0 && result.status !== 1) {
-    throw new Error(`Could not evaluate workflow condition: ${condition}`);
+function evaluateWorkflowConditions(
+  conditions: Array<{ condition: string; values: Record<string, string> }>,
+): boolean[] {
+  const expressions = conditions.map(({ condition, values }) => {
+    let expression = condition
+      .replace(/^\$\{\{\s*/u, "")
+      .replace(/\s*\}\}$/u, "");
+    for (const [identifier, value] of Object.entries(values).sort(
+      ([left], [right]) => right.length - left.length,
+    )) {
+      if (!/^[a-z0-9_/-]+$/u.test(value)) {
+        throw new Error(`Unsafe workflow test value: ${value}`);
+      }
+      expression = expression.replaceAll(identifier, `'${value}'`);
+    }
+    if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
+      throw new Error(`Unsupported workflow condition: ${condition}`);
+    }
+    return `[[ ${expression} ]]
+result=$?
+if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
+printf '%s\n' "$result"`;
+  });
+  const result = spawnSync(bash, ["-c", expressions.join("\n")], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error("Could not evaluate workflow conditions.");
   }
-  return result.status === 0;
+  return result.stdout
+    .trimEnd()
+    .split("\n")
+    .map((status) => status === "0");
 }
 
 describe("reviewed release note helpers", () => {
@@ -3828,6 +3844,12 @@ describe("GitHub release workflow safeguards", () => {
           name ===
           `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
       );
+    const conditionCases: Array<{
+      condition: string;
+      values: Record<string, string>;
+      expected: boolean;
+      message: string;
+    }> = [];
     for (const [validation, upstream, gateFailure] of [
       ["success", "success", false],
       ["success", "skipped", true],
@@ -3846,10 +3868,12 @@ describe("GitHub release workflow safeguards", () => {
         "needs.windows-verify.result": upstream,
       };
       for (const job of ["required-test", "windows"]) {
-        expect(
-          evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
-          `${job}: ${validation}/${upstream}`,
-        ).toBe(gateFailure);
+        conditionCases.push({
+          condition: coverageGate(job)?.if ?? "",
+          values,
+          expected: gateFailure,
+          message: `${job}: ${validation}/${upstream}`,
+        });
       }
     }
 
@@ -3873,8 +3897,9 @@ describe("GitHub release workflow safeguards", () => {
     })) {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {
-          expect(
-            evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
+          conditionCases.push({
+            condition: coverageGate(gate)?.if ?? "",
+            values: {
               "needs.validate-title.result": "success",
               ...Object.fromEntries(
                 dependencies.map((job) => [
@@ -3882,12 +3907,18 @@ describe("GitHub release workflow safeguards", () => {
                   job === dependency ? result : "success",
                 ]),
               ),
-            }),
-            `${gate}: ${dependency}/${result}`,
-          ).toBe(true);
+            },
+            expected: true,
+            message: `${gate}: ${dependency}/${result}`,
+          });
         }
       }
       expect(coverageGate(gate)?.run).toBe("exit 1");
+    }
+
+    const conditions = evaluateWorkflowConditions(conditionCases);
+    for (const [index, item] of conditionCases.entries()) {
+      expect(conditions[index], item.message).toBe(item.expected);
     }
 
     const renderName = (template: string, values: Record<string, string>) => {
