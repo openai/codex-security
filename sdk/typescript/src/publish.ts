@@ -321,7 +321,6 @@ export async function publishScanInternal(
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
-  const completedFindings = new Set<string>();
   reportPublicationProgress(progressObserver, {
     type: "started",
     scanId: prepared.scanId,
@@ -417,19 +416,15 @@ export async function publishScanInternal(
     const outcomes = new Map(
       [...handoffResults.created, ...handoffResults.failed].map(findingEntry),
     );
-    for (const preparedIssue of prepared.issues) {
-      const issue = outcomes.get(preparedIssue.findingId);
-      if (issue === undefined || completedFindings.has(issue.findingId)) {
-        continue;
-      }
-      completedFindings.add(issue.findingId);
+    for (const [index, preparedIssue] of prepared.issues.entries()) {
+      const issue = outcomes.get(preparedIssue.findingId)!;
       reportPublicationProgress(progressObserver, {
         type: "issue_completed",
         findingId: issue.findingId,
         ...("issueIdentifier" in issue
           ? { issueIdentifier: issue.issueIdentifier }
           : { error: issue.error }),
-        completed: completedFindings.size,
+        completed: index + 1,
         total: prepared.issues.length,
       });
     }
@@ -1078,8 +1073,7 @@ function reconcilePublicationEvidence(
     string,
     {
       kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string>;
-      reservedByUnknownOwner: boolean;
+      owners: Set<string | undefined>;
     }
   >();
 
@@ -1089,15 +1083,10 @@ function reconcilePublicationEvidence(
         const key = alias.value;
         const reservation = claimLedger.get(key) ?? {
           kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string>(),
-          reservedByUnknownOwner: false,
+          owners: new Set<string | undefined>(),
         };
         reservation.kinds.add(alias.kind);
-        if (item.ownerFindingId === undefined) {
-          reservation.reservedByUnknownOwner = true;
-        } else {
-          reservation.owners.add(item.ownerFindingId);
-        }
+        reservation.owners.add(item.ownerFindingId);
         claimLedger.set(key, reservation);
       }
     }
@@ -1110,12 +1099,10 @@ function reconcilePublicationEvidence(
 
   const collidingOwners = new Set<string>();
   for (const reservation of claimLedger.values()) {
-    if (
-      reservation.kinds.size > 1 ||
-      reservation.owners.size > 1 ||
-      (reservation.reservedByUnknownOwner && reservation.owners.size > 0)
-    ) {
-      for (const owner of reservation.owners) collidingOwners.add(owner);
+    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
+      for (const owner of reservation.owners) {
+        if (owner !== undefined) collidingOwners.add(owner);
+      }
     }
   }
   for (const outcome of outcomes) {
@@ -1123,7 +1110,6 @@ function reconcilePublicationEvidence(
     outcome.created = undefined;
     outcome.error =
       "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
-    outcome.indeterminate = true;
     indeterminate = true;
   }
 
@@ -1174,15 +1160,10 @@ function reconcilePublicationEvidence(
 
 function reconcileFindingEvidence(
   issue: PreparedPublicationIssue,
-  evidence: readonly PublicationEvidence[] = [],
+  bucket: PublicationEvidence[] = [],
 ): FindingReconciliation {
-  const completed = evidence.filter(
-    (item) => item.source === "event" && item.status === "completed",
-  );
-  const rejected = evidence.filter(
-    (item) => item.source === "event" && item.status === "failed",
-  );
-  const handoffs = evidence.filter((item) => item.source === "handoff");
+  const events = bucket.filter((item) => item.source === "event");
+  const handoffs = bucket.filter((item) => item.source === "handoff");
   const failed = (
     error: string,
     indeterminate: boolean,
@@ -1200,14 +1181,14 @@ function reconcileFindingEvidence(
     },
   });
 
-  if (completed.length + rejected.length > 1) {
+  if (events.length > 1) {
     return failed(
       "Codex attempted to create more than one Linear issue for this finding.",
       true,
     );
   }
-  const completedCall = completed[0];
-  const eventFailure = rejected[0];
+  const completedCall = events.find((event) => event.status === "completed");
+  const eventFailure = events.find((event) => event.status === "failed");
   const failedEventMayHaveMutated =
     eventFailure !== undefined && eventFailure.resolution.claims.length > 0;
   if (completedCall !== undefined && !completedCall.argumentsValid) {

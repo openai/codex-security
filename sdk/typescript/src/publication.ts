@@ -54,7 +54,6 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
@@ -142,7 +141,6 @@ export async function prepareScanPublication(
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
     ...(classification === undefined && options.findingIds === undefined
       ? {}

@@ -233,26 +233,34 @@ describe("TypeScript package skeleton", () => {
       ...["3.10", "3.12", "3.14"].map((python) => ({
         os: "ubuntu-latest",
         python,
-        tests: "plugins/codex-security/tests",
+        markers: "",
       })),
       {
         os: "macos-latest",
         python: "3.12",
-        tests: "plugins/codex-security/tests/test_workbench_scan_usage.py",
+        markers: "cross_platform or native_macos",
       },
       {
         os: "windows-latest",
         python: "3.12",
-        tests: "plugins/codex-security/tests/test_windows_scan_local_files.py",
+        markers: "cross_platform or native_windows",
       },
     ]);
     const testStep = job.steps!.find(
       ({ name }) => name === "Test Python source contracts",
     )!;
-    expect(testStep.env?.["PYTHON_TEST_PATH"]).toBe("${{ matrix.tests }}");
-    expect(testStep.run).toContain('python -m pytest "$PYTHON_TEST_PATH"');
+    expect(testStep.env?.["PYTEST_MARKERS"]).toBe("${{ matrix.markers }}");
+    expect(testStep.run).toContain(
+      'python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS"',
+    );
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
+    const nativeCoverageStep = job.steps!.find(
+      ({ name }) => name === "Require native platform coverage",
+    )!;
+    expect(nativeCoverageStep.if).toBe("runner.os != 'Linux'");
+    expect(nativeCoverageStep.run).toContain(".//testcase/skipped");
+    expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
     for (const name of [
       "Install plugin dependencies",
       "Build SDK and type-check eval tooling",
