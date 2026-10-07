@@ -187,6 +187,20 @@ async function fixture(count: number): Promise<PublicationFixture> {
   };
 }
 
+function publishCommand(scanDirectory: string, ...flags: string[]): string[] {
+  return [
+    "publish",
+    "scan",
+    scanDirectory,
+    "--to",
+    "linear",
+    "--linear-team",
+    OPTIONS.teamId,
+    ...flags,
+    "--json",
+  ];
+}
+
 async function publicationPayload(
   value: string,
 ): Promise<
@@ -395,18 +409,11 @@ describe("database-backed Linear publication integration", () => {
             },
           }) as unknown as LinearClient,
       });
-    const command = [
-      "publish",
-      "scan",
+    const command = publishCommand(
       completed.scanDirectory,
-      "--to",
-      "linear",
-      "--linear-team",
-      OPTIONS.teamId,
       "--project",
       OPTIONS.projectId,
-      "--json",
-    ];
+    );
     const run = async (flags: string[] = []) => {
       const { stdout, runCli } = createCliTest(main);
 
@@ -547,21 +554,7 @@ describe("database-backed Linear publication integration", () => {
         },
       });
 
-    expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        cli,
-      ),
-    ).toBe(0);
+    expect(await runCli(publishCommand(completed.scanDirectory), cli)).toBe(0);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
     expect(result.destination).toEqual({
@@ -682,18 +675,7 @@ describe("database-backed Linear publication integration", () => {
 
     expect(
       await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--project",
-          OPTIONS.projectId,
-          "--json",
-        ],
+        publishCommand(completed.scanDirectory, "--project", OPTIONS.projectId),
         cli,
       ),
     ).toBe(0);
@@ -784,21 +766,7 @@ describe("database-backed Linear publication integration", () => {
         },
       });
 
-    expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        cli,
-      ),
-    ).toBe(2);
+    expect(await runCli(publishCommand(completed.scanDirectory), cli)).toBe(2);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
     expect(result.destination).toEqual({
@@ -866,18 +834,7 @@ describe("database-backed Linear publication integration", () => {
 
     expect(
       await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--project",
-          OPTIONS.projectId,
-          "--json",
-        ],
+        publishCommand(completed.scanDirectory, "--project", OPTIONS.projectId),
         cli,
       ),
     ).toBe(0);
@@ -975,19 +932,12 @@ describe("database-backed Linear publication integration", () => {
 
       expect(
         await runCli(
-          [
-            "publish",
-            "scan",
+          publishCommand(
             completed.scanDirectory,
-            "--to",
-            "linear",
-            "--linear-team",
-            OPTIONS.teamId,
             "--project",
             OPTIONS.projectId,
             ...(skipExisting ? ["--skip-existing"] : []),
-            "--json",
-          ],
+          ),
           cli,
         ),
       ).toBe(2);
@@ -1279,18 +1229,7 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
 
     expect(
       await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--project",
-          OPTIONS.projectId,
-          "--json",
-        ],
+        publishCommand(completed.scanDirectory, "--project", OPTIONS.projectId),
         cli,
       ),
     ).toBe(130);

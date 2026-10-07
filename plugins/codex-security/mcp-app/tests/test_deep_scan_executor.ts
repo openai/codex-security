@@ -25,6 +25,7 @@ import { importModule } from "./import-module.ts";
 
 import type {
   CodexWorkerDiagnostic,
+  CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
 
@@ -388,15 +389,7 @@ async function testWindowsLongExecutableLaunches() {
         (await snapshotWorkerEnvironment()).CODEX_CLI_PATH,
         configured,
       );
-      const result = await new CodexSdkWorkerExecutor({
-        parentSandbox: trustedParentSandbox,
-      }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: new AbortController().signal,
-      });
+      const result = await runWorker(promptPath, workingDirectory);
       assert.equal(result.threadId, "fixture-thread-id");
       const invocation = await readJson(fixture.markerPath);
       assert.deepEqual(invocation.argv.slice(0, 2), [
@@ -777,15 +770,7 @@ async function testWorkerLaunchesWithoutGlobalCodex() {
     await mkdir(workingDirectory);
     await writeFile(promptPath, "fixture nested worker without global codex\n");
 
-    const result = await new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
-      signal: new AbortController().signal,
-    });
+    const result = await runWorker(promptPath, workingDirectory);
 
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = await readJson(fixture.markerPath);
@@ -855,15 +840,7 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       if (configured === undefined) delete process.env.CODEX_CLI_PATH;
       else process.env.CODEX_CLI_PATH = configured;
       assert.equal(resolveCodexPath(), expectedExecutable);
-      const result = await new CodexSdkWorkerExecutor({
-        parentSandbox: trustedParentSandbox,
-      }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: new AbortController().signal,
-      });
+      const result = await runWorker(promptPath, workingDirectory);
 
       assert.equal(result.threadId, "fixture-thread-id");
       const preflight = await readJson(fixture.preflightMarkerPath);
@@ -900,14 +877,12 @@ async function testSdkInvocationAndThreadCapture() {
       model: "gpt-5.6-luna",
       reasoningEffort: "xhigh",
       parentSandbox: trustedParentSandboxWithDenials,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 3,
-      signal: new AbortController().signal,
-      onThreadStarted: onThreadId,
-    });
+    }).run(
+      workerRequest(promptPath, workingDirectory, {
+        subagents: 3,
+        onThreadStarted: onThreadId,
+      }),
+    );
     assert.equal(result.threadId, "fixture-thread-id");
     const callbackThreadId = onThreadId.mock.calls.at(-1)?.arguments[0];
     assert.equal(callbackThreadId, "fixture-thread-id");
@@ -1052,14 +1027,9 @@ async function testOpenAiCredentialsReachWorker() {
       });
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resume"]) {
-          await executor.run({
-            kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
-            resumeThreadId,
-            signal: new AbortController().signal,
-          });
+          await executor.run(
+            workerRequest(promptPath, fixture.root, { kind, resumeThreadId }),
+          );
           const preflight = await readJson(fixture.preflightMarkerPath);
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.codexHome, fixture.root);
@@ -1252,26 +1222,24 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               } else {
                 process.env.SYNTHETIC_GATEWAY_KEY = providerKeys[index];
               }
-              return executor.run({
-                kind,
-                promptPath,
-                workingDirectory: fixture.root,
-                subagents: 0,
-                resumeThreadId,
-                artifactContext: {
-                  root: fixture.root,
-                  layout: kind === "dedup" ? "reducer" : "worker",
-                  ...(kind === "dedup"
-                    ? {
-                        deepReducer: {
-                          scanRoot: fixture.root,
-                          claimedWorkers: [],
-                        },
-                      }
-                    : {}),
-                },
-                signal: new AbortController().signal,
-              });
+              return executor.run(
+                workerRequest(promptPath, fixture.root, {
+                  kind,
+                  resumeThreadId,
+                  artifactContext: {
+                    root: fixture.root,
+                    layout: kind === "dedup" ? "reducer" : "worker",
+                    ...(kind === "dedup"
+                      ? {
+                          deepReducer: {
+                            scanRoot: fixture.root,
+                            claimedWorkers: [],
+                          },
+                        }
+                      : {}),
+                  },
+                }),
+              );
             }),
           );
           const workerLaunches = launches.filter(
@@ -1488,14 +1456,9 @@ async function testWorkerCyberAccessSettings() {
           cases.map((testCase) => {
             // Each scan captures its own config before its asynchronous launch.
             process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
-            return testCase.executor!.run({
-              kind,
-              resumeThreadId,
-              promptPath,
-              workingDirectory: fixture.root,
-              subagents: 0,
-              signal: new AbortController().signal,
-            });
+            return testCase.executor!.run(
+              workerRequest(promptPath, fixture.root, { kind, resumeThreadId }),
+            );
           }),
         );
         const workerLaunches = launches.filter(
@@ -1594,14 +1557,9 @@ async function testBedrockCredentialsReachWorker() {
     });
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-bedrock-resume"]) {
-        const result = await executor.run({
-          kind,
-          promptPath,
-          workingDirectory,
-          subagents: 0,
-          resumeThreadId,
-          signal: new AbortController().signal,
-        });
+        const result = await executor.run(
+          workerRequest(promptPath, workingDirectory, { kind, resumeThreadId }),
+        );
         assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
         const invocation = await readJson(fixture.markerPath);
         assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
@@ -1630,13 +1588,7 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       const result = await new CodexSdkWorkerExecutor({
         model,
         parentSandbox: trustedParentSandbox,
-      }).run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: new AbortController().signal,
-      });
+      }).run(workerRequest(promptPath, workingDirectory));
       assert.equal(result.threadId, "fixture-thread-id");
       const invocation = await readJson(fixture.markerPath);
       assertFlagPair(invocation.argv, "--model", model);
@@ -1656,14 +1608,11 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
         repoRoot: fixture.root,
         scanId: "fixture-scan-id",
       },
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
-      signal: new AbortController().signal,
-      artifactContext: { root: workingDirectory, layout: "worker" },
-    });
+    }).run(
+      workerRequest(promptPath, workingDirectory, {
+        artifactContext: { root: workingDirectory, layout: "worker" },
+      }),
+    );
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = await readJson(fixture.markerPath);
     assertConfigOverrides(invocation.argv, {
@@ -1681,15 +1630,13 @@ async function testSdkResumesExistingThread() {
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
       parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 3,
-      signal: new AbortController().signal,
-      resumeThreadId: "fixture-existing-thread",
-      continuationPrompt: "continue the existing worker\n",
-    });
+    }).run(
+      workerRequest(promptPath, workingDirectory, {
+        subagents: 3,
+        resumeThreadId: "fixture-existing-thread",
+        continuationPrompt: "continue the existing worker\n",
+      }),
+    );
     assert.equal(result.threadId, "fixture-existing-thread");
     const invocation = await readJson(fixture.markerPath);
     const resumeIndex = invocation.argv.indexOf("resume");
@@ -1706,14 +1653,8 @@ async function testSdkResumesExistingThread() {
 async function testRetryNotificationDoesNotInterruptTurn() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "RETRYABLE_STREAM_ERROR\n");
-    const result = await new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
+    const result = await runWorker(promptPath, workingDirectory, {
       subagents: 3,
-      signal: new AbortController().signal,
     });
     assert.equal(result.threadId, "fixture-thread-id");
     const invocation = await readJson(fixture.markerPath);
@@ -1870,14 +1811,8 @@ async function testCodeModeFrameDiagnosticSurvivesSuccessfulTurn() {
         promptPath,
         `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`,
       );
-      const result = await new CodexSdkWorkerExecutor({
-        parentSandbox: trustedParentSandbox,
-      }).run({
+      const result = await runWorker(promptPath, workingDirectory, {
         kind: "dedup",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: new AbortController().signal,
       });
       assert.equal(result.threadId, "fixture-thread-id");
       assert.deepEqual(result.diagnostics, [
@@ -2038,14 +1973,7 @@ async function testMalformedCommandEventsRemainRetryable() {
       );
       const onThreadId = mock.fn();
       await assert.rejects(
-        new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind: "discovery",
-          promptPath,
-          workingDirectory,
-          subagents: 0,
-          signal: new AbortController().signal,
+        runWorker(promptPath, workingDirectory, {
           onThreadStarted: onThreadId,
         }),
         (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
@@ -2097,13 +2025,12 @@ async function testMissingParentSandboxFailsBeforeWorkerLaunch() {
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   try {
     await assert.rejects(
-      new CodexSdkWorkerExecutor().run({
-        kind: "discovery",
-        promptPath: path.join(fixture.root, "missing-prompt.md"),
-        workingDirectory: path.join(fixture.root, "artifacts"),
-        subagents: 0,
-        signal: new AbortController().signal,
-      }),
+      new CodexSdkWorkerExecutor().run(
+        workerRequest(
+          path.join(fixture.root, "missing-prompt.md"),
+          path.join(fixture.root, "artifacts"),
+        ),
+      ),
       (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
         error?.name === "DeepScanNonRetryableError" &&
         /verified parent sandbox metadata/i.test(error.message),
@@ -2124,15 +2051,7 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
       await writeFile(promptPath, "fixture blocked worker prompt\n");
 
       await assert.rejects(
-        new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind: "discovery",
-          promptPath,
-          workingDirectory,
-          subagents: 0,
-          signal: new AbortController().signal,
-        }),
+        runWorker(promptPath, workingDirectory),
         (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
           error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("codex_security_deep_scan_worker") &&
@@ -2160,15 +2079,7 @@ async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
       await writeFile(promptPath, `${marker}\n`);
 
       await assert.rejects(
-        new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind: "discovery",
-          promptPath,
-          workingDirectory,
-          subagents: 0,
-          signal: new AbortController().signal,
-        }),
+        runWorker(promptPath, workingDirectory),
         (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
           error?.name === "DeepScanNonRetryableError" &&
           error.message.includes("worker was stopped") &&
@@ -2181,6 +2092,31 @@ async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
   }
 }
 
+function runWorker(
+  promptPath: string,
+  workingDirectory: string,
+  options: Partial<CodexWorkerRequest> = {},
+) {
+  return new CodexSdkWorkerExecutor({
+    parentSandbox: trustedParentSandbox,
+  }).run(workerRequest(promptPath, workingDirectory, options));
+}
+
+function workerRequest(
+  promptPath: string,
+  workingDirectory: string,
+  options: Partial<CodexWorkerRequest> = {},
+): CodexWorkerRequest {
+  return {
+    kind: "discovery",
+    promptPath,
+    workingDirectory,
+    subagents: 0,
+    signal: new AbortController().signal,
+    ...options,
+  };
+}
+
 async function runFixtureWorker(
   prompt: string,
   kind: DeepScanWorkerKind = "discovery",
@@ -2188,15 +2124,7 @@ async function runFixtureWorker(
 ) {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, `${prompt}\n`);
-    return await new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
-      kind,
-      promptPath,
-      workingDirectory,
-      subagents,
-      signal: new AbortController().signal,
-    });
+    return await runWorker(promptPath, workingDirectory, { kind, subagents });
   });
 }
 
