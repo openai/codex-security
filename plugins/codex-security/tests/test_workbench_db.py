@@ -27,6 +27,7 @@ from workbench_test_support import (
     run_workbench,
     save_workspace,
     scan_claim_command,
+    scan_command,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -598,24 +599,13 @@ def test_workbench_reopens_workspace_only_from_owning_thread(tmp_path: Path) -> 
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-a")
 
-    reopened = run_workbench(
-        state_dir,
-        "get-workspace",
-        "--workspace-id",
-        str(workspace["id"]),
-        "--thread-id",
-        "thread-a",
+    reopened = workspace_command(
+        state_dir, "get-workspace", str(workspace["id"]), "--thread-id", "thread-a"
     )
     assert reopened["id"] == workspace["id"]
 
-    rejected = run_workbench(
-        state_dir,
-        "get-workspace",
-        "--workspace-id",
-        str(workspace["id"]),
-        "--thread-id",
-        "thread-b",
-        check=False,
+    rejected = workspace_command(
+        state_dir, "get-workspace", str(workspace["id"]), "--thread-id", "thread-b", check=False
     )
     assert rejected["returncode"] != 0
     assert "workspace not found in this thread" in str(rejected["stderr"])
@@ -747,14 +737,8 @@ def test_scan_start_rejects_artifact_root_inside_target(tmp_path: Path) -> None:
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(target / "scan-artifacts"),
-        check=False,
+    failed = start_scan_command(
+        state_dir, str(saved["id"]), "--scan-root", str(target / "scan-artifacts"), check=False
     )
 
     assert failed["returncode"] != 0
@@ -2261,7 +2245,7 @@ def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Pat
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    started = start_scan_command(state_dir, str(saved["id"]))
     scan_dir = Path(str(started["results"]["scanDir"]))
     assert scan_dir.is_relative_to(state_dir / "scans")
 
@@ -2275,13 +2259,8 @@ def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda _: run_workbench(
-                    state_dir,
-                    "start-scan",
-                    "--workspace-id",
-                    workspace_id,
-                    "--scan-root",
-                    str(tmp_path / "scans"),
+                lambda _: start_scan_command(
+                    state_dir, workspace_id, "--scan-root", str(tmp_path / "scans")
                 ),
                 range(2),
             )
@@ -2298,21 +2277,9 @@ def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> No
     target = tmp_path / "target"
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
-    run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    start_scan_command(state_dir, str(saved["id"]))
 
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        str(saved["id"]),
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-        check=False,
-    )
+    failed = save_workspace(state_dir, str(saved["id"]), str(target), ".", "standard", check=False)
 
     assert failed["returncode"] != 0
     assert "already has a scan" in str(failed["stderr"])
@@ -2323,20 +2290,8 @@ def test_workbench_rejects_scoped_deep_scan(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        "src",
-        "--mode",
-        "deep",
-        check=False,
-    )
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(state_dir, workspace_id, str(target), "src", "deep", check=False)
     assert failed["returncode"] != 0
     assert "repository-wide" in str(failed["stderr"])
 
@@ -2346,20 +2301,8 @@ def test_workbench_rejects_diff_scan_for_non_git_target(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        check=False,
-    )
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(state_dir, workspace_id, str(target), ".", "diff", check=False)
     assert failed["returncode"] != 0
     assert "non-bare Git worktree" in str(failed["stderr"])
 
@@ -2369,14 +2312,7 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
+    created = create_workspace(state_dir, workspace_id, "--target-path", str(target))
     assert created["targetMetadata"] == {
         "branch": "main",
         "commitSubject": "Initial commit",
@@ -2389,16 +2325,11 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
         "shortRevision": revision[:7],
     }
 
-    saved = run_workbench(
+    saved = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--target-summary",
         "Latest commit",
@@ -2412,16 +2343,11 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
     assert saved["diffTarget"]["kind"] == "commit"
     assert saved["diffTarget"]["headRevision"] == revision
 
-    relabeled = run_workbench(
+    relabeled = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--target-summary",
         "",
@@ -2433,7 +2359,7 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
     assert relabeled["targetSummary"] == f"Commit {revision[:7]}"
 
     subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=target, check=True)
-    detached = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    detached = workspace_command(state_dir, "get-workspace", workspace_id)
     assert detached["targetMetadata"]["branch"] is None
     assert detached["targetMetadata"]["detachedHead"] is True
     assert detached["targetMetadata"]["shortRevision"] == revision[:7]
@@ -2472,18 +2398,13 @@ def test_workbench_rejects_nested_git_target_for_review_changes(tmp_path: Path) 
     nested_target = target / "nested"
     nested_target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
+    create_workspace(state_dir, workspace_id)
 
-    failed = run_workbench(
+    failed = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(nested_target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "commit",
@@ -2508,14 +2429,7 @@ def test_workbench_inspects_target_without_submitting_workspace(tmp_path: Path) 
     assert not (state_dir / "workbench.sqlite3").exists()
 
     workspace_id = str(uuid.uuid4())
-    workspace = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
+    workspace = create_workspace(state_dir, workspace_id, "--target-path", str(target))
     assert workspace["setup"] == {"submitted": False}
 
 
@@ -2533,33 +2447,11 @@ def assert_unversioned_codebase_scan_starts(
         environment=environment,
     )
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        environment=environment,
+    create_workspace(state_dir, workspace_id, environment=environment)
+    saved = save_workspace(
+        state_dir, workspace_id, str(target), ".", "standard", environment=environment
     )
-    saved = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-        environment=environment,
-    )
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        environment=environment,
-    )
+    started = start_scan_command(state_dir, workspace_id, environment=environment)
 
     assert saved["setup"] == {"submitted": True}
     assert started["results"]["targetRevision"] == "unversioned"
@@ -2620,10 +2512,8 @@ def test_workbench_marks_nested_git_paths_as_review_changes_unsupported(tmp_path
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
-    workspace = run_workbench(
+    workspace = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         str(uuid.uuid4()),
         "--target-path",
         str(missing),
@@ -2643,32 +2533,14 @@ def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
     initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
     created_context = "Initial guidance " + "x" * 10_000
-    created = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--user-context",
-        created_context,
+    created = create_workspace(
+        state_dir, workspace_id, "--target-path", str(target), "--user-context", created_context
     )
     assert created["userContext"] == created_context
 
     saved_context = "Updated guidance " + "y" * 10_000
-    saved = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-        "--user-context",
-        saved_context,
+    saved = save_workspace(
+        state_dir, workspace_id, str(target), ".", "standard", "--user-context", saved_context
     )
     assert saved["userContext"] == saved_context
 
@@ -2681,15 +2553,8 @@ def test_workbench_preserves_url_user_context_on_workspace_creation(tmp_path: Pa
         "Repository: https://github.com/example/security-review\n"
         "OAuth callback: https://accounts.example.test/oauth/callback"
     )
-    workspace = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        str(uuid.uuid4()),
-        "--target-path",
-        str(target),
-        "--user-context",
-        user_context,
+    workspace = create_workspace(
+        state_dir, str(uuid.uuid4()), "--target-path", str(target), "--user-context", user_context
     )
     assert workspace["userContext"] == user_context
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -2706,10 +2571,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
 
-    updated = run_workbench(
+    updated = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2719,10 +2583,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert updated["scan"]["userContext"] == "Prioritize tenant isolation."
     assert updated["workspace"]["userContext"] == "Prioritize tenant isolation."
 
-    rejected_workspace = run_workbench(
+    rejected_workspace = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(uuid.uuid4()),
@@ -2734,10 +2597,9 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert "selected workspace" in str(rejected_workspace["stderr"])
 
     url_context = "OAuth issuer: https://accounts.example.test/oauth/authorize"
-    updated_url = run_workbench(
+    updated_url = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2747,11 +2609,10 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert updated_url["scan"]["userContext"] == url_context
     assert updated_url["workspace"]["userContext"] == url_context
 
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "fixture")
-    rejected_terminal = run_workbench(
+    fail_scan(state_dir, scan_id, "fixture")
+    rejected_terminal = scan_command(
         state_dir,
         "update-scan-context",
-        "--scan-id",
         scan_id,
         "--workspace-id",
         str(workspace["id"]),
@@ -2767,15 +2628,8 @@ def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path) ->
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
-    workspace = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        str(uuid.uuid4()),
-        "--target-path",
-        str(target),
-        "--scope",
-        "missing",
+    workspace = create_workspace(
+        state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", "missing"
     )
     assert workspace["targetMetadata"]["isGit"] is False
     assert workspace["scope"] == "missing"
@@ -2861,19 +2715,10 @@ def create_saved_working_tree_workspace(
         revision,
         *(["--diff-head-revision", head_revision] if head_revision is not None else []),
     )
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        *diff_arguments,
-    )
-    return run_workbench(
+    create_workspace(state_dir, workspace_id, "--target-path", str(target), *diff_arguments)
+    return workspace_command(
         state_dir,
         "save-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2897,13 +2742,7 @@ def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) 
     subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "Second commit"], cwd=target, check=True)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        check=False,
-    )
+    failed = start_scan_command(state_dir, workspace_id, check=False)
     assert failed["returncode"] != 0
     assert "HEAD changed" in str(failed["stderr"])
 
@@ -2919,13 +2758,7 @@ def test_workbench_rejects_working_tree_target_after_contents_change(tmp_path: P
     )
     (target / "new-file.txt").write_text("new untracked content\n")
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        check=False,
-    )
+    failed = start_scan_command(state_dir, workspace_id, check=False)
     assert failed["returncode"] != 0
     assert "contents changed" in str(failed["stderr"])
 
@@ -3029,13 +2862,7 @@ def test_workbench_can_validate_legacy_nested_working_tree_scan(tmp_path: Path) 
             (str(nested_target.resolve()), scan_id),
         )
 
-    failed = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        check=False,
-    )
+    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert "repository root" not in str(failed["stderr"])
     assert "scan-manifest.json" in str(failed["stderr"])
@@ -3207,10 +3034,8 @@ def test_workbench_preserves_invalid_requested_initial_deep_scope(
     target = tmp_path / "target"
     target.mkdir()
     (target / "src").mkdir()
-    workspace = run_workbench(
+    workspace = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         str(uuid.uuid4()),
         "--target-path",
         str(target),
@@ -3224,17 +3049,8 @@ def test_workbench_preserves_invalid_requested_initial_deep_scope(
     assert workspace["setupValidation"]["valid"] is False
     assert "repository-wide" in str(workspace["setupValidation"]["error"])
 
-    workspace = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        str(uuid.uuid4()),
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
+    workspace = create_workspace(
+        state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", ".", "--mode", "deep"
     )
     assert workspace["mode"] == "deep"
     assert workspace["scope"] == "."
@@ -3244,10 +3060,8 @@ def test_workbench_discards_diff_target_for_non_diff_mode(tmp_path: Path) -> Non
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
-    workspace = run_workbench(
+    workspace = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         str(uuid.uuid4()),
         "--target-path",
         str(target),
@@ -3278,18 +3092,13 @@ def test_workbench_rejects_diff_target_when_saving_non_diff_mode(tmp_path: Path)
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
+    create_workspace(state_dir, workspace_id)
 
-    failed = run_workbench(
+    failed = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "standard",
         "--diff-target-kind",
         "range",
@@ -3309,20 +3118,8 @@ def test_workbench_requires_exact_diff_target(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        check=False,
-    )
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(state_dir, workspace_id, str(target), ".", "diff", check=False)
     assert failed["returncode"] != 0
     assert "Choose which Git changes" in str(failed["stderr"])
 
@@ -3332,17 +3129,12 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    run_workbench(
+    create_workspace(state_dir, workspace_id)
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--target-summary",
         "Latest commit",
@@ -3355,14 +3147,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
         connection.execute(
             "UPDATE workspaces SET target_summary = NULL WHERE id = ?", (workspace_id,)
         )
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     assert started["results"]["diffTarget"]["headRevision"] == revision
     assert started["results"]["targetSummary"] == f"Commit {revision[:7]}"
 
@@ -3372,20 +3157,8 @@ def test_workbench_rejects_bare_repository_for_audit(tmp_path: Path) -> None:
     target = tmp_path / "bare.git"
     subprocess.run(["git", "init", "-q", "--bare", str(target)], check=True)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-        check=False,
-    )
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(state_dir, workspace_id, str(target), ".", "standard", check=False)
     assert failed["returncode"] != 0
     assert "checked-out worktree" in str(failed["stderr"])
 
@@ -3410,10 +3183,8 @@ def test_workbench_refreshes_title_only_when_target_changes(tmp_path: Path) -> N
     original.mkdir()
     replacement.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(original),
@@ -3422,32 +3193,10 @@ def test_workbench_refreshes_title_only_when_target_changes(tmp_path: Path) -> N
         "--target-summary",
         "Original repository context.",
     )
-    unchanged = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(original),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    )
+    unchanged = save_workspace(state_dir, workspace_id, str(original), ".", "standard")
     assert unchanged["targetTitle"] == "Friendly title"
     assert unchanged["targetSummary"] == "Original repository context."
-    changed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(replacement),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    )
+    changed = save_workspace(state_dir, workspace_id, str(replacement), ".", "standard")
     assert changed["targetTitle"] == "replacement"
     assert changed["targetSummary"] is None
 
@@ -3464,20 +3213,8 @@ def test_review_changes_rejects_unborn_and_bare_git_repositories(tmp_path: Path)
         inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
         assert inspected["targetMetadata"]["reviewChangesSupported"] is False
         workspace_id = str(uuid.uuid4())
-        run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-        failed = run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            workspace_id,
-            "--target-path",
-            str(target),
-            "--scope",
-            ".",
-            "--mode",
-            "diff",
-            check=False,
-        )
+        create_workspace(state_dir, workspace_id)
+        failed = save_workspace(state_dir, workspace_id, str(target), ".", "diff", check=False)
         assert failed["returncode"] != 0, index
         expected = "non-bare Git worktree" if target == unborn else "checked-out worktree"
         assert expected in str(failed["stderr"])
@@ -3489,21 +3226,11 @@ def test_workbench_rejects_missing_or_file_scope(tmp_path: Path) -> None:
     target.mkdir()
     (target / "file.py").write_text("print('fixture')\n")
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
+    create_workspace(state_dir, workspace_id)
 
     for scope in ("missing", "file.py"):
-        failed = run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            workspace_id,
-            "--target-path",
-            str(target),
-            "--scope",
-            scope,
-            "--mode",
-            "standard",
-            check=False,
+        failed = save_workspace(
+            state_dir, workspace_id, str(target), scope, "standard", check=False
         )
         assert failed["returncode"] != 0
         assert "existing directory" in str(failed["stderr"])
@@ -3515,34 +3242,12 @@ def test_workbench_normalizes_absolute_scope_inside_target(tmp_path: Path) -> No
     scoped = target / "src"
     scoped.mkdir(parents=True)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
+    create_workspace(state_dir, workspace_id)
 
-    workspace = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        str(scoped),
-        "--mode",
-        "standard",
-    )
+    workspace = save_workspace(state_dir, workspace_id, str(target), str(scoped), "standard")
     assert workspace["scope"] == "src"
 
-    workspace = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        str(target),
-        "--mode",
-        "standard",
-    )
+    workspace = save_workspace(state_dir, workspace_id, str(target), str(target), "standard")
     assert workspace["scope"] == "."
 
 
@@ -3551,19 +3256,9 @@ def test_workbench_rejects_scope_escape(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        "../outside",
-        "--mode",
-        "standard",
-        check=False,
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(
+        state_dir, workspace_id, str(target), "../outside", "standard", check=False
     )
     assert failed["returncode"] != 0
     assert "stay inside" in str(failed["stderr"])
@@ -3577,20 +3272,8 @@ def test_workbench_rejects_symlinked_scope_escape(tmp_path: Path) -> None:
     outside.mkdir()
     (target / "linked").symlink_to(outside, target_is_directory=True)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    failed = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        "linked",
-        "--mode",
-        "standard",
-        check=False,
-    )
+    create_workspace(state_dir, workspace_id)
+    failed = save_workspace(state_dir, workspace_id, str(target), "linked", "standard", check=False)
     assert failed["returncode"] != 0
     assert "stay inside" in str(failed["stderr"])
 

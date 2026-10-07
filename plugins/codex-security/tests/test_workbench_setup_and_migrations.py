@@ -23,8 +23,11 @@ from workbench_test_support import (
     configure_git_command,
     create_saved_git_workspace,
     create_saved_workspace,
+    create_workspace,
+    get_scan,
     initialize_git_repository,
     run_workbench,
+    save_workspace,
     scan_command,
     start_delivered_scan,
     start_scan_command,
@@ -383,7 +386,7 @@ def test_workbench_does_not_run_fsmonitor_during_scan_start(tmp_path: Path) -> N
     marker.unlink()
 
     saved = create_saved_git_workspace(state_dir, target)
-    run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    start_scan_command(state_dir, str(saved["id"]))
     assert not marker.exists()
 
 
@@ -448,13 +451,7 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        check=False,
-    )
+    failed = start_scan_command(state_dir, str(saved["id"]), check=False)
 
     assert failed["returncode"] != 0
     assert "Dirty Git submodules are not supported" in str(failed["stderr"])
@@ -489,12 +486,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     assert not (target / "vendor/dependency/.git").exists()
     saved = create_saved_git_workspace(state_dir, target)
 
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-    )
+    started = start_scan_command(state_dir, str(saved["id"]))
 
     assert started["results"]["progress"]["status"] == "running"
 
@@ -531,13 +523,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     )
     saved = create_saved_git_workspace(state_dir, target)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        check=False,
-    )
+    failed = start_scan_command(state_dir, str(saved["id"]), check=False)
 
     assert failed["returncode"] != 0
     assert "revision recorded by the parent repository" in str(failed["stderr"])
@@ -557,26 +543,8 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target))
+    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
@@ -588,7 +556,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         target_revision=revision,
     )
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
 
 
@@ -2165,17 +2133,12 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    run_workbench(
+    create_workspace(state_dir, workspace_id)
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--target-summary",
         "Authentication callback changes",
@@ -2185,20 +2148,12 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
         revision,
     )
 
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     scan_id = started["results"]["scanId"]
 
     assert started["results"]["targetSummary"] == "Authentication callback changes"
     assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["targetSummary"]
-        == "Authentication callback changes"
+        get_scan(state_dir, scan_id)["scan"]["targetSummary"] == "Authentication callback changes"
     )
 
 
