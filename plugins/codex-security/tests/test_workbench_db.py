@@ -1618,7 +1618,7 @@ def test_completed_finding_triage_and_remediation_persist(
 
 
 def test_filesystem_identity_serialization_supports_windows_stat_values() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
     serialize_identity = namespace["serialize_filesystem_identity"]
     identity_matches = namespace["stored_filesystem_identity_matches"]
     windows_device_id = (1 << 64) - 1

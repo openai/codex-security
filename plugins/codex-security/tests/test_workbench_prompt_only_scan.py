@@ -276,7 +276,8 @@ def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
             "SELECT target_device, target_inode FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
-    serialize_identity = start_globals["serialize_filesystem_identity"]
+    identity_helpers = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
+    serialize_identity = identity_helpers["serialize_filesystem_identity"]
     assert identity == (
         serialize_identity(metadata.st_dev),
         serialize_identity(metadata.st_ino),
