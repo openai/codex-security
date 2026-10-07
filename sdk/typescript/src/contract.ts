@@ -218,17 +218,12 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     if (!isRecord(finding)) continue;
     const legacyEvidence = finding["code_evidence"];
     if (Array.isArray(legacyEvidence)) {
-      const compatibleEvidence: JsonRecord[] = [];
-      for (const evidence of legacyEvidence) {
-        if (!isRecord(evidence)) continue;
-        const id = evidence["id"];
-        const code = evidence["code"];
-        if (!isNonEmptyString(id) || !isNonEmptyString(code)) {
-          continue;
-        }
-        compatibleEvidence.push(evidence);
-      }
-      finding["code_evidence"] = compatibleEvidence;
+      finding["code_evidence"] = legacyEvidence.filter(
+        (evidence) =>
+          isRecord(evidence) &&
+          isNonEmptyString(evidence["id"]) &&
+          isNonEmptyString(evidence["code"]),
+      );
     } else if ("code_evidence" in finding && legacyEvidence !== null) {
       delete finding["code_evidence"];
     }
@@ -282,10 +277,7 @@ export function normalizePersistedFindings(payload: unknown): unknown {
 
     const validation = finding["validation"];
     if (isRecord(validation)) {
-      if (
-        typeof validation["evidence"] !== "string" ||
-        validation["evidence"].length === 0
-      ) {
+      if (!isNonEmptyString(validation["evidence"])) {
         normalizeLegacyStringLists(validation, ["evidence"]);
       }
       removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
@@ -302,16 +294,8 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     removeUnsupportedLegacyStrings(attackPath, ["summary"]);
     for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
       const detail = attackPath[field];
-      if (detail === null) {
-        delete attackPath[field];
-        continue;
-      }
-      if (typeof detail === "string") {
-        if (detail.length === 0) delete attackPath[field];
-        continue;
-      }
       if (!isRecord(detail)) {
-        if (field in attackPath) delete attackPath[field];
+        if (!isNonEmptyString(detail)) delete attackPath[field];
         continue;
       }
       removeUnsupportedLegacyStrings(detail, [
@@ -366,10 +350,7 @@ function removeUnsupportedLegacyStrings(
   fields: string[],
 ): void {
   for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
+    if (field in section && !isNonEmptyString(section[field])) {
       delete section[field];
     }
   }
@@ -1187,22 +1168,8 @@ function validRfc3339DateTime(value: string): boolean {
   ) {
     return false;
   }
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysInMonth = [
-    31,
-    leapYear ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ][month - 1]!;
-  return day <= daysInMonth;
+  // Date.UTC maps years 1–99 to 1901–1999, which have the same leap days.
+  return day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
 function schemaError(

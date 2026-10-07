@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -1828,6 +1828,17 @@ export async function main(
   let renderedPatch: string | undefined;
   let patchStructuredError = false;
   let scanStructuredError = false;
+  const scanOutcomeData = (
+    outcome: ScanOutcome,
+    error: Parameters<Cli.FileCommand["run"]>[0]["error"],
+    code = "SCAN_FAILED",
+  ) => {
+    exitCode = outcome.exitCode;
+    if (outcome.error !== undefined) {
+      return error({ code, message: outcome.error, exitCode });
+    }
+    return outcome.data;
+  };
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -2282,15 +2293,7 @@ export async function main(
           });
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return scanOutcomeData(outcome, incurError);
       },
     })
     .command("rerun", {
@@ -2374,15 +2377,7 @@ export async function main(
               format,
               parentScanId,
             });
-            exitCode = outcome.exitCode;
-            if (outcome.error !== undefined) {
-              return incurError({
-                code: "SCAN_IMPORT_FAILED",
-                message: outcome.error,
-                exitCode,
-              });
-            }
-            return outcome.data;
+            return scanOutcomeData(outcome, incurError, "SCAN_IMPORT_FAILED");
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
@@ -2423,15 +2418,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        exitCode = outcome.exitCode;
-        if (outcome.error !== undefined) {
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
-        }
-        return outcome.data;
+        return scanOutcomeData(outcome, incurError);
       },
     })
     .command("match", {
@@ -7654,12 +7641,7 @@ export async function readSkillCommandOutput(
 
   for await (const line of createInterface({ input: Readable.from(stream) })) {
     if (line.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => line);
     if (typeof event !== "object" || event === null) {
       continue;
     }
@@ -7923,12 +7905,8 @@ function incurErrorMessage(output: string): string {
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
   if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
-  }
+  const parsed = parseJson(() => message);
+  return typeof parsed === "string" ? parsed : message;
 }
 
 async function runExport(
@@ -9512,7 +9490,6 @@ export class Progress {
   #timerLineActive = false;
   #cursorHidden = false;
   #observingStreamErrors = false;
-  #streamErrorsActive = false;
   #streamErrorGeneration = 0;
   readonly #onStreamError = (): void => {};
 
@@ -9580,14 +9557,12 @@ export class Progress {
       }
     } finally {
       if (this.#observingStreamErrors) {
-        this.#streamErrorsActive = false;
         const generation = this.#streamErrorGeneration;
         try {
           this.#stream.write("", () => {
             queueMicrotask(() => {
               if (
                 generation === this.#streamErrorGeneration &&
-                !this.#streamErrorsActive &&
                 this.#observingStreamErrors
               ) {
                 this.#stream.off?.("error", this.#onStreamError);
@@ -9623,7 +9598,6 @@ export class Progress {
   }
 
   #observeStreamErrors(): void {
-    this.#streamErrorsActive = true;
     this.#streamErrorGeneration += 1;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);
