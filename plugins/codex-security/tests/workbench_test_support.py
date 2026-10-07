@@ -186,6 +186,20 @@ def run_workbench(
     return json.loads(completed.stdout)
 
 
+def begin_deep_scan(
+    state_dir: Path, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, "begin-deep-scan", "--thread-id", thread_id, *extra, **options)
+
+
+def resume_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "begin-deep-scan", scan_id, "--thread-id", thread_id, *extra, **options
+    )
+
+
 def set_triage(
     state_dir: Path, occurrence_id: str, status: str, *extra: str, **options: Any
 ) -> dict[str, object]:
@@ -199,6 +213,12 @@ def set_triage(
         *extra,
         **options,
     )
+
+
+def get_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "get-deep-scan", scan_id, "--thread-id", thread_id, **options)
 
 
 def mark_handoff_delivered(
@@ -223,6 +243,36 @@ def attach_continuation(
     )
 
 
+def upsert_deep_worker(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    kind: str,
+    status: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *extra: str,
+    **options: Any,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "upsert-deep-scan-worker",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--kind",
+        kind,
+        "--status",
+        status,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *extra,
+        **options,
+    )
+
+
 def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -> dict[str, object]:
     return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
 
@@ -241,6 +291,30 @@ def fail_scan(
     state_dir: Path, scan_id: str, message: str, *extra: str, **options: Any
 ) -> dict[str, object]:
     return scan_command(state_dir, "fail-scan", scan_id, "--message", message, *extra, **options)
+
+
+def commit_deep_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    result_manifest_path: str,
+    new_findings_count: str,
+    *extra: str,
+    **options: Any,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "commit-deep-scan-dedup",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--result-manifest-path",
+        result_manifest_path,
+        "--new-findings-count",
+        new_findings_count,
+        *extra,
+        **options,
+    )
 
 
 def scan_command(
@@ -309,6 +383,55 @@ def update_progress(
 ) -> dict[str, object]:
     return scan_command(
         state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
+    )
+
+
+def finish_deep_scan(
+    state_dir: Path,
+    scan_id: str,
+    terminal_reason: str,
+    manifest_path: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "finish-deep-scan",
+        scan_id,
+        "--terminal-reason",
+        terminal_reason,
+        "--manifest-path",
+        manifest_path,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def claim_deep_scan_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "claim-deep-scan-dedup",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *extra,
+        check=check,
+        environment=environment,
     )
 
 
