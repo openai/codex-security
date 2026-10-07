@@ -1,3 +1,4 @@
+import { modelResponseText } from "./support/model-response-text.js";
 import { once } from "node:events";
 import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
@@ -79,12 +80,7 @@ function fakeCodex(response: unknown) {
         async run(prompt, turnOptions) {
           calls.prompt = prompt;
           calls.turnOptions = turnOptions;
-          return {
-            finalResponse:
-              typeof response === "string"
-                ? response
-                : JSON.stringify(response),
-          };
+          return { finalResponse: modelResponseText(response) };
         },
       };
     },
