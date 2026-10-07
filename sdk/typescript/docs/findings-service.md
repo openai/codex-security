@@ -61,7 +61,6 @@ environment. For a service started outside Docker, export any of these settings:
 | `CODEX_SECURITY_EMBEDDINGS_URL` | Full embeddings endpoint URL, including its path and any query parameters. Defaults to `https://api.openai.com/v1/embeddings` when unset or empty. |
 | `CODEX_SECURITY_STATE_DIR`      | State directory containing `workbench.sqlite3`; Compose uses `/state`.                                                                             |
 | `HOST` / `PORT`                 | Listen address and port; outside Compose, defaults are `127.0.0.1` and `3000`.                                                                     |
-| `PYTHON`                        | Python interpreter used by the storage adapter.                                                                                                    |
 
 Exported values override Compose's `.env` values. The repository excludes `.env`
 from Git and Docker builds. Startup, listing, duplicate-group operations, and
@@ -269,8 +268,53 @@ start scans, publication, or deduplication.
 
 Overview counts cover the whole service, regardless of filters. The default
 order is last update descending, then severity descending for findings, then ID
-ascending. Text sorts ignore case; severity and member counts use their natural
-order. The dashboard uses the same unauthenticated endpoint as the API.
+ascending. Search compares uppercase JavaScript strings; text sorts compare
+lowercase strings. Severity and member counts use their natural order. The
+dashboard uses the same unauthenticated endpoint as the API.
+
+### Migrating direct Python helper calls
+
+The Python `workbench_db.py` commands listed below have been retired. Direct
+helper callers can use the existing Node helpers from an installed plugin
+directory. For example:
+
+```bash
+scripts/launch_codex_security_mcp --helper dashboard < dashboard-request.json
+```
+
+On Windows, use `scripts\launch_codex_security_mcp.cmd --helper dashboard` with
+the same JSON on stdin. The request wraps the dashboard query in `payload` and
+specifies the absolute directory containing the existing `workbench.sqlite3`:
+
+```json
+{
+  "stateDirectory": "/absolute/path/to/state",
+  "payload": {
+    "view": "findings",
+    "sort": "activity",
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+Use an absolute Windows path on Windows. The SDK, service API, and
+`codex-security` CLI already use the Node implementation and need no changes.
+
+Use the same command name after `--helper`, with these fields in `payload`:
+
+| Command                     | Payload fields                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------- |
+| `dashboard`                 | The dashboard query shown above; optional `direction`, `query`, `repository`, and `id`.           |
+| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                      |
+| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                       |
+| `find-potential-duplicates` | `findingId` and `scope`: either `{"repositoryId":"REPOSITORY_ID"}` or `{"allRepositories":true}`. |
+| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                          |
+| `list-dedupe-groups`        | `findingId`.                                                                                      |
+
+Pagination and finding/repository selectors move from Python command flags into
+these JSON fields. Retained scan commands such as `workbench_db.py list-findings`
+keep their existing interface.
 
 ## Deduplicate a scan
 
@@ -454,7 +498,7 @@ not support the migrated database.
 
 ## Run without Docker
 
-With the package's supported Node.js and Python versions installed:
+With the package's supported Node.js version installed (22.13 or later in a supported major):
 
 ```bash
 npm install -g @openai/codex-security
@@ -463,8 +507,9 @@ CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve -
 
 `--port` overrides `PORT`. The service does not load `.env`; export the embedding
 key before importing findings. Without a state override, it shares the CLI's
-default state directory. `HOST`, `PORT`, `CODEX_SECURITY_STATE_DIR`, and `PYTHON`
-also work on Windows. Stop with Ctrl-C or SIGTERM.
+default state directory. `HOST`, `PORT`, and `CODEX_SECURITY_STATE_DIR` also
+work on Windows. The findings service uses Node’s built-in SQLite and does not
+require Python. Stop with Ctrl-C or SIGTERM.
 
 For source builds, prepare the
 [universal native payload](https://github.com/openai/codex-security/blob/main/plugins/codex-security/native/README.md#package-inputs),

@@ -182,6 +182,8 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  stateDirectory?: string;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1553,7 +1555,7 @@ const workbenchComparisonSupport = new Map<
 >();
 
 export async function runWorkbench(
-  options: WorkbenchCommandOptions,
+  options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
@@ -1562,11 +1564,54 @@ export async function runWorkbench(
     arguments_: readonly string[],
     input?: string,
   ): Promise<string> => {
+    const native = [
+      "database-info",
+      "store-findings",
+      "list-stored-findings",
+      "find-potential-duplicates",
+      "store-dedupe-groups",
+      "list-dedupe-groups",
+      "dashboard",
+    ].includes(arguments_[0] ?? "");
+    const node =
+      native && process.versions["bun"]
+        ? await resolveTrustedExecutable(
+            "node",
+            options.environment,
+            options.protectedRoot ?? process.cwd(),
+          )
+        : undefined;
+    if (node === null) {
+      throw new Error("Node.js is not available on a trusted PATH.");
+    }
+    const command = native
+      ? (node?.executable ?? process.execPath)
+      : (options.python ??= await resolvePluginPython({
+          environment: options.environment,
+          protectedRoot: options.protectedRoot,
+          signal: options.signal,
+        }));
+    const stateDirectory = native
+      ? (options.stateDirectory ??
+        codexSecurityStateDirectory(options.environment))
+      : undefined;
     const result = await runCodexCommand(
-      { command: options.python },
-      ["-I", "-X", "utf8", "-B", script, ...arguments_],
-      pluginHelperEnvironment(options.environment),
-      input,
+      { command },
+      native
+        ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
+        : ["-I", "-X", "utf8", "-B", script, ...arguments_],
+      pluginHelperEnvironment(node?.environment ?? options.environment),
+      // The SDK owns configuration normalization; the helper receives its resolved location.
+      native
+        ? JSON.stringify(
+            arguments_[0] === "database-info"
+              ? stateDirectory
+              : {
+                  stateDirectory,
+                  payload: input === undefined ? undefined : JSON.parse(input),
+                },
+          )
+        : input,
       options.signal,
     );
     if (!result.success) {
@@ -1623,7 +1668,8 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
