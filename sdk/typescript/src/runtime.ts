@@ -38,6 +38,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +157,7 @@ export interface PluginInstall {
 
 export interface CodexCommand {
   command: string;
+  args?: readonly string[];
 }
 
 interface CodexCommandResult {
@@ -2409,6 +2411,13 @@ export async function createMarketplace(
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
   await copyPluginTree(root, pluginDestination, signal);
+  const projection = await legacyPluginProjection(pluginDestination, signal);
+  for (const [path, file] of projection?.files ?? []) {
+    const destination = join(pluginDestination, path);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, file.contents, { mode: file.mode, signal });
+    if (file.mode !== undefined) await chmod(destination, file.mode);
+  }
   await writeMarketplaceManifest(marketplace, signal);
   return marketplace;
 }
@@ -2445,6 +2454,108 @@ async function writeMarketplaceManifest(
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+type LegacyPluginProjection = {
+  root: string;
+  files: Map<string, { contents: Buffer; mode?: number }>;
+};
+
+async function legacyPluginProjection(
+  root: string,
+  signal?: AbortSignal,
+): Promise<LegacyPluginProjection | undefined> {
+  const path = join(root, ".mcp.json");
+  // Keep the source link checks ahead of any configuration read.
+  if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
+  const configuration: unknown = JSON.parse(
+    await readFile(path, { encoding: "utf8", signal }),
+  );
+  const servers = isRecord(configuration)
+    ? configuration["mcpServers"]
+    : undefined;
+  const server = isRecord(servers) ? servers[PLUGIN_NAME] : undefined;
+  if (
+    !isRecord(server) ||
+    (server["command"] !== "./scripts/launch_codex_security_mcp" &&
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
+      !isLegacyNodeMcpServer(server))
+  ) {
+    return;
+  }
+  const environment = server["env_vars"];
+  if (environment !== undefined && !Array.isArray(environment)) return;
+  const directNode = isLegacyNodeMcpServer(server);
+  if (
+    !Array.isArray(environment) ||
+    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
+  ) {
+    server["env_vars"] = [
+      ...(Array.isArray(environment) ? environment : []),
+      "CODEX_SECURITY_PLUGIN_ROOT",
+    ];
+  }
+  const files: LegacyPluginProjection["files"] = new Map();
+  if (directNode) {
+    const args = [...(server["args"] as string[])];
+    args[args.findIndex(isLegacyNodeMcpEntry)] =
+      "./mcp/codex_security_sdk_bridge.mjs";
+    server["args"] = args;
+    files.set("mcp/codex_security_sdk_bridge.mjs", {
+      contents: Buffer.from(
+        'import { runMain } from "node:module";\n' +
+          'import { dirname, join } from "node:path";\n' +
+          'import { fileURLToPath } from "node:url";\n' +
+          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
+          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
+          "runMain(process.argv[1]);\n",
+      ),
+      mode: 0o644,
+    });
+  } else {
+    server["command"] =
+      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+        : "./scripts/launch_codex_security_mcp_sdk";
+    files.set("scripts/launch_codex_security_mcp_sdk", {
+      contents: Buffer.from(
+        "#!/bin/sh\n" +
+          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+          "fi\n" +
+          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+      ),
+      mode: 0o755,
+    });
+    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+      contents: Buffer.from(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+          "exit /b\r\n:codex_security_sdk_original\r\n" +
+          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+      ),
+      mode: 0o755,
+    });
+  }
+  files.set(".mcp.json", {
+    contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
+  });
+  return { root, files };
+}
+
+function isLegacyNodeMcpEntry(argument: unknown): boolean {
+  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
+}
+
+function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
+  const command = server["command"];
+  return (
+    typeof command === "string" &&
+    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
+    Array.isArray(server["args"]) &&
+    server["args"].some(isLegacyNodeMcpEntry)
+  );
 }
 
 export function resolveCodexCommand(
@@ -2520,6 +2631,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
+  const projection = await legacyPluginProjection(root, options.signal);
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2545,7 +2657,13 @@ export async function bootstrapPlugin(
   const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
   const stagedMatches =
     staged?.version === version &&
-    (await pluginContentsMatch(root, stagedRoot, options.signal));
+    (await pluginContentsMatch(
+      root,
+      stagedRoot,
+      options.signal,
+      false,
+      projection,
+    ));
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -2618,6 +2736,7 @@ export async function bootstrapPlugin(
       previous["installedPath"],
       options.signal,
       true,
+      projection,
     ))
   ) {
     return {
@@ -2681,6 +2800,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
+  projection?: LegacyPluginProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -2697,19 +2817,23 @@ async function pluginContentsMatch(
   if (destinationMetadata === null) return false;
 
   if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
+    const projected = projection?.files.get(
+      relative(projection.root, source).split(sep).join("/"),
+    );
     if (
-      sourceMetadata.size !== destinationMetadata.size ||
-      (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
+      (projected === undefined &&
+        sourceMetadata.size !== destinationMetadata.size) ||
+      ((projected?.mode === undefined || process.platform !== "win32") &&
+        ((projected?.mode ?? sourceMetadata.mode) & 0o111) !==
+          (destinationMetadata.mode & 0o111))
     ) {
       return false;
     }
-
     const [sourceBytes, destinationBytes] = await Promise.all([
       readFile(source, { signal }),
       readFile(destination, { signal }),
     ]);
-
-    return sourceBytes.equals(destinationBytes);
+    return (projected?.contents ?? sourceBytes).equals(destinationBytes);
   }
 
   if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory()) {
@@ -2717,12 +2841,31 @@ async function pluginContentsMatch(
   }
 
   const entries = await readdir(source);
-
+  const projectedDirectory =
+    projection === undefined
+      ? undefined
+      : relative(projection.root, source).split(sep).join("/") || ".";
+  const generated = [...(projection?.files ?? [])].filter(
+    ([path]) =>
+      dirname(path) === projectedDirectory && !entries.includes(basename(path)),
+  );
   if (
     !allowExtraFiles &&
-    entries.length !== (await readdir(destination)).length
+    entries.length + generated.length !== (await readdir(destination)).length
   ) {
     return false;
+  }
+  for (const [path, file] of generated) {
+    const generatedPath = join(destination, basename(path));
+    const metadata = await lstat(generatedPath).catch(nullIfMissingFileError);
+    if (
+      !metadata?.isFile() ||
+      (process.platform !== "win32" &&
+        (metadata.mode & 0o111) !== ((file.mode ?? 0o644) & 0o111)) ||
+      !file.contents.equals(await readFile(generatedPath, { signal }))
+    ) {
+      return false;
+    }
   }
 
   for (const entry of entries) {
@@ -2732,6 +2875,7 @@ async function pluginContentsMatch(
         join(destination, entry),
         signal,
         allowExtraFiles,
+        projection,
       ))
     ) {
       return false;
@@ -2796,8 +2940,10 @@ export async function resolvePluginPython(
   }
 
   const home = options.homeDirectory ?? homedir();
+  const cacheDirectory =
+    environmentValue(environment, "XDG_CACHE_HOME") || join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
-    join(home, ".cache", "codex-runtimes", "codex-primary-runtime"),
+    join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
   ];
   const relativeCandidates =
     process.platform === "win32"
@@ -2903,12 +3049,16 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
 ): Promise<CodexCommandResult> {
-  const child = spawn(executablePathForSpawn(command.command), [...args], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    signal,
-  });
+  const child = spawn(
+    executablePathForSpawn(command.command),
+    [...(command.args ?? []), ...args],
+    {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal,
+    },
+  );
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;

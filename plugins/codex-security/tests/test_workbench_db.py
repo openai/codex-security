@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     SCRIPT,
     begin_deep_scan,
     claim_remediation_resend,
@@ -66,14 +67,6 @@ GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {

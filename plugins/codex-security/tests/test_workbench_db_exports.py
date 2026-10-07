@@ -28,6 +28,7 @@ from workbench_test_support import (
     save_workspace,
     scan_command,
     set_remediation,
+    set_triage,
     start_delivered_scan,
     start_saved_scan,
     start_workspace_scan,
@@ -276,12 +277,9 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     original = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"][0]
-    run_workbench(
+    set_triage(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(original["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "wont_fix",

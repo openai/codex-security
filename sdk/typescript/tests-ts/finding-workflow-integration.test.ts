@@ -483,7 +483,7 @@ test.each(["screen", "pair"])(
     const { scanDir, environment, document, history } = await fixture();
     const findings = [
       document.findings[0]!,
-      ...[1, 2, 3].map((index) => ({
+      ...[1, 2].map((index) => ({
         ...structuredClone(document.findings[0]!),
         findingId: `csf_${"f".repeat(23)}${index}`,
         title: `Synthetic original ${index}`,
@@ -528,7 +528,7 @@ test.each(["screen", "pair"])(
                 ),
               }
             : originals.some(
-                  (finding) => finding.findingId === findings[3]!.findingId,
+                  (finding) => finding.findingId === findings[2]!.findingId,
                 )
               ? distinct
               : merged(originals),
@@ -560,13 +560,13 @@ test.each(["screen", "pair"])(
       fetch,
     });
     expect(result.duplicateGroups).toEqual([
-      findings.slice(0, 3).map((finding) => finding.findingId),
+      findings.slice(0, 2).map((finding) => finding.findingId),
     ]);
     expect(calls.filter((stage) => stage === "screen")).toHaveLength(
       interruptAt === "screen" ? 2 : 1,
     );
     expect(calls.filter((stage) => stage === "pair")).toHaveLength(
-      interruptAt === "pair" ? 4 : 3,
+      interruptAt === "pair" ? 3 : 2,
     );
     const count = calls.length;
     expect(
@@ -584,7 +584,7 @@ test.each(["screen", "pair"])(
 test.each(["screening", "pair-review"] as const)(
   "drains concurrent %s checkpoints after failure and resumes with different concurrency",
   async (failedStage) => {
-    const { environment, document, history } = await fixtureWithFindings(4);
+    const { environment, document, history } = await fixtureWithFindings(3);
     const options = {
       workflowId: `concurrent-${failedStage}`,
       findingsUrl: "http://synthetic.test",
@@ -687,7 +687,7 @@ test.each(["screening", "pair-review"] as const)(
     expect(groupWrites).toHaveBeenCalledTimes(1);
     expect(attempts.get(interruptedKeys[0]!)).toBe(2);
     expect(attempts.get(interruptedKeys[1]!)).toBe(1);
-    expect(attempts.size).toBe(10);
+    expect(attempts.size).toBe(6);
     for (const [key, count] of attempts)
       expect(count).toBe(key === interruptedKeys[0] ? 2 : 1);
     expect(

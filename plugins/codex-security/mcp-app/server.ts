@@ -44,7 +44,8 @@ const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 const CONFIGURED_WORKBENCH_STATE_DIR =
   process.env.CODEX_SECURITY_STATE_DIR?.trim();
-const PLUGIN_ROOT = resolve(__dirname, "..");
+const PLUGIN_ROOT =
+  process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const WORKBENCH_COMMANDS_WITHOUT_DATABASE = new Set([
   "resolve-scan-root",

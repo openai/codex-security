@@ -188,9 +188,25 @@ Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 
+Deep Scans with non-default provider selection or custom provider definitions
+require a plugin that supports per-scan worker provider snapshots. Older custom plugins
+fail before starting model work with an upgrade message; update the plugin or
+omit `pluginPath` to use the bundled version. Older custom plugins remain usable
+for standard scans and Deep Scans that inherit native provider configuration or
+explicitly select the built-in OpenAI provider without custom provider definitions
+when their workers forward that selection or native configuration selects the
+same effective provider for both the parent and workers. Otherwise, the scan
+stops before model work with the plugin upgrade message.
+When no provider is selected, discovery, reducer, and resumed workers inherit the
+same native configuration as the parent.
+
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
 for supported overrides and defaults.
+
+Windows defaults to `windows.sandbox = "elevated"` to enforce credential read
+denials. Explicit `windows.sandbox` settings remain unchanged; Codex reports
+policies unsupported by the selected backend.
 
 ### Load a project file
 
