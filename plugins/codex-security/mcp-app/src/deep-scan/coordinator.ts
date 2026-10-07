@@ -357,13 +357,17 @@ export class DeepScanCoordinator {
       }
       this.abortController.abort(message);
       await this.settleSchedulerWork();
+      if (this.canceled || this.externallyFailed) return;
       try {
-        this.state = await this.options.store.fail(
+        const failed = await this.options.store.fail(
           this.state.scanId,
           persistedMessage,
           "failed",
         );
+        if (this.canceled || this.externallyFailed) return;
+        this.state = failed;
       } catch (persistError) {
+        if (this.canceled || this.externallyFailed) return;
         this.state = {
           ...this.state,
           status: "failed",

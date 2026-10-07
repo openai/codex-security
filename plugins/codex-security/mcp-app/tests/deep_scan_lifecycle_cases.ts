@@ -34,6 +34,7 @@ export async function testDeepScanLifecycle({
     delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
     concurrentOwnershipReadsKeepReplacementResult,
+    lateFailurePersistenceKeepsStoppedState,
     shutdownStopsReplacementObservation,
     failedCancellationStillPreservesResults,
     lateCancellationKeepsPersistedFailure,
@@ -241,6 +242,71 @@ export async function testDeepScanLifecycle({
         "a replaced coordinator must not fail the scan",
       );
       assert.equal(observations, 1, "concurrent reads must share one observer");
+    }
+  }
+
+  async function lateFailurePersistenceKeepsStoppedState() {
+    for (const status of ["succeeded", "canceled", "failed"] as const) {
+      for (const rejectFailure of [false, true]) {
+        const fixture = await fixtureRun(config);
+        fixture.run.coordinatorGeneration = 2;
+        const store = new FakeStore(fixture.run);
+        store.failProgressAt = 1;
+        const failing = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        store.fail = async (_scanId, message) => {
+          const stale = {
+            ...store.run,
+            status: "failed" as const,
+            error: message,
+          };
+          failing.resolve();
+          await release.promise;
+          if (rejectFailure) throw new Error("fixture stale failure rejected");
+          return stale;
+        };
+        const coordinator = createCoordinator(
+          fixture,
+          store,
+          new FakeExecutor(),
+          {
+            threadId: "fixture-owner",
+            heartbeatIntervalMs: 60_000,
+            observeReplacement: async (run) => ({
+              ...run,
+              status: "succeeded",
+              terminalReason: "capped",
+            }),
+          },
+        );
+        coordinator.start();
+        await failing.promise;
+        try {
+          if (status === "succeeded") {
+            store.run.coordinatorGeneration = 3;
+            await coordinator.renewHeartbeat();
+          } else if (status === "canceled") {
+            store.run.status = "canceled";
+            coordinator.cancel("fixture cancellation");
+          } else {
+            store.run.status = "failed";
+            coordinator.failExternallyPersisted("fixture external failure");
+          }
+        } finally {
+          release.resolve();
+        }
+        const terminal = await coordinator.settled();
+        assert.equal(terminal.status, status);
+        assert.equal(
+          terminal.coordinatorGeneration,
+          status === "succeeded" ? 3 : 2,
+        );
+        assert.equal(
+          terminal.error,
+          status === "failed" ? "fixture external failure" : undefined,
+          "stale failure persistence must not replace the stopped result",
+        );
+      }
     }
   }
 
