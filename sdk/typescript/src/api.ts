@@ -5051,6 +5051,8 @@ function selectedWorkerRuntimeConfig(
     ...Object.fromEntries(
       [
         "features",
+        "model_auto_compact_token_limit",
+        "model_context_window",
         "model_instructions_file",
         "model_verbosity",
         "web_search",
