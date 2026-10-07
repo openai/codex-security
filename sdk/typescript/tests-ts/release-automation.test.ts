@@ -13,126 +13,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
 
-type ReleaseMetadata = Record<string, unknown>;
-
-type ReleaseAutomation = {
-  parseReviewedReleaseNotes: (version: string, notes: string) => string;
-  extractHistoricalReleaseSummary: (notes: string) => string | null;
-  resolveReleaseSummary: (
-    version: string,
-    taggedNotes: string | undefined,
-    existingNotes: string | undefined,
-  ) => string | null;
-  composeReleaseNotes: (
-    generatedNotes: string,
-    releaseSummary: string | null,
-  ) => string;
-  releaseVersion: (packageJson: ReleaseMetadata) => string;
-  releaseTagVersion: (
-    refType: string,
-    ref: string,
-    refName: string,
-    packageJson: ReleaseMetadata,
-  ) => string;
-  compareReleaseVersions: (left: string, right: string) => -1 | 0 | 1;
-  requireReleaseIncrease: (version: string, previousVersion: string) => string;
-  initialPublishedVersions: (
-    version: string,
-    registryError: unknown,
-  ) => string[];
-  publishedReleaseMode: (
-    version: string,
-    publishedVersions: unknown,
-  ) => "publish" | "recover";
-  requirePublishedReleaseIncrease: (
-    version: string,
-    publishedVersions: unknown,
-  ) => string;
-  releaseHistory: (
-    tag: string,
-    history: {
-      registryVersions: string[];
-      githubReleaseTags: string[];
-      reachableTags: string[];
-    },
-  ) => { previousTag: string | null; makeLatest: boolean };
-  verifyPublishedRelease: (
-    metadata: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: { version: string; gitHead: string },
-  ) => {
-    version: string;
-    gitHead: string;
-    integrity: string;
-    sha256: string;
-  };
-  verifyGitHubPublishedRelease: (
-    metadata: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-    },
-    provenance: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-      sha512: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    integrity: string;
-    sha256: string;
-  };
-  verifySignatureAudit: (
-    report: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    repository: string;
-    runId: string;
-    sha512: string;
-  };
-  verifyRecoveredSignatureAudit: (
-    report: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    repository: string;
-    runId: string;
-    sha512: string;
-  };
-  verifyGitHubRelease: (
-    release: ReleaseMetadata,
-    archive: Uint8Array,
-    expectedTag: string,
-    assetName: string,
-    downloadedArchive?: Uint8Array,
-  ) => { tag: string; asset: string; digest: string };
-};
-
-const automationScript = new URL(
-  "../scripts/release-automation.mjs",
-  import.meta.url,
-);
-const {
+import {
+  type ReleaseMetadata,
   parseReviewedReleaseNotes,
   extractHistoricalReleaseSummary,
   resolveReleaseSummary,
@@ -150,7 +32,12 @@ const {
   verifySignatureAudit,
   verifyRecoveredSignatureAudit,
   verifyGitHubRelease,
-} = (await import(automationScript.href)) as ReleaseAutomation;
+} from "../scripts/release-automation.mjs";
+
+const automationScript = new URL(
+  "../scripts/release-automation.mjs",
+  import.meta.url,
+);
 
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
@@ -159,11 +46,14 @@ const releaseWorkflowTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
 
-function runShell(script: string, env: NodeJS.ProcessEnv, cwd?: string) {
+function runShell(
+  script: string,
+  env: NodeJS.ProcessEnv,
+  options: { cwd?: string; timeout?: number } = {},
+) {
   return runCommand(bash, ["-c", script], {
-    cwd,
+    ...options,
     env: { ...process.env, ...env },
-    timeout: 10_000,
   });
 }
 
@@ -418,6 +308,14 @@ function signatureExpected() {
     repository: releaseRepository,
     runId: releaseRun,
   };
+}
+
+function verifySignatureFixture(options: SignatureAuditFixture = {}) {
+  return verifySignatureAudit(
+    signatureAudit(options),
+    archive,
+    signatureExpected(),
+  );
 }
 
 function workflowStepShell(workflow: string, stepName: string): string {
@@ -1119,9 +1017,7 @@ describe("GitHub release publication verification", () => {
 
 describe("cryptographically verified npm provenance", () => {
   test("binds the verified bundle to the exact archive, source, and run", () => {
-    expect(
-      verifySignatureAudit(signatureAudit(), archive, signatureExpected()),
-    ).toEqual({
+    expect(verifySignatureFixture()).toEqual({
       version: "0.1.2",
       gitHead: releaseCommit,
       repository: releaseRepository,
@@ -1149,13 +1045,7 @@ describe("cryptographically verified npm provenance", () => {
   test.each(["", "0", "01", "not-a-number", "1/extra", "1?attempt=2"])(
     "rejects the malformed protected workflow run attempt %j",
     (attempt) => {
-      expect(() =>
-        verifySignatureAudit(
-          signatureAudit({ attempt }),
-          archive,
-          signatureExpected(),
-        ),
-      ).toThrow(
+      expect(() => verifySignatureFixture({ attempt })).toThrow(
         "Verified SLSA provenance must identify the successful release run.",
       );
       expect(() =>
@@ -1209,13 +1099,7 @@ describe("cryptographically verified npm provenance", () => {
   });
 
   test("accepts the real Fulcio certificate in the legacy chain format", () => {
-    expect(
-      verifySignatureAudit(
-        signatureAudit({ certificateLocation: "chain" }),
-        archive,
-        signatureExpected(),
-      ),
-    ).toEqual({
+    expect(verifySignatureFixture({ certificateLocation: "chain" })).toEqual({
       version: "0.1.2",
       gitHead: releaseCommit,
       repository: releaseRepository,
@@ -1226,13 +1110,9 @@ describe("cryptographically verified npm provenance", () => {
 
   test("rejects missing and malformed Fulcio signing certificates", () => {
     for (const signingCertificate of [null, "not-base64"]) {
-      expect(() =>
-        verifySignatureAudit(
-          signatureAudit({ signingCertificate }),
-          archive,
-          signatureExpected(),
-        ),
-      ).toThrow("The verified Fulcio signing certificate is invalid.");
+      expect(() => verifySignatureFixture({ signingCertificate })).toThrow(
+        "The verified Fulcio signing certificate is invalid.",
+      );
     }
   });
 
@@ -1247,13 +1127,9 @@ describe("cryptographically verified npm provenance", () => {
 
     for (const certificate of invalidCertificates) {
       expect(() =>
-        verifySignatureAudit(
-          signatureAudit({
-            signingCertificate: certificate.toString("base64"),
-          }),
-          archive,
-          signatureExpected(),
-        ),
+        verifySignatureFixture({
+          signingCertificate: certificate.toString("base64"),
+        }),
       ).toThrow("The verified Fulcio signing certificate is invalid.");
     }
   });
@@ -1401,13 +1277,7 @@ describe("cryptographically verified npm provenance", () => {
         "Verified SLSA provenance must use a GitHub-hosted release runner.",
     },
   ])("$name", ({ options, message }) => {
-    expect(() =>
-      verifySignatureAudit(
-        signatureAudit(options()),
-        archive,
-        signatureExpected(),
-      ),
-    ).toThrow(message);
+    expect(() => verifySignatureFixture(options())).toThrow(message);
   });
 
   test("rejects malformed attestation bundle collections safely", () => {
@@ -1430,15 +1300,21 @@ describe("cryptographically verified npm provenance", () => {
 });
 
 describe("idempotent GitHub release verification", () => {
+  function verifyGitHubReleaseFixture(
+    release: ReleaseMetadata,
+    downloadedArchive?: Uint8Array,
+  ) {
+    return verifyGitHubRelease(
+      release,
+      archive,
+      "npm-v0.1.2",
+      "openai-codex-security-0.1.2.tgz",
+      downloadedArchive,
+    );
+  }
+
   test("accepts the already-published exact verified release asset", () => {
-    expect(
-      verifyGitHubRelease(
-        githubRelease(),
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
-    ).toEqual({
+    expect(verifyGitHubReleaseFixture(githubRelease())).toEqual({
       tag: "npm-v0.1.2",
       asset: "openai-codex-security-0.1.2.tgz",
       digest,
@@ -1449,14 +1325,11 @@ describe("idempotent GitHub release verification", () => {
     const release = githubRelease();
 
     expect(
-      verifyGitHubRelease(
+      verifyGitHubReleaseFixture(
         {
           ...release,
           assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
         },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
         archive,
       ),
     ).toEqual({
@@ -1468,15 +1341,10 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects a digestless release asset without its downloaded bytes", () => {
     expect(() =>
-      verifyGitHubRelease(
-        {
-          ...githubRelease(),
-          assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
+      }),
     ).toThrow(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
@@ -1484,14 +1352,11 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects downloaded release bytes that differ from the npm archive", () => {
     expect(() =>
-      verifyGitHubRelease(
+      verifyGitHubReleaseFixture(
         {
           ...githubRelease(),
           assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
         },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
         Buffer.from("different downloaded GitHub release"),
       ),
     ).toThrow(
@@ -1501,42 +1366,30 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects a GitHub release for another tag", () => {
     expect(() =>
-      verifyGitHubRelease(
-        { ...githubRelease(), tag_name: "npm-v0.1.1" },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        tag_name: "npm-v0.1.1",
+      }),
     ).toThrow("Existing GitHub Release must match the release tag.");
   });
 
   test("rejects a draft or prerelease", () => {
     expect(() =>
-      verifyGitHubRelease(
-        { ...githubRelease(), draft: true },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({ ...githubRelease(), draft: true }),
     ).toThrow("Existing GitHub Release must be published and stable.");
   });
 
   test("rejects a missing or different GitHub release artifact", () => {
     expect(() =>
-      verifyGitHubRelease(
-        {
-          ...githubRelease(),
-          assets: [
-            {
-              name: "openai-codex-security-0.1.2.tgz",
-              digest: "sha256:incorrect",
-            },
-          ],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        assets: [
+          {
+            name: "openai-codex-security-0.1.2.tgz",
+            digest: "sha256:incorrect",
+          },
+        ],
+      }),
     ).toThrow(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
@@ -1545,12 +1398,7 @@ describe("idempotent GitHub release verification", () => {
   test("rejects malformed GitHub release assets safely", () => {
     for (const assets of [null, {}, [null]]) {
       expect(() =>
-        verifyGitHubRelease(
-          { ...githubRelease(), assets },
-          archive,
-          "npm-v0.1.2",
-          "openai-codex-security-0.1.2.tgz",
-        ),
+        verifyGitHubReleaseFixture({ ...githubRelease(), assets }),
       ).toThrow(
         "Existing GitHub Release asset must match the verified npm artifact.",
       );
@@ -1561,15 +1409,10 @@ describe("idempotent GitHub release verification", () => {
     const release = githubRelease();
 
     expect(
-      verifyGitHubRelease(
-        {
-          ...release,
-          assets: [null, ...(release["assets"] as ReleaseMetadata[])],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...release,
+        assets: [null, ...(release["assets"] as ReleaseMetadata[])],
+      }),
     ).toEqual({
       tag: "npm-v0.1.2",
       asset: "openai-codex-security-0.1.2.tgz",
@@ -1697,7 +1540,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_RELEASE_SUMMARY: summary,
           RELEASE_VERSION: "0.1.6",
         },
-        fileURLToPath(new URL("../../../", import.meta.url)),
+        { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
       expect(result.status).toBe(status);
@@ -1808,7 +1651,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF: "refs/heads/main",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -1955,7 +1798,7 @@ describe("GitHub release workflow safeguards", () => {
             MOCK_TAGGED_ANCESTOR: String(taggedAncestor),
             RELEASE_SHA: releaseCommit,
           },
-          fileURLToPath(new URL("../../../", import.meta.url)),
+          { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
         );
 
         expect(result.stderr).toBe("");
@@ -2024,7 +1867,7 @@ describe("GitHub release workflow safeguards", () => {
         MOCK_RELEASE_SUMMARY: summary,
         RELEASE_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -2115,7 +1958,7 @@ describe("GitHub release workflow safeguards", () => {
           }),
           MOCK_RELEASE_VERSION: version,
         },
-        fileURLToPath(new URL("../../../", import.meta.url)),
+        { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
       expect(result.status).toBe(status);
@@ -2150,16 +1993,16 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-      env: {
-        ...process.env,
+    const result = await runShell(
+      `${mock}\n${script}`,
+      {
         GITHUB_REPOSITORY: "test/codex-security",
         GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         RELEASE_SHA: releaseCommit,
         RELEASE_TAG: "npm-v0.1.2",
       },
-      timeout: releaseWorkflowTimeout,
-    });
+      { timeout: releaseWorkflowTimeout },
+    );
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`created tag at ${releaseCommit}`);
@@ -2218,17 +2061,17 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
+      const result = await runShell(
+        `${mock}\n${script}`,
+        {
           GITHUB_REPOSITORY: "test/codex-security",
           GITHUB_SHA: releaseCommit,
           MOCK_LOOKUP_HTTP_STATUS: lookupHttpStatus,
           MOCK_LOOKUP_RESPONSE: lookupResponse,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: releaseWorkflowTimeout,
-      });
+        { timeout: releaseWorkflowTimeout },
+      );
 
       expect(result.status).toBe(status);
       if (status === 0) {
@@ -2294,9 +2137,9 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
+      const result = await runShell(
+        `${mock}\n${script}`,
+        {
           GITHUB_REPOSITORY: "test/codex-security",
           GITHUB_SHA: releaseCommit,
           MOCK_PEELED_COMMIT: peeledCommit,
@@ -2304,8 +2147,8 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_TAG_TYPE: tagType,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: releaseWorkflowTimeout,
-      });
+        { timeout: releaseWorkflowTimeout },
+      );
 
       expect(result.status).toBe(status);
       if (status === 0) {
@@ -2425,7 +2268,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -2452,7 +2295,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(0);
@@ -2562,16 +2405,16 @@ describe("GitHub release workflow safeguards", () => {
           '  printf "wait\\n" >> "$MOCK_CALL_LOG"',
           "}",
         ].join("\n");
-        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
-          env: {
-            ...process.env,
+        const result = await runShell(
+          `${mocks}\n${script}`,
+          {
             MOCK_CALL_LOG: callLog,
             MOCK_MISSING_ATTEMPTS: String(missingAttempts),
             MOCK_ERROR_CODE: errorCode,
             RELEASE_VERSION: "0.1.2",
           },
-          timeout: releaseWorkflowTimeout,
-        });
+          { timeout: releaseWorkflowTimeout },
+        );
         const events = readFileSync(callLog, "utf8").split("\n");
         expect(result.status).toBe(status);
         expect(events.filter((event) => event === "query")).toHaveLength(calls);
@@ -3179,7 +3022,7 @@ describe("GitHub release workflow safeguards", () => {
             RELEASE_TAG: "npm-v0.1.2",
             RELEASE_VERSION: "0.1.2",
           },
-          workspace,
+          { cwd: workspace },
         );
 
         expect(result.status).toBe(status);
