@@ -136,7 +136,7 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", "value = 2\n");
     writeSource(repository, "src/new handler.py", "created = True\n");
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
-    writeSource(repository, "tests/ignored.py", "ignored = True\n");
+    writeSource(repository, "tests/example.py", "test_setup = True\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
@@ -162,6 +162,7 @@ describe("compact diff scan", () => {
       "src/guard.py",
       "src/handler.py",
       "src/new handler.py",
+      "tests/example.py",
     ]);
   });
 

@@ -4562,9 +4562,52 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "creates credential homes with a verified managed-compatible Windows ACL",
+    "initializes the workbench in an explicitly configured Windows drive root",
     async () => {
-      const { home } = await credentialHome(true);
+      const directory = await temporaryDirectory();
+      const drive = [..."ZYXWVUTSRQPONMLKJIHGFED"].find(
+        (letter) => !existsSync(`${letter}:\\`),
+      );
+      expect(drive).toBeDefined();
+      const volume = `${drive}:`;
+      const subst = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "subst.exe",
+      );
+      expect(spawnSync(subst, [volume, directory]).status).toBe(0);
+      try {
+        await runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: `${volume}\\`,
+            },
+          },
+          ["database-info"],
+        );
+        expect(
+          (await stat(join(directory, "workbench.sqlite3"))).isFile(),
+        ).toBe(true);
+      } finally {
+        expect(spawnSync(subst, [volume, "/d"]).status).toBe(0);
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "creates credential homes after database initialization with a verified Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      };
+      await runWorkbench({ pluginRoot: PLUGIN_ROOT, environment }, [
+        "database-info",
+      ]);
+      const home = await prepareCodexSecurityCredentialHome(environment);
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",

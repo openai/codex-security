@@ -220,7 +220,7 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   );
   await fixture.writeRepositoryFile(
     "tests/example.ts",
-    "export const ignored = true;\n",
+    "export const testSetup = true;\n",
   );
   await unlink(path.join(fixture.repoRoot, "src/deleted.ts"));
   await runGit(fixture.repoRoot, "add", ".");
@@ -235,13 +235,14 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   };
 
   assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 3,
+    reviewItemsTotal: 4,
   });
   assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
     items: [
       { path: "src/changed.ts" },
       { path: "src/deleted.ts" },
       { path: "src/new.ts" },
+      { path: "tests/example.ts" },
     ],
   });
 }

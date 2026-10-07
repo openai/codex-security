@@ -541,6 +541,16 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
+def _has_linked_parent(scope: Path, path: Path) -> bool:
+    ancestor = scope
+    for component in path.relative_to(scope).parts[:-1]:
+        ancestor /= component
+        metadata = ancestor.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            return True
+    return False
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -595,9 +605,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
         path = target.joinpath(*relative.parts[scope_depth:])
         try:
+            # The index can retain descendants of a directory replaced by a link.
+            if _has_linked_parent(target, path):
+                continue
             metadata = path.lstat()
-        except FileNotFoundError:
-            # The index can retain a path that was staged and then deleted.
+        except (FileNotFoundError, NotADirectoryError):
+            # The index can retain deleted paths, including directory-to-file replacements.
             continue
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):

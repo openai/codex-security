@@ -57,11 +57,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
-import {
-  resolveCodexCommand,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
@@ -2139,6 +2135,14 @@ describe("CodexSecurity orchestration", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       };
       const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
+      const databaseInfo = await runWorkbench(workbenchOptions, [
+        "database-info",
+      ]);
+      expect(databaseInfo["databasePath"]).toBe(
+        await realpath(
+          join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        ),
+      );
       let previousId: string | undefined;
       if (boundary !== "empty") {
         const previous = await runWorkbench(workbenchOptions, [
@@ -2304,6 +2308,9 @@ describe("CodexSecurity orchestration", () => {
         expect(error).toBeInstanceOf(Error);
         expect((error as Error).message).toMatch(/closed|interrupted/);
         await closing;
+        expect(await runWorkbench(workbenchOptions, ["database-info"])).toEqual(
+          databaseInfo,
+        );
         const scans = (await runWorkbench(workbenchOptions, ["list-scans"]))[
           "scans"
         ] as Array<{ scanId: string; scanDir: string }>;
@@ -2687,7 +2694,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
@@ -5176,7 +5183,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {

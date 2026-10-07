@@ -1,6 +1,7 @@
+import { delimiter, isAbsolute, resolve } from "node:path";
 import {
+  bundledPluginRoot,
   workbenchEnvironment,
-  resolveWorkbenchRuntime,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../runtime.js";
@@ -18,7 +19,7 @@ import type {
 } from "./storage.js";
 
 export class SqliteFindingsStore implements FindingsStore {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
 
   constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
 
@@ -113,13 +114,39 @@ export class SqliteFindingsStore implements FindingsStore {
     return await runWorkbench(options, args, input);
   }
 
-  private async resolveOptions(): Promise<WorkbenchCommandOptions> {
-    const environment = workbenchEnvironment(this.environment);
-    const [python, pluginRoot] = await resolveWorkbenchRuntime({ environment });
+  private async resolveOptions(): Promise<
+    Omit<WorkbenchCommandOptions, "python">
+  > {
+    const protectedRoot = process.cwd();
+    const environment: NodeJS.ProcessEnv = workbenchEnvironment(
+      this.environment,
+    );
+    for (const [name, value] of Object.entries(environment)) {
+      if (value === undefined) continue;
+      if (name.toUpperCase() === "XDG_CACHE_HOME" && value.trim())
+        environment[name] = resolve(value);
+      if (name.toUpperCase() !== "PATH") continue;
+      environment[name] = value
+        .split(delimiter)
+        .map((entry) => {
+          const directory =
+            process.platform === "win32"
+              ? entry.replace(/^"(.*)"$/u, "$1")
+              : entry;
+          if (!directory) return directory;
+          if (process.platform === "win32") return resolve(directory);
+          // Keep POSIX symlink/.. traversal intact.
+          return isAbsolute(directory)
+            ? directory
+            : `${protectedRoot}/${directory}`;
+        })
+        .join(delimiter);
+    }
     return {
-      python,
-      pluginRoot,
+      protectedRoot,
+      pluginRoot: await bundledPluginRoot(),
       environment,
+      stateDirectory: environment["CODEX_SECURITY_STATE_DIR"],
       failureMessage: "Could not access the findings database",
     };
   }
