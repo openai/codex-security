@@ -201,7 +201,6 @@ export interface PublishScanDependencies {
 
 type PublicationHandoffEvidence = {
   source: "handoff";
-  rawLine: string;
   ownerFindingId?: string;
   resolution: ClaimResolution;
   possibleMutation?: boolean;
@@ -218,30 +217,14 @@ type PublicationHandoffEvidence = {
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
 
-type CompletedPublicationEvent = Extract<
-  PublicationEventEvidence,
-  { status: "completed" }
->;
-type FailedPublicationEvent = Extract<
-  PublicationEventEvidence,
-  { status: "failed" }
->;
-
-interface FindingEvidenceBucket {
-  completed: CompletedPublicationEvent[];
-  rejected: FailedPublicationEvent[];
-  handoffs: PublicationHandoffEvidence[];
-}
-
 interface IndexedPublicationEvidence {
-  byOwner: Map<string, FindingEvidenceBucket>;
+  byOwner: Map<string, PublicationEvidence[]>;
   unowned: PublicationEvidence[];
   claimLedger: Map<
     string,
     {
       kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string>;
-      reservedByUnknownOwner: boolean;
+      owners: Set<string | undefined>;
     }
   >;
 }
@@ -350,7 +333,6 @@ export async function publishScanInternal(
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
-  const completedFindings = new Set<string>();
   reportPublicationProgress(progressObserver, {
     type: "started",
     scanId: prepared.scanId,
@@ -446,19 +428,15 @@ export async function publishScanInternal(
     const outcomes = new Map(
       [...handoffResults.created, ...handoffResults.failed].map(findingEntry),
     );
-    for (const preparedIssue of prepared.issues) {
-      const issue = outcomes.get(preparedIssue.findingId);
-      if (issue === undefined || completedFindings.has(issue.findingId)) {
-        continue;
-      }
-      completedFindings.add(issue.findingId);
+    for (const [index, preparedIssue] of prepared.issues.entries()) {
+      const issue = outcomes.get(preparedIssue.findingId)!;
       reportPublicationProgress(progressObserver, {
         type: "issue_completed",
         findingId: issue.findingId,
         ...("issueIdentifier" in issue
           ? { issueIdentifier: issue.issueIdentifier }
           : { error: issue.error }),
-        completed: completedFindings.size,
+        completed: index + 1,
         total: prepared.issues.length,
       });
     }
@@ -964,7 +942,6 @@ async function collectPublicationHandoffEvidence(
       evidence.push({
         source: "handoff",
         status: "invalid",
-        rawLine,
         resolution: resolveClaims([]),
         error: "Codex wrote an invalid Linear publication handoff.",
       });
@@ -980,7 +957,6 @@ async function collectPublicationHandoffEvidence(
       evidence.push({
         source: "handoff",
         status: "invalid",
-        rawLine,
         resolution,
         ...possibleMutation,
         error: "Codex wrote an unexpected Linear publication handoff.",
@@ -992,7 +968,6 @@ async function collectPublicationHandoffEvidence(
       evidence.push({
         source: "handoff",
         status: "invalid",
-        rawLine,
         resolution,
         ...possibleMutation,
         error: "Codex wrote a Linear publication for an unknown finding.",
@@ -1010,7 +985,6 @@ async function collectPublicationHandoffEvidence(
       (!Object.hasOwn(record, "error") && argumentsValid);
     const base = {
       source: "handoff" as const,
-      rawLine,
       ownerFindingId: issue.findingId,
       resolution,
       ...(mutationPossible ? { possibleMutation: true as const } : {}),
@@ -1126,12 +1100,10 @@ function reconcilePublicationEvidence(
 
   const collidingOwners = new Set<string>();
   for (const reservation of indexed.claimLedger.values()) {
-    if (
-      reservation.kinds.size > 1 ||
-      reservation.owners.size > 1 ||
-      (reservation.reservedByUnknownOwner && reservation.owners.size > 0)
-    ) {
-      for (const owner of reservation.owners) collidingOwners.add(owner);
+    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
+      for (const owner of reservation.owners) {
+        if (owner !== undefined) collidingOwners.add(owner);
+      }
     }
   }
   for (const outcome of outcomes) {
@@ -1139,7 +1111,6 @@ function reconcilePublicationEvidence(
     outcome.created = undefined;
     outcome.error =
       "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
-    outcome.indeterminate = true;
     indeterminate = true;
   }
 
@@ -1191,7 +1162,7 @@ function reconcilePublicationEvidence(
 function indexPublicationEvidence(
   evidence: readonly PublicationEvidence[],
 ): IndexedPublicationEvidence {
-  const byOwner = new Map<string, FindingEvidenceBucket>();
+  const byOwner = new Map<string, PublicationEvidence[]>();
   const unowned: PublicationEvidence[] = [];
   const claimLedger: IndexedPublicationEvidence["claimLedger"] = new Map();
 
@@ -1201,15 +1172,10 @@ function indexPublicationEvidence(
         const key = alias.value;
         const reservation = claimLedger.get(key) ?? {
           kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string>(),
-          reservedByUnknownOwner: false,
+          owners: new Set<string | undefined>(),
         };
         reservation.kinds.add(alias.kind);
-        if (item.ownerFindingId === undefined) {
-          reservation.reservedByUnknownOwner = true;
-        } else {
-          reservation.owners.add(item.ownerFindingId);
-        }
+        reservation.owners.add(item.ownerFindingId);
         claimLedger.set(key, reservation);
       }
     }
@@ -1218,18 +1184,8 @@ function indexPublicationEvidence(
       unowned.push(item);
       continue;
     }
-    const bucket: FindingEvidenceBucket = byOwner.get(item.ownerFindingId) ?? {
-      completed: [],
-      rejected: [],
-      handoffs: [],
-    };
-    if (item.source === "handoff") {
-      bucket.handoffs.push(item);
-    } else if (item.status === "completed") {
-      bucket.completed.push(item);
-    } else {
-      bucket.rejected.push(item);
-    }
+    const bucket = byOwner.get(item.ownerFindingId) ?? [];
+    bucket.push(item);
     byOwner.set(item.ownerFindingId, bucket);
   }
 
@@ -1238,11 +1194,10 @@ function indexPublicationEvidence(
 
 function reconcileFindingEvidence(
   issue: PreparedPublicationIssue,
-  bucket: FindingEvidenceBucket | undefined,
+  bucket: PublicationEvidence[] = [],
 ): FindingReconciliation {
-  const completed = bucket?.completed ?? [];
-  const rejected = bucket?.rejected ?? [];
-  const handoffs = bucket?.handoffs ?? [];
+  const events = bucket.filter((item) => item.source === "event");
+  const handoffs = bucket.filter((item) => item.source === "handoff");
   const failed = (
     error: string,
     indeterminate: boolean,
@@ -1260,14 +1215,14 @@ function reconcileFindingEvidence(
     },
   });
 
-  if (completed.length + rejected.length > 1) {
+  if (events.length > 1) {
     return failed(
       "Codex attempted to create more than one Linear issue for this finding.",
       true,
     );
   }
-  const completedCall = completed[0];
-  const eventFailure = rejected[0];
+  const completedCall = events.find((event) => event.status === "completed");
+  const eventFailure = events.find((event) => event.status === "failed");
   const failedEventMayHaveMutated =
     eventFailure !== undefined && eventFailure.resolution.claims.length > 0;
   if (completedCall !== undefined && !completedCall.argumentsValid) {

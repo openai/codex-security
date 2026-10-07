@@ -1,28 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const { verifyInstalledPackage } = (await import(
-  new URL("../scripts/smoke-published-package.mjs", import.meta.url).href
-)) as {
-  verifyInstalledPackage: (
-    consumer: string,
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<void>;
-};
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+import { verifyInstalledPackage } from "../scripts/smoke-published-package.mjs";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const directories = createTemporaryDirectories();
+afterEach(directories.cleanup);
 
 async function installedFixture(cliVersion: string) {
-  const consumer = await mkdtemp(join(tmpdir(), "published smoke "));
-  directories.push(consumer);
+  const consumer = await directories.create("published smoke ");
   const installedRoot = join(
     consumer,
     "node_modules",

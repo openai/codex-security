@@ -6,34 +6,14 @@ import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 const testPosix = process.platform === "win32" ? test.skip : test;
-const publicEntrypoint = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "entrypoint.sh",
-);
-const entrypoint = existsSync(publicEntrypoint)
-  ? publicEntrypoint
-  : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
-const publicVersionVerifier = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docker",
-  "verify-container-release-version.sh",
-);
-const versionVerifier = existsSync(publicVersionVerifier)
-  ? publicVersionVerifier
-  : join(
-      import.meta.dir,
-      "..",
-      "public-repo",
-      "docker",
-      "verify-container-release-version.sh",
-    );
+function dockerScript(name: string): string {
+  const canonical = join(import.meta.dir, "..", "..", "..", "docker", name);
+  return existsSync(canonical)
+    ? canonical
+    : join(import.meta.dir, "..", "public-repo", "docker", name);
+}
+const entrypoint = dockerScript("entrypoint.sh");
+const versionVerifier = dockerScript("verify-container-release-version.sh");
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
