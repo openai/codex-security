@@ -14,6 +14,7 @@ import {
   type ComponentPlanningOptions,
 } from "./component-plan.js";
 import {
+  hasCommandAuth,
   mergedCodexConfig,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -131,10 +132,9 @@ export async function runComponentScans(
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {
     const source = environment ?? process.env;
-    const provider = scanModelProvider(
-      await mergedCodexConfig(options.config ?? {}),
-    );
-    scanAuthentication(source, auth, provider);
+    const configuration = await mergedCodexConfig(options.config ?? {});
+    const provider = scanModelProvider(configuration);
+    scanAuthentication(source, auth, provider, hasCommandAuth(configuration));
     environment = selectedScanEnvironment(source, auth, provider);
   }
   const repository = await normalizeRepository(

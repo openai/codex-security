@@ -1,3 +1,4 @@
+import { jsonCodex } from "./support/codex.js";
 import {
   createCliTest,
   captureCli,
@@ -187,6 +188,24 @@ async function fixture(count: number): Promise<PublicationFixture> {
   };
 }
 
+function publicationArguments(
+  command: "scan" | "check",
+  scanDirectory: string,
+  ...options: string[]
+): string[] {
+  return [
+    "publish",
+    command,
+    scanDirectory,
+    "--to",
+    "linear",
+    "--linear-team",
+    OPTIONS.teamId,
+    ...options,
+    "--json",
+  ];
+}
+
 async function publicationPayload(
   value: string,
 ): Promise<
@@ -310,21 +329,15 @@ describe("database-backed Linear publication integration", () => {
         environment: completed.environment,
         rubricPath,
         findingIds: [finding.findingId],
-        codex: {
-          startThread: () => ({
-            run: async () => ({
-              finalResponse: JSON.stringify({
-                findingId: finding.findingId,
-                decision: "assessed",
-                level: "medium",
-                rubricLabel: "MEDIUM",
-                rationale: "Only bounded impact is established.",
-                confidence: "high",
-                reviewTrigger: null,
-              }),
-            }),
-          }),
-        },
+        codex: jsonCodex(() => ({
+          findingId: finding.findingId,
+          decision: "assessed",
+          level: "medium",
+          rubricLabel: "MEDIUM",
+          rationale: "Only bounded impact is established.",
+          confidence: "high",
+          reviewTrigger: null,
+        })),
       });
       const result = await publishScanInternal(
         completed.scanDirectory,
@@ -395,18 +408,12 @@ describe("database-backed Linear publication integration", () => {
             },
           }) as unknown as LinearClient,
       });
-    const command = [
-      "publish",
+    const command = publicationArguments(
       "scan",
       completed.scanDirectory,
-      "--to",
-      "linear",
-      "--linear-team",
-      OPTIONS.teamId,
       "--project",
       OPTIONS.projectId,
-      "--json",
-    ];
+    );
     const run = async (flags: string[] = []) => {
       const { stdout, runCli } = createCliTest(main);
 
@@ -437,18 +444,12 @@ describe("database-backed Linear publication integration", () => {
     const before = sha256(await readFile(database));
     expect(
       await checkOutput.run(
-        [
-          "publish",
+        publicationArguments(
           "check",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
+        ),
         checkCli,
       ),
     ).toBe(0);
@@ -548,19 +549,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        cli,
-      ),
+      await runCli(publicationArguments("scan", completed.scanDirectory), cli),
     ).toBe(0);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
@@ -682,18 +671,12 @@ describe("database-backed Linear publication integration", () => {
 
     expect(
       await runCli(
-        [
-          "publish",
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
+        ),
         cli,
       ),
     ).toBe(0);
@@ -785,19 +768,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        cli,
-      ),
+      await runCli(publicationArguments("scan", completed.scanDirectory), cli),
     ).toBe(2);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
@@ -866,18 +837,12 @@ describe("database-backed Linear publication integration", () => {
 
     expect(
       await runCli(
-        [
-          "publish",
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
+        ),
         cli,
       ),
     ).toBe(0);
@@ -975,19 +940,13 @@ describe("database-backed Linear publication integration", () => {
 
       expect(
         await runCli(
-          [
-            "publish",
+          publicationArguments(
             "scan",
             completed.scanDirectory,
-            "--to",
-            "linear",
-            "--linear-team",
-            OPTIONS.teamId,
             "--project",
             OPTIONS.projectId,
             ...(skipExisting ? ["--skip-existing"] : []),
-            "--json",
-          ],
+          ),
           cli,
         ),
       ).toBe(2);
@@ -1279,18 +1238,12 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
 
     expect(
       await runCli(
-        [
-          "publish",
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
+        ),
         cli,
       ),
     ).toBe(130);

@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import re
+from bisect import bisect_right
 from pathlib import Path
 
 DEFAULT_PREVIEW_BYTES = 1024
@@ -176,23 +177,12 @@ def fit_preview_lines(lines: list[str], max_bytes: int) -> str:
             line if line == "..." else truncate_utf8(line, line_bytes).rstrip() for line in lines
         )
 
-    content_lines = [line for line in lines if line != "..."]
-    if not content_lines:
-        return truncate_utf8(full_preview, max_bytes)
-    low = 0
-    high = max(len(line.encode("utf-8")) for line in content_lines)
-    best = ""
-    while low <= high:
-        middle = (low + high) // 2
-        candidate = render(middle)
-        if len(candidate.encode("utf-8")) <= max_bytes:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best:
-        return best
-    return truncate_utf8(full_preview, max_bytes)
+    high = max(len(line.encode("utf-8")) for line in lines)
+    limit = bisect_right(
+        range(high + 1), max_bytes, key=lambda size: len(render(size).encode("utf-8"))
+    )
+    best = render(limit - 1) if limit else ""
+    return best or truncate_utf8(full_preview, max_bytes)
 
 
 def python_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:

@@ -58,6 +58,10 @@ export function mockWorkbench(
 }
 
 export class TestClient extends CodexSecurity {
+  static withDependencies(dependencies: Partial<ClientArguments[1]>) {
+    return new TestClient({}, dependencies);
+  }
+
   public constructor(
     config: ClientArguments[0],
     dependencies: Partial<ClientArguments[1]>,

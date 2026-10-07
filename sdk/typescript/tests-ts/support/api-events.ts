@@ -50,13 +50,17 @@ type ScanEventOptions = Omit<
 
 export async function* completedEvents(
   threadId = "thread-1",
+  events?: AsyncIterable<ThreadEvent>,
 ): AsyncGenerator<ThreadEvent> {
   yield { type: "thread.started", thread_id: threadId };
   yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
+  if (events) yield* events;
+  else {
+    yield {
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "scan complete" },
+    };
+  }
   yield {
     type: "turn.completed",
     usage: {
@@ -118,9 +122,12 @@ export function collectObserverErrors(errors: [ScanObserverName, string][]) {
   };
 }
 
-export function codexFactory<Run>(runStreamed: Run) {
+export function codexFactory<Run>(
+  runStreamed: Run,
+  threadId: string | null = null,
+) {
   return () => ({
-    startThread: () => ({ id: null, runStreamed }),
+    startThread: () => ({ id: threadId, runStreamed }),
   });
 }
 
