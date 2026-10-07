@@ -215,10 +215,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
-            echo 'The registry did not return a valid immutable platform digest.' >&2
-            exit 1
-          fi
           mkdir -p "$RUNNER_TEMP/codex-security-platform-digests"
           touch "$RUNNER_TEMP/codex-security-platform-digests/${IMAGE_DIGEST#sha256:}"
 

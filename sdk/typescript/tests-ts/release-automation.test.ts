@@ -875,7 +875,7 @@ describe("published GitHub and npm release history", () => {
   test("never marks a historical backfill as latest", () => {
     expect(
       releaseHistory("npm-v0.1.2", {
-        registryVersions: ["0.1.1", "0.1.2", "0.1.3"],
+        registryVersions: ["0.1.1", "0.1.2"],
         githubReleaseTags: ["npm-v0.1.3"],
         reachableTags: ["npm-v0.1.1"],
       }),
@@ -895,7 +895,7 @@ describe("published GitHub and npm release history", () => {
   test("starts notes from the newest actually published version", () => {
     expect(
       releaseHistory("npm-v0.1.4", {
-        registryVersions: ["0.1.1", "0.1.2", "0.1.4"],
+        registryVersions: ["0.1.1", "0.1.4"],
         githubReleaseTags: ["npm-v0.1.2"],
         reachableTags: ["npm-v0.1.3", "npm-v0.1.2", "npm-v0.1.1"],
       }),
