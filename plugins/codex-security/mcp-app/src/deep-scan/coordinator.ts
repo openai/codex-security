@@ -570,9 +570,10 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return false;
+      if (!leaseLossConfirmed) return this.externallyFailed;
       current = this.state;
     }
+    if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
       leaseLossConfirmed ||
       (current.status === "running" &&

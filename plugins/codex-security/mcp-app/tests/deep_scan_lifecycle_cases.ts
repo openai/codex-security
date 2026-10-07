@@ -33,6 +33,7 @@ export async function testDeepScanLifecycle({
     canceledPublicationWaitsForHeartbeat,
     delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
+    concurrentOwnershipReadsKeepReplacementResult,
     shutdownStopsReplacementObservation,
     failedCancellationStillPreservesResults,
     lateCancellationKeepsPersistedFailure,
@@ -149,6 +150,98 @@ export async function testDeepScanLifecycle({
       await heartbeat;
     }
     assert.equal((await coordinator.settled()).status, "succeeded");
+  }
+
+  async function concurrentOwnershipReadsKeepReplacementResult() {
+    for (const [readFails, leaseLossConfirmed] of [
+      [false, false],
+      [true, false],
+      [true, true],
+    ]) {
+      const fixture = await fixtureRun(config);
+      fixture.run.coordinatorGeneration = 2;
+      const store = new FakeStore(fixture.run);
+      const preparing = Promise.withResolvers<void>();
+      const failProgress = Promise.withResolvers<void>();
+      const heartbeatReadStarted = Promise.withResolvers<void>();
+      const failureReadStarted = Promise.withResolvers<void>();
+      const heartbeatRead = Promise.withResolvers<DeepScanRunState>();
+      const failureRead = Promise.withResolvers<DeepScanRunState>();
+      const observing = Promise.withResolvers<void>();
+      const replacement = Promise.withResolvers<DeepScanRunState>();
+      const releaseStaleFailure = Promise.withResolvers<void>();
+      let reads = 0;
+      let failureCalls = 0;
+      let observations = 0;
+      store.updateProgress = async () => {
+        preparing.resolve();
+        await failProgress.promise;
+        throw new Error(
+          leaseLossConfirmed
+            ? "Deep Scan coordinator lease belongs to a newer generation."
+            : "fixture progress persistence failure",
+        );
+      };
+      store.get = async () => {
+        reads += 1;
+        if (reads === 1) {
+          heartbeatReadStarted.resolve();
+          return await heartbeatRead.promise;
+        }
+        failureReadStarted.resolve();
+        return await failureRead.promise;
+      };
+      store.fail = async () => {
+        failureCalls += 1;
+        await releaseStaleFailure.promise;
+        throw new Error(
+          "Deep Scan coordinator lease belongs to a newer generation.",
+        );
+      };
+      const coordinator = createCoordinator(
+        fixture,
+        store,
+        new FakeExecutor(),
+        {
+          threadId: "fixture-owner",
+          heartbeatIntervalMs: 60_000,
+          observeReplacement: async () => {
+            observations += 1;
+            observing.resolve();
+            return await replacement.promise;
+          },
+        },
+      );
+      coordinator.start();
+      await preparing.promise;
+      const heartbeat = coordinator.renewHeartbeat();
+      await heartbeatReadStarted.promise;
+      failProgress.resolve();
+      await failureReadStarted.promise;
+      const newer = { ...store.run, coordinatorGeneration: 3 };
+      store.run = newer;
+      heartbeatRead.resolve(structuredClone(newer));
+      await observing.promise;
+      if (readFails) failureRead.reject(new Error("database is locked"));
+      else failureRead.resolve(structuredClone(newer));
+      replacement.resolve({
+        ...newer,
+        status: "succeeded",
+        terminalReason: "capped",
+      });
+      await heartbeat;
+      // A stale failure response must arrive only after replacement observation.
+      releaseStaleFailure.resolve();
+      const terminal = await coordinator.settled();
+      assert.equal(terminal.status, "succeeded");
+      assert.equal(terminal.coordinatorGeneration, 3);
+      assert.equal(
+        failureCalls,
+        0,
+        "a replaced coordinator must not fail the scan",
+      );
+      assert.equal(observations, 1, "concurrent reads must share one observer");
+    }
   }
 
   async function shutdownStopsReplacementObservation() {

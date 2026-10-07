@@ -2049,6 +2049,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
+          environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
