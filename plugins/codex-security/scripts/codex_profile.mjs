@@ -8,14 +8,16 @@ import { createInterface } from "node:readline";
 // the full provider configuration from its private profile file.
 export function preflightProviderDefinitions(providers) {
   return Object.fromEntries(
-    Object.entries(providers).map(([id, provider]) => [
-      id,
-      Object.fromEntries(
-        ["name", "wire_api", "requires_openai_auth"]
-          .filter((key) => Object.hasOwn(provider, key))
-          .map((key) => [key, provider[key]]),
-      ),
-    ]),
+    Object.entries(providers)
+      .filter(([, provider]) => provider != null)
+      .map(([id, provider]) => [
+        id,
+        Object.fromEntries(
+          ["name", "wire_api", "requires_openai_auth"]
+            .filter((key) => Object.hasOwn(provider, key))
+            .map((key) => [key, provider[key]]),
+        ),
+      ]),
   );
 }
 
@@ -30,7 +32,7 @@ export function isPermissionProfileFallbackWarning(message, profileId) {
 
 export function profileConfigOverrides(config) {
   return Object.entries(config)
-    .filter(([, value]) => value !== undefined)
+    .filter(([, value]) => value != null)
     .map(([key, value]) => `${key}=${toml(value)}`);
 }
 
@@ -185,7 +187,7 @@ function toml(value) {
   if (Array.isArray(value)) return `[${value.map(toml).join(", ")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value)
-      .filter(([, child]) => child !== undefined)
+      .filter(([, child]) => child != null)
       .map(
         ([key, child]) =>
           `${/^[A-Za-z0-9_-]+$/.test(key) ? key : toml(key)} = ${toml(child)}`,

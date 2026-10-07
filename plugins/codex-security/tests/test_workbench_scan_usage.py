@@ -480,6 +480,40 @@ def test_completion_marks_unverifiable_workers_partial(
     assert usage["totalTokens"] == 16
 
 
+@pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
+@pytest.mark.parametrize("home_kind", ["absolute", "literal_tilde", "relative_home", "home"])
+def test_completion_reads_usage_from_literal_home(
+    tmp_path: Path, home_variable: str, home_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _start_scan(tmp_path)
+    home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
+    if home_kind == "literal_tilde":
+        home = tmp_path / ("~ literal" if sys.platform == "win32" else "~ ")
+    fixture.environment["CODEX_SQLITE_HOME"] = str(home)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [_token_event(fixture.started_at + timedelta(microseconds=1), 12, 3)],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    configured_home = str(home)
+    if home_kind == "literal_tilde":
+        monkeypatch.chdir(tmp_path)
+        configured_home = home.name
+    elif home_kind in {"relative_home", "home"}:
+        monkeypatch.setenv("HOME", str(home if home_kind == "home" else tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(home if home_kind == "home" else tmp_path))
+        configured_home = "~" if home_kind == "home" else f"~/{home.name}"
+    fixture.environment[home_variable] = configured_home
+    if home_variable == "CODEX_HOME":
+        fixture.environment["CODEX_SQLITE_HOME"] = ""
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 15
+
+
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]
