@@ -7,11 +7,15 @@ import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { beforeAll } from "./triage-provider.mts";
 const require = createRequire(import.meta.url);
 const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+const extensions = [
+  `file://${path.join(import.meta.dirname, "triage-provider.mts")}:beforeAll`,
+];
 interface Capture {
   cwd: string;
   policy: string;
@@ -53,6 +57,109 @@ function invoke(args: string[], environment: NodeJS.ProcessEnv) {
     },
   );
 }
+
+test(
+  "runtime extension preserves native credential precedence and wraps providers once",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "triage-auth-")),
+    );
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const priorRuntime = process.env.TRIAGE_RUNTIME_ROOT;
+    process.env.TRIAGE_RUNTIME_ROOT = root;
+    t.after(() => {
+      if (priorRuntime === undefined) delete process.env.TRIAGE_RUNTIME_ROOT;
+      else process.env.TRIAGE_RUNTIME_ROOT = priorRuntime;
+    });
+    const fakeCodex = path.join(root, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      `#!${process.execPath}
+console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-auth'}));
+console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify({apiKey:process.env.CODEX_API_KEY,cwd:process.argv[process.argv.indexOf('--cd')+1],directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])})}}));
+console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
+`,
+      { mode: 0o755 },
+    );
+    const { loadApiProvider } = await import("promptfoo");
+    const cases = [
+      {
+        env: { OPENAI_API_KEY: "synthetic-global" },
+        providerEnv: { CODEX_API_KEY: "synthetic-provider" },
+        expected: "synthetic-provider",
+      },
+      {
+        env: { CODEX_API_KEY: "synthetic-global" },
+        providerEnv: { OPENAI_API_KEY: "synthetic-provider" },
+        expected: "synthetic-provider",
+      },
+      {
+        env: { OPENAI_API_KEY: "synthetic-global" },
+        providerEnv: {
+          OPENAI_API_KEY: "synthetic-openai",
+          CODEX_API_KEY: "synthetic-codex",
+        },
+        expected: "synthetic-openai",
+      },
+      {
+        env: { OPENAI_API_KEY: "synthetic-global" },
+        providerEnv: { CODEX_API_KEY: "synthetic-provider" },
+        apiKey: "synthetic-explicit",
+        expected: "synthetic-explicit",
+      },
+      {
+        env: { OPENAI_API_KEY: "synthetic-global" },
+        providerEnv: { CODEX_API_KEY: "" },
+        expected: "synthetic-global",
+      },
+    ];
+    for (const entry of cases) {
+      const load = () =>
+        loadApiProvider("openai:codex-sdk:gpt-5.5", {
+          basePath: root,
+          env: entry.env,
+          options: {
+            env: entry.providerEnv,
+            config: {
+              working_dir: root,
+              codex_path_override: fakeCodex,
+              skip_git_repo_check: true,
+              model: "gpt-5.5",
+              maxRetries: 0,
+              apiKey: entry.apiKey,
+              cli_env: { CODEX_MCP_NODE_PATH: process.execPath },
+            },
+          },
+        });
+      const native = await load();
+      const adapted = await load();
+      try {
+        const context = { suite: { providers: [adapted] } };
+        beforeAll(context);
+        beforeAll(context);
+        const original = await native.callApi("synthetic");
+        const result = await adapted.callApi("synthetic");
+        assert.equal(original.error, undefined);
+        assert.equal(result.error, undefined);
+        const originalOutput = JSON.parse(String(original.output));
+        const output = JSON.parse(String(result.output));
+        assert.equal(originalOutput.apiKey, entry.expected);
+        assert.equal(output.apiKey, originalOutput.apiKey);
+        assert.equal(output.cwd, root);
+        assert.equal(adapted.id(), native.id());
+        assert.deepEqual(output.directories, [
+          path.dirname(fs.realpathSync(process.execPath)),
+          path.dirname(process.execPath),
+          path.dirname(fakeCodex),
+        ]);
+      } finally {
+        await native.cleanup?.();
+        await adapted.cleanup?.();
+      }
+    }
+  },
+);
 
 // Exercise the pinned provider and Codex SDK subprocess without a model request.
 // The normal setup command supplies the host helper build used by the runner.
@@ -111,11 +218,11 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     const provider = parse(
       fs.readFileSync(path.join(evalRoot, "promptfooconfig.yaml"), "utf8"),
     ).providers[0];
-    provider.id = `file://${path.join(import.meta.dirname, "triage-provider.mts")}`;
     provider.config.codex_path_override = fakeCodex;
     fs.writeFileSync(
       configPath,
       JSON.stringify({
+        extensions,
         providers: [provider],
         prompts: ["hello"],
         tests: [{ assert: [{ type: "equals", value: "ok" }] }],
@@ -173,6 +280,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       calibrationConfig,
       JSON.stringify({
+        extensions,
         defaultTest: {
           options: {
             transformVars: `file://${path.join(import.meta.dirname, "runtime-vars.mts")}`,
@@ -260,6 +368,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       templatedConfig,
       JSON.stringify({
+        extensions,
         providers: [
           {
             ...provider,
@@ -431,28 +540,28 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       command = fakeCodex,
       cliEnvironment: Record<string, string> = {},
     ) =>
-      loadApiProvider(
-        `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
-        {
-          basePath: root,
-          options: {
-            config: {
-              working_dir: root,
-              codex_path_override: command,
-              skip_git_repo_check: true,
-              model: "gpt-5.5",
-              maxRetries: 0,
-              cli_env: {
-                ...cliEnvironment,
-                EXTRA_MARKER: "{{marker}}",
-                ...(template === undefined
-                  ? {}
-                  : { CODEX_MCP_NODE_PATH: template }),
-              },
+      loadApiProvider("openai:codex-sdk:gpt-5.5", {
+        basePath: root,
+        options: {
+          config: {
+            working_dir: root,
+            codex_path_override: command,
+            skip_git_repo_check: true,
+            model: "gpt-5.5",
+            maxRetries: 0,
+            cli_env: {
+              ...cliEnvironment,
+              EXTRA_MARKER: "{{marker}}",
+              ...(template === undefined
+                ? {}
+                : { CODEX_MCP_NODE_PATH: template }),
             },
           },
         },
-      );
+      }).then((provider) => {
+        beforeAll({ suite: { providers: [provider] } });
+        return provider;
+      });
     for (const template of [
       "{{custom_node}}",
       '{{custom_node | replace("second", "second")}}',
@@ -829,6 +938,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       fs.writeFileSync(
         configPath,
         JSON.stringify({
+          extensions: template.extensions,
           providers: [provider],
           prompts: ["hello"],
           defaultTest:
@@ -841,6 +951,10 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
               : undefined,
           tests: [
             {
+              metadata:
+                suite === "SAST"
+                  ? { ground_truth: "true_positive" }
+                  : undefined,
               vars:
                 suite === "SAST"
                   ? { target_repo: targetRepository }
@@ -867,6 +981,20 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       );
       assert.notEqual(initial.code, 0, initial.output);
       assert.match(initial.output, /synthetic retryable failure/);
+      if (suite === "SAST") {
+        const initialDatabase = new DatabaseSync(
+          path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+          { enableForeignKeyConstraints: false },
+        );
+        const initialResult = initialDatabase
+          .prepare("SELECT metadata FROM eval_results LIMIT 1")
+          .get();
+        initialDatabase.close();
+        assert.ok(
+          JSON.parse((initialResult?.metadata as string) || "{}").sastbench,
+          initial.output,
+        );
+      }
       fs.rmSync(failure);
       const retry = await invoke(
         [
@@ -889,11 +1017,15 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         )
         .get();
       assert.ok(stored && typeof stored.config === "string");
-      assert.equal(
-        JSON.parse(stored.config).providers[0].id,
-        suite === "SAST"
-          ? `file://${path.join(import.meta.dirname, "triage-provider.mts")}`
-          : provider.id,
+      assert.equal(JSON.parse(stored.config).providers[0].id, provider.id);
+      assert.deepEqual(
+        JSON.parse(stored.config).extensions,
+        template.extensions.map((extension: string) =>
+          extension.replace(
+            "{{env.TRIAGE_PROVIDER_PATH}}",
+            path.join(import.meta.dirname, "triage-provider.mts"),
+          ),
+        ),
       );
       database.prepare("DELETE FROM eval_results").run();
       database.close();
@@ -985,6 +1117,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
       viewer.kill("SIGTERM");
       await closed;
+      assert.doesNotMatch(viewerOutput, /afterEach extension hook failed/);
       const rows = fs
         .readFileSync(capture, "utf8")
         .trim()

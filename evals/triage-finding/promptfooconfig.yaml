@@ -4,8 +4,11 @@ description: "Codex Security triage-finding input-type I/O eval"
 prompts:
   - file://./prompts/triage-request.txt
 
+extensions:
+  - file://{{env.TRIAGE_PROVIDER_PATH}}:beforeAll
+
 providers:
-  - id: file://./scripts/triage-provider.mts
+  - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding"
     config:
       skip_git_repo_check: true

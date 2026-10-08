@@ -66,117 +66,98 @@ function resolveCommand(
   throw new Error(`Executable not found on PATH: ${command}`);
 }
 
-// Resolve the throwaway runtime when the provider runs, not when Promptfoo
-// persists its configuration for --resume or --retry-errors.
-export default class TriageProvider implements ApiProvider {
-  declare private readonly options: ProviderOptions;
-  declare config: ProviderOptions["config"];
-  declare private provider: Promise<ApiProvider> | undefined;
-  constructor(options: ProviderOptions) {
-    this.options = options;
-    this.config = options.config;
-  }
+const wrappedProviders = new WeakSet<ApiProvider>();
 
-  id() {
-    return `file://${import.meta.filename}`;
-  }
-
-  async callApi(...args: Parameters<ApiProvider["callApi"]>) {
-    this.provider ??= import("promptfoo").then(async ({ loadApiProvider }) => {
-      const provider = (await loadApiProvider("openai:codex-sdk:gpt-5.5", {
-        basePath: this.config.basePath,
-        options: this.options,
-      })) as CodexProvider;
-      const getInstance = provider.getCodexInstanceForTurn.bind(provider);
-      provider.getCodexInstanceForTurn = async (
-        environment,
-        config,
-        apiKey,
-      ) => {
-        const instance = await getInstance(environment, config, apiKey);
-        // The pinned provider exposes its selected SDK executor before creating
-        // thread options. Extend this call's config without changing selection
-        // or the SDK's bundled-tool PATH handling.
-        const { executablePath, pathDirs } = instance.activeInstance.exec;
-        const executable = realpathSync.native(
-          resolveCommand(executablePath, process.cwd(), environment),
-        );
-        const directories = [path.dirname(executable), ...pathDirs];
-        if (path.basename(executable) === "codex.js") {
-          try {
-            const packageJson = path.join(
-              path.dirname(executable),
-              "..",
-              "package.json",
-            );
-            if (
-              JSON.parse(readFileSync(packageJson, "utf8")).name ===
-              "@openai/codex"
-            ) {
-              const native = resolveBundledCodexExecutable(packageJson);
-              directories.push(
-                path.dirname(native),
-                ...Object.values(bundledCodexSdkEnvironment(native, {})),
-              );
-            }
-          } catch {
-            // Other launcher layouts keep their configured directories and
-            // report their own dependency errors when the SDK starts them.
-          }
-        }
-        config.additional_directories = [
-          ...(config.additional_directories ?? []),
-          ...directories,
-        ];
-        return instance;
-      };
-      const callApiInternal = provider.callApiInternal.bind(provider);
-      // The pinned Codex provider merges prompt overrides and renders case
-      // variables before this call. Keep that upstream behavior for each case.
-      provider.callApiInternal = (prompt, context, options, config) => {
-        const runtimeRoot = process.env.TRIAGE_RUNTIME_ROOT;
-        if (!runtimeRoot) {
-          throw new Error(
-            "Run this evaluation through scripts/run-promptfoo.mts.",
-          );
-        }
-        const requestedNode =
-          (config.cli_env?.CODEX_MCP_NODE_PATH ??
-            process.env.CODEX_MCP_NODE_PATH ??
-            process.execPath) ||
-          process.execPath;
-        const environment = { ...process.env, ...config.cli_env };
-        let nodeCommand: string;
+// Keep native provider loading and authentication unchanged. Bind the staged
+// runtime after Promptfoo has created each provider for this evaluation.
+export function beforeAll({ suite }: { suite: { providers: ApiProvider[] } }) {
+  for (const apiProvider of suite.providers) {
+    const provider = apiProvider as CodexProvider;
+    if (
+      typeof provider.getCodexInstanceForTurn !== "function" ||
+      wrappedProviders.has(provider)
+    )
+      continue;
+    const getInstance = provider.getCodexInstanceForTurn.bind(provider);
+    provider.getCodexInstanceForTurn = async (environment, config, apiKey) => {
+      const instance = await getInstance(environment, config, apiKey);
+      // The pinned provider exposes its selected SDK executor before creating
+      // thread options. Extend this call's config without changing selection
+      // or the SDK's bundled-tool PATH handling.
+      const { executablePath, pathDirs } = instance.activeInstance.exec;
+      const executable = realpathSync.native(
+        resolveCommand(executablePath, process.cwd(), environment),
+      );
+      const directories = [path.dirname(executable), ...pathDirs];
+      if (path.basename(executable) === "codex.js") {
         try {
-          nodeCommand = resolveCommand(requestedNode, runtimeRoot, environment);
-          accessSync(
-            nodeCommand,
-            process.platform === "win32" ? constants.F_OK : constants.X_OK,
+          const packageJson = path.join(
+            path.dirname(executable),
+            "..",
+            "package.json",
           );
+          if (
+            JSON.parse(readFileSync(packageJson, "utf8")).name ===
+            "@openai/codex"
+          ) {
+            const native = resolveBundledCodexExecutable(packageJson);
+            directories.push(
+              path.dirname(native),
+              ...Object.values(bundledCodexSdkEnvironment(native, {})),
+            );
+          }
         } catch {
-          nodeCommand = resolveCommand("node", runtimeRoot, environment);
+          // Other launcher layouts keep their configured directories and
+          // report their own dependency errors when the SDK starts them.
         }
-        const nodePath =
-          process.platform === "win32"
-            ? realpathSync(nodeCommand)
-            : realpathSync.native(nodeCommand);
-        return callApiInternal(prompt, context, options, {
-          ...config,
-          working_dir: runtimeRoot,
-          cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodeCommand },
-          additional_directories: [
-            ...(config.additional_directories ?? []),
-            path.dirname(nodePath),
-            path.dirname(nodeCommand),
-          ],
-        });
-      };
-      return provider;
-    });
-    return (await this.provider).callApi(...args);
-  }
-
-  async cleanup() {
-    if (this.provider) await (await this.provider).cleanup?.();
+      }
+      config.additional_directories = [
+        ...(config.additional_directories ?? []),
+        ...directories,
+      ];
+      return instance;
+    };
+    const callApiInternal = provider.callApiInternal.bind(provider);
+    // The pinned Codex provider merges prompt overrides and renders case
+    // variables before this call. Keep that upstream behavior for each case.
+    provider.callApiInternal = (prompt, context, options, config) => {
+      const runtimeRoot = process.env.TRIAGE_RUNTIME_ROOT;
+      if (!runtimeRoot) {
+        throw new Error(
+          "Run this evaluation through scripts/run-promptfoo.mts.",
+        );
+      }
+      const requestedNode =
+        (config.cli_env?.CODEX_MCP_NODE_PATH ??
+          process.env.CODEX_MCP_NODE_PATH ??
+          process.execPath) ||
+        process.execPath;
+      const environment = { ...process.env, ...config.cli_env };
+      let nodeCommand: string;
+      try {
+        nodeCommand = resolveCommand(requestedNode, runtimeRoot, environment);
+        accessSync(
+          nodeCommand,
+          process.platform === "win32" ? constants.F_OK : constants.X_OK,
+        );
+      } catch {
+        nodeCommand = resolveCommand("node", runtimeRoot, environment);
+      }
+      const nodePath =
+        process.platform === "win32"
+          ? realpathSync(nodeCommand)
+          : realpathSync.native(nodeCommand);
+      return callApiInternal(prompt, context, options, {
+        ...config,
+        working_dir: runtimeRoot,
+        cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodeCommand },
+        additional_directories: [
+          ...(config.additional_directories ?? []),
+          path.dirname(nodePath),
+          path.dirname(nodeCommand),
+        ],
+      });
+    };
+    wrappedProviders.add(provider);
   }
 }

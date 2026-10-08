@@ -37,7 +37,7 @@ assert.match(config, /sastbench_runtime_only:\n\s+filesystem:/);
 assert.match(config, /":minimal":\s+read/);
 assert.match(config, /":workspace_roots":\s+read/);
 assert.match(config, /network:\n\s+enabled:\s+false/);
-assert.match(config, /id:\s+file:\/\/\{\{env\.TRIAGE_PROVIDER_PATH\}\}/);
+assert.match(config, /id:\s+openai:codex-sdk:gpt-5\.5/);
 assert.match(
   config,
   /label:\s+"Codex SDK triage-finding SastBench \(gpt-5\.5\)"/,
@@ -51,7 +51,7 @@ assert.match(config, /metric:\s+schema_valid/);
 assert.match(config, /metric:\s+strict_case_correct/);
 assert.match(
   config,
-  /extensions:\n\s+- file:\/\/\.\/assertions\/sastbench-metrics\.mts:afterEach/,
+  /extensions:\n\s+- file:\/\/\{\{env\.TRIAGE_PROVIDER_PATH\}\}:beforeAll\n\s+- file:\/\/\.\/assertions\/sastbench-metrics\.mts:afterEach/,
 );
 for (const metric of [
   "strict_precision",

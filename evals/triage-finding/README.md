@@ -25,7 +25,9 @@ pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 ```
 
-The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits.
+The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. The runtime extension runs after Promptfoo loads the native Codex provider, preserving its authentication precedence. A pinned Promptfoo patch runs saved `:beforeAll` startup hooks during viewer replay. Replay does not restore grading metadata, so grading hooks remain disabled.
+
+Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
 
 Validate the config:
 

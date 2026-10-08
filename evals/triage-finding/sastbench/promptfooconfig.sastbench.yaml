@@ -7,7 +7,7 @@ prompts:
   - file://./prompts/sastbench-triage-request.txt
 
 providers:
-  - id: file://{{env.TRIAGE_PROVIDER_PATH}}
+  - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding SastBench (gpt-5.5)"
     config:
       # The provider binds working_dir to the current staged skill runtime.
@@ -42,6 +42,7 @@ providers:
           plugins: false
 
 extensions:
+  - file://{{env.TRIAGE_PROVIDER_PATH}}:beforeAll
   - file://./assertions/sastbench-metrics.mts:afterEach
 
 defaultTest:
