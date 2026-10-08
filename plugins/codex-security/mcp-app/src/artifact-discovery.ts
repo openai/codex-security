@@ -1,13 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { decodeUtf8 } from "./helpers/utf8.js";
-import { parsedPath } from "./helpers/resolve-security-md.js";
 import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
   createCandidateNormalizer,
   stableJson,
-  relativeFile,
-  pathKey,
+  candidateRelativePath,
   type CandidateSource,
 } from "./helpers/normalize-candidates.js";
 import type * as z from "zod/v4";
@@ -189,35 +187,18 @@ async function diffCandidateSources(
     )
     .filter(Boolean)
     .map(nativePath);
-  const locations = candidates.flatMap((candidate) =>
-    candidate.locations.map((location) => nativePath(location.path)),
-  );
-  const aliases = new Map<string, string>();
-  if (process.platform === "win32") {
-    // Prefer an unambiguous spelling from the selected inventory.
-    const selectedPaths = new Map<string, string | null>();
-    for (const value of paths) {
-      const name = nativePath(parsedPath(value));
-      const key = pathKey(name);
-      selectedPaths.set(
-        key,
-        selectedPaths.has(key) && selectedPaths.get(key) !== name ? null : name,
+  const locations = candidates.flatMap((candidate, index) => {
+    try {
+      return candidate.locations.map((location) =>
+        candidateRelativePath(location.path),
+      );
+    } catch (error) {
+      throw new Error(
+        `${discoveryLabel}: candidate input row ${index + 1}: ${(error as Error).message}`,
+        { cause: error },
       );
     }
-    for (const value of new Set([...paths, ...locations])) {
-      try {
-        const key = pathKey(nativePath(parsedPath(value)));
-        let name = selectedPaths.get(key);
-        if (!name) {
-          const [currentName] = relativeFile(value, context.repoRoot);
-          name = selectedPaths.get(pathKey(currentName)) ?? currentName;
-        }
-        if (value !== name && key === pathKey(name)) aliases.set(value, name);
-      } catch {
-        // The selected revision may contain a file absent from this checkout.
-      }
-    }
-  }
+  });
   const python = context.pythonCommand ?? (await resolvePythonCommand());
   const output = await runPythonWithInput(
     python,
@@ -241,25 +222,15 @@ except subprocess.CalledProcessError as error:
     ],
     JSON.stringify({
       diff_target: target,
-      paths: [...paths, ...aliases.values()],
-      locations: locations.flatMap((value) =>
-        aliases.has(value) ? [value, aliases.get(value)!] : [value],
-      ),
+      paths,
+      locations,
+      case_insensitive: process.platform === "win32",
     }),
     "Diff source reader",
   );
-  const sources = new Map(
+  return new Map(
     Object.entries(JSON.parse(output) as Record<string, CandidateSource>),
   );
-  for (const [value, name] of aliases) {
-    const source = sources.get(value);
-    if (
-      (!source || ("error" in source && source.error === "missing")) &&
-      sources.has(name)
-    )
-      sources.set(value, sources.get(name)!);
-  }
-  return sources;
 }
 
 /** Read the actual compact ledger, including records added by later shared phases. */
