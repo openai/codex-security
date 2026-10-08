@@ -67,9 +67,13 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
-  const existingRoot = await resolveStoragePath(scanRoot);
-  if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
-    throw new Error("Artifact storage must be outside the target repository.");
+  for (const storagePath of [scanRoot, root]) {
+    const existingRoot = await resolveStoragePath(storagePath);
+    if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
+      throw new Error(
+        "Artifact storage must be outside the target repository.",
+      );
+    }
   }
   if (create) await fs.mkdir(root, { recursive: true, mode: 0o700 });
   return {

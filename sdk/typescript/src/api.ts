@@ -1684,9 +1684,7 @@ export class CodexSecurity {
               JSON.stringify({
                 recipe,
                 userContext: options.scanPrompt,
-                ...(options.workflowId === undefined
-                  ? {}
-                  : { workflowId: options.workflowId }),
+                workflowId: options.workflowId,
               }),
             );
       const scanId = registration["scanId"];
@@ -3303,9 +3301,7 @@ export class CodexSecurity {
             mock: true,
           },
           userContext: options.scanPrompt,
-          ...(options.workflowId === undefined
-            ? {}
-            : { workflowId: options.workflowId }),
+          workflowId: options.workflowId,
         }),
       );
       const scanId = registration["scanId"];
