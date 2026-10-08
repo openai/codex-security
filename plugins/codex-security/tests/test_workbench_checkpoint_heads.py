@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
@@ -26,6 +28,7 @@ from workbench_test_support import (
     saved_discovery_worker,
     saved_draft,
     scan_command,
+    set_triage,
     start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
@@ -1406,3 +1409,377 @@ def test_registered_frozen_numeric_sources_keep_published_meaning(
         assert "checkpoint changed after the scan stopped" in result["stderr"]
     assert worker_result.read_bytes() == changed_source
     assert all((scan_dir / name).read_bytes() == raw for name, raw in original.items())
+
+
+def test_deep_coverage_values_survive_frozen_source_hashing(
+    tmp_path: Path, checkpoint_scan
+) -> None:
+    scan_id, _, _, binding = checkpoint_scan
+    nested: object = 1
+    for _ in range(600):
+        nested = [nested]
+    document = saved_draft(scan_id)
+    document["coverage"]["extensions"] = {"nested": nested}
+    output = tmp_path / "worker"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_text(json.dumps(document))
+    original = result.read_bytes()
+    first = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [saved_discovery_worker(output)],
+        [],
+        stopped=True,
+        reason="interrupted",
+    )
+    assert first is not None
+    assert (
+        replay_saved_results(
+            saved, first, tmp_path, scan_id, binding, [saved_discovery_worker(output)]
+        )
+        is not None
+    )
+    assert result.read_bytes() == original
+
+
+def test_adopted_draft_and_canonical_artifacts_keep_exact_numbers(tmp_path: Path) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    document = {
+        key: json.loads((contract / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    for value in document.values():
+        value["extensions"] = {"observation": "RAW_NUMBER"}
+    document["findings"]["findings"][0].setdefault("extensions", {})["observation"] = "RAW_NUMBER"
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(document).replace('"RAW_NUMBER"', "1.0000000000000001"))
+    original = staged.read_bytes()
+    result = scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(staged))
+    assert result["status"] == "draft_written"
+    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+    checkpoint = scan_dir / "checkpoints" / head["checkpoint"]
+    assert hashlib.sha256(checkpoint.read_bytes()).hexdigest() == checkpoint.stem
+    assert "1.0000000000000001" in checkpoint.read_text()
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        assert "1.0000000000000001" in (scan_dir / name).read_text()
+    assert staged.read_bytes() == original
+    fail_deep_scan(state, codex_home, scan_id)
+    assert "1.0000000000000001" in (scan_dir / "findings.json").read_text()
+    assert get_scan(state, scan_id)["scan"]["findingCount"] == 1
+
+
+def test_exact_parent_history_survives_failed_publication_and_later_recovery(
+    tmp_path: Path,
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    historical = json.loads((contract / "findings.json").read_text())["findings"][0]
+    historical["extensions"] = {"candidateId": "numeric-history", "observation": "RAW_NUMBER"}
+    historical["severity"].update(level="critical", score=9.5, scoringSystem="CVSS:3.1")
+    current = copy.deepcopy(historical)
+    current["severity"].update(level="low", score=2.0)
+    current["provenance"]["previousFindings"] = [historical]
+    parent = saved_draft(scan_id, findings=[current], complete=False)
+    write_saved_parent(scan_dir, parent, 100)
+    path = scan_dir / "findings.json"
+    path.write_text(path.read_text().replace('"RAW_NUMBER"', "1.0000000000000001"))
+    worker = saved_draft(scan_id, findings=[historical], complete=True)
+    raw_worker = json.dumps(worker).replace('"RAW_NUMBER"', "1.0000000000000001").encode()
+    result.write_bytes(raw_worker)
+    os.utime(result, ns=(10, 10))
+    failed = run_workbench_with_fault(
+        tmp_path / "fail_publication.py",
+        state,
+        codex_home,
+        "def fail_publication(*args, **kwargs):\n"
+        "    raise OSError('synthetic publication failure')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Synthetic worker stop.",
+    )
+    assert failed.returncode == 0, failed.stderr
+    environment = {"CODEX_HOME": str(codex_home)}
+    retried = preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment=environment
+    )["scan"]
+    assert retried["findings"][0]["severity"]["level"] == "low"
+    assert "1.0000000000000001" in (scan_dir / "findings.json").read_text()
+    copied = {file: file.read_bytes() for file in (scan_dir / "checkpoints").glob("*.json")}
+    checkpoint_dir = result.parent / "checkpoints"
+    checkpoint_dir.mkdir(exist_ok=True)
+    (checkpoint_dir / f"{hashlib.sha256(raw_worker).hexdigest()}.json").write_bytes(raw_worker)
+    recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)[
+        "scan"
+    ]
+    assert recovered["findings"][0]["severity"]["level"] == "low"
+    assert "1.0000000000000001" in (scan_dir / "findings.json").read_text()
+    assert result.read_bytes() == raw_worker
+    assert all(path.read_bytes() == contents for path, contents in copied.items())
+
+
+@pytest.mark.parametrize("preserved_identity", [False, True])
+@pytest.mark.parametrize("initial_float", [False, True])
+def test_recovered_sibling_ids_and_triage_survive_legacy_replay(
+    tmp_path: Path, preserved_identity: bool, initial_float: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    if preserved_identity:
+        finding["provenance"]["preservedIdentity"] = {
+            "anchor": "original-anchor",
+            "instance": "original-instance",
+        }
+    sibling = copy.deepcopy(finding)
+    sibling["locations"][0].update(startLine=51, endLine=54)
+    document = saved_draft(scan_id, findings=[finding, sibling], complete=True)
+    if initial_float:
+        for item in document["findings"]:
+            for location in item["locations"]:
+                for key in ("startLine", "endLine"):
+                    if key in location:
+                        location[key] = float(location[key])
+    result.write_text(json.dumps(document))
+    if initial_float:
+        fail_deep_scan(state, codex_home, scan_id)
+    else:
+        legacy = run_workbench_with_fault(
+            tmp_path / "legacy_writer.py",
+            state,
+            codex_home,
+            "workbench_saved_results._semantic_digest = workbench_saved_results._digest\n"
+            "read_saved = workbench_saved_results._read_saved_result\n"
+            "def legacy_read(directory, relative, scan_id, **options):\n"
+            "    draft, digest, observed = read_saved(directory, relative, scan_id, **options)\n"
+            "    if not workbench_saved_results._is_source_order_snapshot(relative) and workbench_saved_results._checkpoint_head_directory(relative) is None:\n"
+            "        digest = workbench_saved_results._digest(draft)\n"
+            "    return draft, digest, observed\n"
+            "workbench_saved_results._read_saved_result = legacy_read\n",
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Synthetic worker stop.",
+        )
+        assert legacy.returncode == 0, legacy.stderr
+    before = get_scan(state, scan_id)["scan"]["findings"]
+    before_ids = {(row["findingId"], row["occurrenceId"]) for row in before}
+    assert len(before_ids) == 2
+    for row in before:
+        set_triage(
+            state,
+            row["occurrenceId"],
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            "Synthetic reviewed decision.",
+        )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        decisions = connection.execute(
+            "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+        ).fetchall()
+    for as_float in (True, False):
+        checkpoint = copy.deepcopy(document)
+        for item in checkpoint["findings"]:
+            if not as_float:
+                item["severity"]["level"] = "critical"
+            for location in item["locations"]:
+                for key in ("startLine", "endLine"):
+                    if key in location:
+                        location[key] = float(location[key]) if as_float else int(location[key])
+        # Each newly admitted observation may use an equivalent JSON line spelling.
+        write_checkpoint(result.parent / "checkpoints", checkpoint)
+        recovered = scan_command(
+            state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )["scan"]
+        assert {
+            (row["findingId"], row["occurrenceId"]) for row in recovered["findings"]
+        } == before_ids
+        assert all(row["triage"]["status"] == "closed" for row in recovered["findings"])
+        if not as_float:
+            assert all(row["severity"]["level"] == "critical" for row in recovered["findings"])
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(
+                    "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+                ).fetchall()
+                == decisions
+            )
+
+
+@pytest.mark.parametrize("reverse_source", [False, True])
+@pytest.mark.parametrize("add_later", [False, True])
+def test_distinct_decimal_siblings_keep_ids_when_sources_grow(
+    tmp_path: Path, reverse_source: bool, add_later: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    tokens = ["1.0", "1.00000000000000001", "1.00000000000000002"]
+
+    def source(selected):
+        document = saved_draft(scan_id, complete=False)
+        for token in selected:
+            row = copy.deepcopy(finding)
+            row["provenance"]["preservedIdentity"] = {
+                "anchor": "opaque-anchor",
+                "instance": f"RAW_{token}",
+            }
+            row["extensions"] = {"variant": token}
+            document["findings"].append(row)
+        raw = json.dumps(document)
+        for token in tokens:
+            raw = raw.replace(f'"RAW_{token}"', token)
+        return raw.encode()
+
+    initial = tokens[:2] if add_later else list(reversed(tokens)) if reverse_source else tokens
+    result.write_bytes(source(initial))
+    original = result.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id)
+
+    def published():
+        return {
+            row["extensions"]["variant"]: (row["findingId"], row["occurrenceId"])
+            for row in json.loads((scan_dir / "findings.json").read_text())["findings"]
+        }
+
+    before = published()
+    assert len(before) == len(initial)
+    assert len({ids[1] for ids in before.values()}) == len(initial)
+    for _, occurrence_id in before.values():
+        set_triage(
+            state,
+            occurrence_id,
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            "Synthetic prior review.",
+        )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        decisions = connection.execute(
+            "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+        ).fetchall()
+    if add_later:
+        raw = source(list(reversed(tokens)) if reverse_source else tokens)
+        checkpoint_dir = result.parent / "checkpoints"
+        checkpoint_dir.mkdir(exist_ok=True)
+        (checkpoint_dir / f"{hashlib.sha256(raw).hexdigest()}.json").write_bytes(raw)
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+    )
+    after = published()
+    assert len(after) == 3
+    assert len({ids[1] for ids in after.values()}) == 3
+    assert all(after[token] == ids for token, ids in before.items())
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+            ).fetchall()
+            == decisions
+        )
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("reverse_source", [False, True])
+@pytest.mark.parametrize("initial_float", [False, True])
+def test_equivalent_sibling_updates_keep_published_identity_and_triage(
+    tmp_path: Path, reverse_source: bool, initial_float: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+
+    def source(token: str, level: str) -> bytes:
+        document = saved_draft(scan_id, complete=False)
+        for variant in reversed((0, 1)) if reverse_source else (0, 1):
+            row = copy.deepcopy(finding)
+            row["provenance"]["preservedIdentity"] = {
+                "anchor": "opaque-anchor",
+                "instance": "RAW_NUMBER" if variant else 0,
+            }
+            row["extensions"] = {"variant": variant, "observation": token}
+            row["severity"].update(
+                level=level if variant else "low",
+                score={"low": 2, "high": 7, "critical": 9.5}[level] if variant else 2,
+                scoringSystem="CVSS:3.1",
+            )
+            document["findings"].append(row)
+        return json.dumps(document).replace('"RAW_NUMBER"', token).encode()
+
+    result.write_bytes(source("1.0" if initial_float else "1", "low"))
+    original = result.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id)
+    before = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    identities = {
+        row["extensions"]["variant"]: (row["findingId"], row["occurrenceId"]) for row in before
+    }
+    assert len(identities) == 2
+    for row in before:
+        set_triage(
+            state,
+            row["occurrenceId"],
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            "Synthetic prior review.",
+        )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        decisions = connection.execute(
+            "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+        ).fetchall()
+    for token, level in (("1" if initial_float else "1.0", "high"), ("1e0", "critical")):
+        raw = source(token, level)
+        directory = result.parent / "checkpoints"
+        directory.mkdir(exist_ok=True)
+        checkpoint = directory / f"{hashlib.sha256(raw).hexdigest()}.json"
+        checkpoint.write_bytes(raw)
+        recovered = scan_command(
+            state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )["scan"]["findings"]
+        assert all(row["triage"]["status"] == "closed" for row in recovered)
+        published = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        assert {
+            row["extensions"]["variant"]: (row["findingId"], row["occurrenceId"])
+            for row in published
+        } == identities
+        updated = next(row for row in published if row["extensions"]["variant"] == 1)
+        assert updated["severity"]["level"] == level
+        assert updated["extensions"]["observation"] == token
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(
+                    "SELECT occurrence_id, status, close_reason, note FROM finding_decisions ORDER BY occurrence_id, rowid"
+                ).fetchall()
+                == decisions
+            )
+        assert checkpoint.read_bytes() == raw
+    assert result.read_bytes() == original
