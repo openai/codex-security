@@ -161,6 +161,10 @@ describe("CodexSecurity policy API", () => {
   test.each([
     "bundled",
     "symlink",
+    "custom-malformed-metadata",
+    "custom-null-metadata",
+    "custom-missing-bin",
+    "custom-directory-metadata",
     ...(process.platform === "win32"
       ? []
       : [
@@ -185,6 +189,29 @@ describe("CodexSecurity policy API", () => {
       let readPaths = [executable];
       if (installation === "symlink")
         await symlink(executable, selected, "file");
+      if (installation.startsWith("custom")) {
+        const packageRoot = join(runtimeFixture.root, "custom");
+        selected = join(
+          packageRoot,
+          "bin",
+          process.platform === "win32" ? "codex.exe" : "codex",
+        );
+        await mkdir(dirname(selected), { recursive: true });
+        await writeFile(selected, "synthetic native executable\n");
+        const packageJson = join(packageRoot, "package.json");
+        if (installation === "custom-directory-metadata")
+          await mkdir(packageJson);
+        else
+          await writeFile(
+            packageJson,
+            installation === "custom-malformed-metadata"
+              ? "{"
+              : installation === "custom-null-metadata"
+                ? "null"
+                : JSON.stringify({ name: "@openai/codex" }),
+          );
+        readPaths = [await realpath(selected)];
+      }
       if (installation.startsWith("npm")) {
         const modules = join(runtimeFixture.root, "node_modules", "@openai");
         const packageRoot = installation.endsWith("-linked")

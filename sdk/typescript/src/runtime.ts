@@ -2819,18 +2819,21 @@ export async function codexExecutableReadPaths(
 ): Promise<string[]> {
   const executable = await realpath(command);
   const packageJson = resolve(dirname(executable), "..", "package.json");
-  let metadata;
   try {
-    metadata = JSON.parse(await readFile(packageJson, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [executable];
-    throw error;
+    const metadata = JSON.parse(await readFile(packageJson, "utf8"));
+    if (
+      metadata?.name !== "@openai/codex" ||
+      typeof metadata.bin?.codex !== "string"
+    )
+      return [executable];
+    const launcher = await realpath(
+      resolve(dirname(packageJson), metadata.bin.codex),
+    );
+    if (launcher !== executable) return [executable];
+  } catch {
+    // A custom executable need not belong to a readable, valid npm package.
+    return [executable];
   }
-  if (metadata.name !== "@openai/codex") return [executable];
-  const launcher = await realpath(
-    resolve(dirname(packageJson), metadata.bin.codex),
-  );
-  if (launcher !== executable) return [executable];
 
   // npm's entrypoint launches a native binary, which Linux re-executes in the sandbox.
   return [
