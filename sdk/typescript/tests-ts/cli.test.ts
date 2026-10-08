@@ -70,6 +70,10 @@ import {
   runCapturedCli,
 } from "./support/cli-run.js";
 
+function scanDependencies(run: Parameters<typeof fakeSecurity>[0]) {
+  return { ...dependencies(), createSecurity: () => fakeSecurity(run) };
+}
+
 const profileScenarios = [
   {
     overrides: [
@@ -1687,15 +1691,13 @@ describe("CLI", () => {
           resolve(error);
         });
       });
-      const deps = dependencies();
-      deps.createSecurity = () =>
-        fakeSecurity(async function (_repository, options) {
-          if (scenario === "archive") {
-            options?.onOutputArchived?.("/tmp/previous-results");
-            return fakeResult();
-          }
-          throw new CodexSecurityError(failingMessage);
-        });
+      const deps = scanDependencies(async function (_repository, options) {
+        if (scenario === "archive") {
+          options?.onOutputArchived?.("/tmp/previous-results");
+          return fakeResult();
+        }
+        throw new CodexSecurityError(failingMessage);
+      });
 
       expect(
         await main(["scan", ".", "--json"], capture().stream, stream, deps),
@@ -3565,22 +3567,20 @@ describe("CLI", () => {
     for (const verbose of [false, true]) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = () =>
-        fakeSecurity(async (_repository, options) => {
-          options?.onWarning?.(
-            'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
-          );
-          options?.onWarning?.(
-            `Provider warning ${JSON.stringify({
-              payload: JSON.stringify({
-                organizationId: "organization private",
-                requestId: "request private",
-              }),
-            })}`,
-          );
-          return fakeResult();
-        });
+      const deps = scanDependencies(async (_repository, options) => {
+        options?.onWarning?.(
+          'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
+        );
+        options?.onWarning?.(
+          `Provider warning ${JSON.stringify({
+            payload: JSON.stringify({
+              organizationId: "organization private",
+              requestId: "request private",
+            }),
+          })}`,
+        );
+        return fakeResult();
+      });
 
       expect(
         await runCli(
@@ -3638,21 +3638,19 @@ describe("CLI", () => {
   test("preserves verbose output paths and observer errors", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onOutputArchived?.(
-          "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
-        );
-        options?.onOutputDirReady?.(
-          "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
-        );
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
-        );
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onOutputArchived?.(
+        "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
+      );
+      options?.onOutputDirReady?.(
+        "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
+      );
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
+      );
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -3673,17 +3671,15 @@ describe("CLI", () => {
   test("excludes observer failure context from verbose diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(
-            "Observer failed for tenant=tenant-private request_id=req-internal",
-          ),
-        );
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(
+          "Observer failed for tenant=tenant-private request_id=req-internal",
+        ),
+      );
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -3744,17 +3740,15 @@ describe("CLI", () => {
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        const callbacks = options as {
-          onScanStarted?: () => void;
-          onReconnect?: (attempt: number, maxAttempts: number) => void;
-        };
-        callbacks.onScanStarted?.();
-        callbacks.onReconnect?.(2, 5);
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      const callbacks = options as {
+        onScanStarted?: () => void;
+        onReconnect?: (attempt: number, maxAttempts: number) => void;
+      };
+      callbacks.onScanStarted?.();
+      callbacks.onReconnect?.(2, 5);
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -3767,17 +3761,15 @@ describe("CLI", () => {
   test("renders bounded rate-limit retry details without leaking provider context", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onScanStarted?.();
-        options?.onReconnect?.(2, 5, {
-          reason: "rate_limit",
-          retryAfterSeconds: 1.2,
-        });
-        options?.onReconnect?.(3, 5, { reason: "rate_limit" });
-        return fakeResult();
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onScanStarted?.();
+      options?.onReconnect?.(2, 5, {
+        reason: "rate_limit",
+        retryAfterSeconds: 1.2,
       });
+      options?.onReconnect?.(3, 5, { reason: "rate_limit" });
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -3790,14 +3782,12 @@ describe("CLI", () => {
   test("renders safe reconnect causes without forwarding provider messages", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onReconnect?.(1, 5, { reason: "network" });
-        options?.onReconnect?.(2, 5, { reason: "authentication" });
-        options?.onReconnect?.(3, 5, { reason: "authorization" });
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onReconnect?.(1, 5, { reason: "network" });
+      options?.onReconnect?.(2, 5, { reason: "authentication" });
+      options?.onReconnect?.(3, 5, { reason: "authorization" });
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", "--json"], deps)).toBe(0);
     expect(stderr.text()).toContain("Network connection interrupted; retrying");
@@ -3959,9 +3949,9 @@ describe("CLI", () => {
     for (const [, failure] of failures) {
       const { stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = () =>
-        fakeSecurity((Promise.reject<never>).bind(Promise, failure));
+      const deps = scanDependencies(
+        (Promise.reject<never>).bind(Promise, failure),
+      );
 
       expect(await runCli(["scan", ".", "--verbose"], deps)).toBe(2);
       expect(stderr.text()).toContain((failure as Error).message);
@@ -4140,8 +4130,7 @@ describe("CLI", () => {
     ]) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = () => fakeSecurity(warningResult(warning, true));
+      const deps = scanDependencies(warningResult(warning, true));
 
       expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual({
@@ -4214,8 +4203,7 @@ describe("CLI", () => {
     ]) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = () => fakeSecurity(warningResult(warning));
+      const deps = scanDependencies(warningResult(warning));
 
       expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4226,13 +4214,11 @@ describe("CLI", () => {
   test("preserves scan warnings in verbose diagnostics", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(
-        warningResult(
-          "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
-        ),
-      );
+    const deps = scanDependencies(
+      warningResult(
+        "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
+      ),
+    );
 
     expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4247,12 +4233,10 @@ describe("CLI", () => {
   test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onTrustedAccessStatus?.("granted");
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onTrustedAccessStatus?.("granted");
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4265,13 +4249,11 @@ describe("CLI", () => {
   test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(
-        warningResult(
-          "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
-        ),
-      );
+    const deps = scanDependencies(
+      warningResult(
+        "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
+      ),
+    );
 
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4284,13 +4266,11 @@ describe("CLI", () => {
   test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(
-        warningResult(
-          "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
-        ),
-      );
+    const deps = scanDependencies(
+      warningResult(
+        "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+      ),
+    );
 
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4309,8 +4289,7 @@ describe("CLI", () => {
     ]) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
-      const deps = dependencies();
-      deps.createSecurity = () => fakeSecurity(warningResult(warning));
+      const deps = scanDependencies(warningResult(warning));
 
       expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -4322,15 +4301,13 @@ describe("CLI", () => {
   test("reports isolated observer failures without failing the scan", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
-    const deps = dependencies();
-    deps.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onObserverError?.(
-          "onWorkerStatus",
-          new Error(`status observer failed ${SYNTHETIC_CREDENTIALS}`),
-        );
-        return fakeResult();
-      });
+    const deps = scanDependencies(async (_repository, options) => {
+      options?.onObserverError?.(
+        "onWorkerStatus",
+        new Error(`status observer failed ${SYNTHETIC_CREDENTIALS}`),
+      );
+      return fakeResult();
+    });
 
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -5307,16 +5284,14 @@ describe("CLI", () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
     const partial = "/tmp/codex-security-partial";
-    const failing = dependencies();
-    failing.createSecurity = () =>
-      fakeSecurity(async (_repository, options) => {
-        options?.onOutputDirReady?.(partial);
-        throw new OutputInsideProtectedRootError(
-          "/tmp/worktree/runtime",
-          "/tmp/worktree",
-          "runtime",
-        );
-      });
+    const failing = scanDependencies(async (_repository, options) => {
+      options?.onOutputDirReady?.(partial);
+      throw new OutputInsideProtectedRootError(
+        "/tmp/worktree/runtime",
+        "/tmp/worktree",
+        "runtime",
+      );
+    });
 
     expect(await runCli(["scan", "."], failing)).toBe(2);
     expect(stdout.text()).toBe("");
@@ -5333,11 +5308,9 @@ describe("CLI", () => {
     const protectedRoot =
       "/private/tmp/worktree_sk-proj-SYNTHETIC_ROOT_KEY_123";
     const output = `${protectedRoot}/results_sk-proj-SYNTHETIC_OUTPUT_KEY_123`;
-    const failing = dependencies();
-    failing.createSecurity = () =>
-      fakeSecurity(async () => {
-        throw new OutputInsideProtectedRootError(output, protectedRoot);
-      });
+    const failing = scanDependencies(async () => {
+      throw new OutputInsideProtectedRootError(output, protectedRoot);
+    });
 
     expect(await runCli(["scan", ".", "--json"], failing)).toBe(2);
     expect(JSON.parse(stdout.text())).toMatchObject({
@@ -5358,9 +5331,9 @@ describe("CLI", () => {
     ]) {
       const { stdout, stderr, runCli } = createCliTest(main);
 
-      const failing = dependencies();
-      failing.createSecurity = () =>
-        fakeSecurity((Promise.reject<never>).bind(Promise, failure));
+      const failing = scanDependencies(
+        (Promise.reject<never>).bind(Promise, failure),
+      );
 
       expect(await runCli(["scan", "."], failing)).toBe(2);
       expect(stdout.text()).toBe("");
