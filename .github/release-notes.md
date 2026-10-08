@@ -120,6 +120,11 @@
 - support optional Cyber access program selection ([#1516](https://github.com/openai/codex-security/pull/1516))
 - identify local plugin and knowledge-base failures ([#463](https://github.com/openai/codex-security/pull/463))
 - resume scans when old worker prompts are missing ([#900](https://github.com/openai/codex-security/pull/900))
+- protect saved history when archiving scan output ([#1271](https://github.com/openai/codex-security/pull/1271))
+- preserve scan history and publication outcomes ([#1270](https://github.com/openai/codex-security/pull/1270))
+- match user context before reusing discovery ([#1048](https://github.com/openai/codex-security/pull/1048))
+- report incomplete results as errors and deduplicate log warnings ([#977](https://github.com/openai/codex-security/pull/977))
+- preserve request attribution across CLI, SDK, and Deep Scan ([#1424](https://github.com/openai/codex-security/pull/1424))
 
 <!-- release-section: highlights:end -->
 
