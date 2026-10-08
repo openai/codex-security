@@ -198,11 +198,7 @@ test.each([
     await mkdir(repository);
     await mkdir(sourceHome, { mode: 0o700 });
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-    // Initialize native state before the mocked primary scans start concurrently.
-    await effectiveProvider({ CODEX_HOME: sharedHome }, repository, []);
-
     const workerRuntimeSettings = await loadWorkerSettings(root);
-    let nativeProbe = Promise.resolve();
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -379,22 +375,32 @@ test.each([
                       featureOverrides,
                     );
                     expect(settings.config["web_search"]).toBe(webSearch);
-                    // Native SQLite probes share a home; keep the scans concurrent.
-                    const probe = nativeProbe.then(() =>
-                      effectiveProvider(
-                        environment,
-                        repository,
-                        profileConfigOverrides(settings.config),
-                        settings.nativeProfile,
+                    expect(settings.config["model_provider"]).toBe(
+                      "openrouter",
+                    );
+                    expect(settings.nativeProfile).toBeDefined();
+                    expect(settings.nativeProfile).toBe(options.nativeProfile);
+                    expect(
+                      (workerSnapshot["worker_runtime"] as JsonObject)[
+                        "native_profile"
+                      ],
+                    ).toBe(settings.nativeProfile);
+                    // Read A's private profile after B updates the shared home.
+                    // Native profile loading is covered by the inheritance tests.
+                    const nativeConfig = parseToml(
+                      await readFile(
+                        join(
+                          sharedHome,
+                          `${settings.nativeProfile}.config.toml`,
+                        ),
+                        "utf8",
                       ),
                     );
-                    nativeProbe = probe.then(
-                      () => undefined,
-                      () => undefined,
-                    );
-                    const actual = await probe;
+                    const actual = (
+                      nativeConfig["model_providers"] as JsonObject
+                    )["openrouter"] as JsonObject;
                     expect(actual).toMatchObject(provider);
-                    expect(actual.http_headers ?? {}).toEqual(
+                    expect(actual["http_headers"] ?? {}).toEqual(
                       provider.http_headers ?? {},
                     );
                     expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
