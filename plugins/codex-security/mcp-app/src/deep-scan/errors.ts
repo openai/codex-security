@@ -37,6 +37,20 @@ export class DeepScanOwnershipChangedError extends Error {
   }
 }
 
+/** Only a store-confirmed state for this scan establishes ownership loss. */
+export function confirmedOwnershipChange(
+  error: unknown,
+  scanId: string,
+): DeepScanOwnershipChangedError | undefined {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    if (
+      cause instanceof DeepScanOwnershipChangedError &&
+      cause.run.scanId === scanId
+    )
+      return cause;
+  }
+}
+
 /** Keep SQLite's bounded diagnostic useful while the manifest retains the full error. */
 export function boundedDeepScanErrorMessage(error: unknown): string {
   return boundedDeepScanErrorText(
