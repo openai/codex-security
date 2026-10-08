@@ -42,7 +42,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench.json_numbers import normalize_json_integer
+from workbench.json_numbers import json_number_key, normalize_json_integer
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -615,8 +615,12 @@ def _semantic_digest(value: Any) -> str:
         if isinstance(item, dict):
             return {key: normalize(child) for key, child in item.items()}
         if isinstance(item, (list, tuple)):
-            return [normalize(child) for child in item]
-        return normalize_json_integer(item)
+            # Reserve number markers without adding another container level.
+            return ["array", *(normalize(child) for child in item)]
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            sign, coefficient, exponent = json_number_key(item)
+            return ["number", sign, coefficient, hex(exponent)]
+        return item
 
     return _digest(normalize(value))
 
