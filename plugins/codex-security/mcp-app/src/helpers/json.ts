@@ -1,8 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-export function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export { isRecord as object } from "../record.ts";
 
 export function escapeControls(text: string): string {
   return text.replace(/[\p{Cc}\p{Cf}]/gu, (character) => {
