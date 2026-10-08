@@ -438,10 +438,26 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
     "https:///finding",
     "https:\\example.test",
     "http://@example.test",
+    "https://[127.0.0.1]/finding",
+    "https://[example.test]/finding",
+    "https://prefix[::1]/finding",
+    "https://[::1]suffix/finding",
+    "https://example.test\uFF1A443/finding",
+    "https://exam\u2100ple.test/finding",
   ]) {
     expect(() => validateExternalEvidence({ ...evidence, url })).toThrow(
       "HTTP(S)",
     );
+  }
+  for (const url of [
+    "https://[::1]/finding",
+    "https://[fe80::1%25eth0]/finding",
+    "https://[fe80::1%zone!]/finding",
+    "https://[v1.example]/finding",
+    "https://[::1]:non-numeric/finding",
+    "https://bücher.example/finding",
+  ]) {
+    expect(validateExternalEvidence({ ...evidence, url }).url).toBe(url);
   }
   for (const path of ["/absolute.ts", "C:\\source.ts", "src\\..\\outside.ts"]) {
     expect(() =>
@@ -625,8 +641,14 @@ test.each(["human", "json"])(
     ).toBe(0);
     expect(prompted).toBe(true);
     expect(f.reports.has("vendor-selected")).toBe(true);
-    if (format === "json")
-      expect(JSON.parse(cli.stdout.text()).counts.created).toBe(1);
+    if (format === "json") {
+      const result = JSON.parse(cli.stdout.text());
+      expect(result.counts.created).toBe(1);
+      expect(result).not.toHaveProperty("cloudUrl");
+    } else {
+      expect(cli.stderr.text()).toContain("Findings");
+      expect(cli.stderr.text()).not.toContain("/codex/cloud/security/findings");
+    }
   },
 );
 
@@ -1415,5 +1437,222 @@ test.each(["duplicate", "missing", "unexpected"])(
         [],
     ).toEqual([]);
     expect(f.posts).toHaveLength(1);
+  },
+);
+
+test.each(["replacement-environment", null])(
+  "saved publication preserves its environment when discovery changes to %p",
+  async (environmentId) => {
+    const f = await fixture();
+    f.state.loseResponse = true;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("resume the saved request");
+    const original = f.posts[0]!;
+    f.state.environmentId = environmentId;
+    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests[0]!.repository.environment_id).toBe(
+      "environment-example",
+    );
+    expect((await retry.publish()).counts.created).toBe(1);
+    expect(f.posts.at(-1)).toBe(original);
+  },
+);
+
+test("mixed environments preserve input order and are shown before confirmation", async () => {
+  const f = await fixture([normalized("existing-a"), normalized("existing-c")]);
+  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  const originalIds = ["existing-a", "existing-c"].map(
+    (id) => f.reports.get(id)!.canonical_finding_id,
+  );
+  f.state.environmentId = "replacement-environment";
+  await writeFile(
+    f.file,
+    JSON.stringify([
+      normalized("existing-a", "critical"),
+      normalized("new-b"),
+      normalized("existing-c", "critical"),
+    ]),
+  );
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.requests.map(
+      (request) => request.repository.environment_id,
+    ),
+  ).toEqual([
+    "environment-example",
+    "replacement-environment",
+    "environment-example",
+  ]);
+  expect(
+    prepared.preview.requests.flatMap((request) =>
+      request.items.map((item) => [
+        item.source_finding_id,
+        item.expected_version,
+      ]),
+    ),
+  ).toEqual([
+    ["existing-a", 1],
+    ["new-b", 0],
+    ["existing-c", 1],
+  ]);
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(f.command, {
+      ...f.cliDeps,
+      externalPublicationPrompt: {
+        isInteractive: () => true,
+        confirm: async () => {
+          expect(cli.stderr.text()).toContain(
+            "Environment: environment-example, replacement-environment",
+          );
+          expect(f.posts).toHaveLength(1);
+          return true;
+        },
+      },
+    }),
+  ).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).counts).toEqual({
+    created: 1,
+    updated: 2,
+    unchanged: 0,
+    error: 0,
+  });
+  expect(
+    ["existing-a", "new-b", "existing-c"].map(
+      (id) => f.reports.get(id)!.environment_id,
+    ),
+  ).toEqual([
+    "environment-example",
+    "replacement-environment",
+    "environment-example",
+  ]);
+  expect(
+    ["existing-a", "existing-c"].map(
+      (id) => f.reports.get(id)!.canonical_finding_id,
+    ),
+  ).toEqual(originalIds);
+});
+
+test("existing source updates do not need a newly discovered default environment", async () => {
+  const f = await fixture();
+  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  f.state.environmentId = null;
+  await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(prepared.preview.requests[0]!.repository.environment_id).toBe(
+    "environment-example",
+  );
+  expect((await prepared.publish()).counts.updated).toBe(1);
+  const posts = f.posts.length;
+  await writeFile(f.file, JSON.stringify([normalized("new-vendor")]));
+  await expect(
+    prepareExternalPublication(f.file, options, f.deps),
+  ).rejects.toThrow("Configure an authorized Cloud environment");
+  expect(f.posts).toHaveLength(posts);
+});
+
+test("source readback must preserve the acknowledged batch environment", async () => {
+  const f = await fixture();
+  const prepared = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    fetch: async (url, init) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.includes("/source_reports/")) {
+        return Response.json({
+          ...(await response.json()),
+          environment_id: "unexpected-environment",
+        });
+      }
+      return response;
+    },
+  });
+  await expect(prepared.publish()).rejects.toThrow(
+    "Cloud readback did not match the saved finding identity",
+  );
+  expect(f.posts).toHaveLength(1);
+  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(f.posts).toHaveLength(1);
+});
+
+test("malformed bracketed URLs exclude only their own finding before upload", async () => {
+  const invalid = normalized("invalid-url");
+  const f = await fixture([
+    normalized("valid-url"),
+    {
+      ...invalid,
+      evidence: { ...invalid.evidence, url: "https://[127.0.0.1]/finding" },
+    },
+  ]);
+  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  expect(
+    prepared.preview.findings.map((finding) => finding.source_finding_id),
+  ).toEqual(["valid-url"]);
+  expect(prepared.preview.excluded).toHaveLength(1);
+  expect(prepared.preview.excluded[0]!.reason).toContain("HTTP(S)");
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect(f.reports.has("invalid-url")).toBe(false);
+});
+
+test.each([false, true])(
+  "publication waits through the server budget while retaining cancellation: %p",
+  async (cancel) => {
+    const f = await fixture();
+    const arrived = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    const prepared = await prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      signal: controller.signal,
+      fetch: async (url, init) => {
+        if (init.method === "POST") {
+          arrived.resolve();
+          await release.promise;
+        }
+        return f.deps.fetch(url, init);
+      },
+    });
+    const deadlines: { milliseconds: number; controller: AbortController }[] =
+      [];
+    const timeout = spyOn(AbortSignal, "timeout").mockImplementation(
+      (milliseconds) => {
+        const controller = new AbortController();
+        deadlines.push({ milliseconds, controller });
+        return controller.signal;
+      },
+    );
+    const completion = prepared.publish();
+    try {
+      await Promise.race([
+        arrived.promise,
+        completion.then(() => {
+          throw new Error(
+            "Publication completed before the POST was released.",
+          );
+        }),
+      ]);
+      // Advance a controlled clock through the server's publication budget.
+      for (const deadline of deadlines) {
+        if (deadline.milliseconds <= 45_000)
+          deadline.controller.abort(
+            new DOMException("Publication deadline elapsed", "TimeoutError"),
+          );
+      }
+      if (cancel) controller.abort(new Error("Synthetic cancellation"));
+      release.resolve();
+      if (cancel) {
+        await expect(completion).rejects.toThrow("Synthetic cancellation");
+        expect(f.posts).toHaveLength(0);
+      } else {
+        expect((await completion).counts.created).toBe(1);
+        expect(f.posts).toHaveLength(1);
+      }
+    } finally {
+      release.resolve();
+      await completion.catch(() => undefined);
+      timeout.mockRestore();
+    }
   },
 );
