@@ -52,11 +52,49 @@ describe("scan output schema", () => {
           },
         },
         { properties: { code: { const: "SCAN_FAILED" } } },
+        {
+          properties: { ok: { const: false }, error: { type: "object" } },
+        },
       ],
     });
     const validate = new Ajv2020({ strict: false }).compile(schema);
     expect(validate({})).toBe(false);
   });
+
+  test.each(["partial", "unknown"] as const)(
+    "accepts actual %s full-output errors alongside completed scan shapes",
+    async (completeness) => {
+      const validate = new Ajv2020({ strict: false }).compile(
+        await scanOutputSchema(),
+      );
+      for (const format of ["json", "jsonl"]) {
+        for (const filter of [undefined, "warnings", "findings"]) {
+          const stdout = capture();
+          expect(
+            await main(
+              [
+                "scan",
+                ".",
+                "--format",
+                format,
+                "--full-output",
+                ...(filter === undefined ? [] : ["--filter-output", filter]),
+              ],
+              stdout.stream,
+              capture().stream,
+              dependencies({ result: fakeResult(["high"], completeness) }),
+            ),
+          ).toBe(2);
+          const output: unknown = JSON.parse(stdout.text());
+          expect(output).toMatchObject({
+            ok: false,
+            error: { code: "SCAN_FAILED" },
+          });
+          expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+        }
+      }
+    },
+  );
 
   test.each(["completed", "dry-run", "failed"] as const)(
     "accepts actual %s command output",
@@ -118,6 +156,7 @@ test.each(retainedThreatModels)(
             threatModelPath: { type: ["string", "null"] },
           },
         },
+        {},
         {},
         {},
       ],

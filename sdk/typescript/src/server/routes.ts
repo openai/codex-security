@@ -19,7 +19,15 @@ export async function handleFindingsRequest(
   validate: ValidateFunction<FindingsRequest>,
 ): Promise<void> {
   try {
-    const url = new URL(request.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      throw new FindingsError(
+        "invalid_request",
+        "Request target must be a valid URL.",
+      );
+    }
     const route = `${request.method} ${url.pathname}`;
     if (
       request.method === "GET" &&

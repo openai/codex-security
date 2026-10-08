@@ -12,6 +12,9 @@ import {
   skillCommandFailure,
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
+import { pluginMetadata } from "../src/runtime.js";
+import { VERSION } from "../src/version.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -103,6 +106,12 @@ describe("CLI skill commands", () => {
           'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
+          "--config",
+          `responses_api_metadata.codex_security_command=${JSON.stringify(command)}`,
+          "--config",
+          `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
+          "--config",
+          `responses_api_metadata.codex_security_plugin_version=${JSON.stringify((await pluginMetadata(PLUGIN_ROOT)).version)}`,
           ...(command === "patch"
             ? []
             : [

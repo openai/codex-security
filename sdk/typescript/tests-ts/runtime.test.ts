@@ -12,6 +12,7 @@ import {
   link,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readlink,
   realpath,
@@ -1157,6 +1158,8 @@ ${directNode ? "}" : ""}
       }
 
       const readRoot = async (pluginRoot?: string) => {
+        // Share credentials and plugin registration, not native session databases.
+        const sqliteHome = await mkdtemp(join(root, "sqlite-"));
         const child = childProcess.spawn(
           executablePathForSpawn(command.command),
           ["app-server", "--stdio"],
@@ -1165,6 +1168,7 @@ ${directNode ? "}" : ""}
             env: {
               ...environment,
               CODEX_HOME: home,
+              CODEX_SQLITE_HOME: sqliteHome,
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1202,9 +1206,15 @@ ${directNode ? "}" : ""}
           await closed;
         }
       };
-      // Warm native session storage independently of this concurrent root check.
-      await readRoot(selected);
-      const servers = await Promise.all([readRoot(selected), readRoot(second)]);
+      // Drain both clients before fixture cleanup, including when one fails.
+      const results = await Promise.allSettled([
+        readRoot(selected),
+        readRoot(second),
+      ]);
+      const servers = results.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
       const assertServer = async (
         server: Awaited<ReturnType<typeof readRoot>>,
         pluginRoot: string,
