@@ -2,17 +2,13 @@
 
 This Promptfoo lane measures how accurately the source version of `plugins/codex-security/skills/triage-finding/SKILL.md` triages supplied scanner findings from public SastBench v0.1. It does not measure repository-wide vulnerability discovery.
 
-SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. The eval runner stages the skill in a throwaway working directory and uses a deny-by-default Codex permission profile so only that directory, hydrated target repos, and their label-free Git cache plus minimal Codex runtime paths are readable to the model.
+SastBench contains 2,737 findings: 299 labeled true positive and 2,438 labeled false positive. The JavaScript test generator exposes the scanner claim and the exact affected checkout to Codex while keeping SastBench's label-bearing `finding_id` and ground-truth label out of the rendered prompt. Codex reads the skill directly from the checkout's plugin directory. Its permission profile also allows the selected target, the label-free Git cache, and the Node runtime; the label-bearing eval harness remains outside those roots.
 
 Run commands from the repository root. The parent `evals/triage-finding/` directory owns the pinned Promptfoo and Codex SDK dependencies and the ignored `artifacts/` tree.
 
 ## Prepare the benchmark
 
-Install dependencies once:
-
-```bash
-pnpm --dir evals/triage-finding run setup
-```
+Follow the [parent setup instructions](../README.md) to install dependencies and build the checkout's policy helper before running model evals.
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 
@@ -74,10 +70,10 @@ Promptfoo computes the SastBench confusion matrix, strict and decided-only metri
 
 SastBench's `false_positive` label is the benchmark's negative class: it means the supplied scanner alert is expected to be benign. The eval maps `triage-finding` verdicts to SastBench predictions as follows:
 
-| SastBench ground truth | `confirmed` | `not_actionable` | `needs_review` | Execution or parse error |
-| --- | --- | --- | --- | --- |
-| `true_positive` | True positive | False negative | Strict false negative; excluded from decided-only metrics | Strict false negative; excluded from decided-only metrics |
-| `false_positive` | False positive | True negative | Strict false positive; excluded from decided-only metrics | Strict false positive; excluded from decided-only metrics |
+| SastBench ground truth | `confirmed`    | `not_actionable` | `needs_review`                                            | Execution or parse error                                  |
+| ---------------------- | -------------- | ---------------- | --------------------------------------------------------- | --------------------------------------------------------- |
+| `true_positive`        | True positive  | False negative   | Strict false negative; excluded from decided-only metrics | Strict false negative; excluded from decided-only metrics |
+| `false_positive`       | False positive | True negative    | Strict false positive; excluded from decided-only metrics | Strict false positive; excluded from decided-only metrics |
 
 Strict metrics count every benchmark row. They count `needs_review` and execution or parse errors as incorrect. Decided-only metrics include only valid `confirmed` and `not_actionable` verdicts.
 
@@ -101,29 +97,29 @@ The `Group` column uses these categories:
 
 Every denominator uses `max(denominator, 1)`. An empty denominator therefore produces `0` instead of `NaN`.
 
-| Group | Metric | Exact definition | Interpretation |
-| --- | --- | --- | --- |
-| Strict | `strict_precision` | `TPs / max(TPs + FPs, 1)` | Of the cases treated as positive by strict scoring, the fraction that are genuine positives. Negative abstentions and errors count as strict false positives. |
-| Strict | `strict_recall` | `TPs / max(TPs + FNs, 1)` | Fraction of all genuine alerts explicitly marked `confirmed`. `not_actionable`, `needs_review`, and errors on positive cases reduce strict recall. |
-| Strict | `strict_f1` | `2 * TPs / max(2 * TPs + FPs + FNs, 1)` | Harmonic balance between strict precision and strict recall with equal weight. |
-| Strict | `strict_f2` | `5 * TPs / max(5 * TPs + FPs + 4 * FNs, 1)` | Precision-recall balance weighted toward recall, so missing a genuine alert matters more than retaining a false alert. |
-| Strict | `strict_accuracy` | `(TPs + TNs) / max(W, 1)` | Fraction of the represented population assigned the exact correct decisive verdict. Abstentions and errors are incorrect. |
-| Strict | `strict_mcc` | `(TPs * TNs - FPs * FNs) / max(sqrt((TPs + FPs) * (TPs + FNs) * (TNs + FPs) * (TNs + FNs)), 1)` | Matthews correlation coefficient across all rows. It balances both classes in the imbalanced SastBench dataset. The usual range is `-1` to `1`; a degenerate confusion matrix returns `0` through the denominator guard. |
-| Decided only | `decided_precision` | `TPd / max(TPd + FPd, 1)` | Among valid `confirmed` decisions, the fraction that are genuine positives. Abstentions and errors are excluded. |
-| Decided only | `decided_recall` | `TPd / max(TPd + FNd, 1)` | Among genuine-positive cases with a decisive verdict, the fraction marked `confirmed`. This is not overall recall because positive abstentions and errors are excluded. |
-| Decided only | `decided_f1` | `2 * TPd / max(2 * TPd + FPd + FNd, 1)` | Equal-weight precision-recall balance over decisive verdicts only. |
-| Decided only | `decided_f2` | `5 * TPd / max(5 * TPd + FPd + 4 * FNd, 1)` | Recall-weighted precision-recall balance over decisive verdicts only. |
-| Decided only | `decided_accuracy` | `(TPd + TNd) / max(D, 1)` | Fraction of valid non-abstaining decisions that are correct. |
-| Decided only | `decided_mcc` | `(TPd * TNd - FPd * FNd) / max(sqrt((TPd + FPd) * (TPd + FNd) * (TNd + FPd) * (TNd + FNd)), 1)` | Matthews correlation coefficient after excluding abstentions and errors. Read it together with `decided_coverage`. |
-| Decided only | `decided_coverage` | `D / max(W, 1)` | Fraction of the represented population receiving a valid `confirmed` or `not_actionable` verdict. Low coverage can make decided-only quality look artificially strong. |
-| Workflow | `true_positive_retention` | `(positive cases marked confirmed or needs_review) / max(P, 1)` | Fraction of genuine alerts not automatically closed. `needs_review` counts as retained; an execution or parse error does not. |
-| Workflow | `unsafe_closure_rate` | `(positive cases marked not_actionable) / max(P, 1)` | Fraction of genuine alerts the skill would incorrectly auto-close. |
-| Workflow | `false_alert_auto_closure_rate` | `(negative cases marked not_actionable) / max(N, 1)` | Fraction of actual false alerts removed without human review. |
-| Workflow | `false_alert_escalation_rate` | `(negative cases marked needs_review) / max(N, 1)` | Fraction of false alerts sent to a human instead of being auto-closed. Negative cases incorrectly confirmed or ending in errors are outside this numerator. |
-| Workflow | `confirmed_precision` | `(positive cases marked confirmed) / max(all confirmed cases, 1)` | Among alerts placed in the confirmed queue, the fraction that are genuine. Under the current verdict mapping, this is numerically equal to `decided_precision`. |
-| Workflow | `abstention_rate` | `(valid needs_review verdicts) / max(W, 1)` | Fraction of the represented population where the skill explicitly declines to decide. Execution and parsing errors are not abstentions. |
-| Workflow | `remaining_analyst_workload` | `(confirmed + needs_review + execution or parse errors) / max(W, 1)` | Fraction of the represented alert queue still requiring human handling. Only a valid `not_actionable` verdict removes an alert from this workload, even when that closure is unsafe. |
-| Reliability | `execution_or_parse_error_rate` | `(model errors + invalid outputs) / max(W, 1)` | Fraction of the represented population without a usable triage verdict because execution failed or the output could not be parsed as the required contract. |
+| Group        | Metric                          | Exact definition                                                                                | Interpretation                                                                                                                                                                                                           |
+| ------------ | ------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Strict       | `strict_precision`              | `TPs / max(TPs + FPs, 1)`                                                                       | Of the cases treated as positive by strict scoring, the fraction that are genuine positives. Negative abstentions and errors count as strict false positives.                                                            |
+| Strict       | `strict_recall`                 | `TPs / max(TPs + FNs, 1)`                                                                       | Fraction of all genuine alerts explicitly marked `confirmed`. `not_actionable`, `needs_review`, and errors on positive cases reduce strict recall.                                                                       |
+| Strict       | `strict_f1`                     | `2 * TPs / max(2 * TPs + FPs + FNs, 1)`                                                         | Harmonic balance between strict precision and strict recall with equal weight.                                                                                                                                           |
+| Strict       | `strict_f2`                     | `5 * TPs / max(5 * TPs + FPs + 4 * FNs, 1)`                                                     | Precision-recall balance weighted toward recall, so missing a genuine alert matters more than retaining a false alert.                                                                                                   |
+| Strict       | `strict_accuracy`               | `(TPs + TNs) / max(W, 1)`                                                                       | Fraction of the represented population assigned the exact correct decisive verdict. Abstentions and errors are incorrect.                                                                                                |
+| Strict       | `strict_mcc`                    | `(TPs * TNs - FPs * FNs) / max(sqrt((TPs + FPs) * (TPs + FNs) * (TNs + FPs) * (TNs + FNs)), 1)` | Matthews correlation coefficient across all rows. It balances both classes in the imbalanced SastBench dataset. The usual range is `-1` to `1`; a degenerate confusion matrix returns `0` through the denominator guard. |
+| Decided only | `decided_precision`             | `TPd / max(TPd + FPd, 1)`                                                                       | Among valid `confirmed` decisions, the fraction that are genuine positives. Abstentions and errors are excluded.                                                                                                         |
+| Decided only | `decided_recall`                | `TPd / max(TPd + FNd, 1)`                                                                       | Among genuine-positive cases with a decisive verdict, the fraction marked `confirmed`. This is not overall recall because positive abstentions and errors are excluded.                                                  |
+| Decided only | `decided_f1`                    | `2 * TPd / max(2 * TPd + FPd + FNd, 1)`                                                         | Equal-weight precision-recall balance over decisive verdicts only.                                                                                                                                                       |
+| Decided only | `decided_f2`                    | `5 * TPd / max(5 * TPd + FPd + 4 * FNd, 1)`                                                     | Recall-weighted precision-recall balance over decisive verdicts only.                                                                                                                                                    |
+| Decided only | `decided_accuracy`              | `(TPd + TNd) / max(D, 1)`                                                                       | Fraction of valid non-abstaining decisions that are correct.                                                                                                                                                             |
+| Decided only | `decided_mcc`                   | `(TPd * TNd - FPd * FNd) / max(sqrt((TPd + FPd) * (TPd + FNd) * (TNd + FPd) * (TNd + FNd)), 1)` | Matthews correlation coefficient after excluding abstentions and errors. Read it together with `decided_coverage`.                                                                                                       |
+| Decided only | `decided_coverage`              | `D / max(W, 1)`                                                                                 | Fraction of the represented population receiving a valid `confirmed` or `not_actionable` verdict. Low coverage can make decided-only quality look artificially strong.                                                   |
+| Workflow     | `true_positive_retention`       | `(positive cases marked confirmed or needs_review) / max(P, 1)`                                 | Fraction of genuine alerts not automatically closed. `needs_review` counts as retained; an execution or parse error does not.                                                                                            |
+| Workflow     | `unsafe_closure_rate`           | `(positive cases marked not_actionable) / max(P, 1)`                                            | Fraction of genuine alerts the skill would incorrectly auto-close.                                                                                                                                                       |
+| Workflow     | `false_alert_auto_closure_rate` | `(negative cases marked not_actionable) / max(N, 1)`                                            | Fraction of actual false alerts removed without human review.                                                                                                                                                            |
+| Workflow     | `false_alert_escalation_rate`   | `(negative cases marked needs_review) / max(N, 1)`                                              | Fraction of false alerts sent to a human instead of being auto-closed. Negative cases incorrectly confirmed or ending in errors are outside this numerator.                                                              |
+| Workflow     | `confirmed_precision`           | `(positive cases marked confirmed) / max(all confirmed cases, 1)`                               | Among alerts placed in the confirmed queue, the fraction that are genuine. Under the current verdict mapping, this is numerically equal to `decided_precision`.                                                          |
+| Workflow     | `abstention_rate`               | `(valid needs_review verdicts) / max(W, 1)`                                                     | Fraction of the represented population where the skill explicitly declines to decide. Execution and parsing errors are not abstentions.                                                                                  |
+| Workflow     | `remaining_analyst_workload`    | `(confirmed + needs_review + execution or parse errors) / max(W, 1)`                            | Fraction of the represented alert queue still requiring human handling. Only a valid `not_actionable` verdict removes an alert from this workload, even when that closure is unsafe.                                     |
+| Reliability  | `execution_or_parse_error_rate` | `(model errors + invalid outputs) / max(W, 1)`                                                  | Fraction of the represented population without a usable triage verdict because execution failed or the output could not be parsed as the required contract.                                                              |
 
 `schema_valid` and `strict_case_correct` are per-row assertions rather than derived aggregate metrics. `schema_valid` checks the complete `triage-finding/v0` schema. `strict_case_correct` checks the verdict against the binary SastBench label and fails for `needs_review`, malformed output, and provider errors.
 

@@ -1,7 +1,7 @@
 [project]
 name = "codex-security"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 test = [
@@ -10,16 +10,21 @@ test = [
     "pytest==9.1.1",
     "pytest-xdist==3.8.0",
     "PyYAML==6.0.3",
-    "ruff==0.16.8",
+    "ruff==0.16.9",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "cross_platform: source contracts exercised on Linux, macOS, and Windows",
+    "native_macos: source contracts exercised by the native macOS job",
+    "native_windows: source contracts exercised by the native Windows job",
+]
 
 [tool.ruff]
 line-length = 100
-required-version = "==0.16.8"
-target-version = "py312"
+required-version = "==0.16.9"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [

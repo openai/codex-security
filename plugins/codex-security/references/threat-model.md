@@ -39,9 +39,9 @@ Keep hypotheses separate from validated vulnerabilities. Independent source-back
 
 ## Use Within A Scan
 
-Apply this method inside the caller's existing audit and worker allowance; do not start another scan, worker pool, or report. Keep scan-specific context and knowledge-base facts in the per-scan result, not the shared repository-model cache, unless the user separately requests a reusable-model update and the host permits it. Preserve a supplied schema-valid threat-model object unchanged. Preserve supplied text exactly as `{ "summary": "<original supplied text>" }`.
+Apply this method inside the caller's existing audit and worker allowance; do not start another scan, worker pool, or report. Keep scan-specific context and knowledge-base facts in the per-scan result, not the shared repository-model cache, unless the user separately requests a reusable-model update and the host permits it. Preserve a supplied schema-valid threat-model object unchanged. Preserve supplied text exactly as `{ "format": "markdown", "content": "<original supplied text>", "origin": "provided" }`. Record a model's declared scope when known; do not infer that a supplied model or recovered worker model covers the parent scan's scope.
 
-Build the generated canonical `threatModel` while mapping the architecture. Carry it through the audit and update it when evidence changes; do not replace it at final assembly with an uncited synopsis. Use the existing fields:
+Build the generated canonical `threatModel` while mapping the architecture. As soon as it is usable, retain it through the caller's semantic checkpoint mechanism with `complete: false`, partial coverage, and no requirement to have findings yet. Carry it through the audit and update it when evidence changes; do not replace it at final assembly with an uncited synopsis. Generated structured models may record `origin: "generated"` and their known `scope` with `includePaths`, optional `excludePaths`, and optional `summary`. Use the existing content fields:
 
 - `summary`: product purpose, main components and data flow, and normal deployment.
 - `assets`: the data, identities, privileges, and integrity guarantees that matter.

@@ -1,6 +1,9 @@
+import type { JsonObject } from "./types.js";
+import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
@@ -10,14 +13,14 @@ import {
   artifactDestination,
   readArtifactJsonObject,
   readArtifactText,
+  readArtifactTextWithMetadata,
   replaceArtifactJson,
 } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-
-type JsonObject = Record<string, unknown>;
+import { saveThreatModelDocument } from "./threat-model-document.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -38,15 +41,14 @@ export interface ScanDraftResult {
   scanId: string;
   findingCount: number;
   surfaceCount: number;
+  coverage: JsonObject;
   operation: "replace";
   status: "draft_written";
+  warnings?: string[];
 }
 
-export interface CompletedScanResult {
+export interface CompletedScanResult extends PreparedScanDraft {
   scanId: string;
-  manifest: JsonObject;
-  findings: JsonObject;
-  coverage: JsonObject;
 }
 
 interface PreparedScanDraft {
@@ -55,11 +57,18 @@ interface PreparedScanDraft {
   coverage: JsonObject;
 }
 
+interface SavedScanDraft {
+  input: ScanDraftInput;
+  modifiedMs: number;
+  head?: boolean;
+  attempt?: string;
+}
+
 type PublishScanDraft = (
   draft: PreparedScanDraft,
   expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
-) => Promise<void>;
+) => Promise<string[] | void>;
 
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
 
@@ -84,17 +93,25 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
-  if (!publishDraft) await saveScanDraftCheckpoint(context, parsed);
+  const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
+  if (finalDeepDraft && resolvedDeferred(parsed.coverage).length > 0) {
+    throw new Error(
+      "scan draft: terminal Deep drafts cannot resolve child deferred work.",
+    );
+  }
+  if (finalDeepDraft && !publishDraft)
+    await saveScanDraftCheckpoint(context, parsed);
 
   for (;;) {
     signal?.throwIfAborted();
-    // Deep results are ready to save. Do not merge older drafts or
-    // checkpoints into them.
-    const preserved =
-      context.mode === "deep" && parsed.complete !== false
-        ? { input: parsed, previousDigest: undefined }
-        : await preserveScanDraft(context, parsed, false);
+    // Deep results replace findings and coverage while retaining an omitted model.
+    // Do not merge older review work into them.
+    const preserved = finalDeepDraft
+      ? await preserveDeepThreatModel(context, parsed)
+      : await preserveScanDraft(context, parsed, !publishDraft);
     const reconciled = preserved.input;
+    if (finalDeepDraft && !publishDraft && reconciled !== parsed)
+      await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -134,8 +151,13 @@ export async function recordCodexSecurityScanDraft(
         coverage,
         manifest: { scan: manifestScan },
       };
+      let documentWarnings: string[] | void = undefined;
       if (publishDraft) {
-        await publishDraft(draft, preserved.previousDigest, parsed);
+        documentWarnings = await publishDraft(
+          draft,
+          preserved.previousDigest,
+          finalDeepDraft ? reconciled : parsed,
+        );
       } else {
         const destinations = await Promise.all([
           artifactDestination(
@@ -157,13 +179,20 @@ export async function recordCodexSecurityScanDraft(
         await replaceArtifactJson(destinations[0], { findings });
         await replaceArtifactJson(destinations[1], coverage);
         await replaceArtifactJson(destinations[2], { scan: manifestScan });
+        const warning = await saveThreatModelDocument(
+          context,
+          reconciled.threatModel,
+        );
+        if (warning !== undefined) documentWarnings = [warning];
       }
       return {
         scanId: reconciled.scanId,
         findingCount: findings.length,
         surfaceCount: (coverage.surfaces as unknown[]).length,
+        coverage,
         operation: "replace",
         status: "draft_written",
+        ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
       };
     } catch (error) {
       if (!isScanDraftConflict(error)) throw error;
@@ -215,7 +244,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           arguments_.push("--claim-token", context.handoffClaimToken);
         }
         try {
-          await runWorkbench(arguments_);
+          const result = await runWorkbench(arguments_);
+          return Array.isArray(result?.warnings)
+            ? result.warnings.filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : undefined;
         } catch (error) {
           if (!workbenchScanDraftConflict(error)) throw error;
           throw Object.assign(
@@ -236,7 +270,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   );
 }
 
-/** Preserve one complete Standard scan draft inside its assigned worker output. */
+/** Save a Standard worker draft in its assigned output directory. */
 export async function recordCodexSecurityWorkerScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
@@ -273,13 +307,19 @@ export async function recordCodexSecurityWorkerScanDraft(
     "worker scan draft",
   );
   await replaceArtifactJson(destination, scoped);
+  const documentWarning = await saveThreatModelDocument(
+    context,
+    scoped.threatModel,
+  );
 
   return {
     scanId: parsed.scanId,
     findingCount: scoped.findings.length,
     surfaceCount: (scoped.coverage.surfaces as unknown[]).length,
+    coverage: scoped.coverage,
     operation: "replace",
     status: "draft_written",
+    ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
   };
 }
 
@@ -323,7 +363,9 @@ async function preserveScanDraft(
   saveCheckpoint = true,
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
-  if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
+  const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
+  if (saveCheckpoint && !requiresClosureValidation)
+    await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
@@ -331,18 +373,94 @@ async function preserveScanDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  const current = await readCurrentCheckpoints(context, currentCheckpointName);
+  const current: SavedScanDraft[] = await readSavedCheckpoints(
+    context,
+    "current",
+    currentCheckpointName,
+  );
   const archived =
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
-  const sources: ScanDraftInput[] = previous
-    ? [previous, ...current, ...archived]
-    : [...current, ...archived];
-  if (input.complete === false) {
-    const final = sources.find((source) => source.complete !== false);
-    if (final) result = structuredClone(final);
+  if (previous) {
+    current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
   }
+  current.sort(
+    (left, right) =>
+      right.modifiedMs - left.modifiedMs ||
+      Number(right.head ?? false) - Number(left.head ?? false),
+  );
+  const savedSources = [...current, ...archived];
+  const sources = savedSources.map(({ input }) => input);
+  // Older checkpoints can omit IDs already assigned in their published output.
+  const savedDeferred = sources.flatMap(
+    (source) => source.coverage.deferred as JsonObject[],
+  );
+  const savedSurfaces = sources.flatMap(
+    (source) => source.coverage.surfaces as JsonObject[],
+  );
+  for (const source of sources) {
+    const reservedSurfaceIds = new Set(
+      (source.coverage.surfaces as JsonObject[]).flatMap((row) =>
+        typeof row.id === "string" ? [row.id] : [],
+      ),
+    );
+    const surfaces = (source.coverage.surfaces as JsonObject[]).map((row) => {
+      if (typeof row.id === "string") return row;
+      const matching = savedSurfaces.find(
+        ({ id, ...content }) =>
+          typeof id === "string" &&
+          !reservedSurfaceIds.has(id) &&
+          isDeepStrictEqual(
+            { ...content, receiptRefs: content.receiptRefs ?? [] },
+            { ...row, receiptRefs: row.receiptRefs ?? [] },
+          ),
+      );
+      if (matching === undefined) return row;
+      const id = matching.id as string;
+      reservedSurfaceIds.add(id);
+      return { ...row, id };
+    });
+    const normalizedSurfaces = normalizeSurfaces(surfaces);
+    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
+    source.coverage.surfaces = surfaces.map((row, index) =>
+      typeof row.id === "string" ? row : normalizedSurfaces[index]!,
+    );
+    const reservedIds = new Set(
+      (source.coverage.deferred as JsonObject[]).flatMap((row) =>
+        typeof row.id === "string" ? [row.id] : [],
+      ),
+    );
+    source.coverage.deferred = normalizeDeferred(
+      (source.coverage.deferred as JsonObject[]).map((row) => {
+        if (
+          typeof row.id === "string" ||
+          "candidateId" in row ||
+          "candidate" in row ||
+          "finding" in row
+        )
+          return row;
+        const matching = savedDeferred.find(
+          ({ id, ...content }) =>
+            typeof id === "string" &&
+            !reservedIds.has(id) &&
+            isDeepStrictEqual(content, row),
+        );
+        if (matching === undefined) return row;
+        const id = matching.id as string;
+        reservedIds.add(id);
+        return { ...row, id };
+      }),
+    );
+  }
+  const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
+  const keepsGenericWork = (row: JsonObject) =>
+    ambiguousGenericEntry(row, ambiguousDeferredIds);
+  const retainedFinal =
+    input.complete === false
+      ? savedSources.find(({ input }) => input.complete !== false)
+      : undefined;
+  if (retainedFinal) result = structuredClone(retainedFinal.input);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -356,18 +474,89 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  const resolvedCandidateIds = new Set(
-    [
-      ...result.findings.map(findingCandidateId),
-      ...(result.coverage.surfaces as JsonObject[])
-        .filter(
-          (surface) =>
-            surface.disposition === "rejected" ||
-            surface.disposition === "not_applicable",
-        )
-        .map((surface) => surface.candidateId),
-    ].filter((value): value is string => typeof value === "string"),
+  const reopenedSurfaces = new Set<JsonObject>();
+  if (retainedFinal) {
+    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    for (const surface of result.coverage.surfaces as JsonObject[]) {
+      if (
+        terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
+        typeof surface.id === "string"
+      )
+        terminalOutcomeIds.add(surface.id);
+    }
+    const closedIds = new Set(
+      resolvedDeferred(result.coverage).map((row) => row.id as string),
+    );
+    const retainedIndex = savedSources.indexOf(retainedFinal);
+    const progressSources = savedSources
+      .filter(
+        (source, index) =>
+          source.input.complete === false &&
+          (index < retainedIndex ||
+            (source.attempt === retainedFinal.attempt &&
+              source.modifiedMs === retainedFinal.modifiedMs)),
+      )
+      .map(({ input }) => input)
+      .reverse();
+    progressSources.push(input);
+    let acceptProgress = coverageHasOutstandingWork(result.coverage);
+    for (const observation of progressSources) {
+      const progress = structuredClone(observation);
+      const reopenedIds = new Set(
+        (progress.coverage.deferred as JsonObject[]).flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string" && closedIds.has(id),
+          ),
+        ),
+      );
+      if (reopenedIds.size > 0) acceptProgress = true;
+      if (!acceptProgress) continue;
+      result.complete = false;
+      const resolved = reconcileDeferredSurfaces(
+        progress.coverage,
+        sources,
+        reopenedIds,
+        new Set(),
+        ambiguousDeferredIds,
+        [],
+      );
+      for (const surface of resolved) reopenedSurfaces.add(surface);
+      result.coverage = preserveScanCoverage(
+        {
+          ...result.coverage,
+          deferred: (progress.coverage.deferred as JsonObject[]).filter(
+            (row) =>
+              keepsGenericWork(row) ||
+              !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
+          ),
+          surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
+            (surface) =>
+              keepsGenericWork(surface) ||
+              (!terminalOutcomeIds.has(surface.id as string) &&
+                !terminalOutcomeIds.has(surface.candidateId as string)),
+          ),
+        },
+        result.coverage,
+        ambiguousDeferredIds,
+      );
+      sources.unshift(progress);
+    }
+  }
+  const currentCandidateIds = completedCandidateIds(result);
+  const resolvedCandidateIds = completedCandidateIds(result, sources);
+  const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
+    result,
+    resolvedDeferred(input.coverage),
+    sources,
+    savedSources,
+    resolvedCandidateIds,
+    ambiguousDeferredIds,
+    retainedFinal?.input,
   );
+  for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
+  if (saveCheckpoint && requiresClosureValidation)
+    await saveScanDraftCheckpoint(context, input, false);
+
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
     if (
@@ -375,8 +564,9 @@ async function preserveScanDraft(
       pending.some((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
+          keepsGenericWork(item) ||
           typeof candidateId !== "string" ||
-          !resolvedCandidateIds.has(candidateId)
+          !currentCandidateIds.has(candidateId)
         );
       })
     )
@@ -414,7 +604,9 @@ async function preserveScanDraft(
           preserveFindingDetails(finding, pending.finding);
       } else {
         const candidateRow = candidateRows.find(
-          (item) => item.candidateId === candidateId || item.id === candidateId,
+          (item) =>
+            !keepsGenericWork(item) &&
+            (item.candidateId === candidateId || item.id === candidateId),
         );
         if (candidateRow) {
           for (const field of ["candidate", "finding"] as const) {
@@ -454,7 +646,9 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...candidateRows
+          .filter((item) => !keepsGenericWork(item))
+          .map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
@@ -462,17 +656,23 @@ async function preserveScanDraft(
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
-          !coverageEntryPresent(result.coverage.deferred as unknown[], item)
+          (keepsGenericWork(item) ||
+            typeof candidateId !== "string" ||
+            !resolvedIds.has(candidateId)) &&
+          !closedDeferredIds.has(item.id as string)
         );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
+        if (resolvedSurfaces.has(surface)) return false;
         const candidateId = surface.candidateId ?? surface.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (keepsGenericWork(surface) ||
+            typeof candidateId !== "string" ||
+            !resolvedIds.has(candidateId)) &&
           !coverageEntryPresent(
             result.coverage.surfaces as unknown[],
             surface,
+            ambiguousDeferredIds,
           ) &&
           !(
             surface.disposition === "needs_follow_up" &&
@@ -494,111 +694,498 @@ async function preserveScanDraft(
             )
           : [],
     };
+    result.coverage.surfaces = exactUnion(
+      result.coverage.surfaces as JsonObject[],
+      previousCoverage.surfaces,
+    );
     result.coverage = preserveScanCoverage(
       result.coverage,
-      [previousCoverage],
-      false,
+      previousCoverage,
+      ambiguousDeferredIds,
     );
   }
+  result.coverage.deferred = normalizeDeferred(
+    result.coverage.deferred as JsonObject[],
+  );
+  result.coverage.surfaces = normalizeSurfaces(
+    result.coverage.surfaces as JsonObject[],
+  );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
 }
 
-async function readCurrentCheckpoints(
-  context: ArtifactContext,
-  excludedCheckpoint: string,
-): Promise<ScanDraftInput[]> {
-  const checkpointRoot = join(context.root, "checkpoints");
-  const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
-  if (checkpointRootMetadata === undefined) return [];
-  if (
-    checkpointRootMetadata.isSymbolicLink() ||
-    !checkpointRootMetadata.isDirectory()
-  ) {
-    throw new Error(
-      "scan checkpoint: current checkpoint set is not a safe directory.",
+function completedCandidateIds(
+  result: ScanDraftInput,
+  sources: ScanDraftInput[] = [],
+): Set<string> {
+  const completed = new Set<string>();
+  const observed = new Set<string>();
+  for (const source of [result, ...sources]) {
+    for (const finding of source.findings) {
+      const id = findingCandidateId(finding);
+      if (id !== undefined) completed.add(id);
+    }
+    const dispositions = (source.coverage.surfaces as JsonObject[]).filter(
+      (surface) =>
+        surface.disposition === "rejected" ||
+        surface.disposition === "not_applicable",
     );
-  }
-  const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
-    fs.realpath(context.root),
-    fs.realpath(checkpointRoot),
-  ]);
-  if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
-    throw new Error(
-      "scan checkpoint: current checkpoint set escaped its artifact directory.",
-    );
-  }
-
-  let checkpointHead: string | undefined;
-  if (context.layout === "worker") {
-    const headMetadata = await lstatIfExists(
-      join(context.root, "checkpoint-head.json"),
-    );
-    if (headMetadata !== undefined) {
-      if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
-        throw new Error(
-          "scan checkpoint: current checkpoint head is not a safe file.",
-        );
-      }
-      const head = parseJsonObject(
-        await readArtifactText(
-          context,
-          ["checkpoint-head.json"],
-          "current scan checkpoint head",
-        ),
-        "current scan checkpoint head",
-      );
-      if (
-        typeof head.checkpoint !== "string" ||
-        !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-      ) {
-        throw new Error("scan checkpoint: current checkpoint head is invalid.");
-      }
-      checkpointHead = head.checkpoint;
+    for (const surface of dispositions) {
+      const id = surface.candidateId;
+      if (typeof id === "string" && !observed.has(id)) completed.add(id);
+    }
+    for (const row of [
+      ...(source.coverage.deferred as JsonObject[]),
+      ...dispositions,
+    ]) {
+      const id = row.candidateId ?? row.id;
+      if (typeof id === "string") observed.add(id);
     }
   }
+  return completed;
+}
 
-  const checkpoints: Array<{
-    input: ScanDraftInput;
-    modifiedMs: number;
-    head: boolean;
-    name: string;
-  }> = [];
-  for (const entry of await fs.readdir(canonicalCheckpointRoot, {
-    withFileTypes: true,
-  })) {
+function resolvedDeferred(coverage: JsonObject): JsonObject[] {
+  return (coverage.resolvedDeferred as JsonObject[] | undefined) ?? [];
+}
+
+function genericDeferred(row: JsonObject): boolean {
+  return (
+    typeof row.candidateId !== "string" &&
+    !("candidate" in row) &&
+    !("finding" in row)
+  );
+}
+
+function ambiguousGenericEntry(
+  row: JsonObject,
+  identities: Set<string>,
+): boolean {
+  return (
+    typeof row.id === "string" && identities.has(row.id) && genericDeferred(row)
+  );
+}
+
+function ambiguousGenericDeferredIds(sources: ScanDraftInput[]): Set<string> {
+  const ambiguous = new Set<string>();
+  for (const source of sources) {
+    const rows = source.coverage.deferred as JsonObject[];
+    const candidateIds = new Set(
+      rows
+        .filter((row) => !genericDeferred(row))
+        .flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string",
+          ),
+        ),
+    );
+    const byId = new Map<string, JsonObject>();
+    for (const row of rows) {
+      if (typeof row.id !== "string" || !genericDeferred(row)) continue;
+      const previous = byId.get(row.id);
+      if (
+        candidateIds.has(row.id) ||
+        (previous !== undefined && !isDeepStrictEqual(previous, row))
+      )
+        ambiguous.add(row.id);
+      byId.set(row.id, row);
+    }
+  }
+  return ambiguous;
+}
+
+function reconcileResolvedDeferred(
+  result: ScanDraftInput,
+  requestedClosures: JsonObject[],
+  sources: ScanDraftInput[],
+  savedSources: SavedScanDraft[],
+  resolvedCandidateIds: Set<string>,
+  ambiguousIds: Set<string>,
+  retainedFinal?: ScanDraftInput,
+): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
+  const activeDeferred = result.coverage.deferred as JsonObject[];
+  // Legacy aliases cannot identify which independent task was completed.
+  // Keep generic work separate from candidate outcomes and ambiguous closures.
+  for (const source of sources) {
+    for (const row of source.coverage.deferred as JsonObject[]) {
+      if (
+        ambiguousGenericEntry(row, ambiguousIds) &&
+        !activeDeferred.some((current) => isDeepStrictEqual(current, row))
+      )
+        activeDeferred.push(structuredClone(row));
+    }
+  }
+  const observedIds = new Set(
+    activeDeferred.flatMap((row) =>
+      [row.id, row.candidateId].filter(
+        (id): id is string => typeof id === "string",
+      ),
+    ),
+  );
+  // Equal timestamps cannot prove that a closure followed pending work.
+  const pendingByTime = new Map<string, Set<string>>();
+  const tiedPending = new Map<ScanDraftInput, Set<string>>();
+  for (const source of savedSources) {
+    const key = JSON.stringify([source.attempt, source.modifiedMs]);
+    const pending = pendingByTime.get(key) ?? new Set<string>();
+    for (const row of source.input.coverage.deferred as JsonObject[]) {
+      pending.add(row.id as string);
+      if (typeof row.candidateId === "string") pending.add(row.candidateId);
+    }
+    pendingByTime.set(key, pending);
+    tiedPending.set(source.input, pending);
+  }
+  const historical = sources.flatMap(
+    (source) => source.coverage.deferred as JsonObject[],
+  );
+  const candidateRows = historical.filter(
+    (row) =>
+      typeof row.candidateId === "string" ||
+      "candidate" in row ||
+      "finding" in row,
+  );
+  const candidateIds = new Set(
+    candidateRows.flatMap((row) =>
+      [row.id, row.candidateId].filter(
+        (id): id is string => typeof id === "string",
+      ),
+    ),
+  );
+  const closures = new Map<string, JsonObject>();
+  const previouslyClosed = new Set<string>();
+  const closureSources = new Map<string, ScanDraftInput>();
+  for (const source of sources) {
+    // Keep the first saved state for each ID so reopened work stays pending.
+    for (const row of source.coverage.deferred as JsonObject[]) {
+      observedIds.add(row.id as string);
+      if (typeof row.candidateId === "string") observedIds.add(row.candidateId);
+    }
+    if (source.complete === false) continue;
+    for (const closure of resolvedDeferred(source.coverage)) {
+      const id = closure.id as string;
+      previouslyClosed.add(id);
+      if (
+        !candidateIds.has(id) &&
+        !observedIds.has(id) &&
+        !tiedPending.get(source)?.has(id)
+      ) {
+        closures.set(id, closure);
+        closureSources.set(id, source);
+      }
+      observedIds.add(id);
+    }
+  }
+  const requested = new Set<string>();
+  for (const closure of requestedClosures) {
+    const id = closure.id as string;
+    if (requested.has(id))
+      throw new Error(`scan draft: coverage.resolvedDeferred repeats ${id}.`);
+    requested.add(id);
+    closures.set(id, closure);
+  }
+  for (const id of closures.keys()) {
+    if (ambiguousIds.has(id))
+      throw new Error(
+        `scan draft: coverage.resolvedDeferred cannot close ambiguous saved deferred work: ${id}.`,
+      );
+    if (candidateIds.has(id)) {
+      if (
+        candidateRows
+          .filter((row) => row.id === id || row.candidateId === id)
+          .every((row) =>
+            resolvedCandidateIds.has((row.candidateId ?? row.id) as string),
+          )
+      ) {
+        // The ordinary candidate outcome resolves this work; keep closures generic-only.
+        closures.delete(id);
+        continue;
+      }
+      throw new Error(
+        `scan draft: coverage.resolvedDeferred cannot close candidate ${id}; record its finding or disposition.`,
+      );
+    }
     if (
-      !entry.isFile() ||
-      !entry.name.endsWith(".json") ||
-      entry.name === excludedCheckpoint
+      !closureSources.has(id) &&
+      !historical.some((row) => row.id === id || row.candidateId === id)
+    )
+      throw new Error(
+        `scan draft: coverage.resolvedDeferred names no saved generic deferral: ${id}.`,
+      );
+    if (activeDeferred.some((row) => row.id === id || row.candidateId === id))
+      throw new Error(
+        `scan draft: resolved deferred work is still active: ${id}.`,
+      );
+  }
+  if (closures.size > 0) {
+    result.coverage.resolvedDeferred = [...closures.values()].map((closure) =>
+      structuredClone(closure),
+    );
+  } else {
+    delete result.coverage.resolvedDeferred;
+  }
+  const closedDeferredIds = new Set(closures.keys());
+  const reopenedIds = new Set(
+    [...activeDeferred, ...historical]
+      .map((row) => row.id as string)
+      .filter(
+        (id) =>
+          previouslyClosed.has(id) &&
+          !closedDeferredIds.has(id) &&
+          !candidateIds.has(id),
+      ),
+  );
+  const inherited = [
+    ...new Set([
+      ...closureSources.values(),
+      ...sources.filter((source) =>
+        (source.coverage.deferred as JsonObject[]).some((row) =>
+          reopenedIds.has(row.id as string),
+        ),
+      ),
+    ]),
+  ];
+  const resolvedSurfaces = reconcileDeferredSurfaces(
+    result.coverage,
+    sources,
+    closedDeferredIds,
+    resolvedCandidateIds,
+    ambiguousIds,
+    inherited,
+    savedSources,
+    retainedFinal,
+    reopenedIds,
+  );
+  return { closedDeferredIds, resolvedSurfaces };
+}
+
+function reconcileDeferredSurfaces(
+  coverage: JsonObject,
+  sources: ScanDraftInput[],
+  closedDeferredIds: Set<string>,
+  resolvedCandidateIds: Set<string>,
+  ambiguousDeferredIds: Set<string>,
+  inherited: ScanDraftInput[],
+  savedSources: SavedScanDraft[] = [],
+  retainedFinal?: ScanDraftInput,
+  reopenedIds: Set<string> = new Set(),
+): Set<JsonObject> {
+  const resolved = new Set<JsonObject>();
+  const workIds = new Set([...closedDeferredIds, ...reopenedIds]);
+  if (workIds.size === 0) return resolved;
+  const current = coverage.surfaces as JsonObject[];
+  const inheritedSurfaces = inherited.flatMap((source) =>
+    (source.coverage.surfaces as JsonObject[]).map((surface) => ({
+      surface,
+      source,
+    })),
+  );
+  const observations = new Map(
+    savedSources.map((source) => [source.input, source]),
+  );
+  const carriesCandidate = (surface: JsonObject) =>
+    "candidateId" in surface || "candidate" in surface || "finding" in surface;
+  const latestDeferred = [...(coverage.deferred as JsonObject[])];
+  for (const source of sources) {
+    for (const row of source.coverage.deferred as JsonObject[]) {
+      if (!deferredEntryPresent(latestDeferred, row, ambiguousDeferredIds))
+        latestDeferred.push(row);
+    }
+  }
+  const pending = latestDeferred.filter(
+    (row) =>
+      !closedDeferredIds.has(row.id as string) &&
+      (ambiguousGenericEntry(row, ambiguousDeferredIds) ||
+        !resolvedCandidateIds.has((row.candidateId ?? row.id) as string)),
+  );
+  for (const { surface: original, source: inheritedSource } of [
+    ...current.map((surface) => ({
+      surface,
+      source: retainedFinal,
+    })),
+    ...inheritedSurfaces,
+  ]) {
+    const saved = !current.includes(original);
+    let surface = saved ? structuredClone(original) : original;
+    if (typeof surface.id !== "string" || carriesCandidate(surface)) continue;
+    const id = surface.id;
+    const sameSurface = (other: JsonObject) => other.id === id;
+    const currentMatches = current.filter(sameSurface);
+    if (saved ? currentMatches.length > 0 : currentMatches.length !== 1)
+      continue;
+    const matches = sources.map((source) => ({
+      source,
+      surfaces: (source.coverage.surfaces as JsonObject[]).filter(sameSurface),
+      deferred: source.coverage.deferred as JsonObject[],
+    }));
+    if (
+      matches.some(
+        ({ surfaces }) =>
+          surfaces.length > 1 || surfaces.some(carriesCandidate),
+      )
     )
       continue;
-    const checkpointPath = join(canonicalCheckpointRoot, entry.name);
-    const checkpointMetadata = await fs.lstat(checkpointPath);
-    if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
-      throw new Error(
-        "scan checkpoint: current checkpoint is not a safe file.",
-      );
+    if (inheritedSource) {
+      const latest = matches.find(({ surfaces }) => surfaces.length > 0)!;
+      const latestObservation = observations.get(latest.source);
+      const pendingAtSameTime =
+        latestObservation &&
+        matches.find(({ source, surfaces }) => {
+          const observation = observations.get(source);
+          return (
+            observation?.attempt === latestObservation.attempt &&
+            observation?.modifiedMs === latestObservation.modifiedMs &&
+            surfaces[0]?.disposition === "needs_follow_up"
+          );
+        });
+      surface = structuredClone((pendingAtSameTime ?? latest).surfaces[0]!);
     }
-    const input = parsePersistedCheckpoint(
-      parseJsonObject(
-        await readArtifactText(
-          context,
-          ["checkpoints", entry.name],
-          "current scan checkpoint",
+    const previousSurfaces = matches.flatMap(({ surfaces }) => surfaces);
+    if (
+      surface.disposition !== "needs_follow_up" &&
+      pending.some(
+        (row) =>
+          row.id === id ||
+          ((row.surfaceIds as string[] | undefined) ?? []).includes(id),
+      )
+    ) {
+      const followUp = previousSurfaces.find(
+        (row) => row.disposition === "needs_follow_up",
+      );
+      if (!followUp) continue;
+      surface = {
+        ...structuredClone(followUp),
+        receiptRefs: surface.receiptRefs,
+      };
+    }
+    const linked = matches.some(
+      ({ surfaces, deferred }) =>
+        surfaces.length > 0 &&
+        deferred.some(
+          (row) =>
+            workIds.has(row.id as string) &&
+            (row.id === id ||
+              ((row.surfaceIds as string[] | undefined) ?? []).includes(id)),
         ),
-        "current scan checkpoint",
+    );
+    if (!linked) continue;
+    surface.receiptRefs = exactUnion(
+      (surface.receiptRefs as unknown[] | undefined) ?? [],
+      previousSurfaces.flatMap(
+        (row) => (row.receiptRefs as unknown[] | undefined) ?? [],
       ),
     );
-    if (input.scanId !== context.scanId) {
+    if (saved) current.push(surface);
+    else current[current.indexOf(original)] = surface;
+    for (const previous of previousSurfaces) {
+      if (
+        surface.disposition === "needs_follow_up" ||
+        previous.disposition === "needs_follow_up"
+      )
+        resolved.add(previous);
+    }
+  }
+  return resolved;
+}
+
+async function readCheckpointHead(
+  context: ArtifactContext,
+  kind: "current" | "archived",
+): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
+  const metadata = await lstatIfExists(
+    join(context.root, "checkpoint-head.json"),
+  );
+  if (metadata === undefined) return;
+  if (metadata.isSymbolicLink() || !metadata.isFile())
+    throw new Error(
+      `scan checkpoint: ${kind} checkpoint head is not a safe file.`,
+    );
+  const label = `${kind} scan checkpoint head`;
+  const saved = await readArtifactTextWithMetadata(
+    context,
+    ["checkpoint-head.json"],
+    label,
+  );
+  const head = parseJsonObject(saved.contents, label);
+  if (
+    typeof head.checkpoint !== "string" ||
+    !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
+  )
+    throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
+  // Reselecting an immutable checkpoint updates only the head file.
+  return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
+}
+
+async function readSavedCheckpoints(
+  context: ArtifactContext,
+  kind: "current" | "archived",
+  excludedCheckpoint?: string,
+): Promise<Array<SavedScanDraft & { name: string }>> {
+  let checkpointRoot = join(context.root, "checkpoints");
+  const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
+  if (checkpointRootMetadata === undefined) return [];
+  if (!checkpointRootMetadata.isDirectory()) {
+    throw new Error(
+      `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
+    );
+  }
+  if (kind === "current") {
+    const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
+      fs.realpath(context.root),
+      fs.realpath(checkpointRoot),
+    ]);
+    if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
+      throw new Error(
+        "scan checkpoint: current checkpoint set escaped its artifact directory.",
+      );
+    }
+    checkpointRoot = canonicalCheckpointRoot;
+  }
+
+  const head =
+    kind === "current" ? await readCheckpointHead(context, kind) : undefined;
+  const checkpointHead = head?.checkpoint;
+
+  const checkpoints: Array<SavedScanDraft & { name: string }> = [];
+  const entries = (
+    await fs.readdir(checkpointRoot, { withFileTypes: true })
+  ).filter(
+    (entry) =>
+      entry.isFile() &&
+      entry.name.endsWith(".json") &&
+      entry.name !== excludedCheckpoint,
+  );
+  if (kind === "archived")
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const checkpointPath = join(checkpointRoot, entry.name);
+    const checkpointMetadata = await fs.lstat(checkpointPath);
+    if (!checkpointMetadata.isFile()) {
+      throw new Error(
+        `scan checkpoint: ${kind} checkpoint is not a safe file.`,
+      );
+    }
+    const label = `${kind} scan checkpoint`;
+    const draft = parseJsonObject(
+      await readArtifactText(context, ["checkpoints", entry.name], label),
+      label,
+    );
+    const input =
+      kind === "current"
+        ? parsePersistedCheckpoint(draft)
+        : parsePersistedScanDraft(draft);
+    if (kind === "archived") requireMatchingScan(context, input);
+    else if (input.scanId !== context.scanId) {
       throw new Error(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
     }
     checkpoints.push({
       input,
-      modifiedMs: Number(checkpointMetadata.mtimeMs),
-      head: entry.name === checkpointHead,
+      modifiedMs:
+        entry.name === checkpointHead
+          ? head!.modifiedMs
+          : Number(checkpointMetadata.mtimeMs),
+      ...(kind === "current" ? { head: entry.name === checkpointHead } : {}),
       name: entry.name,
     });
   }
@@ -609,13 +1196,14 @@ async function readCurrentCheckpoints(
   ) {
     throw new Error("scan checkpoint: current checkpoint head is missing.");
   }
-  checkpoints.sort(
-    (left, right) =>
-      Number(right.head) - Number(left.head) ||
-      right.modifiedMs - left.modifiedMs ||
-      right.name.localeCompare(left.name),
-  );
-  return checkpoints.map(({ input }) => input);
+  if (kind === "current")
+    checkpoints.sort(
+      (left, right) =>
+        right.modifiedMs - left.modifiedMs ||
+        Number(right.head) - Number(left.head) ||
+        right.name.localeCompare(left.name),
+    );
+  return checkpoints;
 }
 
 function scanDraftCheckpointName(
@@ -630,32 +1218,25 @@ function scanDraftCheckpointName(
 
 async function readPreviousScanDraft(
   context: ArtifactContext,
-): Promise<{ input?: ScanDraftInput; digest: string }> {
+): Promise<{ input?: ScanDraftInput; digest: string; modifiedMs: number }> {
   if (context.layout === "worker") {
-    const contents = await readOptionalArtifactText(context, ["result.json"]);
+    const saved = await readOptionalArtifactTextWithMetadata(context, [
+      "result.json",
+    ]);
     return {
-      ...(contents === undefined
-        ? {}
-        : {
-            input: parsePersistedScanDraft(
-              parseJsonObject(contents, "previous scan draft"),
+      input:
+        saved === undefined
+          ? undefined
+          : parsePersistedScanDraft(
+              parseJsonObject(saved.contents, "previous scan draft"),
             ),
-          }),
-      digest: draftDigest([["result.json", contents]]),
+      digest: draftDigest([["result.json", saved?.contents]]),
+      modifiedMs: saved?.modifiedMs ?? 0,
     };
   }
-  const names = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-  ] as const;
-  const contents = await Promise.all(
-    names.map((name) => readOptionalArtifactText(context, [name])),
-  );
-  const digest = draftDigest(
-    names.map((name, index) => [name, contents[index]]),
-  );
-  if (contents.every((value) => value === undefined)) return { digest };
+  const { saved, contents, digest } = await readPreviousScanDocuments(context);
+  if (contents.every((value) => value === undefined))
+    return { digest, modifiedMs: 0 };
   if (contents.some((value) => value === undefined)) {
     throw new Error("previous scan draft: canonical documents are incomplete.");
   }
@@ -672,53 +1253,74 @@ async function readPreviousScanDraft(
     "previous scan draft coverage",
   );
   const scan = requireObject(manifest.scan, "previous scan draft.scan");
-  const semanticScope = isObject(scan.scope) ? { ...scan.scope } : undefined;
-  if (semanticScope) {
-    delete semanticScope.includePaths;
-    delete semanticScope.excludePaths;
-  }
-  const semanticCoverage = { ...coverage };
-  for (const field of [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "mode",
-    "includePaths",
-    "excludePaths",
-    "receiptRefs",
-    "inventoryStrategy",
-  ])
-    delete semanticCoverage[field];
   return {
     digest,
-    input: parsePersistedScanDraft({
+    // File-authored coverage may leave its manifest unchanged; tool writes have a head.
+    modifiedMs:
+      (await readCheckpointHead(context, "current")) === undefined
+        ? saved[2]!.modifiedMs
+        : Math.min(...saved.map((record) => record!.modifiedMs)),
+    input: parsePersistedCheckpoint({
       scanId: context.scanId,
       ...(scan.complete === false ? { complete: false } : {}),
-      ...(semanticScope && Object.keys(semanticScope).length > 0
-        ? { scope: semanticScope }
-        : {}),
-      ...(isObject(scan.threatModel)
-        ? { threatModel: structuredClone(scan.threatModel) }
-        : {}),
-      findings: (findings.findings as JsonObject[]).map((finding) => {
-        const semantic = { ...finding };
-        for (const field of ["findingId", "occurrenceId", "fingerprints"])
-          delete semantic[field];
-        return semantic;
-      }),
-      coverage: semanticCoverage,
+      ...(isObject(scan.scope) ? { scope: scan.scope } : {}),
+      ...(isObject(scan.threatModel) ? { threatModel: scan.threatModel } : {}),
+      findings: findings.findings,
+      coverage,
     }),
+  };
+}
+
+async function readPreviousScanDocuments(context: ArtifactContext) {
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+  ] as const;
+  const saved = await Promise.all(
+    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
+  );
+  const contents = saved.map((record) => record?.contents);
+  return {
+    saved,
+    contents,
+    digest: draftDigest(names.map((name, index) => [name, contents[index]])),
+  };
+}
+
+async function preserveDeepThreatModel(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+  if (input.threatModel !== undefined) return { input };
+  const { contents, digest } = await readPreviousScanDocuments(context);
+  const previous =
+    contents[0] === undefined
+      ? undefined
+      : requireObject(
+          parseJsonObject(contents[0], "previous scan draft manifest").scan,
+          "previous scan draft.scan",
+        );
+  return {
+    input:
+      previous?.threatModel === undefined
+        ? input
+        : scanDraftInputSchema.parse({
+            ...input,
+            threatModel: previous.threatModel,
+          }),
+    previousDigest: digest,
   };
 }
 
 async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
-): Promise<ScanDraftInput[]> {
+): Promise<SavedScanDraft[]> {
   const workerRoot = dirname(context.root);
   const attemptsRoot = join(workerRoot, "attempts");
   const attemptsMetadata = await lstatIfExists(attemptsRoot);
   if (attemptsMetadata === undefined) return [];
-  if (attemptsMetadata.isSymbolicLink() || !attemptsMetadata.isDirectory()) {
+  if (!attemptsMetadata.isDirectory()) {
     throw new Error(
       "scan checkpoint: archived attempts are not a safe directory.",
     );
@@ -733,14 +1335,15 @@ async function readArchivedWorkerCheckpoints(
     );
   }
 
-  const archived: ScanDraftInput[] = [];
+  const archived: SavedScanDraft[] = [];
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .filter((entry) => entry.isDirectory())
     .sort(
       (left, right) =>
-        archivedAttemptNumber(right.name) - archivedAttemptNumber(left.name) ||
+        Number(/^attempt-(\d+)$/.exec(right.name)?.[1] ?? -1) -
+          Number(/^attempt-(\d+)$/.exec(left.name)?.[1] ?? -1) ||
         right.name.localeCompare(left.name),
     );
   for (const attempt of attempts) {
@@ -752,45 +1355,17 @@ async function readArchivedWorkerCheckpoints(
         "scan checkpoint: archived attempt escaped its worker directory.",
       );
     }
-    const drafts: Array<{
-      input: ScanDraftInput;
-      modifiedMs: number;
-      result: boolean;
-      name: string;
-    }> = [];
+    const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
+      [];
+    const attemptContext = { ...context, root: attemptRoot };
+    const head = await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
-    let checkpointHeadName: string | undefined;
-    const headMetadata = await lstatIfExists(
-      join(attemptRoot, "checkpoint-head.json"),
-    );
-    if (headMetadata !== undefined) {
-      if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint head is not a safe file.",
-        );
-      }
-      const head = parseJsonObject(
-        await readArtifactText(
-          { ...context, root: attemptRoot },
-          ["checkpoint-head.json"],
-          "archived scan checkpoint head",
-        ),
-        "archived scan checkpoint head",
-      );
-      if (
-        typeof head.checkpoint !== "string" ||
-        !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-      ) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint head is invalid.",
-        );
-      }
-      checkpointHeadName = head.checkpoint;
+    if (head) {
       checkpointHead = parsePersistedScanDraft(
         parseJsonObject(
           await readArtifactText(
-            { ...context, root: attemptRoot },
-            ["checkpoints", checkpointHeadName],
+            attemptContext,
+            ["checkpoints", head.checkpoint],
             "archived scan checkpoint head",
           ),
           "archived scan checkpoint head",
@@ -802,18 +1377,18 @@ async function readArchivedWorkerCheckpoints(
       join(attemptRoot, "result.json"),
     );
     if (resultMetadata !== undefined) {
-      if (resultMetadata.isSymbolicLink() || !resultMetadata.isFile()) {
+      if (!resultMetadata.isFile()) {
         throw new Error("scan checkpoint: archived result is not a safe file.");
       }
-      const contents = await readArtifactText(
-        { ...context, root: attemptRoot },
+      const saved = await readArtifactTextWithMetadata(
+        attemptContext,
         ["result.json"],
         "archived scan result",
       );
       let result: ScanDraftInput | undefined;
       try {
         result = parsePersistedScanDraft(
-          parseJsonObject(contents, "archived scan result"),
+          parseJsonObject(saved.contents, "archived scan result"),
         );
       } catch {
         // A failed attempt may leave an invalid replaceable result after valid checkpoints.
@@ -822,76 +1397,38 @@ async function readArchivedWorkerCheckpoints(
         requireMatchingScan(context, result);
         drafts.push({
           input: result,
-          modifiedMs: Number(resultMetadata.mtimeMs),
+          modifiedMs: saved.modifiedMs,
           result: true,
           name: "result.json",
         });
       }
     }
-    const checkpointRoot = join(attemptRoot, "checkpoints");
-    const checkpointMetadata = await lstatIfExists(checkpointRoot);
-    if (checkpointMetadata !== undefined) {
-      if (
-        checkpointMetadata.isSymbolicLink() ||
-        !checkpointMetadata.isDirectory()
-      ) {
-        throw new Error(
-          "scan checkpoint: archived checkpoint set is not a safe directory.",
-        );
-      }
-      const checkpoints = (
-        await fs.readdir(checkpointRoot, { withFileTypes: true })
-      )
-        .filter(
-          (entry) =>
-            entry.isFile() &&
-            entry.name.endsWith(".json") &&
-            entry.name !== checkpointHeadName,
-        )
-        .sort((left, right) => left.name.localeCompare(right.name));
-      for (const checkpoint of checkpoints) {
-        const checkpointPath = join(checkpointRoot, checkpoint.name);
-        const checkpointMetadata = await fs.lstat(checkpointPath);
-        if (
-          checkpointMetadata.isSymbolicLink() ||
-          !checkpointMetadata.isFile()
-        ) {
-          throw new Error(
-            "scan checkpoint: archived checkpoint is not a safe file.",
-          );
-        }
-        const contents = await readArtifactText(
-          { ...context, root: attemptRoot },
-          ["checkpoints", checkpoint.name],
-          "archived scan checkpoint",
-        );
-        const draft = parsePersistedScanDraft(
-          parseJsonObject(contents, "archived scan checkpoint"),
-        );
-        requireMatchingScan(context, draft);
-        drafts.push({
-          input: draft,
-          modifiedMs: Number(checkpointMetadata.mtimeMs),
-          result: false,
-          name: checkpoint.name,
-        });
-      }
+    drafts.push(
+      ...(
+        await readSavedCheckpoints(attemptContext, "archived", head?.checkpoint)
+      ).map((draft) => ({ ...draft, result: false })),
+    );
+    if (checkpointHead !== undefined) {
+      drafts.push({
+        input: checkpointHead,
+        modifiedMs: head!.modifiedMs,
+        head: true,
+        result: false,
+        name: head!.checkpoint,
+      });
     }
     drafts.sort(
       (left, right) =>
         right.modifiedMs - left.modifiedMs ||
+        Number(right.head ?? false) - Number(left.head ?? false) ||
         Number(right.result) - Number(left.result) ||
         right.name.localeCompare(left.name),
     );
-    if (checkpointHead !== undefined) archived.push(checkpointHead);
-    archived.push(...drafts.map((draft) => draft.input));
+    archived.push(
+      ...drafts.map((draft) => ({ ...draft, attempt: attempt.name })),
+    );
   }
   return archived;
-}
-
-function archivedAttemptNumber(name: string): number {
-  const match = /^attempt-(\d+)$/.exec(name);
-  return match ? Number(match[1]) : -1;
 }
 
 async function lstatIfExists(
@@ -905,12 +1442,16 @@ async function lstatIfExists(
   }
 }
 
-async function readOptionalArtifactText(
+async function readOptionalArtifactTextWithMetadata(
   context: ArtifactContext,
   components: readonly string[],
-): Promise<string | undefined> {
+): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactText(context, components, "previous scan draft");
+    return await readArtifactTextWithMetadata(
+      context,
+      components,
+      "previous scan draft",
+    );
   } catch (error) {
     if (
       error instanceof Error &&
@@ -1047,7 +1588,31 @@ function containsSavedValue(current: unknown, previous: unknown): boolean {
   return current === previous;
 }
 
-function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
+function deferredEntryPresent(
+  entries: unknown[],
+  previous: unknown,
+  ambiguousIds = new Set<string>(),
+): boolean {
+  return entries.some(
+    (current) =>
+      isDeepStrictEqual(current, previous) ||
+      (isObject(current) &&
+        isObject(previous) &&
+        !ambiguousGenericEntry(current, ambiguousIds) &&
+        !ambiguousGenericEntry(previous, ambiguousIds) &&
+        [previous.id, previous.candidateId].some(
+          (id) =>
+            typeof id === "string" &&
+            (current.id === id || current.candidateId === id),
+        )),
+  );
+}
+
+function coverageEntryPresent(
+  entries: unknown[],
+  previous: unknown,
+  ambiguousIds = new Set<string>(),
+): boolean {
   return entries.some((entry) => {
     const current =
       typeof entry === "string" ? { question: entry.trim() } : entry;
@@ -1056,6 +1621,11 @@ function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
         ? { question: previous.trim() }
         : structuredClone(previous);
     if (isObject(current) && isObject(original)) {
+      if (
+        ambiguousGenericEntry(current, ambiguousIds) ||
+        ambiguousGenericEntry(original, ambiguousIds)
+      )
+        return isDeepStrictEqual(current, original);
       const currentIdentities = coverageEntryIdentities(current);
       if (
         coverageEntryIdentities(original).some((identity) =>
@@ -1064,7 +1634,6 @@ function coverageEntryPresent(entries: unknown[], previous: unknown): boolean {
       ) {
         return true;
       }
-      if (current.id === undefined) delete original.id;
       if (
         current.receiptRefs === undefined &&
         Array.isArray(original.receiptRefs) &&
@@ -1083,20 +1652,14 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     if (typeof value === "string" && value.trim())
       stable.push(`stable:${value}`);
   }
-  if (stable.length > 0) return stable;
-  if (typeof entry.label === "string" && entry.label.trim()) {
-    return [
-      `surface:${typeof entry.riskArea === "string" ? entry.riskArea : ""}:${entry.label}`,
-    ];
-  }
-  return [];
+  return stable;
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
-export function preserveScanCoverage(
+function preserveScanCoverage(
   coverage: JsonObject,
-  sources: JsonObject[],
-  preserveCompleteness = true,
+  previous: JsonObject,
+  ambiguousDeferredIds = new Set<string>(),
 ): JsonObject {
   const result = structuredClone(coverage);
   for (const field of [
@@ -1107,11 +1670,19 @@ export function preserveScanCoverage(
   ] as const) {
     const current = (result[field] as unknown[] | undefined) ?? [];
     const values = [...current];
-    for (const source of sources) {
-      for (const value of (source[field] as unknown[] | undefined) ?? []) {
-        if (!coverageEntryPresent(values, value))
-          values.push(structuredClone(value));
-      }
+    for (const value of (previous[field] as unknown[] | undefined) ?? []) {
+      const present =
+        field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
+      if (
+        !present(
+          values,
+          value,
+          field === "deferred" || field === "surfaces"
+            ? ambiguousDeferredIds
+            : undefined,
+        )
+      )
+        values.push(structuredClone(value));
     }
     if (
       field !== "openQuestions" ||
@@ -1120,22 +1691,7 @@ export function preserveScanCoverage(
     )
       result[field] = values;
   }
-  if (
-    coverageHasOutstandingWork(result) ||
-    (preserveCompleteness &&
-      sources.some(
-        (source) =>
-          source.completeness === "partial" &&
-          !coverageHasOutstandingWork(source),
-      ))
-  )
-    result.completeness = "partial";
-  else if (
-    preserveCompleteness &&
-    sources.some((source) => source.completeness === "unknown")
-  ) {
-    result.completeness = "unknown";
-  }
+  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 
@@ -1244,25 +1800,48 @@ export async function getCodexSecurityCompletedScan(
 }
 
 export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
+  const parsed = parseScanDraftDocument(input);
+  const deferredIds = new Set<string>();
+  const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
+  for (const row of parsed.coverage.deferred as JsonObject[]) {
+    if (typeof row.id !== "string") continue;
+    if (deferredIds.has(row.id) || ambiguousIds.has(row.id))
+      throw new Error(`scan draft: coverage.deferred repeats ${row.id}.`);
+    deferredIds.add(row.id);
+  }
+  if (parsed.complete === false && resolvedDeferred(parsed.coverage).length > 0)
+    throw new Error(
+      "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
+    );
+  parsed.coverage.deferred = normalizeDeferred(
+    parsed.coverage.deferred as JsonObject[],
+  );
+  parsed.coverage.surfaces = normalizeSurfaces(
+    parsed.coverage.surfaces as JsonObject[],
+  );
+  return parsed;
+}
+
+function parseScanDraftDocument(input: unknown): ScanDraftInput {
   const parsed = scanDraftInputSchema.parse(input);
   validateFindingSemantics(parsed.findings);
   validateCoverageSemantics(parsed.coverage);
   return parsed;
 }
 
-/** Re-admit results persisted by older plugin versions without loosening live tool input. */
+/** Validate saved drafts before reconciling interrupted writes and older findings. */
 export function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (!Array.isArray(compatible.findings)) {
-    return parseScanDraft(compatible as unknown as ScanDraftInput);
+    return parseScanDraftDocument(compatible);
   }
   for (const finding of compatible.findings) {
     if (!isObject(finding)) continue;
     normalizePersistedFindingDetails(finding);
   }
-  return parseScanDraft(compatible as unknown as ScanDraftInput);
+  return parseScanDraftDocument(compatible);
 }
 
 function parsePersistedCheckpoint(
@@ -1306,7 +1885,7 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     canonicalEvidence.flatMap((evidence) => {
       if (!isObject(evidence)) return [];
       const id = evidence.id;
-      return typeof id === "string" && id.trim().length > 0 ? [id] : [];
+      return isNonEmptyString(id) ? [id] : [];
     }),
   );
   if (Array.isArray(finding.code_evidence)) {
@@ -1316,10 +1895,8 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       const id = evidence.id;
       const code = evidence.code;
       if (
-        typeof id !== "string" ||
-        id.trim().length === 0 ||
-        typeof code !== "string" ||
-        code.trim().length === 0 ||
+        !isNonEmptyString(id) ||
+        !isNonEmptyString(code) ||
         evidenceIds.has(id)
       ) {
         continue;
@@ -1363,15 +1940,11 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     const section = finding[sectionName];
     if (!isObject(section)) continue;
     normalizePersistedStringLists(section, listFields);
-    filterPersistedEvidenceRefs(section, evidenceIds);
   }
 
   const rootCause = finding.rootCause;
   if (isObject(rootCause)) {
-    if (
-      typeof rootCause.summary !== "string" ||
-      rootCause.summary.trim().length === 0
-    ) {
+    if (!isNonEmptyString(rootCause.summary)) {
       delete finding.rootCause;
     } else {
       removeUnsupportedPersistedStrings(rootCause, ["code", "language"]);
@@ -1384,10 +1957,7 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       "code",
       "language",
     ]);
-  } else if (
-    "root_cause" in finding &&
-    (typeof legacyRootCause !== "string" || legacyRootCause.trim().length === 0)
-  ) {
+  } else if ("root_cause" in finding && !isNonEmptyString(legacyRootCause)) {
     delete finding.root_cause;
   }
 
@@ -1407,16 +1977,8 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
   removeUnsupportedPersistedStrings(attackPath, ["summary"]);
   for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
     const detail = attackPath[field];
-    if (detail === null) {
-      delete attackPath[field];
-      continue;
-    }
-    if (typeof detail === "string") {
-      if (detail.trim().length === 0) delete attackPath[field];
-      continue;
-    }
     if (!isObject(detail)) {
-      if (field in attackPath) delete attackPath[field];
+      if (!isNonEmptyString(detail)) delete attackPath[field];
       continue;
     }
     removeUnsupportedPersistedStrings(detail, [
@@ -1432,7 +1994,6 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
       "transformations",
       ...(field === "reachability" ? ["preconditions"] : []),
     ]);
-    filterPersistedEvidenceRefs(detail, evidenceIds);
   }
   for (const field of ["impact", "likelihood"]) {
     const detail = attackPath[field];
@@ -1441,49 +2002,32 @@ function normalizePersistedFindingDetails(finding: JsonObject): void {
     } else if (
       detail !== undefined &&
       detail !== null &&
-      (typeof detail !== "string" || detail.trim().length === 0)
+      !isNonEmptyString(detail)
     ) {
       delete attackPath[field];
     }
   }
-}
 
-function normalizePersistedStringLists(
-  section: JsonObject,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    const normalized =
-      typeof value === "string"
-        ? value.trim().length > 0
-          ? [value]
-          : []
+  function normalizePersistedStringLists(
+    section: JsonObject,
+    fields: string[],
+  ): void {
+    for (const field of fields) {
+      if (!(field in section)) continue;
+      const value = section[field];
+      const normalized = isNonEmptyString(value)
+        ? [value]
         : Array.isArray(value)
-          ? value.filter(
-              (item): item is string =>
-                typeof item === "string" && item.trim().length > 0,
-            )
+          ? value.filter(isNonEmptyString)
           : [];
-    if (normalized.length > 0) section[field] = normalized;
-    else delete section[field];
-  }
-}
-
-function filterPersistedEvidenceRefs(
-  section: JsonObject,
-  evidenceIds: Set<string>,
-): void {
-  for (const field of ["evidenceRefs", "evidence_refs"]) {
-    const refs = section[field];
-    if (!Array.isArray(refs)) continue;
-    section[field] = refs.filter(
-      (ref): ref is string =>
-        typeof ref === "string" &&
-        ref.trim().length > 0 &&
-        evidenceIds.has(ref),
-    );
+      if (normalized.length > 0) section[field] = normalized;
+      else delete section[field];
+    }
+    for (const field of ["evidenceRefs", "evidence_refs"]) {
+      const refs = section[field];
+      if (!Array.isArray(refs)) continue;
+      section[field] = refs.filter((ref) => evidenceIds.has(ref));
+    }
   }
 }
 
@@ -1492,10 +2036,7 @@ function removeUnsupportedPersistedStrings(
   fields: string[],
 ): void {
   for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].trim().length === 0)
-    ) {
+    if (field in section && !isNonEmptyString(section[field])) {
       delete section[field];
     }
   }
@@ -1634,79 +2175,68 @@ function buildScope(
 ): JsonObject {
   const includePaths = trustedScope.requiredIncludePaths;
   const excludePaths = trustedScope.requiredExcludePaths;
-  const resolvedIncludePaths =
-    includePaths === undefined
-      ? [
-          typeof trustedScope.requestedPath === "string"
-            ? trustedScope.requestedPath
-            : (context.scope ?? "."),
-        ]
-      : requireTextArray(
-          includePaths,
-          "scan draft: authoritative included scope",
-        );
-  const resolvedExcludePaths =
-    excludePaths === undefined
-      ? []
-      : requireTextArray(
-          excludePaths,
-          "scan draft: authoritative excluded scope",
-        );
 
   return {
     ...semanticScope,
-    includePaths: resolvedIncludePaths,
-    excludePaths: resolvedExcludePaths,
+    includePaths:
+      includePaths === undefined
+        ? [
+            typeof trustedScope.requestedPath === "string"
+              ? trustedScope.requestedPath
+              : (context.scope ?? "."),
+          ]
+        : requireTextArray(
+            includePaths,
+            "scan draft: authoritative included scope",
+          ),
+    excludePaths:
+      excludePaths === undefined
+        ? []
+        : requireTextArray(
+            excludePaths,
+            "scan draft: authoritative excluded scope",
+          ),
   };
 }
 
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
-  const generatedIdentities = findings.map((finding, index) => {
-    if (finding.identity !== undefined) return undefined;
+  const anchorCounts = new Map<string, number>();
+  const anchors = findings.map((finding, index) => {
     const candidateId = (finding.extensions as JsonObject | undefined)
       ?.candidateId;
     const identitySource =
       typeof candidateId === "string" && candidateId.trim()
         ? candidateId
         : (finding.title as string);
-    const extensions = finding.extensions as JsonObject | undefined;
-    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
-    );
-    return {
-      anchor: semanticIdentifier(identitySource, `finding-${index + 1}`),
-      stableInstanceSource: siblingSource,
-      siblingSource: siblingSource ?? (finding.title as string),
-    };
-  });
-  const anchorCounts = new Map<string, number>();
-  for (const [index, finding] of findings.entries()) {
-    const generatedIdentity = generatedIdentities[index];
-    const authoredIdentity = finding.identity as JsonObject | undefined;
     const anchor =
-      generatedIdentity?.anchor ?? (authoredIdentity?.anchor as string);
+      finding.identity === undefined
+        ? semanticIdentifier(identitySource, `finding-${index + 1}`)
+        : ((finding.identity as JsonObject).anchor as string);
     const ruleScopedAnchor = `${finding.ruleId}\0${anchor}`;
     anchorCounts.set(
       ruleScopedAnchor,
       (anchorCounts.get(ruleScopedAnchor) ?? 0) + 1,
     );
-  }
+    return anchor;
+  });
 
   const identified: JsonObject[] = findings.map((finding, index) => {
-    const generatedIdentity = generatedIdentities[index];
-    if (generatedIdentity === undefined) return { ...finding };
-    const identity: JsonObject = { anchor: generatedIdentity.anchor };
-    const ruleScopedAnchor = `${finding.ruleId}\0${generatedIdentity.anchor}`;
+    if (finding.identity !== undefined) return { ...finding };
+    const identity: JsonObject = { anchor: anchors[index] };
+    const extensions = finding.extensions as JsonObject | undefined;
+    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
+      (value): value is string =>
+        typeof value === "string" && Boolean(value.trim()),
+    );
+    const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
     if (
-      generatedIdentity.stableInstanceSource !== undefined ||
+      siblingSource !== undefined ||
       (anchorCounts.get(ruleScopedAnchor) ?? 0) > 1
     ) {
-      const baseInstance = semanticIdentifier(
-        generatedIdentity.siblingSource,
+      identity.instance = semanticIdentifier(
+        siblingSource ?? (finding.title as string),
         `finding-${index + 1}`,
       );
-      identity.instance = baseInstance;
     }
     return {
       ...finding,
@@ -1757,72 +2287,6 @@ function buildCoverage(
   scope: JsonObject,
   target: JsonObject,
 ): JsonObject {
-  const surfaces = semanticCoverage.surfaces as JsonObject[];
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      typeof surface.id === "string" ? [surface.id] : [],
-    ),
-  );
-  const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface.id === "string";
-    const baseId = explicitId
-      ? (surface.id as string)
-      : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
-    let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-      let suffix = 2;
-      do {
-        id = `${baseId}-${suffix}`;
-        suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-    }
-    surfaceIds.add(id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface.receiptRefs ?? [],
-    };
-  });
-  const deferred = semanticCoverage.deferred as JsonObject[];
-  // Reserve later owned identities before deriving any earlier missing ones.
-  const deferredIds = new Set(
-    deferred.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
-  );
-  const reservedCandidateIds = new Set(
-    deferred.flatMap((item) =>
-      typeof item.candidateId === "string" ? [item.candidateId] : [],
-    ),
-  );
-  const normalizedDeferred = deferred.map((item) => {
-    if (typeof item.id === "string") return item;
-
-    const candidateId = item.candidateId;
-    const baseId =
-      typeof candidateId === "string"
-        ? candidateId
-        : `deferred-${createHash("sha256")
-            .update(
-              JSON.stringify([
-                item.reason,
-                item.paths ?? [],
-                item.surfaceIds ?? [],
-              ]),
-            )
-            .digest("hex")
-            .slice(0, 16)}`;
-    let id = baseId;
-    let suffix = 2;
-    while (
-      deferredIds.has(id) ||
-      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
-    ) {
-      id = `${baseId}-${suffix}`;
-      suffix += 1;
-    }
-    deferredIds.add(id);
-    return { ...item, id };
-  });
   const openQuestions = semanticCoverage.openQuestions as
     Array<string | JsonObject> | undefined;
 
@@ -1832,8 +2296,6 @@ function buildCoverage(
     inventoryStrategy: inventoryStrategy(context, scope, target),
     includePaths: scope.includePaths,
     excludePaths: scope.excludePaths,
-    surfaces: normalizedSurfaces,
-    deferred: normalizedDeferred,
     ...(openQuestions === undefined
       ? {}
       : {
@@ -1844,6 +2306,71 @@ function buildCoverage(
           ),
         }),
   };
+}
+
+function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
+  const reservedSurfaceIds = new Set(
+    surfaces.flatMap((surface) =>
+      [surface.id, surface.candidateId].filter(
+        (id): id is string => typeof id === "string",
+      ),
+    ),
+  );
+  const surfaceIds = new Set<string>();
+  return surfaces.map((surface) => {
+    const explicitId = typeof surface.id === "string";
+    const baseId = explicitId
+      ? (surface.id as string)
+      : `surface-${createHash("sha256")
+          .update(JSON.stringify(surface))
+          .digest("hex")
+          .slice(0, 16)}`;
+    let id = baseId;
+    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+      let suffix = 2;
+      do {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+    }
+    surfaceIds.add(id);
+    return { ...surface, id, receiptRefs: surface.receiptRefs ?? [] };
+  });
+}
+
+function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
+  // Reserve later owned identities before deriving any earlier missing ones.
+  const ids = new Set(
+    rows.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
+  );
+  const reservedCandidateIds = new Set(
+    rows.flatMap((item) =>
+      typeof item.candidateId === "string" ? [item.candidateId] : [],
+    ),
+  );
+  return rows.map((item) => {
+    if (typeof item.id === "string") return item;
+
+    const candidateId = item.candidateId;
+    const baseId =
+      typeof candidateId === "string"
+        ? candidateId
+        : `deferred-${createHash("sha256")
+            .update(JSON.stringify(item))
+            .digest("hex")
+            .slice(0, 16)}`;
+    let id = baseId;
+    let suffix = 2;
+    while (
+      ids.has(id) ||
+      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
+    ) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    ids.add(id);
+    return { ...item, id };
+  });
 }
 
 function coverageMode(context: ArtifactContext, contract: JsonObject): string {
@@ -2025,10 +2552,6 @@ async function readExistingHardeningPortfolio(
 function requireObject(value: unknown, context: string): JsonObject {
   if (!isObject(value)) throw new Error(`${context} must be an object.`);
   return value;
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requireTextArray(value: unknown, context: string): string[] {

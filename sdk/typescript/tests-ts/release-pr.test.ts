@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { gitText } from "./support/shell.js";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, test } from "bun:test";
+import { check } from "prettier";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
 type Change = {
   title: string;
@@ -112,16 +112,10 @@ const {
     plan: Plan;
   }>;
 };
-const releaseAutomation = new URL(
-  "../scripts/release-automation.mjs",
-  import.meta.url,
-);
-const { parseReviewedReleaseNotes, composeReleaseNotes } = (await import(
-  releaseAutomation.href
-)) as {
-  parseReviewedReleaseNotes: (version: string, notes: string) => string;
-  composeReleaseNotes: (inventory: string, summary: string) => string;
-};
+import {
+  parseReviewedReleaseNotes,
+  composeReleaseNotes,
+} from "../scripts/release-automation.mjs";
 const template = readFileSync(
   new URL("../../../.github/PULL_REQUEST_TEMPLATE.md", import.meta.url),
   "utf8",
@@ -130,11 +124,8 @@ const workflow = readFileSync(
   new URL("../../../.github/workflows/node-release-pr.yml", import.meta.url),
   "utf8",
 );
-const directories: string[] = [];
-afterEach(() => {
-  for (const directory of directories.splice(0))
-    rmSync(directory, { recursive: true, force: true });
-});
+const directories = createTemporaryDirectoriesSync();
+afterEach(directories.cleanup);
 
 function packageText(version = "0.1.23", dependencies = {}) {
   return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
@@ -181,13 +172,12 @@ function apiError(status: number) {
 }
 
 class Fixture {
-  readonly directory = mkdtempSync(join(tmpdir(), "release pr test "));
+  readonly directory = directories.create("release pr test ");
   readonly repo = createGitRepository(this.directory);
   readonly github = new FakeGitHub(this);
   readonly git = this.repo.git;
 
   constructor() {
-    directories.push(this.directory);
     this.git("init", "-b", "main");
     this.git("config", "user.name", "Release Test");
     this.git("config", "user.email", "release-test@example.invalid");
@@ -219,10 +209,9 @@ class Fixture {
       if (content === null) {
         this.git("update-index", "--force-remove", "--", path);
       } else {
-        const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        const blob = gitText(["hash-object", "-w", "--stdin"], {
           cwd: this.directory,
           input: content,
-          encoding: "utf8",
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
         this.git("update-index", "--add", "--cacheinfo", "100644", blob, path);
@@ -759,6 +748,17 @@ describe("pre-1.0 release policy", () => {
     expect(
       nextReleaseVersion("0.1.23", [change("fix: first fix"), breaking]),
     ).toBe("0.2.0");
+  });
+
+  test("generates formatted release notes", async () => {
+    for (const changes of [
+      [],
+      [change("fix: repair behavior")],
+      [change("fix!: change behavior")],
+    ]) {
+      const notes = createReleasePlan(history(changes)).files[notesPath]!;
+      expect(await check(notes, { parser: "markdown" })).toBe(true);
+    }
   });
 
   test("recomputes the whole cycle, including hidden changes, without incrementing on reruns", () => {

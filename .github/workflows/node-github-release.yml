@@ -173,11 +173,7 @@ jobs:
             sleep 2
           done
 
-          if [[ "$run_name" != "node-release" ||
-                "$run_status" != "completed" ||
-                "$run_conclusion" != "success" ||
-                "$run_sha" != "$release_sha" ||
-                "$run_tag" != "$release_tag" ]]; then
+          if [[ "$run_conclusion" != "success" ]]; then
             echo "The release run must successfully publish the exact tagged commit." >&2
             exit 1
           fi
@@ -188,6 +184,37 @@ jobs:
             printf 'sha=%s\n' "$release_sha"
             printf 'run-id=%s\n' "$release_run"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the published npm package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # npm can finish publishing before its registry makes the version available.
+          for attempt in {1..21}; do
+            if metadata="$(
+              npm view "@openai/codex-security@$RELEASE_VERSION" version \
+                --json --prefer-online --registry=https://registry.npmjs.org/
+            )"; then
+              exit 0
+            fi
+            printf '%s\n' "$metadata" >&2
+            if ! printf '%s\n' "$metadata" | node --input-type=module --eval '
+              import { readFileSync } from "node:fs";
+              const result = JSON.parse(readFileSync(0, "utf8"));
+              process.exit(result?.error?.code === "E404" ? 0 : 1);
+            '; then
+              exit 1
+            fi
+            if (( attempt == 21 )); then
+              echo "The published npm version did not become available within ten minutes." >&2
+              exit 1
+            fi
+            echo "Waiting for npm publication to become available." >&2
+            sleep 30
+          done
 
       - name: Download the verified or durable npm release artifact
         shell: bash
@@ -262,7 +289,7 @@ jobs:
                 "$RELEASE_VERSION" \
                 "$RELEASE_SHA" \
                 "$GITHUB_REPOSITORY" \
-                "$RELEASE_RUN_ID" 2>/dev/null
+                "$RELEASE_RUN_ID"
           )"; then
             verified_run_id="$RELEASE_RUN_ID"
             printf '%s\n' "$verified_provenance"

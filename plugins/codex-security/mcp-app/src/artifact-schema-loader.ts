@@ -33,12 +33,71 @@ export function bundleArtifactSchema(
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Unknown Codex Security schema definition: " + definition);
   }
-  return dereferenceArtifactSchema(
-    source,
-    document,
-    documentsById,
-    new Set<string>(),
-  ) as ArtifactSchemaObject;
+
+  const activeReferences = new Set<string>();
+
+  function dereferenceArtifactSchema(
+    value: unknown,
+    document: SchemaDocument,
+  ): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => dereferenceArtifactSchema(item, document));
+    }
+    if (!value || typeof value !== "object") return value;
+
+    const object = value as ArtifactSchemaObject;
+    if (typeof object.$ref !== "string") {
+      return Object.fromEntries(
+        Object.entries(object).map(([name, child]) => [
+          name,
+          dereferenceArtifactSchema(child, document),
+        ]),
+      );
+    }
+
+    const reference = object.$ref;
+    const separator = reference.indexOf("#");
+    const referencedDocumentId =
+      separator < 0 ? reference : reference.slice(0, separator);
+    const pointer = separator < 0 ? "" : reference.slice(separator + 1);
+    const referencedDocument = referencedDocumentId
+      ? documentsById.get(referencedDocumentId)
+      : document;
+    if (!referencedDocument) {
+      throw new Error("Unknown Codex Security schema reference: " + reference);
+    }
+
+    const referenceKey = referencedDocument.$id + "#" + pointer;
+    if (activeReferences.has(referenceKey)) {
+      throw new Error("Cyclic Codex Security schema reference: " + reference);
+    }
+    activeReferences.add(referenceKey);
+    const resolved = dereferenceArtifactSchema(
+      readSchemaPointer(referencedDocument, pointer),
+      referencedDocument,
+    );
+    // A recursive failure exits this bundle. Siblings use the parent path.
+    activeReferences.delete(referenceKey);
+    const siblings = Object.fromEntries(
+      Object.entries(object).filter(([name]) => name !== "$ref"),
+    );
+    if (Object.keys(siblings).length === 0) return resolved;
+    if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
+      throw new Error(
+        "Codex Security schema reference cannot have sibling fields: " +
+          reference,
+      );
+    }
+    return {
+      ...resolved,
+      ...(dereferenceArtifactSchema(
+        siblings,
+        document,
+      ) as ArtifactSchemaObject),
+    };
+  }
+
+  return dereferenceArtifactSchema(source, document) as ArtifactSchemaObject;
 }
 
 /**
@@ -56,84 +115,6 @@ export function loadArtifactZodSchema(
       definition,
     ) as z.core.JSONSchema.JSONSchema,
   );
-}
-
-function dereferenceArtifactSchema(
-  value: unknown,
-  document: SchemaDocument,
-  documentsById: ReadonlyMap<string, SchemaDocument>,
-  activeReferences: ReadonlySet<string>,
-): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) =>
-      dereferenceArtifactSchema(
-        item,
-        document,
-        documentsById,
-        activeReferences,
-      ),
-    );
-  }
-  if (!value || typeof value !== "object") return value;
-
-  const object = value as ArtifactSchemaObject;
-  if (typeof object.$ref !== "string") {
-    return Object.fromEntries(
-      Object.entries(object).map(([name, child]) => [
-        name,
-        dereferenceArtifactSchema(
-          child,
-          document,
-          documentsById,
-          activeReferences,
-        ),
-      ]),
-    );
-  }
-
-  const reference = object.$ref;
-  const separator = reference.indexOf("#");
-  const referencedDocumentId =
-    separator < 0 ? reference : reference.slice(0, separator);
-  const pointer = separator < 0 ? "" : reference.slice(separator + 1);
-  const referencedDocument = referencedDocumentId
-    ? documentsById.get(referencedDocumentId)
-    : document;
-  if (!referencedDocument) {
-    throw new Error("Unknown Codex Security schema reference: " + reference);
-  }
-
-  const referenceKey = referencedDocument.$id + "#" + pointer;
-  if (activeReferences.has(referenceKey)) {
-    throw new Error("Cyclic Codex Security schema reference: " + reference);
-  }
-  const nextReferences = new Set(activeReferences);
-  nextReferences.add(referenceKey);
-  const resolved = dereferenceArtifactSchema(
-    readSchemaPointer(referencedDocument, pointer),
-    referencedDocument,
-    documentsById,
-    nextReferences,
-  );
-  const siblings = Object.fromEntries(
-    Object.entries(object).filter(([name]) => name !== "$ref"),
-  );
-  if (Object.keys(siblings).length === 0) return resolved;
-  if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
-    throw new Error(
-      "Codex Security schema reference cannot have sibling fields: " +
-        reference,
-    );
-  }
-  return {
-    ...resolved,
-    ...(dereferenceArtifactSchema(
-      siblings,
-      document,
-      documentsById,
-      activeReferences,
-    ) as ArtifactSchemaObject),
-  };
 }
 
 function readSchemaPointer(document: SchemaDocument, pointer: string): unknown {

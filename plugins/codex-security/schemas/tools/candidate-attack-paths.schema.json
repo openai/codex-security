@@ -2,20 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-security://schemas/tools/candidate-attack-paths.schema.json",
   "title": "Record Codex Security candidate attack paths",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["scanId", "attackPaths"],
-  "properties": {
-    "scanId": {
-      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
-    },
-    "attackPaths": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/attackPathUpdate"
-      }
-    }
-  },
+  "$ref": "#/$defs/input",
   "$defs": {
     "input": {
       "type": "object",

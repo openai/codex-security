@@ -3,7 +3,6 @@ import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import { useMemo, useRef, useState } from "react";
-import { safeErrorMessage } from "./errors.js";
 import type { Finding, FindingCodeEvidence } from "./models.js";
 
 const SEVERITY_COLORS = {
@@ -57,7 +56,7 @@ interface PatchTuiProps {
 }
 
 function safeText(value: unknown): string {
-  return stripVTControlCharacters(safeErrorMessage(String(value)))
+  return stripVTControlCharacters(String(value))
     .replaceAll(/\r\n?/gu, "\n")
     .replaceAll(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
 }
@@ -102,9 +101,8 @@ function detailLines(
       return [];
     }
     if (key === "level") {
-      const level = safeLine(entry);
       return [
-        `${indent}${level.replace(/^./u, (match) => match.toUpperCase())}`,
+        `${indent}${safeLine(entry).replace(/^./u, (match) => match.toUpperCase())}`,
       ];
     }
     if (
