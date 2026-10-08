@@ -93,52 +93,23 @@ export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   return updates;
 }
 
-interface FenceDelimiter {
-  marker: string;
-  length: number;
-  rest: string;
-}
-
-interface FenceState {
-  marker: string;
-  length: number;
-}
-
-function fenceDelimiter(line: string): FenceDelimiter | null {
-  const match = /^\s*(`{3,}|~{3,})(.*)$/u.exec(line);
-  if (match === null) return null;
-  const run = match[1]!;
-  return { marker: run[0]!, length: run.length, rest: match[2]! };
-}
-
-/** Track Markdown fenced code blocks so quoted markers are not read as live. */
-function nextFenceState(
-  fence: FenceState | null,
-  delimiter: FenceDelimiter,
-): FenceState | null {
-  if (fence === null) {
-    return { marker: delimiter.marker, length: delimiter.length };
-  }
-  // A closing fence uses the same marker character, is at least as long as the
-  // opening fence, and carries no trailing content.
-  if (
-    delimiter.marker === fence.marker &&
-    delimiter.length >= fence.length &&
-    delimiter.rest.trim() === ""
-  ) {
-    return null;
-  }
-  return fence;
-}
-
-/** Return only the lines that are not inside a Markdown fenced code block. */
+/** Return lines outside Markdown fences so quoted markers are not read as live. */
 function linesOutsideFences(text: string): string[] {
   const lines: string[] = [];
-  let fence: FenceState | null = null;
+  let fence: { marker: string; length: number } | null = null;
   for (const line of text.split(/\r?\n/u)) {
-    const delimiter = fenceDelimiter(line);
+    const delimiter = /^\s*(`{3,}|~{3,})(.*)$/u.exec(line);
     if (delimiter !== null) {
-      fence = nextFenceState(fence, delimiter);
+      const run = delimiter[1]!;
+      if (fence === null) {
+        fence = { marker: run[0]!, length: run.length };
+      } else if (
+        run[0] === fence.marker &&
+        run.length >= fence.length &&
+        delimiter[2]!.trim() === ""
+      ) {
+        fence = null;
+      }
       continue;
     }
     if (fence === null) lines.push(line);

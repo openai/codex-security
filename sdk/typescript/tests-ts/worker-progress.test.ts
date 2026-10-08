@@ -358,34 +358,39 @@ describe("worker progress events", () => {
       scanProgressUpdatesFromEvent(
         commandEvent(
           "read the scan workflow",
-          ["````markdown", "```text", progressMarker, "```", "````"].join("\n"),
+          [
+            "````markdown",
+            "```text",
+            progressMarker,
+            "```",
+            "````",
+            progressMarker,
+          ].join("\n"),
         ),
       ),
-    ).toEqual([]);
+    ).toEqual([progress]);
     // A tilde fence is not closed by a backtick fence.
     expect(
       scanProgressUpdatesFromEvent(
         commandEvent(
           "read the scan workflow",
-          ["~~~text", progressMarker, "```", progressMarker, "~~~"].join("\n"),
+          [
+            "~~~text",
+            progressMarker,
+            "```",
+            progressMarker,
+            "~~~",
+            progressMarker,
+          ].join("\n"),
         ),
       ),
-    ).toEqual([]);
+    ).toEqual([progress]);
     // Dispatch markers inside a fenced block are not live worker status.
     expect(
       workerStatusFromEvent(
         messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
       ),
     ).toBeNull();
-    // A real marker after the fence closes is still read.
-    expect(
-      scanProgressUpdatesFromEvent(
-        commandEvent(
-          "read the scan workflow",
-          ["```text", progressMarker, "```", progressMarker].join("\n"),
-        ),
-      ),
-    ).toEqual([progress]);
   });
 
   test("rejects malformed or overstated file progress", () => {
