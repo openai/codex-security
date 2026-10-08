@@ -8,6 +8,8 @@ import sqlite3
 from decimal import Decimal
 from typing import Any
 
+from workbench.json_numbers import dumps_json
+
 # Tag numbers so 10 and 10.0 compare equally without treating true as 1.
 _finding_json = json.JSONDecoder(
     parse_int=lambda value: (Decimal(value),),
@@ -24,7 +26,7 @@ def upsert_finding(
     current = connection.execute(
         "SELECT details_json FROM findings WHERE id = ?", (finding["findingId"],)
     ).fetchone()
-    details = json.dumps(finding, allow_nan=False, sort_keys=True)
+    details = dumps_json(finding, allow_nan=False, sort_keys=True)
     # Preserve unchanged text without conflating JSON booleans and numbers.
     if (
         current is not None
@@ -102,7 +104,7 @@ def index_findings(
                 severity["level"],
                 confidence["level"],
                 finding["remediation"],
-                json.dumps(finding, allow_nan=False, sort_keys=True),
+                dumps_json(finding, allow_nan=False, sort_keys=True),
                 timestamp,
             ),
         )
