@@ -95,6 +95,7 @@ import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
+import { prepareExternalPublication } from "./external-findings-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
@@ -1121,6 +1122,7 @@ interface CliDependencies {
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
+  externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
@@ -3192,6 +3194,102 @@ export async function main(
         return cloudBatch;
       } finally {
         removeSignalListeners();
+      }
+    },
+  });
+  publication.command("findings", {
+    description: "Preview and publish selected Wiz findings to Cloud.",
+    destructive: true,
+    mcp: false,
+    args: z.object({
+      file: z
+        .string()
+        .describe("Saved Wiz vulnerability findings JSON or normalized JSONL."),
+    }),
+    options: z.object({
+      to: z.literal("cloud").describe("Publication destination."),
+      repository: optionValue("--repository").describe(
+        "Authorized Cloud repository ID.",
+      ),
+      provider: z
+        .literal("wiz")
+        .describe("Vendor that produced these findings."),
+      sourceKey: optionValue("--source-key").describe(
+        "Stable vendor tenant and finding namespace; not a project selection filter.",
+      ),
+      dryRun: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Read and preview the destination and findings without uploading.",
+        ),
+      yes: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Confirm publication of the previewed input without a terminal prompt.",
+        ),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, options, format, formatExplicit }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      const structured = formatExplicit && format !== "toon";
+      try {
+        const prepared = await prepareExternalPublication(
+          resolveCliPath(dependencies.currentDirectory(), args.file),
+          options,
+          {
+            environment: dependencies.environment,
+            fetch: dependencies.cloudFetch,
+            signal: controller.signal,
+          },
+        );
+        const { preview } = prepared;
+        const showPreview = () => {
+          errorOutput.write(
+            `Source: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+          );
+          for (const excluded of preview.excluded)
+            errorOutput.write(
+              `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
+            );
+        };
+        if (!structured) showPreview();
+        if (options.dryRun) return { ...preview, dryRun: true };
+        if (!options.yes) {
+          const prompt =
+            dependencies.externalPublicationPrompt ??
+            createTerminalPrompt(errorOutput);
+          if (!prompt.isInteractive())
+            throw new CodexSecurityError(
+              "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
+            );
+          if (structured) showPreview();
+          if (
+            !(await prompt.confirm(
+              `Publish these ${preview.findings.length} findings?`,
+              false,
+              controller.signal,
+            ))
+          )
+            return { published: false, preview };
+        }
+        const result = await prepared.publish();
+        if (result.counts.error) exitCode = 1;
+        if (!structured)
+          errorOutput.write(
+            `Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}\nOpen in Cloud: ${result.cloudUrl}\n`,
+          );
+        return { ...result, excluded: preview.excluded };
+      } catch (error) {
+        reportPublicationError(
+          error,
+          controller.signal.aborted ? controller.signal.reason : undefined,
+        );
+        return undefined;
+      } finally {
+        removeSignals();
       }
     },
   });

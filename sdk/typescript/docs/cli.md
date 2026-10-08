@@ -951,6 +951,56 @@ Supply the validation prompt again when rerunning.
 
 ## Publish findings to Cloud
 
+Publish selected external Wiz vulnerability findings without creating a scan:
+
+```bash
+codex-security publish findings selected-wiz.json \
+  --to cloud --repository REPOSITORY_ID --provider wiz \
+  --source-key TENANT_ID/vulnerability-finding --dry-run --format json
+```
+
+This command reads the authorized destination and current source versions during
+preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
+repository needs an existing environment; no native scan is required. Review the
+destination, findings, and exclusions, then rerun without `--dry-run`. The default
+terminal prompt is No; `--yes` confirms a previously reviewed input for scripts or
+the plugin. Without a terminal or `--yes`, no upload occurs.
+
+Input can be a Wiz vulnerability finding, an array, a complete
+`data.vulnerabilityFindings.nodes` response, or JSONL with one vendor record per
+line. A response that advertises another page is rejected: save the explicitly
+selected records as an array. Normalized JSONL is also accepted:
+
+```json
+{
+  "source_finding_id": "vendor-finding-42",
+  "evidence": {
+    "title": "Vulnerable example package",
+    "severity": "high",
+    "source_data": { "id": "vendor-finding-42" }
+  }
+}
+```
+
+Use Wiz's finding `id`, not a CVE, as identity. Keep the source key stable across
+exports; a selected project filter does not change the vendor namespace. Confirm
+that the selected assets or builds map to this repository. The raw Wiz adapter
+retains each record in `source_data`, uses reported severity, and leaves unknown
+branch/revision and repository locations empty. Container paths are retained as
+vendor evidence rather than interpreted as source-code locations. It does not
+fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
+
+Requests contain at most 100 findings and respect the Cloud payload limits.
+Before uploading, the publisher saves request IDs and bodies privately under
+the configured Codex Security state directory. After an uncertain response,
+repeat the same command with unchanged input to resume those requests. A reset
+retires the old request without republishing; review and explicitly approve a
+fresh invocation. Final item errors are reported individually with exit code 1;
+correct the input or source conflict before a fresh submission. Transport or
+readback failures return exit code 2 and retain the resumable request. Successful
+receipts are saved locally; the CLI verifies Cloud source-report reads and
+returns a Findings link. Search indexing can lag an accepted import.
+
 Preview selected completed scans before uploading:
 
 ```bash

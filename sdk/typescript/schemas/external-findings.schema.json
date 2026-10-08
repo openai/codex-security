@@ -1,0 +1,929 @@
+{
+  "$defs": {
+    "FindingImportItem": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Client Id",
+          "type": "string"
+        },
+        "source_finding_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Finding Id",
+          "type": "string"
+        },
+        "expected_version": {
+          "minimum": 0,
+          "title": "Expected Version",
+          "type": "integer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/ImportedFindingEvidence"
+        }
+      },
+      "required": [
+        "client_id",
+        "source_finding_id",
+        "expected_version",
+        "evidence"
+      ],
+      "title": "FindingImportItem",
+      "type": "object"
+    },
+    "FindingImportReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "object": {
+          "const": "security.finding_import",
+          "default": "security.finding_import",
+          "title": "Object",
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/$defs/ImportDestination"
+        },
+        "source": {
+          "$ref": "#/$defs/ImportSource"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "integer"
+        },
+        "item_count": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Item Count",
+          "type": "integer"
+        },
+        "counts": {
+          "$ref": "#/$defs/ImportCounts"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/FindingImportResult"
+          },
+          "title": "Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "repository",
+        "source",
+        "actor",
+        "created_at",
+        "item_count",
+        "counts",
+        "results"
+      ],
+      "title": "FindingImportReceipt",
+      "type": "object"
+    },
+    "FindingImportRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "format": "uuid",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/$defs/ImportDestination"
+        },
+        "source": {
+          "$ref": "#/$defs/ImportSource"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/FindingImportItem"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": ["request_id", "repository", "source", "items"],
+      "title": "FindingImportRequest",
+      "type": "object"
+    },
+    "FindingImportResult": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "title": "Client Id",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": ["created", "updated", "unchanged", "error"],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "source_report_id": {
+          "anyOf": [
+            {
+              "pattern": "^aif_[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Report Id"
+        },
+        "observation_id": {
+          "anyOf": [
+            {
+              "pattern": "^aio_[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observation Id"
+        },
+        "canonical_finding_id": {
+          "anyOf": [
+            {
+              "pattern": "^acf_[0-9a-f]{32}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Finding Id"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportItemError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": ["client_id", "outcome"],
+      "title": "FindingImportResult",
+      "type": "object"
+    },
+    "ImportCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "created": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Created",
+          "type": "integer"
+        },
+        "updated": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Updated",
+          "type": "integer"
+        },
+        "unchanged": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Unchanged",
+          "type": "integer"
+        },
+        "error": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Error",
+          "type": "integer"
+        }
+      },
+      "title": "ImportCounts",
+      "type": "object"
+    },
+    "ImportDestination": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "repo_connector_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Repo Connector Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "reset_marker": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reset Marker",
+          "type": "string"
+        }
+      },
+      "required": ["id", "repo_connector_id", "environment_id", "reset_marker"],
+      "title": "ImportDestination",
+      "type": "object"
+    },
+    "ImportItemError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "version_conflict",
+            "scope_conflict",
+            "stale_source_snapshot"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": ["code", "message"],
+      "title": "ImportItemError",
+      "type": "object"
+    },
+    "ImportRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "object": {
+          "const": "security.repository",
+          "default": "security.repository",
+          "title": "Object",
+          "type": "string"
+        },
+        "repo_connector_id": {
+          "title": "Repo Connector Id",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "default_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Branch"
+        },
+        "reset_marker": {
+          "title": "Reset Marker",
+          "type": "string"
+        },
+        "import_environment_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Import Environment Id"
+        }
+      },
+      "required": ["id", "repo_connector_id", "url", "reset_marker"],
+      "title": "ImportRepository",
+      "type": "object"
+    },
+    "ImportRepositoryPage": {
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "const": "page",
+          "default": "page",
+          "title": "Object",
+          "type": "string"
+        },
+        "data": {
+          "items": {
+            "$ref": "#/$defs/ImportRepository"
+          },
+          "title": "Data",
+          "type": "array"
+        },
+        "has_more": {
+          "title": "Has More",
+          "type": "boolean"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next"
+        }
+      },
+      "required": ["data", "has_more", "next"],
+      "title": "ImportRepositoryPage",
+      "type": "object"
+    },
+    "ImportSource": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "enum": ["wiz", "endor", "snyk"],
+          "title": "Provider",
+          "type": "string"
+        },
+        "source_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Key",
+          "type": "string"
+        }
+      },
+      "required": ["provider", "source_key"],
+      "title": "ImportSource",
+      "type": "object"
+    },
+    "ImportedAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "const": "not_assessed",
+          "default": "not_assessed",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "title": "ImportedAssessment",
+      "type": "object"
+    },
+    "ImportedFindingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low", "informational"],
+          "title": "Severity",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "advisory_ids": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Advisory Ids",
+          "type": "array"
+        },
+        "packages": {
+          "items": {
+            "$ref": "#/$defs/ImportedPackage"
+          },
+          "maxItems": 100,
+          "title": "Packages",
+          "type": "array"
+        },
+        "locations": {
+          "items": {
+            "$ref": "#/$defs/ImportedLocation"
+          },
+          "maxItems": 100,
+          "title": "Locations",
+          "type": "array"
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branch"
+        },
+        "code_revision": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Revision"
+        },
+        "source_scan_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Scan Id"
+        },
+        "image_digests": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Image Digests",
+          "type": "array"
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Updated At"
+        },
+        "source_data": {
+          "additionalProperties": true,
+          "title": "Source Data",
+          "type": "object"
+        }
+      },
+      "required": ["title", "severity"],
+      "title": "ImportedFindingEvidence",
+      "type": "object"
+    },
+    "ImportedLocation": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        }
+      },
+      "required": ["path"],
+      "title": "ImportedLocation",
+      "type": "object"
+    },
+    "ImportedPackage": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "ecosystem": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ecosystem"
+        },
+        "installed_version": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Installed Version"
+        },
+        "manifest_path": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Path"
+        },
+        "fixed_versions": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Fixed Versions",
+          "type": "array"
+        }
+      },
+      "required": ["name"],
+      "title": "ImportedPackage",
+      "type": "object"
+    },
+    "LastImport": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "integer"
+        }
+      },
+      "required": ["id", "actor", "created_at"],
+      "title": "LastImport",
+      "type": "object"
+    },
+    "SourceReport": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^aif_[0-9a-f]{64}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "object": {
+          "const": "security.source_report",
+          "default": "security.source_report",
+          "title": "Object",
+          "type": "string"
+        },
+        "origin": {
+          "const": "imported",
+          "default": "imported",
+          "title": "Origin",
+          "type": "string"
+        },
+        "repo_id": {
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "repo_connector_id": {
+          "title": "Repo Connector Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "canonical_finding_id": {
+          "pattern": "^acf_[0-9a-f]{32}$",
+          "title": "Canonical Finding Id",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/ImportSource"
+        },
+        "source_finding_id": {
+          "title": "Source Finding Id",
+          "type": "string"
+        },
+        "observation_id": {
+          "pattern": "^aio_[0-9a-f]{64}$",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/ImportedFindingEvidence"
+        },
+        "assessment": {
+          "$ref": "#/$defs/ImportedAssessment"
+        },
+        "last_import": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LastImport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "integer"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "repo_id",
+        "repo_connector_id",
+        "environment_id",
+        "canonical_finding_id",
+        "source",
+        "source_finding_id",
+        "observation_id",
+        "version",
+        "evidence",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "SourceReport",
+      "type": "object"
+    },
+    "SourceReportPage": {
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "const": "page",
+          "default": "page",
+          "title": "Object",
+          "type": "string"
+        },
+        "data": {
+          "items": {
+            "$ref": "#/$defs/SourceReportSummary"
+          },
+          "title": "Data",
+          "type": "array"
+        },
+        "has_more": {
+          "title": "Has More",
+          "type": "boolean"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next"
+        }
+      },
+      "required": ["data", "has_more", "next"],
+      "title": "SourceReportPage",
+      "type": "object"
+    },
+    "SourceReportSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^aif_[0-9a-f]{64}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "object": {
+          "const": "security.source_report_summary",
+          "default": "security.source_report_summary",
+          "title": "Object",
+          "type": "string"
+        },
+        "origin": {
+          "const": "imported",
+          "default": "imported",
+          "title": "Origin",
+          "type": "string"
+        },
+        "repo_id": {
+          "title": "Repo Id",
+          "type": "string"
+        },
+        "repo_connector_id": {
+          "title": "Repo Connector Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "canonical_finding_id": {
+          "pattern": "^acf_[0-9a-f]{32}$",
+          "title": "Canonical Finding Id",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/ImportSource"
+        },
+        "source_finding_id": {
+          "title": "Source Finding Id",
+          "type": "string"
+        },
+        "observation_id": {
+          "pattern": "^aio_[0-9a-f]{64}$",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low", "informational"],
+          "title": "Severity",
+          "type": "string"
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Updated At"
+        },
+        "assessment": {
+          "$ref": "#/$defs/ImportedAssessment"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "integer"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "repo_id",
+        "repo_connector_id",
+        "environment_id",
+        "canonical_finding_id",
+        "source",
+        "source_finding_id",
+        "observation_id",
+        "version",
+        "title",
+        "severity",
+        "source_updated_at",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "SourceReportSummary",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Schema export root; transport endpoints return the individual models.",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/FindingImportRequest"
+    },
+    "receipt": {
+      "$ref": "#/$defs/FindingImportReceipt"
+    },
+    "repositories": {
+      "$ref": "#/$defs/ImportRepositoryPage"
+    },
+    "source_report": {
+      "$ref": "#/$defs/SourceReport"
+    },
+    "source_reports": {
+      "$ref": "#/$defs/SourceReportPage"
+    }
+  },
+  "required": [
+    "request",
+    "receipt",
+    "repositories",
+    "source_report",
+    "source_reports"
+  ],
+  "title": "ExternalFindingContracts",
+  "type": "object"
+}

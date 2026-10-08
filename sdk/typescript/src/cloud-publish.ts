@@ -268,7 +268,8 @@ async function publishCloudPayload(
   };
 }
 
-async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+/** @internal Shared sign-in for local Cloud publishers. */
+export async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
   const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
     configuredHome?.trim() ? configuredHome : "~/.codex",
