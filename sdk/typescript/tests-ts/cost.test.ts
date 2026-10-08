@@ -813,14 +813,13 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each([
+  for (const [code, identified] of [
     ["EACCES", true],
     ["EACCES", false],
     ["EPERM", true],
     ["EPERM", false],
-  ] as const)(
-    "retains and retries a %s worker when its parent appears later (already identified: %s)",
-    async (code, identified) => {
+  ] as const) {
+    test(`retains and retries a ${code} worker when its parent appears later (already identified: ${identified})`, async () => {
       const home = await codexHome();
       const usage = (input_tokens: number) => ({
         input_tokens,
@@ -881,8 +880,8 @@ describe("live scan cost tracking", () => {
         await tracker.stop().catch(() => {});
         opening.mockRestore();
       }
-    },
-  );
+    });
+  }
 
   test.each([...parentFields])(
     "counts independent Deep workers and %s descendants",
